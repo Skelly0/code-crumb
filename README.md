@@ -45,7 +45,7 @@ Each face has its own blink timer, color theme, and state. Sessions appear when 
 | **Executing** | `██ ██` | `◡◡` | `Bash` | Running commands |
 | **Happy** | `✦ ✧` (sparkle) | `◡◡◡◡◡` | Successful completion | Sparkle particles everywhere |
 | **Error** | `╲╱ ╲╱` (glitch) | `◠◠◠` | Non-zero exit code | Border glitches, distress particles |
-| **Sleeping** | `── ──` (closed) | `～～～` | 60s idle | Zzz particles float up, slow breathing, deep indigo |
+| **Sleeping** | `── ──` (closed) | `~~~` | 60s idle | Zzz particles float up, slow breathing, deep indigo |
 | **Waiting** | `▄▄ ██` (half-lidded) | `───` | Notification / needs input | Gentle `?` particles, patient pulse |
 | **Testing** | `██ ██` (intense) | `═══` | `jest`, `pytest`, `vitest`, etc. | Nervous twitches, sweat drop particles |
 | **Installing** | `▄▄` (looking down) | `···` | `npm install`, `pip install`, etc. | Falling dot particles like packages raining down |
@@ -83,7 +83,7 @@ node claude-face/renderer.js
 **Grid mode** (one mini-face per session/subagent):
 
 ```bash
-node claude-face/grid-renderer.js
+node claude-face/renderer.js --grid
 ```
 
 **Via the launcher** (auto-opens the face in a new terminal tab):
@@ -113,7 +113,7 @@ claude-face\claude-face.cmd --grid --dangerously-skip-permissions
 # Single face demo (run renderer.js in another pane first)
 node claude-face/demo.js
 
-# Grid demo with simulated sessions (run grid-renderer.js first)
+# Grid demo with simulated sessions (run renderer.js --grid first)
 node claude-face/grid-demo.js
 ```
 
@@ -140,21 +140,22 @@ cd claude-face && npm link
 ```
 ┌───────────────┐     state files     ┌──────────────────┐
 │  Claude Code   │ ──── writes ────▶  │  ~/.claude-face-  │
-│  (hooks fire)  │    JSON per         │  sessions/*.json  │
-│                │    session           │                   │
-│  Main session  │                     │  main.json        │
-│  Subagent 1    │                     │  sub-1.json       │
+│  (hooks fire)  │    JSON per         │  state            │
+│                │    session           │  sessions/*.json  │
+│  Main session  │                     │                   │
+│  Subagent 1    │                     │  main.json        │
 │  Subagent 2    │                     │  sub-2.json       │
 └───────────────┘                      └────────┬──────────┘
                                                 │
                                            fs.watch
                                                 │
-                    ┌───────────────────────────────────────┐
-                    │                                       │
-              ┌─────▼──────┐                    ┌───────────▼──┐
-              │ renderer.js │  (single face)     │ grid-renderer │
-              │ @ 15fps     │                    │ .js @ 12fps   │
-              └─────────────┘                    └───────────────┘
+                                    ┌───────────▼──────────┐
+                                    │     renderer.js       │
+                                    │     @ 15fps           │
+                                    │                       │
+                                    │  (default) single face│
+                                    │  (--grid)  multi-grid │
+                                    └───────────────────────┘
 ```
 
 1. **Hooks fire** on `PreToolUse`, `PostToolUse`, `Stop`, and `Notification` events
@@ -162,14 +163,13 @@ cd claude-face && npm link
    - A single `~/.claude-face-state` file (for the classic renderer)
    - A per-session file in `~/.claude-face-sessions/` (for the grid)
 3. **Session ID** is extracted from the hook data (`session_id`), falling back to the parent process ID — each Claude instance and subagent gets its own face
-4. **Renderers** watch for file changes and animate transitions
+4. **`renderer.js`** watches for file changes and animates transitions (single face by default, `--grid` for multi-face)
 
 ## Files
 
 | File | What it does |
 |---|---|
-| `renderer.js` | Single animated face — the classic view |
-| `grid-renderer.js` | Multi-face grid — one face per session |
+| `renderer.js` | Unified renderer — single face (default) or grid (`--grid`) |
 | `update-state.js` | Hook script called by Claude Code on each event |
 | `launch.js` | Auto-starts renderer and launches Claude with args |
 | `setup.js` | Installs hooks into Claude Code's settings |
@@ -229,8 +229,8 @@ Add this to `~/.claude/settings.json`:
 ## Performance
 
 - Zero dependencies — just Node.js
-- Single renderer: ~0.5% CPU at 15fps
-- Grid renderer: ~0.5% CPU at 12fps (even with many faces)
+- Single mode: ~0.5% CPU at 15fps
+- Grid mode: ~0.5% CPU at 15fps (even with many faces)
 - Hook script runs in <50ms per invocation
 - State files are <200 bytes each
 - No network, no IPC, no sockets

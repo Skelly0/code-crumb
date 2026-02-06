@@ -630,10 +630,9 @@ class ClaudeFace {
 
     let buf = '';
 
-    // Clear the rendering area (face + particle zone) to prevent ghosts
-    const clearTop = Math.max(1, startRow - 3);
-    const clearBot = Math.min(rows, startRow + totalH + 4);
-    for (let row = clearTop; row <= clearBot; row++) {
+    // Clear the full terminal to prevent ghost particles
+    // (float/zzz particles can drift far above the face)
+    for (let row = 1; row <= rows; row++) {
       buf += ansi.to(row, 1) + ansi.clearLine;
     }
 
