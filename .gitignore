@@ -1,0 +1,4 @@
+node_modules/
+.claude-face-state
+.claude-face.pid
+nul

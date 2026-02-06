@@ -1,0 +1,31 @@
+{
+  "name": "claude-face",
+  "version": "1.0.0",
+  "description": "A terminal tamagotchi that shows what Claude Code is doing",
+  "main": "renderer.js",
+  "bin": {
+    "claude-face": "./launch.js"
+  },
+  "scripts": {
+    "start": "node renderer.js",
+    "launch": "node launch.js",
+    "demo": "node demo.js",
+    "setup": "node setup.js"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "terminal",
+    "ascii-art",
+    "tamagotchi",
+    "hooks"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Skelly0/claude-face.git"
+  }
+}
