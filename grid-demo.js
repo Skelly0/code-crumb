@@ -105,8 +105,8 @@ const script = [
 
 console.log('\n  Claude Face Grid Demo');
 console.log('  ' + '='.repeat(40));
-console.log('  Make sure grid-renderer.js is running!');
-console.log('  (node grid-renderer.js)\n');
+console.log('  Make sure renderer.js --grid is running!');
+console.log('  (node renderer.js --grid)\n');
 
 async function runDemo() {
   for (const step of script) {

@@ -31,8 +31,8 @@ const gridMode = rawArgs.includes('--grid');
 const claudeArgs = rawArgs.filter(a => a !== '--grid');
 
 const pidFile = gridMode ? GRID_PID : SINGLE_PID;
-const rendererFile = gridMode ? 'grid-renderer.js' : 'renderer.js';
-const rendererPath = path.resolve(__dirname, rendererFile);
+const rendererPath = path.resolve(__dirname, 'renderer.js');
+const rendererArgs = gridMode ? [rendererPath, '--grid'] : [rendererPath];
 const windowTitle = gridMode ? 'Claude Face Grid' : 'Claude Face';
 
 function isRendererRunning() {
@@ -52,29 +52,29 @@ function startRenderer() {
   if (platform === 'win32') {
     // Try Windows Terminal first, fall back to cmd start
     try {
-      spawn('wt', ['-w', '0', 'new-tab', '--title', windowTitle, 'node', rendererPath], {
+      spawn('wt', ['-w', '0', 'new-tab', '--title', windowTitle, 'node', ...rendererArgs], {
         detached: true,
         stdio: 'ignore',
         shell: true,
       }).unref();
     } catch {
-      spawn('cmd', ['/c', 'start', `"${windowTitle}"`, 'node', rendererPath], {
+      spawn('cmd', ['/c', 'start', `"${windowTitle}"`, 'node', ...rendererArgs], {
         detached: true,
         stdio: 'ignore',
       }).unref();
     }
   } else if (platform === 'darwin') {
-    const escaped = rendererPath.replace(/'/g, "'\\''");
-    spawn('osascript', ['-e', `tell application "Terminal" to do script "node '${escaped}'; exit"`], {
+    const escaped = rendererArgs.map(a => a.replace(/'/g, "'\\''")).join(' ');
+    spawn('osascript', ['-e', `tell application "Terminal" to do script "node ${escaped}; exit"`], {
       detached: true,
       stdio: 'ignore',
     }).unref();
   } else {
     const terminals = [
-      ['gnome-terminal', ['--title=' + windowTitle, '--', 'node', rendererPath]],
-      ['konsole', ['--new-tab', '-e', 'node', rendererPath]],
-      ['xfce4-terminal', ['--title=' + windowTitle, '-e', `node ${rendererPath}`]],
-      ['xterm', ['-T', windowTitle, '-e', 'node', rendererPath]],
+      ['gnome-terminal', ['--title=' + windowTitle, '--', 'node', ...rendererArgs]],
+      ['konsole', ['--new-tab', '-e', 'node', ...rendererArgs]],
+      ['xfce4-terminal', ['--title=' + windowTitle, '-e', `node ${rendererArgs.join(' ')}`]],
+      ['xterm', ['-T', windowTitle, '-e', 'node', ...rendererArgs]],
     ];
 
     let launched = false;

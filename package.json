@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node renderer.js",
-    "grid": "node grid-renderer.js",
+    "grid": "node renderer.js --grid",
     "launch": "node launch.js",
     "launch:grid": "node launch.js --grid",
     "demo": "node demo.js",
