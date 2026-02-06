@@ -35,16 +35,22 @@ Each face has its own blink timer, color theme, and state. Sessions appear when 
 
 ## Expressions
 
-| State | Eyes | Trigger | Vibe |
-|---|---|---|---|
-| **Idle** | `██ ██` + blinking | No activity | Calm, breathing, floating particles |
-| **Thinking** | `● ●` (rotating) | Between tool calls | Orbiting particles, contemplative |
-| **Reading** | `── ──` (narrowed) | `Read`, `View` | Focused, studying |
-| **Searching** | `██ ██` (darting) | `Grep`, `Glob`, `WebFetch` | Eyes look left and right |
-| **Coding** | `▀▀ ▀▀` (focused) | `Edit`, `Write` | Determined, in the zone |
-| **Executing** | `██ ██` | `Bash` | Running commands |
-| **Happy** | `✦ ✧` (sparkle) | Successful completion | Sparkle particles everywhere |
-| **Error** | `╲╱ ╲╱` (glitch) | Non-zero exit code | Border glitches, distress particles |
+| State | Eyes | Mouth | Trigger | Vibe |
+|---|---|---|---|---|
+| **Idle** | `██ ██` + blinking | `◡◡◡` | No activity | Calm, breathing, floating particles |
+| **Thinking** | `● ●` (rotating) | `───` | Between tool calls | Orbiting particles, contemplative |
+| **Reading** | `── ──` (narrowed) | `───` | `Read`, `View` | Focused, studying |
+| **Searching** | `██ ██` (darting) | `○` | `Grep`, `Glob`, `WebFetch` | Eyes look left and right |
+| **Coding** | `▀▀ ▀▀` (focused) | `═══` | `Edit`, `Write` | Determined, in the zone |
+| **Executing** | `██ ██` | `◡◡` | `Bash` | Running commands |
+| **Happy** | `✦ ✧` (sparkle) | `◡◡◡◡◡` | Successful completion | Sparkle particles everywhere |
+| **Error** | `╲╱ ╲╱` (glitch) | `◠◠◠` | Non-zero exit code | Border glitches, distress particles |
+| **Sleeping** | `── ──` (closed) | `～～～` | 60s idle | Zzz particles float up, slow breathing, deep indigo |
+| **Waiting** | `▄▄ ██` (half-lidded) | `───` | Notification / needs input | Gentle `?` particles, patient pulse |
+| **Testing** | `██ ██` (intense) | `═══` | `jest`, `pytest`, `vitest`, etc. | Nervous twitches, sweat drop particles |
+| **Installing** | `▄▄` (looking down) | `···` | `npm install`, `pip install`, etc. | Falling dot particles like packages raining down |
+| **Caffeinated** | `██` (vibrating) | `▪◡▪` | 5+ tool calls in 10 seconds | Speed line particles, fast breathing, face jitter |
+| **Subagent** | `██ ██` | `◡◡` | `Task` / subagent spawn | Ghost echo particles (╭╮╰╯│─), mitosis energy |
 
 ## Quick Start
 
