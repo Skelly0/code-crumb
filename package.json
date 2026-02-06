@@ -1,6 +1,6 @@
 {
   "name": "claude-face",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A terminal tamagotchi that shows what Claude Code is doing",
   "main": "renderer.js",
   "bin": {
@@ -8,8 +8,11 @@
   },
   "scripts": {
     "start": "node renderer.js",
+    "grid": "node grid-renderer.js",
     "launch": "node launch.js",
+    "launch:grid": "node launch.js --grid",
     "demo": "node demo.js",
+    "demo:grid": "node grid-demo.js",
     "setup": "node setup.js"
   },
   "keywords": [

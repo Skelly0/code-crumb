@@ -7,14 +7,14 @@
 // |  Claude Code, passing through all arguments.                    |
 // |                                                                 |
 // |  Usage:                                                         |
-// |    node launch.js                                               |
+// |    node launch.js                        (single face)          |
+// |    node launch.js --grid                 (multi-face grid)      |
 // |    node launch.js --dangerously-skip-permissions                |
-// |    node launch.js -p "fix the bug in auth.ts"                   |
-// |    node launch.js --resume                                      |
+// |    node launch.js --grid -p "fix the bug"                       |
 // |                                                                 |
 // |  Or via the batch/shell wrappers:                               |
 // |    claude-face                                                  |
-// |    claude-face --dangerously-skip-permissions                   |
+// |    claude-face --grid --dangerously-skip-permissions             |
 // +================================================================+
 
 const { spawn } = require('child_process');
@@ -22,12 +22,22 @@ const fs = require('fs');
 const path = require('path');
 
 const HOME = process.env.USERPROFILE || process.env.HOME || '/tmp';
-const PID_FILE = path.join(HOME, '.claude-face.pid');
-const rendererPath = path.resolve(__dirname, 'renderer.js');
+const SINGLE_PID = path.join(HOME, '.claude-face.pid');
+const GRID_PID = path.join(HOME, '.claude-face-grid.pid');
+
+// Parse our own flags (consumed here, not passed to claude)
+const rawArgs = process.argv.slice(2);
+const gridMode = rawArgs.includes('--grid');
+const claudeArgs = rawArgs.filter(a => a !== '--grid');
+
+const pidFile = gridMode ? GRID_PID : SINGLE_PID;
+const rendererFile = gridMode ? 'grid-renderer.js' : 'renderer.js';
+const rendererPath = path.resolve(__dirname, rendererFile);
+const windowTitle = gridMode ? 'Claude Face Grid' : 'Claude Face';
 
 function isRendererRunning() {
   try {
-    const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+    const pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
     if (isNaN(pid)) return false;
     process.kill(pid, 0);
     return true;
@@ -40,35 +50,31 @@ function startRenderer() {
   const platform = process.platform;
 
   if (platform === 'win32') {
-    // Open renderer in a new Windows Terminal tab/window
-    // Try wt.exe first (Windows Terminal), fall back to cmd start
+    // Try Windows Terminal first, fall back to cmd start
     try {
-      spawn('wt', ['-w', '0', 'new-tab', '--title', 'Claude Face', 'node', rendererPath], {
+      spawn('wt', ['-w', '0', 'new-tab', '--title', windowTitle, 'node', rendererPath], {
         detached: true,
         stdio: 'ignore',
         shell: true,
       }).unref();
     } catch {
-      // Fall back to old-school cmd start
-      spawn('cmd', ['/c', 'start', '"Claude Face"', 'node', rendererPath], {
+      spawn('cmd', ['/c', 'start', `"${windowTitle}"`, 'node', rendererPath], {
         detached: true,
         stdio: 'ignore',
       }).unref();
     }
   } else if (platform === 'darwin') {
-    // macOS: open a new Terminal.app window
     const escaped = rendererPath.replace(/'/g, "'\\''");
     spawn('osascript', ['-e', `tell application "Terminal" to do script "node '${escaped}'; exit"`], {
       detached: true,
       stdio: 'ignore',
     }).unref();
   } else {
-    // Linux: try common terminal emulators in order of popularity
     const terminals = [
-      ['gnome-terminal', ['--title=Claude Face', '--', 'node', rendererPath]],
+      ['gnome-terminal', ['--title=' + windowTitle, '--', 'node', rendererPath]],
       ['konsole', ['--new-tab', '-e', 'node', rendererPath]],
-      ['xfce4-terminal', ['--title=Claude Face', '-e', `node ${rendererPath}`]],
-      ['xterm', ['-T', 'Claude Face', '-e', 'node', rendererPath]],
+      ['xfce4-terminal', ['--title=' + windowTitle, '-e', `node ${rendererPath}`]],
+      ['xterm', ['-T', windowTitle, '-e', 'node', rendererPath]],
     ];
 
     let launched = false;
@@ -101,9 +107,8 @@ if (!isRendererRunning()) {
   while (Date.now() - start < 500) { /* spin */ }
 }
 
-// Pass all arguments through to claude
-const args = process.argv.slice(2);
-const claude = spawn('claude', args, {
+// Pass remaining arguments through to claude
+const claude = spawn('claude', claudeArgs, {
   stdio: 'inherit',
   shell: true,
 });

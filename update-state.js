@@ -13,20 +13,41 @@ const path = require('path');
 
 const HOME = process.env.USERPROFILE || process.env.HOME || '/tmp';
 const STATE_FILE = process.env.CLAUDE_FACE_STATE || path.join(HOME, '.claude-face-state');
+const SESSIONS_DIR = path.join(HOME, '.claude-face-sessions');
 
 // Event type passed as CLI argument (cross-platform -- no env var tricks)
 const hookEvent = process.argv[2] || '';
 
+function safeFilename(id) {
+  return String(id).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+}
+
+// Write to the single state file (backward compat with renderer.js)
 function writeState(state, detail = '') {
-  const data = JSON.stringify({
-    state,
-    detail,
-    timestamp: Date.now(),
-  });
+  const data = JSON.stringify({ state, detail, timestamp: Date.now() });
   try {
     fs.writeFileSync(STATE_FILE, data, 'utf8');
-  } catch (e) {
+  } catch {
     // Silently fail -- don't break Claude Code
+  }
+}
+
+// Write per-session state file for the grid renderer
+function writeSessionState(sessionId, state, detail = '', stopped = false) {
+  try {
+    fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+    const filename = safeFilename(sessionId) + '.json';
+    const data = JSON.stringify({
+      session_id: sessionId,
+      state,
+      detail,
+      timestamp: Date.now(),
+      cwd: process.cwd(),
+      stopped,
+    });
+    fs.writeFileSync(path.join(SESSIONS_DIR, filename), data, 'utf8');
+  } catch {
+    // Silently fail
   }
 }
 
@@ -86,42 +107,57 @@ let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => { input += chunk; });
 process.stdin.on('end', () => {
+  let state = 'thinking';
+  let detail = '';
+  let stopped = false;
+
   try {
     const data = JSON.parse(input);
     const toolName = data.tool_name || '';
     const toolInput = data.tool_input || {};
     const toolResponse = data.tool_response || {};
 
+    // Extract session ID: try hook data, env, then fall back to PPID
+    const sessionId = data.session_id
+      || process.env.CLAUDE_SESSION_ID
+      || String(process.ppid);
+
     if (hookEvent === 'PreToolUse') {
-      const { state, detail } = toolToState(toolName, toolInput);
-      writeState(state, detail);
+      ({ state, detail } = toolToState(toolName, toolInput));
     }
     else if (hookEvent === 'PostToolUse') {
       const exitCode = toolResponse?.exit_code;
       const stderr = toolResponse?.stderr || '';
 
       if (exitCode !== undefined && exitCode !== 0) {
-        writeState('error', `command failed (exit ${exitCode})`);
+        state = 'error';
+        detail = `command failed (exit ${exitCode})`;
       } else if (stderr && stderr.toLowerCase().includes('error')) {
-        writeState('error', 'something went wrong');
+        state = 'error';
+        detail = 'something went wrong';
       } else {
-        writeState('happy', 'step complete');
+        state = 'happy';
+        detail = 'step complete';
       }
     }
     else if (hookEvent === 'Stop') {
-      writeState('happy', 'all done!');
+      state = 'happy';
+      detail = 'all done!';
+      stopped = true;
     }
     else if (hookEvent === 'Notification') {
-      writeState('thinking', 'needs attention');
+      state = 'thinking';
+      detail = 'needs attention';
     }
     else {
       if (toolName) {
-        const { state, detail } = toolToState(toolName, toolInput);
-        writeState(state, detail);
-      } else {
-        writeState('thinking');
+        ({ state, detail } = toolToState(toolName, toolInput));
       }
     }
+
+    // Write both: single file (backward compat) + session file (grid mode)
+    writeState(state, detail);
+    writeSessionState(sessionId, state, detail, stopped);
   } catch {
     writeState('thinking');
   }

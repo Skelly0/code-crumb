@@ -550,7 +550,7 @@ class ClaudeFace {
 
     // Bottom border
     buf += ansi.to(startRow + 7, startCol + gx);
-    buf += `${fc}    \u256e${'\u2500'.repeat(faceW - 10)}\u256f${r}`;
+    buf += `${fc}    \u2570${'\u2500'.repeat(faceW - 10)}\u256f${r}`;
 
     // Status line
     const emoji = theme.emoji;
