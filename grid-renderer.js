@@ -61,6 +61,12 @@ const themes = {
   executing: { border: [210,150,70],  eye: [250,210,150], mouth: [200,160,100], label: [220,160,80],  status: 'executing' },
   happy:     { border: [220,200,60],  eye: [255,250,150], mouth: [230,210,90],  label: [240,220,80],  status: 'done!' },
   error:     { border: [210,70,70],   eye: [255,150,150], mouth: [200,100,100], label: [220,90,90],   status: 'error!' },
+  sleeping:  { border: [60,50,110],   eye: [90,80,150],   mouth: [70,60,120],   label: [80,70,140],   status: 'zzz' },
+  waiting:   { border: [150,140,180], eye: [190,180,220], mouth: [160,150,190], label: [160,150,190], status: 'waiting' },
+  testing:   { border: [180,200,70],  eye: [220,240,130], mouth: [190,210,100], label: [190,210,80],  status: 'testing' },
+  installing:{ border: [70,160,190],  eye: [130,200,230], mouth: [100,170,200], label: [80,170,200],  status: 'installing' },
+  caffeinated:{ border: [255,180,50], eye: [255,220,100], mouth: [240,190,70],  label: [250,190,60],  status: '!!!' },
+  subagent:  { border: [150,100,210], eye: [190,160,240], mouth: [140,110,200], label: [160,120,220], status: 'spawning' },
 };
 
 // -- MiniFace ------------------------------------------------------
@@ -133,12 +139,18 @@ class MiniFace {
       }
     }
 
-    // Auto-return to idle
+    // Auto-return to idle (but not sleeping or waiting)
     const elapsed = Date.now() - this.lastUpdate;
     if (this.state === 'happy' && elapsed > HAPPY_RETURN_MS) {
       this.state = 'idle';
-    } else if (this.state !== 'idle' && this.state !== 'happy' && elapsed > IDLE_RETURN_MS) {
+    } else if (this.state !== 'idle' && this.state !== 'happy' &&
+               this.state !== 'sleeping' && this.state !== 'waiting' &&
+               elapsed > IDLE_RETURN_MS) {
       this.state = 'idle';
+    }
+    // Idle for 60s => sleeping
+    if (this.state === 'idle' && elapsed > 60000) {
+      this.state = 'sleeping';
     }
   }
 
@@ -195,6 +207,40 @@ class MiniFace {
         return ' \u2572\u2571 \u2572\u2571';
       }
 
+      case 'sleeping': {
+        // Closed lines with occasional flutter
+        if (this.frame % 150 > 145) return ' \u2584\u2584 \u2584\u2584';
+        return ' \u2500\u2500 \u2500\u2500';
+      }
+
+      case 'waiting': {
+        // Half-lidded, drifting
+        const drift = Math.floor(this.frame / 40) % 3;
+        if (drift === 1) return ' \u2584\u2588 \u2584\u2588';
+        return ' \u2584\u2584 \u2584\u2584';
+      }
+
+      case 'testing': {
+        // Intense stare with nervous twitch
+        if (this.frame % 25 < 2) return ' \u2580\u2588 \u2588\u2580';
+        return ' \u2588\u2588 \u2588\u2588';
+      }
+
+      case 'installing':
+        // Looking down
+        return ' \u2584\u2584 \u2584\u2584';
+
+      case 'caffeinated': {
+        // Vibrating
+        const j = this.frame % 3;
+        if (j === 1) return '  \u2588\u2588\u2588 ';
+        if (j === 2) return ' \u2588 \u2588 \u2588';
+        return ' \u2588\u2588 \u2588\u2588';
+      }
+
+      case 'subagent':
+        return ' \u2588\u2588 \u2588\u2588';
+
       default:
         return ' \u2588\u2588 \u2588\u2588';
     }
@@ -214,6 +260,12 @@ class MiniFace {
           return ['\u25e1\u25e0\u25e1', '\u25e0\u25e1\u25e0', '\u2500\u25e1\u2500'][Math.floor(Math.random() * 3)];
         }
         return '\u25e0\u25e0\u25e0';
+      case 'sleeping':    return '\uff5e\uff5e\uff5e';
+      case 'waiting':     return '\u2500\u2500\u2500';
+      case 'testing':     return '\u2550\u2550\u2550';
+      case 'installing':  return '\u00b7\u00b7\u00b7';
+      case 'caffeinated': return '\u25aa\u25e1\u25aa';
+      case 'subagent':    return ' \u25e1\u25e1';
       default:          return '\u25e1\u25e1\u25e1';
     }
   }
@@ -222,7 +274,9 @@ class MiniFace {
   // Returns an ANSI string buffer.
   render(startRow, startCol, globalTime) {
     const theme = themes[this.state] || themes.idle;
-    const bc = breathe(theme.border, globalTime + this.firstSeen % 2000); // offset so they don't all pulse together
+    const breathSpeed = this.state === 'sleeping' ? 0.5
+      : this.state === 'caffeinated' ? 2.5 : 1;
+    const bc = breathe(theme.border, (globalTime + this.firstSeen % 2000) * breathSpeed); // offset so they don't all pulse together
     const fc = ansi.fg(...bc);
     const ec = ansi.fg(...theme.eye);
     const mc = ansi.fg(...theme.mouth);

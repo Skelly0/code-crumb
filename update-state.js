@@ -64,6 +64,18 @@ function toolToState(toolName, toolInput) {
   if (/^bash$/i.test(toolName)) {
     const cmd = toolInput?.command || '';
     const shortCmd = cmd.length > 40 ? cmd.slice(0, 37) + '...' : cmd;
+
+    // Detect test commands
+    if (/\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|spec)\b/i.test(cmd) ||
+        /\bnpm\s+(run\s+)?test\b/i.test(cmd)) {
+      return { state: 'testing', detail: shortCmd || 'running tests' };
+    }
+
+    // Detect install commands
+    if (/\b(npm\s+install|yarn\s+(add|install)|pip\s+install|cargo\s+build|apt(-get)?\s+install|brew\s+install|pnpm\s+(add|install)|bun\s+(add|install))\b/i.test(cmd)) {
+      return { state: 'installing', detail: shortCmd || 'installing' };
+    }
+
     return { state: 'executing', detail: shortCmd || 'running command' };
   }
 
@@ -87,7 +99,7 @@ function toolToState(toolName, toolInput) {
 
   // Task/subagent
   if (/^(task|subagent)$/i.test(toolName)) {
-    return { state: 'thinking', detail: 'delegating to subagent' };
+    return { state: 'subagent', detail: 'spawning subagent' };
   }
 
   // MCP tools
@@ -146,7 +158,7 @@ process.stdin.on('end', () => {
       stopped = true;
     }
     else if (hookEvent === 'Notification') {
-      state = 'thinking';
+      state = 'waiting';
       detail = 'needs attention';
     }
     else {

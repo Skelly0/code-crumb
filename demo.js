@@ -27,6 +27,12 @@ const states = [
   { state: 'executing', detail: 'npm run build',        duration: 3000, label: 'Executing -- running a command' },
   { state: 'happy',     detail: 'all done!',            duration: 3000, label: 'Happy -- sparkle eyes, celebration!' },
   { state: 'error',     detail: 'build failed (exit 1)', duration: 3500, label: 'Error -- glitching, distressed' },
+  { state: 'sleeping',    detail: '',                      duration: 3500, label: 'Sleeping -- zzz, drifted off after long idle' },
+  { state: 'waiting',     detail: 'needs input',           duration: 3000, label: 'Waiting -- needs user attention, gentle pulse' },
+  { state: 'testing',     detail: 'npm test',              duration: 3500, label: 'Testing -- nervous energy, sweat drops' },
+  { state: 'installing',  detail: 'npm install',           duration: 3000, label: 'Installing -- packages raining down' },
+  { state: 'caffeinated', detail: 'hyperdrive mode!',      duration: 3000, label: 'Caffeinated -- wired, vibrating, speed lines' },
+  { state: 'subagent',    detail: 'spawning subagent',     duration: 3000, label: 'Subagent -- mitosis energy, ghost echo' },
   { state: 'idle',      detail: '',                     duration: 2000, label: 'Back to idle -- the cycle of life' },
 ];
 

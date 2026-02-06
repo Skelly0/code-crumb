@@ -20,6 +20,9 @@ const BLINK_FRAMES = 3; // ~200ms at 15fps
 const BREATH_PERIOD = 4000; // full breath cycle in ms
 const PARTICLE_SPEED = 0.06;
 const IDLE_TIMEOUT = 8000; // ms before returning to idle after last state change
+const SLEEP_TIMEOUT = 60000; // ms of idle before drifting to sleep
+const CAFFEINE_WINDOW = 10000; // track state changes in this window
+const CAFFEINE_THRESHOLD = 5; // this many changes = caffeinated
 
 // -- ANSI Helpers --------------------------------------------------
 const CSI = '\x1b[';
@@ -133,6 +136,60 @@ const themes = {
     status:  'hit a snag',
     emoji:   '\u00d7',
   },
+  sleeping: {
+    border:  [60, 50, 110],
+    eye:     [90, 80, 150],
+    mouth:   [70, 60, 120],
+    accent:  [110, 90, 170],
+    label:   [80, 70, 140],
+    status:  'sleeping',
+    emoji:   'z',
+  },
+  waiting: {
+    border:  [150, 140, 180],
+    eye:     [190, 180, 220],
+    mouth:   [160, 150, 190],
+    accent:  [180, 170, 210],
+    label:   [160, 150, 190],
+    status:  'waiting',
+    emoji:   '?',
+  },
+  testing: {
+    border:  [180, 200, 70],
+    eye:     [220, 240, 130],
+    mouth:   [190, 210, 100],
+    accent:  [200, 220, 90],
+    label:   [190, 210, 80],
+    status:  'running tests',
+    emoji:   '\u29eb',
+  },
+  installing: {
+    border:  [70, 160, 190],
+    eye:     [130, 200, 230],
+    mouth:   [100, 170, 200],
+    accent:  [90, 180, 210],
+    label:   [80, 170, 200],
+    status:  'installing',
+    emoji:   '\u25bc',
+  },
+  caffeinated: {
+    border:  [255, 180, 50],
+    eye:     [255, 220, 100],
+    mouth:   [240, 190, 70],
+    accent:  [255, 200, 80],
+    label:   [250, 190, 60],
+    status:  'hyperdrive!',
+    emoji:   '\u25c9',
+  },
+  subagent: {
+    border:  [150, 100, 210],
+    eye:     [190, 160, 240],
+    mouth:   [140, 110, 200],
+    accent:  [180, 130, 230],
+    label:   [160, 120, 220],
+    status:  'spawning',
+    emoji:   '\u25c8',
+  },
 };
 
 // -- Face Components -----------------------------------------------
@@ -200,6 +257,47 @@ const eyes = {
   wide(theme, frame) {
     return { left: ['\u2588\u2588', '\u2588\u2588'], right: ['\u2588\u2588', '\u2588\u2588'] };
   },
+
+  sleeping(theme, frame) {
+    // Closed lines with occasional flutter
+    if (frame % 150 > 145) {
+      return { left: ['  ', '\u2584\u2584'], right: ['  ', '\u2584\u2584'] };
+    }
+    return { left: ['  ', '\u2500\u2500'], right: ['  ', '\u2500\u2500'] };
+  },
+
+  waiting(theme, frame) {
+    // Half-lidded, slowly drifting gaze
+    const drift = Math.floor(frame / 40) % 3;
+    if (drift === 1) return { left: ['\u2584\u2584', '\u2588 '], right: ['\u2584\u2584', ' \u2588'] };
+    return { left: ['\u2584\u2584', '\u2588\u2588'], right: ['\u2584\u2584', '\u2588\u2588'] };
+  },
+
+  intense(theme, frame) {
+    // Wide stare with nervous twitch
+    if (frame % 25 < 2) {
+      return { left: ['\u2588\u2588', '\u2580\u2580'], right: ['\u2580\u2580', '\u2588\u2588'] };
+    }
+    return { left: ['\u2588\u2588', '\u2588\u2588'], right: ['\u2588\u2588', '\u2588\u2588'] };
+  },
+
+  down(theme, frame) {
+    // Looking downward
+    return { left: ['  ', '\u2584\u2584'], right: ['  ', '\u2584\u2584'] };
+  },
+
+  vibrate(theme, frame) {
+    // Rapid jitter between positions
+    const j = frame % 3;
+    if (j === 0) return { left: ['\u2588\u2588', '\u2588\u2588'], right: ['\u2588\u2588', '\u2588\u2588'] };
+    if (j === 1) return { left: [' \u2588', '\u2588 '], right: ['\u2588 ', ' \u2588'] };
+    return { left: ['\u2588 ', ' \u2588'], right: [' \u2588', '\u2588 '] };
+  },
+
+  echo(theme, frame) {
+    // Normal eyes (ghost effect comes from particles)
+    return { left: ['\u2588\u2588', '\u2588\u2588'], right: ['\u2588\u2588', '\u2588\u2588'] };
+  },
 };
 
 // Mouths: function(theme, frame) => string (centered in face)
@@ -216,6 +314,12 @@ const mouths = {
     const ms = ['\u25e1\u25e0\u25e1', '\u25e0\u25e1\u25e0', '\u2550\u25e1\u2550', '\u25e1\u2550\u25e1', '\u2500\u25e1\u2500', '\u25e1\u2500\u25e1'];
     return ms[Math.floor(Math.random() * ms.length)];
   },
+  wavy:       () => '\uff5e\uff5e\uff5e',
+  wait:       () => '\u2500\u2500\u2500',
+  tight:      () => '\u2550\u2550\u2550',
+  dots:       () => '\u00b7\u00b7\u00b7',
+  grin:       () => '\u25aa\u25e1\u25aa',
+  calm:       () => ' \u25e1\u25e1',
 };
 
 // -- Particles -----------------------------------------------------
@@ -276,6 +380,80 @@ class ParticleSystem {
           char: ['\u25c6', '\u25c7', '\u00b7', '\u2022'][Math.floor(Math.random() * 4)],
           style,
         });
+      } else if (style === 'zzz') {
+        // Zzz floating upward and to the right
+        this.particles.push({
+          x: this.width / 2 + 4 + Math.random() * 3,
+          y: this.height / 2 - 2,
+          vx: 0.04 + Math.random() * 0.04,
+          vy: -0.08 - Math.random() * 0.04,
+          life: 50 + Math.random() * 50,
+          maxLife: 100,
+          char: ['z', 'Z', 'z', '\u00b7'][Math.floor(Math.random() * 4)],
+          style,
+        });
+      } else if (style === 'question') {
+        // ? gently floating above
+        this.particles.push({
+          x: this.width / 2 + (Math.random() - 0.5) * 8,
+          y: this.height / 2 - 3 - Math.random() * 2,
+          vx: (Math.random() - 0.5) * 0.04,
+          vy: -0.02 - Math.random() * 0.02,
+          life: 40 + Math.random() * 40,
+          maxLife: 80,
+          char: ['?', '\u00b7', '?', '\u00b7'][Math.floor(Math.random() * 4)],
+          style,
+        });
+      } else if (style === 'sweat') {
+        // Sweat drops falling from forehead area
+        this.particles.push({
+          x: this.width / 2 + (Math.random() > 0.5 ? 1 : -1) * (7 + Math.random() * 2),
+          y: this.height / 2 - 3,
+          vx: (Math.random() - 0.5) * 0.08,
+          vy: 0.15 + Math.random() * 0.1,
+          life: 15 + Math.random() * 15,
+          maxLife: 30,
+          char: ['\u00b7', '\u2022', '\u00b0'][Math.floor(Math.random() * 3)],
+          style,
+        });
+      } else if (style === 'falling') {
+        // Dots raining down like packages
+        this.particles.push({
+          x: this.width / 4 + Math.random() * (this.width / 2),
+          y: 0,
+          vx: (Math.random() - 0.5) * 0.08,
+          vy: 0.15 + Math.random() * 0.12,
+          life: 50 + Math.random() * 30,
+          maxLife: 80,
+          char: ['\u00b7', '\u2022', '\u2218', '\u25cb'][Math.floor(Math.random() * 4)],
+          style,
+        });
+      } else if (style === 'speedline') {
+        // Horizontal speed lines shooting outward
+        const side = Math.random() > 0.5 ? 1 : -1;
+        this.particles.push({
+          x: this.width / 2 + side * (4 + Math.random() * 8),
+          y: this.height / 2 - 2 + Math.random() * 4,
+          vx: side * (0.3 + Math.random() * 0.2),
+          vy: 0,
+          life: 6 + Math.random() * 10,
+          maxLife: 16,
+          char: ['\u2500', '\u2501', '\u2550', '\u2500'][Math.floor(Math.random() * 4)],
+          style,
+        });
+      } else if (style === 'echo') {
+        // Ghost face outline fragments
+        const angle = Math.random() * Math.PI * 2;
+        this.particles.push({
+          x: this.width / 2 + Math.cos(angle) * (5 + Math.random() * 3),
+          y: this.height / 2 + Math.sin(angle) * (2.5 + Math.random() * 1.5),
+          vx: Math.cos(angle) * 0.06,
+          vy: Math.sin(angle) * 0.03,
+          life: 25 + Math.random() * 25,
+          maxLife: 50,
+          char: ['\u256d', '\u256e', '\u2570', '\u256f', '\u2502', '\u2500'][Math.floor(Math.random() * 6)],
+          style,
+        });
       }
     }
   }
@@ -327,6 +505,8 @@ class ClaudeFace {
     this.lookTimer = 0;
     this.transitionFrame = 0;
     this.glitchIntensity = 0;
+    this.stateChangeTimes = []; // for caffeinated detection
+    this.isCaffeinated = false;
   }
 
   _nextBlink() {
@@ -341,6 +521,10 @@ class ClaudeFace {
       this.lastStateChange = Date.now();
       this.stateDetail = detail;
 
+      // Track state changes for caffeinated detection
+      this.stateChangeTimes.push(Date.now());
+      if (this.stateChangeTimes.length > 20) this.stateChangeTimes.shift();
+
       // Spawn appropriate particles
       if (newState === 'happy') {
         this.particles.spawn(12, 'sparkle');
@@ -349,6 +533,12 @@ class ClaudeFace {
         this.glitchIntensity = 1.0;
       } else if (newState === 'thinking') {
         this.particles.spawn(6, 'orbit');
+      } else if (newState === 'subagent') {
+        this.particles.spawn(8, 'echo');
+      } else if (newState === 'sleeping') {
+        // Gentle initial zzz
+      } else if (newState === 'caffeinated') {
+        this.particles.spawn(6, 'speedline');
       }
     } else {
       this.lastStateChange = Date.now();
@@ -400,6 +590,24 @@ class ClaudeFace {
         return eyes.cross(theme, frame);
       }
 
+      case 'sleeping':
+        return eyes.sleeping(theme, frame);
+
+      case 'waiting':
+        return eyes.waiting(theme, frame);
+
+      case 'testing':
+        return eyes.intense(theme, frame);
+
+      case 'installing':
+        return eyes.down(theme, frame);
+
+      case 'caffeinated':
+        return eyes.vibrate(theme, frame);
+
+      case 'subagent':
+        return eyes.echo(theme, frame);
+
       default:
         return eyes.open(theme, frame);
     }
@@ -419,6 +627,12 @@ class ClaudeFace {
           return mouths.glitch(frame);
         }
         return mouths.frown();
+      case 'sleeping':    return mouths.wavy();
+      case 'waiting':     return mouths.wait();
+      case 'testing':     return mouths.tight();
+      case 'installing':  return mouths.dots();
+      case 'caffeinated': return mouths.grin();
+      case 'subagent':    return mouths.calm();
       default:          return mouths.smile();
     }
   }
@@ -475,6 +689,53 @@ class ClaudeFace {
       this.particles.spawn(2, 'sparkle');
     }
 
+    // Sleeping Zzz particles
+    if (this.state === 'sleeping' && this.frame % 30 === 0) {
+      this.particles.spawn(1, 'zzz');
+    }
+
+    // Waiting ? particles
+    if (this.state === 'waiting' && this.frame % 45 === 0) {
+      this.particles.spawn(1, 'question');
+    }
+
+    // Testing sweat drops
+    if (this.state === 'testing' && this.frame % 12 === 0) {
+      this.particles.spawn(1, 'sweat');
+    }
+
+    // Installing falling packages
+    if (this.state === 'installing' && this.frame % 8 === 0) {
+      this.particles.spawn(1, 'falling');
+    }
+
+    // Caffeinated speed lines
+    if (this.state === 'caffeinated' && this.frame % 4 === 0) {
+      this.particles.spawn(1, 'speedline');
+    }
+
+    // Subagent echo fragments
+    if (this.state === 'subagent' && this.frame % 10 === 0) {
+      this.particles.spawn(1, 'echo');
+    }
+
+    // Caffeinated detection: 5+ state changes in last 10s
+    const now = Date.now();
+    const recentChanges = this.stateChangeTimes.filter(t => now - t < CAFFEINE_WINDOW);
+    if (recentChanges.length >= CAFFEINE_THRESHOLD &&
+        this.state !== 'idle' && this.state !== 'sleeping' &&
+        this.state !== 'happy' && this.state !== 'error' &&
+        this.state !== 'caffeinated') {
+      this.isCaffeinated = true;
+      this.prevState = this.state;
+      this.state = 'caffeinated';
+      this.stateDetail = this.stateDetail || 'hyperdrive!';
+      this.particles.spawn(4, 'speedline');
+    } else if (this.state === 'caffeinated' && recentChanges.length < CAFFEINE_THRESHOLD - 1) {
+      // Drop out of caffeinated when things calm down
+      this.isCaffeinated = false;
+    }
+
     this.particles.update();
   }
 
@@ -483,8 +744,11 @@ class ClaudeFace {
     const rows = process.stdout.rows || 24;
     const theme = this.getTheme();
 
-    // Breathing border color
-    const borderColor = breathe(theme.border, this.time);
+    // Breathing border color (slower for sleeping, faster for caffeinated)
+    const breathTime = this.state === 'sleeping' ? this.time * 0.5
+      : this.state === 'caffeinated' ? this.time * 2.5
+      : this.time;
+    const borderColor = breathe(theme.border, breathTime);
     const eyeColor = theme.eye;
     const mouthColor = theme.mouth;
 
@@ -507,8 +771,12 @@ class ClaudeFace {
     const mouthStr = this.getMouth(theme, this.frame);
 
     // Glitch offset for error state
-    const gx = (this.state === 'error' && this.glitchIntensity > 0.3 && Math.random() < 0.15)
+    let gx = (this.state === 'error' && this.glitchIntensity > 0.3 && Math.random() < 0.15)
       ? Math.floor(Math.random() * 3) - 1 : 0;
+    // Caffeinated jitter
+    if (this.state === 'caffeinated' && this.frame % 2 === 0) {
+      gx = Math.floor(Math.random() * 3) - 1;
+    }
 
     // Build face lines
     let buf = '';
@@ -662,14 +930,19 @@ function main() {
       // File doesn't exist yet, that's fine
     }
 
-    // Auto-return to idle after timeout
+    // Auto-return to idle after timeout (but not sleeping or waiting)
     if (face.state !== 'idle' && face.state !== 'happy' &&
+        face.state !== 'sleeping' && face.state !== 'waiting' &&
         Date.now() - face.lastStateChange > IDLE_TIMEOUT) {
       face.setState('idle');
     }
     // Happy state returns to idle after a shorter period
     if (face.state === 'happy' && Date.now() - face.lastStateChange > 4000) {
       face.setState('idle');
+    }
+    // Idle for 60s+ => drift to sleeping
+    if (face.state === 'idle' && Date.now() - face.lastStateChange > SLEEP_TIMEOUT) {
+      face.setState('sleeping');
     }
   }
 
