@@ -609,6 +609,10 @@ class ClaudeFace {
       this.lastStateChange = Date.now();
       this.stateDetail = detail;
     }
+
+    // Immediately show new activity in thought bubble
+    this.thoughtTimer = 0;
+    this._updateThought();
   }
 
   setStats(data) {
@@ -642,26 +646,33 @@ class ClaudeFace {
       // Sometimes hide (flicker effect)
       if (Math.random() < 0.25) { this.thoughtText = ''; return; }
       this.thoughtText = IDLE_THOUGHTS[this.thoughtIndex % IDLE_THOUGHTS.length];
-    } else if (this.state === 'thinking') {
-      this.thoughtText = THINKING_THOUGHTS[this.thoughtIndex % THINKING_THOUGHTS.length];
-    } else if (this.state === 'coding' && this.filesEditedCount > 1) {
-      this.thoughtText = `${this.filesEditedCount} files changed`;
-    } else if (this.state === 'error' && this.lastBrokenStreak > 10) {
-      this.thoughtText = `...${this.lastBrokenStreak} streak gone`;
     } else if (this.state === 'happy' && this.milestone && this.milestoneShowTime > 0) {
       this.thoughtText = '';
+    } else if (this.state === 'error' && this.lastBrokenStreak > 10) {
+      this.thoughtText = `...${this.lastBrokenStreak} streak gone`;
     } else if (['satisfied', 'proud', 'relieved'].includes(this.state)) {
-      this.thoughtText = COMPLETION_THOUGHTS[this.thoughtIndex % COMPLETION_THOUGHTS.length];
-    } else if (this.toolCallCount > 0 && !['happy', 'waiting', 'satisfied', 'proud', 'relieved'].includes(this.state)) {
-      // Alternate between tool call count and time running
-      if (this.sessionStart && this.thoughtIndex % 3 === 0) {
+      // Alternate between real detail and completion flavor
+      if (this.stateDetail && this.thoughtIndex % 2 === 0) {
+        this.thoughtText = this.stateDetail;
+      } else {
+        this.thoughtText = COMPLETION_THOUGHTS[this.thoughtIndex % COMPLETION_THOUGHTS.length];
+      }
+    } else if (this.stateDetail) {
+      // Show what Claude is actually doing -- occasionally swap in secondary info
+      const cycle = this.thoughtIndex % 5;
+      if (cycle === 3 && this.sessionStart) {
         const elapsed = Date.now() - this.sessionStart;
         const mins = Math.floor(elapsed / 60000);
-        if (mins >= 1) {
-          this.thoughtText = `running for ${mins}m`;
-          return;
-        }
+        if (mins >= 1) { this.thoughtText = `running for ${mins}m`; return; }
       }
+      if (cycle === 4 && this.filesEditedCount > 1) {
+        this.thoughtText = `${this.filesEditedCount} files changed`;
+        return;
+      }
+      this.thoughtText = this.stateDetail;
+    } else if (this.state === 'thinking') {
+      this.thoughtText = THINKING_THOUGHTS[this.thoughtIndex % THINKING_THOUGHTS.length];
+    } else if (this.toolCallCount > 0 && !['happy', 'waiting'].includes(this.state)) {
       this.thoughtText = `tool call #${this.toolCallCount}`;
     } else {
       this.thoughtText = '';

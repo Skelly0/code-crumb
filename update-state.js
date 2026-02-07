@@ -112,12 +112,16 @@ function toolToState(toolName, toolInput) {
 
   // Web/fetch
   if (/^(web_search|web_fetch|fetch|webfetch)$/i.test(toolName)) {
-    return { state: 'searching', detail: 'searching the web' };
+    const query = toolInput?.query || toolInput?.url || '';
+    const shortQuery = query.length > 30 ? query.slice(0, 27) + '...' : query;
+    return { state: 'searching', detail: shortQuery ? `searching "${shortQuery}"` : 'searching the web' };
   }
 
   // Task/subagent
   if (/^(task|subagent)$/i.test(toolName)) {
-    return { state: 'subagent', detail: 'spawning subagent' };
+    const desc = toolInput?.description || '';
+    const shortDesc = desc.length > 30 ? desc.slice(0, 27) + '...' : desc;
+    return { state: 'subagent', detail: shortDesc || 'spawning subagent' };
   }
 
   // MCP tools
@@ -215,9 +219,17 @@ process.stdin.on('end', () => {
         state = 'proud';
         const fp = toolInput?.file_path || toolInput?.path || '';
         detail = fp ? `saved ${path.basename(fp)}` : 'code written';
-      } else if (/^(read|view|cat|grep|glob|search|ripgrep|find|list|web_search|web_fetch|fetch|webfetch)$/i.test(toolName)) {
+      } else if (/^(read|view|cat)$/i.test(toolName)) {
         state = 'satisfied';
-        detail = 'got it';
+        const fp = toolInput?.file_path || toolInput?.path || '';
+        detail = fp ? `read ${path.basename(fp)}` : 'got it';
+      } else if (/^(grep|glob|search|ripgrep|find|list)$/i.test(toolName)) {
+        state = 'satisfied';
+        const pattern = toolInput?.pattern || toolInput?.query || '';
+        detail = pattern ? `found "${pattern.length > 20 ? pattern.slice(0, 17) + '...' : pattern}"` : 'got it';
+      } else if (/^(web_search|web_fetch|fetch|webfetch)$/i.test(toolName)) {
+        state = 'satisfied';
+        detail = 'search complete';
       } else if (/^bash$/i.test(toolName)) {
         state = 'relieved';
         const cmd = toolInput?.command || '';
