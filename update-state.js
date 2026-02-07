@@ -61,6 +61,8 @@ function readStats() {
       records: { longestSession: 0, mostSubagents: 0, mostFilesEdited: 0 },
       session: { id: '', start: 0, toolCalls: 0, filesEdited: [], subagentCount: 0 },
       recentMilestone: null,
+      daily: { date: '', sessionCount: 0, cumulativeMs: 0 },
+      frequentFiles: {},
     };
   }
 }
@@ -144,6 +146,7 @@ process.stdin.on('end', () => {
   let state = 'thinking';
   let detail = '';
   let stopped = false;
+  let diffInfo = null;
 
   try {
     const data = JSON.parse(input);
@@ -159,6 +162,13 @@ process.stdin.on('end', () => {
     // Load persistent stats
     const stats = readStats();
 
+    // Daily tracking -- reset counters on new day
+    const today = new Date().toISOString().slice(0, 10);
+    if (!stats.daily || stats.daily.date !== today) {
+      stats.daily = { date: today, sessionCount: 0, cumulativeMs: 0 };
+    }
+    if (!stats.frequentFiles) stats.frequentFiles = {};
+
     // Initialize session if new
     if (stats.session.id !== sessionId) {
       // Save records from previous session before resetting
@@ -171,7 +181,9 @@ process.stdin.on('end', () => {
         if ((stats.session.subagentCount || 0) > (stats.records.mostSubagents || 0)) {
           stats.records.mostSubagents = stats.session.subagentCount;
         }
+        stats.daily.cumulativeMs += dur;
       }
+      stats.daily.sessionCount++;
       stats.session = {
         id: sessionId, start: Date.now(),
         toolCalls: 0, filesEdited: [], subagentCount: 0,
@@ -194,6 +206,9 @@ process.stdin.on('end', () => {
         const base = fp ? path.basename(fp) : '';
         if (base && !stats.session.filesEdited.includes(base)) {
           stats.session.filesEdited.push(base);
+        }
+        if (base) {
+          stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
         }
       }
 
@@ -219,6 +234,14 @@ process.stdin.on('end', () => {
         state = 'proud';
         const fp = toolInput?.file_path || toolInput?.path || '';
         detail = fp ? `saved ${path.basename(fp)}` : 'code written';
+        // Calculate diff info for thought bubbles
+        const oldStr = toolInput?.old_string || toolInput?.old_str || '';
+        const newStr = toolInput?.new_string || toolInput?.new_str || toolInput?.content || '';
+        if (oldStr || newStr) {
+          const removed = oldStr ? oldStr.split('\n').length : 0;
+          const added = newStr ? newStr.split('\n').length : 0;
+          diffInfo = { added, removed };
+        }
       } else if (/^(read|view|cat)$/i.test(toolName)) {
         state = 'satisfied';
         const fp = toolInput?.file_path || toolInput?.path || '';
@@ -270,6 +293,8 @@ process.stdin.on('end', () => {
       if (stats.session.start) {
         const dur = Date.now() - stats.session.start;
         if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
+        stats.daily.cumulativeMs += dur;
+        stats.session.start = 0; // Prevent double-counting on next session change
       }
       if ((stats.session.filesEdited?.length || 0) > (stats.records.mostFilesEdited || 0)) {
         stats.records.mostFilesEdited = stats.session.filesEdited.length;
@@ -286,6 +311,7 @@ process.stdin.on('end', () => {
     }
 
     // Build extra data for state files
+    const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
     const extra = {
       toolCalls: stats.session.toolCalls,
       filesEdited: stats.session.filesEdited.length,
@@ -295,6 +321,10 @@ process.stdin.on('end', () => {
       brokenStreak: stats.brokenStreak,
       brokenStreakAt: stats.brokenStreakAt,
       milestone: stats.recentMilestone,
+      diffInfo,
+      dailySessions: stats.daily.sessionCount,
+      dailyCumulativeMs: stats.daily.cumulativeMs + currentSessionMs,
+      frequentFiles: stats.frequentFiles,
     };
 
     // Write both: single file (backward compat) + session file (grid mode)

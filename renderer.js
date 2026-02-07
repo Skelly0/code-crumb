@@ -578,6 +578,12 @@ class ClaudeFace {
     this.milestone = null;
     this.milestoneShowTime = 0;
 
+    // Inter-session memory
+    this.diffInfo = null;
+    this.dailySessions = 0;
+    this.dailyCumulativeMs = 0;
+    this.frequentFiles = {};
+
     // Timeline
     this.timeline = [{ state: 'idle', at: Date.now() }];
   }
@@ -670,6 +676,12 @@ class ClaudeFace {
       this.particles.spawn(Math.floor(4 + drama * 16), 'glitch');
     }
 
+    // Inter-session memory
+    this.diffInfo = data.diffInfo || null;
+    this.dailySessions = data.dailySessions || 0;
+    this.dailyCumulativeMs = data.dailyCumulativeMs || 0;
+    if (data.frequentFiles) this.frequentFiles = data.frequentFiles;
+
     // Detect milestone
     if (data.milestone && (!this.milestone || data.milestone.at !== this.milestone.at)) {
       this.milestone = data.milestone;
@@ -684,11 +696,32 @@ class ClaudeFace {
     } else if (this.state === 'idle') {
       // Sometimes hide (flicker effect)
       if (Math.random() < 0.25) { this.thoughtText = ''; return; }
-      this.thoughtText = IDLE_THOUGHTS[this.thoughtIndex % IDLE_THOUGHTS.length];
+      // Build dynamic idle thoughts with session memory
+      const thoughts = [...IDLE_THOUGHTS];
+      if (this.dailySessions > 1) {
+        thoughts.push(`session ${this.dailySessions} today`);
+      }
+      if (this.dailyCumulativeMs > 1800000) {
+        const hours = Math.floor(this.dailyCumulativeMs / 3600000);
+        const mins = Math.floor((this.dailyCumulativeMs % 3600000) / 60000);
+        thoughts.push(hours > 0 ? `${hours}h ${mins}m today` : `${mins}m today`);
+      }
+      const topFile = this._getTopFile();
+      if (topFile) thoughts.push(`back to ${topFile} again...`);
+      this.thoughtText = thoughts[this.thoughtIndex % thoughts.length];
     } else if (this.state === 'happy' && this.milestone && this.milestoneShowTime > 0) {
       this.thoughtText = '';
     } else if (this.state === 'error' && this.lastBrokenStreak > 10) {
       this.thoughtText = `...${this.lastBrokenStreak} streak gone`;
+    } else if (this.state === 'proud' && this.diffInfo) {
+      const { added, removed } = this.diffInfo;
+      if (added > 0 && removed > 0) {
+        this.thoughtText = `+${added} -${removed} lines`;
+      } else if (added > 0) {
+        this.thoughtText = `+${added} lines`;
+      } else {
+        this.thoughtText = COMPLETION_THOUGHTS[this.thoughtIndex % COMPLETION_THOUGHTS.length];
+      }
     } else if (['satisfied', 'proud', 'relieved'].includes(this.state)) {
       this.thoughtText = COMPLETION_THOUGHTS[this.thoughtIndex % COMPLETION_THOUGHTS.length];
     } else if (STATE_THOUGHTS[this.state]) {
@@ -700,6 +733,15 @@ class ClaudeFace {
     } else {
       this.thoughtText = '';
     }
+  }
+
+  _getTopFile() {
+    if (!this.frequentFiles) return null;
+    let max = 0, top = null;
+    for (const [file, count] of Object.entries(this.frequentFiles)) {
+      if (count > max && count >= 3) { max = count; top = file; }
+    }
+    return top;
   }
 
   getTheme() {
@@ -1398,6 +1440,10 @@ function readState() {
       brokenStreak: data.brokenStreak || 0,
       brokenStreakAt: data.brokenStreakAt || 0,
       milestone: data.milestone || null,
+      diffInfo: data.diffInfo || null,
+      dailySessions: data.dailySessions || 0,
+      dailyCumulativeMs: data.dailyCumulativeMs || 0,
+      frequentFiles: data.frequentFiles || {},
     };
   } catch {
     return { state: 'idle', detail: '' };
