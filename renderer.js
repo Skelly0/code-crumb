@@ -60,6 +60,10 @@ const THINKING_THOUGHTS = [
   'almost there...', 'connecting dots', 'following a thread',
   'one sec...', 'untangling this',
 ];
+const COMPLETION_THOUGHTS = [
+  'nice', 'good', 'clean', 'got it', 'smooth',
+  'okay', 'that worked', 'moving on', 'next...',
+];
 
 // -- Timeline colors -------------------------------------------------
 const TIMELINE_COLORS = {
@@ -70,6 +74,9 @@ const TIMELINE_COLORS = {
   searching:   [180, 160, 50],
   executing:   [180, 130, 50],
   happy:       [190, 170, 40],
+  satisfied:   [90, 180, 150],
+  proud:       [130, 200, 80],
+  relieved:    [190, 170, 110],
   error:       [190, 50, 50],
   sleeping:    [40, 35, 80],
   waiting:     [120, 110, 150],
@@ -77,6 +84,14 @@ const TIMELINE_COLORS = {
   installing:  [50, 130, 160],
   caffeinated: [220, 150, 30],
   subagent:    [120, 80, 180],
+};
+
+// How long completion states linger before fading to idle
+const COMPLETION_LINGER = {
+  happy: 8000,
+  proud: 5000,
+  satisfied: 3500,
+  relieved: 4000,
 };
 
 // -- ANSI ----------------------------------------------------------
@@ -146,6 +161,18 @@ const themes = {
     border: [220,200,60], eye: [255,250,150], mouth: [230,210,90],
     accent: [255,240,100], label: [240,220,80], status: 'done!', emoji: '\u2726',
   },
+  satisfied: {
+    border: [90,180,150], eye: [150,220,200], mouth: [120,200,170],
+    accent: [110,200,180], label: [100,190,160], status: 'got it', emoji: '\u2218',
+  },
+  proud: {
+    border: [130,200,80], eye: [190,240,140], mouth: [150,210,100],
+    accent: [170,230,110], label: [150,220,90], status: 'nailed it', emoji: '\u25b8',
+  },
+  relieved: {
+    border: [190,170,110], eye: [230,220,170], mouth: [210,190,140],
+    accent: [220,200,140], label: [200,190,130], status: 'phew!', emoji: '\u25cb',
+  },
   error: {
     border: [210,70,70], eye: [255,150,150], mouth: [200,100,100],
     accent: [230,90,90], label: [220,90,90], status: 'hit a snag', emoji: '\u00d7',
@@ -196,6 +223,8 @@ const mouths = {
   dots:       () => '\u00b7\u00b7\u00b7',
   grin:       () => '\u25aa\u25e1\u25aa',
   calm:       () => ' \u25e1\u25e1',
+  exhale:     () => ' \u25e1 ',
+  content:    () => '\u25e1\u25e1 ',
 };
 
 // -- Grid mouths (compact for BOX_INNER=6) -------------------------
@@ -214,6 +243,9 @@ const gridMouths = {
   installing:  '\u00b7\u00b7\u00b7',
   caffeinated: '\u25aa\u25e1\u25aa',
   subagent:    ' \u25e1\u25e1',
+  satisfied:   '\u25e1\u25e1\u25e1',
+  proud:       '  \u25e1\u25e1',
+  relieved:    ' \u25e1 ',
 };
 
 // -- Helpers -------------------------------------------------------
@@ -294,6 +326,13 @@ const eyes = {
   },
 
   echo() { return { left: ['\u2588\u2588', '\u2588\u2588'], right: ['\u2588\u2588', '\u2588\u2588'] }; },
+
+  pleased(theme, frame) {
+    if (frame % 50 < 3) return { left: ['\u2580\u2580', '\u2500\u2500'], right: ['\u2580\u2580', '\u2500\u2500'] };
+    return { left: ['\u2584\u2584', '\u2588\u2588'], right: ['\u2584\u2584', '\u2588\u2588'] };
+  },
+
+  content() { return { left: ['\u2580\u2580', '  '], right: ['\u2580\u2580', '  '] }; },
 };
 
 // -- Particles -----------------------------------------------------
@@ -479,6 +518,11 @@ class ClaudeFace {
     this.stateChangeTimes = [];
     this.isCaffeinated = false;
 
+    // Minimum display time (prevents rapid state flickering)
+    this.minDisplayUntil = 0;
+    this.pendingState = null;
+    this.pendingDetail = '';
+
     // Thought bubbles
     this.thoughtText = '';
     this.thoughtTimer = 0;
@@ -503,13 +547,35 @@ class ClaudeFace {
     return BLINK_MIN + Math.random() * (BLINK_MAX - BLINK_MIN);
   }
 
+  _getMinDisplayMs(state) {
+    const times = {
+      happy: 5000, proud: 3000, satisfied: 2500, relieved: 3000,
+      error: 3000, coding: 1500, thinking: 1500, reading: 1000,
+      searching: 1000, executing: 1500, testing: 2000, installing: 2000,
+      caffeinated: 2000, subagent: 2000, waiting: 1000, sleeping: 1000,
+    };
+    return times[state] || 1000;
+  }
+
   setState(newState, detail = '') {
     if (newState !== this.state) {
+      const now = Date.now();
+
+      // Minimum display time: buffer incoming state if current hasn't shown long enough
+      if (now < this.minDisplayUntil) {
+        this.pendingState = newState;
+        this.pendingDetail = detail;
+        return;
+      }
+
       this.prevState = this.state;
       this.state = newState;
       this.transitionFrame = 0;
-      this.lastStateChange = Date.now();
+      this.lastStateChange = now;
       this.stateDetail = detail;
+      this.minDisplayUntil = now + this._getMinDisplayMs(newState);
+      this.pendingState = null;
+      this.pendingDetail = '';
 
       // Track timeline
       this.timeline.push({ state: newState, at: Date.now() });
@@ -523,6 +589,12 @@ class ClaudeFace {
 
       if (newState === 'happy') {
         this.particles.spawn(12, 'sparkle');
+      } else if (newState === 'proud') {
+        this.particles.spawn(6, 'sparkle');
+      } else if (newState === 'satisfied') {
+        this.particles.spawn(4, 'float');
+      } else if (newState === 'relieved') {
+        this.particles.spawn(3, 'float');
       } else if (newState === 'error') {
         this.particles.spawn(8, 'glitch');
         this.glitchIntensity = 1.0;
@@ -578,7 +650,9 @@ class ClaudeFace {
       this.thoughtText = `...${this.lastBrokenStreak} streak gone`;
     } else if (this.state === 'happy' && this.milestone && this.milestoneShowTime > 0) {
       this.thoughtText = '';
-    } else if (this.toolCallCount > 0 && this.state !== 'happy' && this.state !== 'waiting') {
+    } else if (['satisfied', 'proud', 'relieved'].includes(this.state)) {
+      this.thoughtText = COMPLETION_THOUGHTS[this.thoughtIndex % COMPLETION_THOUGHTS.length];
+    } else if (this.toolCallCount > 0 && !['happy', 'waiting', 'satisfied', 'proud', 'relieved'].includes(this.state)) {
       // Alternate between tool call count and time running
       if (this.sessionStart && this.thoughtIndex % 3 === 0) {
         const elapsed = Date.now() - this.sessionStart;
@@ -613,6 +687,9 @@ class ClaudeFace {
         return eyes.wide(theme, frame);
       case 'executing':   return eyes.open(theme, frame);
       case 'happy':       return eyes.sparkle(theme, frame);
+      case 'satisfied':   return eyes.content(theme, frame);
+      case 'proud':       return eyes.pleased(theme, frame);
+      case 'relieved':    return eyes.open(theme, frame);
       case 'error':
         if (this.glitchIntensity > 0.3 && Math.random() < this.glitchIntensity * 0.4) {
           return eyes.glitch(theme, frame);
@@ -637,6 +714,9 @@ class ClaudeFace {
       case 'searching': return mouths.curious();
       case 'executing': return mouths.smirk();
       case 'happy':     return mouths.wide();
+      case 'satisfied': return mouths.smile();
+      case 'proud':     return mouths.smirk();
+      case 'relieved':  return mouths.exhale();
       case 'error':
         if (this.glitchIntensity > 0.2 && Math.random() < 0.3) return mouths.glitch();
         return mouths.frown();
@@ -654,6 +734,11 @@ class ClaudeFace {
     this.time += dt;
     this.frame++;
     this.transitionFrame++;
+
+    // Apply pending state if minimum display time has passed
+    if (this.pendingState && Date.now() >= this.minDisplayUntil) {
+      this.setState(this.pendingState, this.pendingDetail);
+    }
 
     // Blink timer
     this.blinkTimer -= dt;
@@ -685,6 +770,9 @@ class ClaudeFace {
     if (this.state === 'idle' && this.frame % 40 === 0) this.particles.spawn(1, 'float');
     if (this.state === 'error' && this.glitchIntensity > 0.1 && this.frame % 5 === 0) this.particles.spawn(1, 'glitch');
     if (this.state === 'happy' && this.frame % 20 === 0) this.particles.spawn(2, 'sparkle');
+    if (this.state === 'proud' && this.frame % 30 === 0) this.particles.spawn(1, 'sparkle');
+    if (this.state === 'satisfied' && this.frame % 50 === 0) this.particles.spawn(1, 'float');
+    if (this.state === 'relieved' && this.frame % 45 === 0) this.particles.spawn(1, 'float');
     if (this.state === 'sleeping' && this.frame % 30 === 0) this.particles.spawn(1, 'zzz');
     if (this.state === 'waiting' && this.frame % 45 === 0) this.particles.spawn(1, 'question');
     if (this.state === 'testing' && this.frame % 12 === 0) this.particles.spawn(1, 'sweat');
@@ -697,8 +785,9 @@ class ClaudeFace {
     const recentChanges = this.stateChangeTimes.filter(t => now - t < CAFFEINE_WINDOW);
     if (recentChanges.length >= CAFFEINE_THRESHOLD &&
         this.state !== 'idle' && this.state !== 'sleeping' &&
-        this.state !== 'happy' && this.state !== 'error' &&
-        this.state !== 'caffeinated') {
+        this.state !== 'happy' && this.state !== 'satisfied' &&
+        this.state !== 'proud' && this.state !== 'relieved' &&
+        this.state !== 'error' && this.state !== 'caffeinated') {
       this.isCaffeinated = true;
       this.prevState = this.state;
       this.state = 'caffeinated';
@@ -966,11 +1055,13 @@ class MiniFace {
     }
 
     const elapsed = Date.now() - this.lastUpdate;
-    if (this.state === 'happy' && elapsed > 4000) {
+    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
+    const completionLinger = COMPLETION_LINGER[this.state];
+    if (completionLinger && elapsed > completionLinger) {
       this.state = 'idle';
-    } else if (this.state !== 'idle' && this.state !== 'happy' &&
-               this.state !== 'sleeping' && this.state !== 'waiting' &&
-               elapsed > IDLE_TIMEOUT) {
+    } else if (!completionStates.includes(this.state) &&
+               this.state !== 'idle' && this.state !== 'sleeping' &&
+               this.state !== 'waiting' && elapsed > IDLE_TIMEOUT) {
       this.state = 'idle';
     }
     if (this.state === 'idle' && elapsed > SLEEP_TIMEOUT) {
@@ -1028,6 +1119,9 @@ class MiniFace {
         return ' \u2588\u2588 \u2588\u2588';
       }
       case 'subagent':    return ' \u2588\u2588 \u2588\u2588';
+      case 'satisfied':   return ' \u2580\u2580 \u2580\u2580';
+      case 'proud':       return ' \u2584\u2584 \u2584\u2584';
+      case 'relieved':    return ' \u2588\u2588 \u2588\u2588';
       default:            return ' \u2588\u2588 \u2588\u2588';
     }
   }
@@ -1312,15 +1406,22 @@ function runSingleMode() {
       }
     } catch {}
 
-    if (face.state !== 'idle' && face.state !== 'happy' &&
-        face.state !== 'sleeping' && face.state !== 'waiting' &&
-        Date.now() - face.lastStateChange > IDLE_TIMEOUT) {
+    const now = Date.now();
+    // Don't apply timeouts if minimum display time hasn't passed
+    if (now < face.minDisplayUntil) return;
+
+    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
+    const completionLinger = COMPLETION_LINGER[face.state];
+
+    if (completionLinger && now - face.lastStateChange > completionLinger) {
+      face.setState('idle');
+    } else if (!completionStates.includes(face.state) &&
+               face.state !== 'idle' && face.state !== 'sleeping' &&
+               face.state !== 'waiting' &&
+               now - face.lastStateChange > IDLE_TIMEOUT) {
       face.setState('idle');
     }
-    if (face.state === 'happy' && Date.now() - face.lastStateChange > 4000) {
-      face.setState('idle');
-    }
-    if (face.state === 'idle' && Date.now() - face.lastStateChange > SLEEP_TIMEOUT) {
+    if (face.state === 'idle' && now - face.lastStateChange > SLEEP_TIMEOUT) {
       face.setState('sleeping');
     }
   }

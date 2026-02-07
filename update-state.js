@@ -211,8 +211,24 @@ process.stdin.on('end', () => {
       } else if (stderr && stderr.toLowerCase().includes('error')) {
         state = 'error';
         detail = 'something went wrong';
+      } else if (/^(edit|multiedit|write|str_replace|create_file)$/i.test(toolName)) {
+        state = 'proud';
+        const fp = toolInput?.file_path || toolInput?.path || '';
+        detail = fp ? `saved ${path.basename(fp)}` : 'code written';
+      } else if (/^(read|view|cat|grep|glob|search|ripgrep|find|list|web_search|web_fetch|fetch|webfetch)$/i.test(toolName)) {
+        state = 'satisfied';
+        detail = 'got it';
+      } else if (/^bash$/i.test(toolName)) {
+        state = 'relieved';
+        const cmd = toolInput?.command || '';
+        if (/\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|spec)\b/i.test(cmd) ||
+            /\bnpm\s+(run\s+)?test\b/i.test(cmd)) {
+          detail = 'tests passed';
+        } else {
+          detail = 'command succeeded';
+        }
       } else {
-        state = 'happy';
+        state = 'satisfied';
         detail = 'step complete';
       }
 
