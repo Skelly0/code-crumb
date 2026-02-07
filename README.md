@@ -48,7 +48,7 @@ A thin color-coded bar underneath the face shows a visual history of the session
   ████░░████████▓▓▓▓░░████████████████
 ```
 
-Each color maps to a state — purple for thinking, green for coding, red for errors, gold for happy. At a glance you can see how the session went: lots of red? rough session. smooth green? clean run. It's a tiny EKG for your AI.
+Each color maps to a state — purple for thinking, green for coding, red for errors, gold for happy, teal for satisfied, green-gold for proud, amber for relieved. At a glance you can see how the session went: lots of red? rough session. smooth green? clean run. It's a tiny EKG for your AI.
 
 ## Grid Mode
 
@@ -75,7 +75,10 @@ Each face has its own blink timer, color theme, and state. Sessions appear when 
 | **Searching** | `██ ██` (darting) | `○` | `Grep`, `Glob`, `WebFetch` | Eyes look left and right |
 | **Coding** | `▀▀ ▀▀` (focused) | `═══` | `Edit`, `Write` | Determined, in the zone |
 | **Executing** | `██ ██` | `◡◡` | `Bash` | Running commands |
-| **Happy** | `✦ ✧` (sparkle) | `◡◡◡◡◡` | Successful completion | Sparkle particles everywhere |
+| **Happy** | `✦ ✧` (sparkle) | `◡◡◡◡◡` | Session complete (Stop) | Sparkle particles everywhere, lingers 8s |
+| **Satisfied** | `▀▀ ▀▀` (content) | `◡◡◡` | Read/search/fetch done | Calm teal glow, gentle floaters |
+| **Proud** | `▄▄ ██` (pleased) | `◡◡` | Code edit/write done | Green-gold sparkles, confident squint |
+| **Relieved** | `██ ██` (relaxed) | `◡` | Command/test passed | Warm amber, soft exhale particles |
 | **Error** | `╲╱ ╲╱` (glitch) | `◠◠◠` | Non-zero exit code | Border glitches, distress particles |
 | **Sleeping** | `── ──` (closed) | `~~~` | 60s idle | Zzz particles float up, slow breathing, deep indigo |
 | **Waiting** | `▄▄ ██` (half-lidded) | `───` | Notification / needs input | Gentle `?` particles, patient pulse |
@@ -253,7 +256,7 @@ Add this to `~/.claude/settings.json`:
 - The grid auto-layouts based on terminal size (up to ~8 faces across in an 80-col terminal)
 - Sessions are labeled by working directory name — different projects get different labels
 - Sessions sharing a directory get `main` / `sub-1` / `sub-2` labels
-- Faces linger for 5 seconds after a session stops (showing the "done!" state)
+- Faces linger after a session stops (happy 8s, proud 5s, relieved 4s, satisfied 3.5s)
 - Stale sessions (no update for 2 minutes) are cleaned up automatically
 - Each face blinks independently and has its own color-breathing phase offset
 - Session count is shown in the top-right corner
