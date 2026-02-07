@@ -89,9 +89,9 @@ const TIMELINE_COLORS = {
 // How long completion states linger before fading to idle
 const COMPLETION_LINGER = {
   happy: 8000,
-  proud: 5000,
-  satisfied: 3500,
-  relieved: 4000,
+  proud: 7000,
+  satisfied: 5500,
+  relieved: 6000,
 };
 
 // -- ANSI ----------------------------------------------------------
@@ -549,10 +549,10 @@ class ClaudeFace {
 
   _getMinDisplayMs(state) {
     const times = {
-      happy: 5000, proud: 3000, satisfied: 2500, relieved: 3000,
-      error: 3000, coding: 1500, thinking: 1500, reading: 1000,
-      searching: 1000, executing: 1500, testing: 2000, installing: 2000,
-      caffeinated: 2000, subagent: 2000, waiting: 1000, sleeping: 1000,
+      happy: 5000, proud: 4500, satisfied: 4000, relieved: 4500,
+      error: 3500, coding: 2500, thinking: 2500, reading: 2000,
+      searching: 2000, executing: 2500, testing: 2500, installing: 2500,
+      caffeinated: 2500, subagent: 2500, waiting: 1500, sleeping: 1000,
     };
     return times[state] || 1000;
   }
@@ -658,16 +658,11 @@ class ClaudeFace {
         this.thoughtText = COMPLETION_THOUGHTS[this.thoughtIndex % COMPLETION_THOUGHTS.length];
       }
     } else if (this.stateDetail) {
-      // Show what Claude is actually doing -- occasionally swap in secondary info
-      const cycle = this.thoughtIndex % 5;
-      if (cycle === 3 && this.sessionStart) {
+      // Show what Claude is actually doing -- occasionally note session duration
+      if (this.thoughtIndex % 5 === 4 && this.sessionStart) {
         const elapsed = Date.now() - this.sessionStart;
         const mins = Math.floor(elapsed / 60000);
         if (mins >= 1) { this.thoughtText = `running for ${mins}m`; return; }
-      }
-      if (cycle === 4 && this.filesEditedCount > 1) {
-        this.thoughtText = `${this.filesEditedCount} files changed`;
-        return;
       }
       this.thoughtText = this.stateDetail;
     } else if (this.state === 'thinking') {
