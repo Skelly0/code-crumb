@@ -65,6 +65,45 @@ const COMPLETION_THOUGHTS = [
   'okay', 'that worked', 'moving on', 'next...',
 ];
 
+// Per-state reactive thoughts -- personality, not status
+const STATE_THOUGHTS = {
+  coding: [
+    'refactoring this...', 'let me fix this', 'almost there...',
+    'one more edit', 'cleaning this up', 'this should work',
+    'restructuring...', 'tweaking...', 'here we go',
+  ],
+  reading: [
+    'let me see...', 'hmm interesting', 'checking this out',
+    'scanning through', 'ah I see...', 'okay okay...',
+    'taking notes...', 'absorbing this',
+  ],
+  searching: [
+    'where is it...', 'gotta be somewhere', 'looking around...',
+    'digging through', 'hunting...', 'let me find this',
+    'scanning...', 'it must be here',
+  ],
+  executing: [
+    'let\'s see...', 'running this...', 'here goes...',
+    'fingers crossed', 'moment of truth', 'let me try this',
+  ],
+  testing: [
+    'please pass...', 'moment of truth', 'sweating a bit',
+    'come on...', 'hope this works', 'deep breath...',
+  ],
+  installing: [
+    'downloading...', 'pulling deps', 'this might take a sec',
+    'loading up...', 'grabbing packages', 'patience...',
+  ],
+  subagent: [
+    'delegating this', 'sending a helper', 'teamwork...',
+    'splitting the work', 'parallel vibes', 'tag team',
+  ],
+  error: [
+    'ugh', 'wait what', 'hmm not right',
+    'okay let me think', 'well that broke', 'debugging time',
+  ],
+};
+
 // -- Timeline colors -------------------------------------------------
 const TIMELINE_COLORS = {
   idle:        [60, 70, 80],
@@ -651,24 +690,13 @@ class ClaudeFace {
     } else if (this.state === 'error' && this.lastBrokenStreak > 10) {
       this.thoughtText = `...${this.lastBrokenStreak} streak gone`;
     } else if (['satisfied', 'proud', 'relieved'].includes(this.state)) {
-      // Alternate between real detail and completion flavor
-      if (this.stateDetail && this.thoughtIndex % 2 === 0) {
-        this.thoughtText = this.stateDetail;
-      } else {
-        this.thoughtText = COMPLETION_THOUGHTS[this.thoughtIndex % COMPLETION_THOUGHTS.length];
-      }
-    } else if (this.stateDetail) {
-      // Show what Claude is actually doing -- occasionally note session duration
-      if (this.thoughtIndex % 5 === 4 && this.sessionStart) {
-        const elapsed = Date.now() - this.sessionStart;
-        const mins = Math.floor(elapsed / 60000);
-        if (mins >= 1) { this.thoughtText = `running for ${mins}m`; return; }
-      }
-      this.thoughtText = this.stateDetail;
+      this.thoughtText = COMPLETION_THOUGHTS[this.thoughtIndex % COMPLETION_THOUGHTS.length];
+    } else if (STATE_THOUGHTS[this.state]) {
+      // Reactive personality thoughts -- detail line below handles the facts
+      const thoughts = STATE_THOUGHTS[this.state];
+      this.thoughtText = thoughts[this.thoughtIndex % thoughts.length];
     } else if (this.state === 'thinking') {
       this.thoughtText = THINKING_THOUGHTS[this.thoughtIndex % THINKING_THOUGHTS.length];
-    } else if (this.toolCallCount > 0 && !['happy', 'waiting'].includes(this.state)) {
-      this.thoughtText = `tool call #${this.toolCallCount}`;
     } else {
       this.thoughtText = '';
     }
