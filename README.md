@@ -18,6 +18,38 @@ Claude Face hooks into Claude Code's lifecycle events and displays an animated f
 
 Zero dependencies. Just Node.js and vibes.
 
+## Thought Bubbles
+
+The face shows a tiny thought bubble with contextual content:
+
+```
+                   ╭──────────────────╮
+                   │ tool call #23    │
+                   ╰──────────────────╯
+                  o
+         ╭────────────────────╮
+         │      ██      ██    │
+         │      ██      ██    │
+         │         ◡◡◡        │
+         ╰────────────────────╯
+```
+
+Content adapts to what's happening: file count when editing multiple files, tool call number, session duration, or idle flavor text ("thinking about types", "contemplating recursion").
+
+## Streaks & Achievements
+
+A persistent counter tracks consecutive successful tool calls. The face gets increasingly confident during long streaks, and when a build finally fails, the reaction is proportional to how long the streak was — first error after 50 successes? *DEVASTATION.* Milestones at 10, 25, 50, 100, 200, and 500 trigger sparkle celebrations. Stats persist across sessions in `~/.claude-face-stats.json`.
+
+## Session Timeline
+
+A thin color-coded bar underneath the face shows a visual history of the session:
+
+```
+  ████░░████████▓▓▓▓░░████████████████
+```
+
+Each color maps to a state — purple for thinking, green for coding, red for errors, gold for happy. At a glance you can see how the session went: lots of red? rough session. smooth green? clean run. It's a tiny EKG for your AI.
+
 ## Grid Mode
 
 When you're running multiple Claude Code sessions or using subagents, the **grid renderer** shows one mini-face per session, auto-laid out based on terminal size:
@@ -253,6 +285,7 @@ Remove the `update-state.js` hook entries from `~/.claude/settings.json` and cle
 
 ```bash
 rm ~/.claude-face-state
+rm ~/.claude-face-stats.json
 rm ~/.claude-face.pid
 rm ~/.claude-face-grid.pid
 rm -rf ~/.claude-face-sessions

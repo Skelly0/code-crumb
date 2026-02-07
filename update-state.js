@@ -14,6 +14,7 @@ const path = require('path');
 const HOME = process.env.USERPROFILE || process.env.HOME || '/tmp';
 const STATE_FILE = process.env.CLAUDE_FACE_STATE || path.join(HOME, '.claude-face-state');
 const SESSIONS_DIR = path.join(HOME, '.claude-face-sessions');
+const STATS_FILE = path.join(HOME, '.claude-face-stats.json');
 
 // Event type passed as CLI argument (cross-platform -- no env var tricks)
 const hookEvent = process.argv[2] || '';
@@ -23,8 +24,8 @@ function safeFilename(id) {
 }
 
 // Write to the single state file (backward compat with renderer.js)
-function writeState(state, detail = '') {
-  const data = JSON.stringify({ state, detail, timestamp: Date.now() });
+function writeState(state, detail = '', extra = {}) {
+  const data = JSON.stringify({ state, detail, timestamp: Date.now(), ...extra });
   try {
     fs.writeFileSync(STATE_FILE, data, 'utf8');
   } catch {
@@ -33,22 +34,39 @@ function writeState(state, detail = '') {
 }
 
 // Write per-session state file for the grid renderer
-function writeSessionState(sessionId, state, detail = '', stopped = false) {
+function writeSessionState(sessionId, state, detail = '', stopped = false, extra = {}) {
   try {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true });
     const filename = safeFilename(sessionId) + '.json';
     const data = JSON.stringify({
-      session_id: sessionId,
-      state,
-      detail,
-      timestamp: Date.now(),
-      cwd: process.cwd(),
-      stopped,
+      session_id: sessionId, state, detail,
+      timestamp: Date.now(), cwd: process.cwd(), stopped,
+      ...extra,
     });
     fs.writeFileSync(path.join(SESSIONS_DIR, filename), data, 'utf8');
   } catch {
     // Silently fail
   }
+}
+
+// Persistent stats (streaks, records, session counters)
+function readStats() {
+  try {
+    return JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
+  } catch {
+    return {
+      streak: 0, bestStreak: 0,
+      brokenStreak: 0, brokenStreakAt: 0,
+      totalToolCalls: 0, totalErrors: 0,
+      records: { longestSession: 0, mostSubagents: 0, mostFilesEdited: 0 },
+      session: { id: '', start: 0, toolCalls: 0, filesEdited: [], subagentCount: 0 },
+      recentMilestone: null,
+    };
+  }
+}
+
+function writeStats(stats) {
+  try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats), 'utf8'); } catch {}
 }
 
 // Map tool names to face states
@@ -134,8 +152,54 @@ process.stdin.on('end', () => {
       || process.env.CLAUDE_SESSION_ID
       || String(process.ppid);
 
+    // Load persistent stats
+    const stats = readStats();
+
+    // Initialize session if new
+    if (stats.session.id !== sessionId) {
+      // Save records from previous session before resetting
+      if (stats.session.id && stats.session.start) {
+        const dur = Date.now() - stats.session.start;
+        if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
+        if ((stats.session.filesEdited?.length || 0) > (stats.records.mostFilesEdited || 0)) {
+          stats.records.mostFilesEdited = stats.session.filesEdited.length;
+        }
+        if ((stats.session.subagentCount || 0) > (stats.records.mostSubagents || 0)) {
+          stats.records.mostSubagents = stats.session.subagentCount;
+        }
+      }
+      stats.session = {
+        id: sessionId, start: Date.now(),
+        toolCalls: 0, filesEdited: [], subagentCount: 0,
+      };
+    }
+
+    // Clear old milestones (older than 8 seconds)
+    if (stats.recentMilestone && Date.now() - stats.recentMilestone.at > 8000) {
+      stats.recentMilestone = null;
+    }
+
     if (hookEvent === 'PreToolUse') {
       ({ state, detail } = toolToState(toolName, toolInput));
+      stats.session.toolCalls++;
+      stats.totalToolCalls = (stats.totalToolCalls || 0) + 1;
+
+      // Track files edited
+      if (/^(edit|multiedit|write|str_replace|create_file)$/i.test(toolName)) {
+        const fp = toolInput?.file_path || toolInput?.path || '';
+        const base = fp ? path.basename(fp) : '';
+        if (base && !stats.session.filesEdited.includes(base)) {
+          stats.session.filesEdited.push(base);
+        }
+      }
+
+      // Track subagents
+      if (/^(task|subagent)$/i.test(toolName)) {
+        stats.session.subagentCount++;
+        if (stats.session.subagentCount > (stats.records.mostSubagents || 0)) {
+          stats.records.mostSubagents = stats.session.subagentCount;
+        }
+      }
     }
     else if (hookEvent === 'PostToolUse') {
       const exitCode = toolResponse?.exit_code;
@@ -151,11 +215,37 @@ process.stdin.on('end', () => {
         state = 'happy';
         detail = 'step complete';
       }
+
+      if (state === 'error') {
+        stats.brokenStreak = stats.streak || 0;
+        stats.brokenStreakAt = Date.now();
+        stats.streak = 0;
+        stats.totalErrors = (stats.totalErrors || 0) + 1;
+      } else {
+        stats.streak = (stats.streak || 0) + 1;
+        if (stats.streak > (stats.bestStreak || 0)) {
+          stats.bestStreak = stats.streak;
+        }
+        // Milestone checks
+        const milestones = [10, 25, 50, 100, 200, 500];
+        if (milestones.includes(stats.streak)) {
+          stats.recentMilestone = { type: 'streak', value: stats.streak, at: Date.now() };
+        }
+      }
     }
     else if (hookEvent === 'Stop') {
       state = 'happy';
       detail = 'all done!';
       stopped = true;
+
+      // Update session records
+      if (stats.session.start) {
+        const dur = Date.now() - stats.session.start;
+        if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
+      }
+      if ((stats.session.filesEdited?.length || 0) > (stats.records.mostFilesEdited || 0)) {
+        stats.records.mostFilesEdited = stats.session.filesEdited.length;
+      }
     }
     else if (hookEvent === 'Notification') {
       state = 'waiting';
@@ -167,9 +257,22 @@ process.stdin.on('end', () => {
       }
     }
 
+    // Build extra data for state files
+    const extra = {
+      toolCalls: stats.session.toolCalls,
+      filesEdited: stats.session.filesEdited.length,
+      sessionStart: stats.session.start,
+      streak: stats.streak,
+      bestStreak: stats.bestStreak,
+      brokenStreak: stats.brokenStreak,
+      brokenStreakAt: stats.brokenStreakAt,
+      milestone: stats.recentMilestone,
+    };
+
     // Write both: single file (backward compat) + session file (grid mode)
-    writeState(state, detail);
-    writeSessionState(sessionId, state, detail, stopped);
+    writeState(state, detail, extra);
+    writeSessionState(sessionId, state, detail, stopped, extra);
+    writeStats(stats);
   } catch {
     writeState('thinking');
   }

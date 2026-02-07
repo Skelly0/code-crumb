@@ -40,6 +40,45 @@ const BOX_INNER = 6;
 const STALE_MS = 120000;
 const STOPPED_LINGER_MS = 5000;
 
+// -- Thought bubbles -------------------------------------------------
+const IDLE_THOUGHTS = [
+  'thinking about types',
+  'contemplating recursion',
+  'wondering about edge cases',
+  'refactoring dreams',
+  'pondering abstractions',
+  'imagining clean code',
+  'considering the void',
+  'counting semicolons',
+  'mapping dependencies',
+  'tracing call stacks',
+  'optimizing nothing',
+  'cataloguing lint warnings',
+];
+const THINKING_THOUGHTS = [
+  'hmm...', 'what if...', 'let me think...',
+  'almost there...', 'connecting dots', 'following a thread',
+  'one sec...', 'untangling this',
+];
+
+// -- Timeline colors -------------------------------------------------
+const TIMELINE_COLORS = {
+  idle:        [60, 70, 80],
+  thinking:    [140, 90, 180],
+  coding:      [60, 160, 90],
+  reading:     [80, 150, 150],
+  searching:   [180, 160, 50],
+  executing:   [180, 130, 50],
+  happy:       [190, 170, 40],
+  error:       [190, 50, 50],
+  sleeping:    [40, 35, 80],
+  waiting:     [120, 110, 150],
+  testing:     [150, 170, 50],
+  installing:  [50, 130, 160],
+  caffeinated: [220, 150, 30],
+  subagent:    [120, 80, 180],
+};
+
 // -- ANSI ----------------------------------------------------------
 const CSI = '\x1b[';
 const ansi = {
@@ -439,6 +478,25 @@ class ClaudeFace {
     this.glitchIntensity = 0;
     this.stateChangeTimes = [];
     this.isCaffeinated = false;
+
+    // Thought bubbles
+    this.thoughtText = '';
+    this.thoughtTimer = 0;
+    this.thoughtIndex = 0;
+    this.toolCallCount = 0;
+    this.filesEditedCount = 0;
+    this.sessionStart = 0;
+
+    // Streaks
+    this.streak = 0;
+    this.bestStreak = 0;
+    this.brokenStreakAt = 0;
+    this.lastBrokenStreak = 0;
+    this.milestone = null;
+    this.milestoneShowTime = 0;
+
+    // Timeline
+    this.timeline = [{ state: 'idle', at: Date.now() }];
   }
 
   _nextBlink() {
@@ -452,6 +510,10 @@ class ClaudeFace {
       this.transitionFrame = 0;
       this.lastStateChange = Date.now();
       this.stateDetail = detail;
+
+      // Track timeline
+      this.timeline.push({ state: newState, at: Date.now() });
+      if (this.timeline.length > 200) this.timeline.shift();
 
       // Fade out old particles quickly on state change
       this.particles.fadeAll();
@@ -474,6 +536,61 @@ class ClaudeFace {
     } else {
       this.lastStateChange = Date.now();
       this.stateDetail = detail;
+    }
+  }
+
+  setStats(data) {
+    this.toolCallCount = data.toolCalls || 0;
+    this.filesEditedCount = data.filesEdited || 0;
+    this.sessionStart = data.sessionStart || 0;
+    this.streak = data.streak || 0;
+    this.bestStreak = data.bestStreak || 0;
+
+    // Detect streak break -- dramatic reaction proportional to lost streak
+    if (data.brokenStreak > 0 && data.brokenStreakAt !== this.brokenStreakAt) {
+      this.lastBrokenStreak = data.brokenStreak;
+      this.brokenStreakAt = data.brokenStreakAt;
+      const drama = Math.min(1.0, data.brokenStreak / 50);
+      this.glitchIntensity = Math.max(this.glitchIntensity, 0.5 + drama * 0.5);
+      this.particles.spawn(Math.floor(4 + drama * 16), 'glitch');
+    }
+
+    // Detect milestone
+    if (data.milestone && (!this.milestone || data.milestone.at !== this.milestone.at)) {
+      this.milestone = data.milestone;
+      this.milestoneShowTime = 180; // ~12 seconds at 15fps
+      this.particles.spawn(15, 'sparkle');
+    }
+  }
+
+  _updateThought() {
+    if (this.state === 'sleeping') {
+      this.thoughtText = '';
+    } else if (this.state === 'idle') {
+      // Sometimes hide (flicker effect)
+      if (Math.random() < 0.25) { this.thoughtText = ''; return; }
+      this.thoughtText = IDLE_THOUGHTS[this.thoughtIndex % IDLE_THOUGHTS.length];
+    } else if (this.state === 'thinking') {
+      this.thoughtText = THINKING_THOUGHTS[this.thoughtIndex % THINKING_THOUGHTS.length];
+    } else if (this.state === 'coding' && this.filesEditedCount > 1) {
+      this.thoughtText = `${this.filesEditedCount} files changed`;
+    } else if (this.state === 'error' && this.lastBrokenStreak > 10) {
+      this.thoughtText = `...${this.lastBrokenStreak} streak gone`;
+    } else if (this.state === 'happy' && this.milestone && this.milestoneShowTime > 0) {
+      this.thoughtText = '';
+    } else if (this.toolCallCount > 0 && this.state !== 'happy' && this.state !== 'waiting') {
+      // Alternate between tool call count and time running
+      if (this.sessionStart && this.thoughtIndex % 3 === 0) {
+        const elapsed = Date.now() - this.sessionStart;
+        const mins = Math.floor(elapsed / 60000);
+        if (mins >= 1) {
+          this.thoughtText = `running for ${mins}m`;
+          return;
+        }
+      }
+      this.thoughtText = `tool call #${this.toolCallCount}`;
+    } else {
+      this.thoughtText = '';
     }
   }
 
@@ -591,6 +708,17 @@ class ClaudeFace {
       this.isCaffeinated = false;
     }
 
+    // Thought bubble cycling
+    this.thoughtTimer += dt;
+    if (this.thoughtTimer > 4000) {
+      this.thoughtTimer = 0;
+      this.thoughtIndex++;
+      this._updateThought();
+    }
+
+    // Milestone display decay
+    if (this.milestoneShowTime > 0) this.milestoneShowTime--;
+
     this.particles.update();
   }
 
@@ -608,10 +736,10 @@ class ClaudeFace {
 
     const faceW = 30;
     const faceH = 10;
-    const totalH = faceH + 4;
+    const totalH = faceH + 12; // face + status/detail + thought bubble above + streak/timeline below
 
     const startCol = Math.max(1, Math.floor((cols - faceW) / 2));
-    const startRow = Math.max(1, Math.floor((rows - totalH) / 2));
+    const startRow = Math.max(5, Math.floor((rows - totalH) / 2) + 4);
 
     const fc = ansi.fg(...borderColor);
     const ec = ansi.fg(...eyeColor);
@@ -685,6 +813,85 @@ class ClaudeFace {
       const detailPad = Math.floor((faceW - detailText.length) / 2) + 4;
       buf += ansi.to(startRow + 10, startCol);
       buf += `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.6))}${' '.repeat(Math.max(0, detailPad))}${detailText}${r}`;
+    }
+
+    // Thought bubble (above face, right of center)
+    if (this.thoughtText && startRow >= 5) {
+      const txt = this.thoughtText;
+      const bubbleInner = txt.length + 2;
+      const bubbleLeft = startCol + Math.floor(faceW / 2);
+      const bc = ansi.fg(...dimColor(theme.accent, 0.5));
+      const tc = `${ansi.italic}${ansi.fg(...dimColor(theme.label, 0.7))}`;
+
+      if (bubbleLeft + bubbleInner + 2 < cols) {
+        buf += ansi.to(startRow - 4, bubbleLeft);
+        buf += `${bc}\u256d${'\u2500'.repeat(bubbleInner)}\u256e${r}`;
+        buf += ansi.to(startRow - 3, bubbleLeft);
+        buf += `${bc}\u2502 ${tc}${txt}${r} ${bc}\u2502${r}`;
+        buf += ansi.to(startRow - 2, bubbleLeft);
+        buf += `${bc}\u2570${'\u2500'.repeat(bubbleInner)}\u256f${r}`;
+        buf += ansi.to(startRow - 1, bubbleLeft + 2);
+        buf += `${bc}\u25cb${r}`;
+      }
+    }
+
+    // Streak counter
+    if (this.streak > 0 || this.milestoneShowTime > 0) {
+      let streakText, sc;
+      if (this.milestoneShowTime > 0 && this.milestone) {
+        const stars = '\u2605'.repeat(Math.min(5, Math.ceil(this.milestone.value / 20)));
+        streakText = `${stars} ${this.milestone.value} in a row! ${stars}`;
+        sc = ansi.fg(255, 220, 50);
+      } else if (this.streak >= 25) {
+        streakText = `\u2605 ${this.streak} successful in a row`;
+        sc = ansi.fg(...dimColor(theme.label, 0.7));
+      } else if (this.streak > 1) {
+        streakText = `${this.streak} successful in a row`;
+        sc = ansi.fg(...dimColor(theme.label, 0.4));
+      } else {
+        streakText = '';
+        sc = '';
+      }
+      if (streakText) {
+        const streakPad = Math.floor((faceW - streakText.length) / 2) + 4;
+        buf += ansi.to(startRow + 12, startCol);
+        buf += `${sc}${' '.repeat(Math.max(0, streakPad))}${streakText}${r}`;
+      }
+    }
+    // Show dramatic broken streak message
+    if (this.state === 'error' && this.lastBrokenStreak > 5) {
+      const severity = this.lastBrokenStreak >= 50 ? 'DEVASTATION.'
+        : this.lastBrokenStreak >= 25 ? 'that really hurt.'
+        : this.lastBrokenStreak >= 10 ? 'ouch.'
+        : '';
+      if (severity) {
+        const spad = Math.floor((faceW - severity.length) / 2) + 4;
+        buf += ansi.to(startRow + 12, startCol);
+        buf += `${ansi.fg(230, 80, 80)}${' '.repeat(Math.max(0, spad))}${severity}${r}`;
+      }
+    }
+
+    // Session timeline bar
+    if (this.timeline.length > 1) {
+      const barWidth = Math.min(faceW - 2, 38);
+      const now = Date.now();
+      const tlStart = this.timeline[0].at;
+      const totalDur = now - tlStart;
+
+      if (totalDur > 2000) {
+        let bar = '';
+        for (let i = 0; i < barWidth; i++) {
+          const t = tlStart + (totalDur * i / barWidth);
+          let st = 'idle';
+          for (let j = this.timeline.length - 1; j >= 0; j--) {
+            if (this.timeline[j].at <= t) { st = this.timeline[j].state; break; }
+          }
+          const color = TIMELINE_COLORS[st] || TIMELINE_COLORS.idle;
+          bar += ansi.fg(...color) + '\u2588';
+        }
+        const barPad = Math.floor((faceW - barWidth) / 2) + 4;
+        buf += ansi.to(startRow + 13, startCol + barPad) + bar + r;
+      }
     }
 
     // Particles (drawn on top of face)
@@ -1051,7 +1258,19 @@ function readState() {
     const raw = fs.readFileSync(STATE_FILE, 'utf8').trim();
     if (!raw) return { state: 'idle', detail: '' };
     const data = JSON.parse(raw);
-    return { state: data.state || 'idle', detail: data.detail || '', timestamp: data.timestamp || 0 };
+    return {
+      state: data.state || 'idle',
+      detail: data.detail || '',
+      timestamp: data.timestamp || 0,
+      toolCalls: data.toolCalls || 0,
+      filesEdited: data.filesEdited || 0,
+      sessionStart: data.sessionStart || 0,
+      streak: data.streak || 0,
+      bestStreak: data.bestStreak || 0,
+      brokenStreak: data.brokenStreak || 0,
+      brokenStreakAt: data.brokenStreakAt || 0,
+      milestone: data.milestone || null,
+    };
   } catch {
     return { state: 'idle', detail: '' };
   }
@@ -1087,8 +1306,9 @@ function runSingleMode() {
       const stat = fs.statSync(STATE_FILE);
       if (stat.mtimeMs > lastMtime) {
         lastMtime = stat.mtimeMs;
-        const { state, detail } = readState();
-        face.setState(state, detail);
+        const stateData = readState();
+        face.setState(stateData.state, stateData.detail);
+        face.setStats(stateData);
       }
     } catch {}
 
