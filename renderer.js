@@ -163,15 +163,15 @@ const themes = {
   },
   satisfied: {
     border: [90,180,150], eye: [150,220,200], mouth: [120,200,170],
-    accent: [110,200,180], label: [100,190,160], status: 'got it', emoji: '\u2218',
+    accent: [110,200,180], label: [100,190,160], status: 'satisfied', emoji: '\u2218',
   },
   proud: {
     border: [130,200,80], eye: [190,240,140], mouth: [150,210,100],
-    accent: [170,230,110], label: [150,220,90], status: 'nailed it', emoji: '\u25b8',
+    accent: [170,230,110], label: [150,220,90], status: 'proud', emoji: '\u25b8',
   },
   relieved: {
     border: [190,170,110], eye: [230,220,170], mouth: [210,190,140],
-    accent: [220,200,140], label: [200,190,130], status: 'phew!', emoji: '\u25cb',
+    accent: [220,200,140], label: [200,190,130], status: 'relieved', emoji: '\u25cb',
   },
   error: {
     border: [210,70,70], eye: [255,150,150], mouth: [200,100,100],
