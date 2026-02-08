@@ -40,6 +40,12 @@ const BOX_INNER = 6;
 const STALE_MS = 120000;
 const STOPPED_LINGER_MS = 5000;
 
+// Minimum terminal dimensions for rendering
+const MIN_COLS_SINGLE = 38;
+const MIN_ROWS_SINGLE = 20;
+const MIN_COLS_GRID = 14;
+const MIN_ROWS_GRID = 9;
+
 // -- Thought bubbles -------------------------------------------------
 const IDLE_THOUGHTS = [
   'thinking about types',
@@ -892,6 +898,20 @@ class ClaudeFace {
     const rows = process.stdout.rows || 24;
     const theme = this.getTheme();
 
+    // Terminal too small -- show compact fallback
+    if (cols < MIN_COLS_SINGLE || rows < MIN_ROWS_SINGLE) {
+      let buf = '';
+      for (let row = 1; row <= rows; row++) {
+        buf += ansi.to(row, 1) + ansi.clearLine;
+      }
+      const msg = cols < 20 ? '\u00b7_\u00b7' : '\u00b7_\u00b7  resize me';
+      const msgCol = Math.max(1, Math.floor((cols - msg.length) / 2));
+      const msgRow = Math.max(1, Math.floor(rows / 2));
+      buf += ansi.to(msgRow, msgCol);
+      buf += `${ansi.fg(...dimColor(theme.border, 0.6))}${msg}${ansi.reset}`;
+      return buf;
+    }
+
     const breathTime = this.state === 'sleeping' ? this.time * 0.5
       : this.state === 'caffeinated' ? this.time * 2.5
       : this.time;
@@ -972,8 +992,9 @@ class ClaudeFace {
 
     // Detail line
     if (this.stateDetail) {
-      const detailText = this.stateDetail.length > faceW + 4
-        ? this.stateDetail.slice(0, faceW + 1) + '...'
+      const maxDetailWidth = Math.max(10, cols - startCol - 8);
+      const detailText = this.stateDetail.length > maxDetailWidth
+        ? this.stateDetail.slice(0, maxDetailWidth - 3) + '...'
         : this.stateDetail;
       const detailPad = Math.floor((faceW - detailText.length) / 2) + 4;
       buf += ansi.to(startRow + 10, startCol);
@@ -1344,6 +1365,21 @@ class FaceGrid {
   render() {
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
+
+    // Terminal too small -- show compact fallback
+    if (cols < MIN_COLS_GRID || rows < MIN_ROWS_GRID) {
+      let buf = '';
+      for (let row = 1; row <= rows; row++) {
+        buf += ansi.to(row, 1) + ansi.clearLine;
+      }
+      const msg = '\u00b7_\u00b7';
+      const msgCol = Math.max(1, Math.floor((cols - msg.length) / 2));
+      const msgRow = Math.max(1, Math.floor(rows / 2));
+      buf += ansi.to(msgRow, msgCol);
+      buf += `${ansi.dim}${ansi.fg(80, 120, 160)}${msg}${ansi.reset}`;
+      return buf;
+    }
+
     const faces = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
     const n = faces.length;
 
@@ -1516,6 +1552,11 @@ function runSingleMode() {
     });
   } catch {}
 
+  process.stdout.on('resize', () => {
+    face.particles.fadeAll(5);
+    process.stdout.write(ansi.clear);
+  });
+
   let lastTime = Date.now();
   function loop() {
     const now = Date.now();
@@ -1543,6 +1584,11 @@ function runGridMode() {
   } catch {}
 
   grid.loadSessions();
+
+  process.stdout.on('resize', () => {
+    grid.prevFaceCount = -1;
+    process.stdout.write(ansi.clear);
+  });
 
   let lastTime = Date.now();
   function loop() {
@@ -1588,9 +1634,6 @@ function main() {
     runSingleMode();
   }
 
-  process.stdout.on('resize', () => {
-    process.stdout.write(ansi.clear);
-  });
 }
 
 main();
