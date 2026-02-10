@@ -221,15 +221,116 @@ process.stdin.on('end', () => {
       }
     }
     else if (hookEvent === 'PostToolUse') {
-      const exitCode = toolResponse?.exit_code;
+      // ── Error detection ───────────────────────────────────────────
+      // Claude Code doesn't pass exit_code to hooks, so we have to
+      // play detective with what we DO get: stdout, stderr, isError,
+      // and interrupted.  This is forensic error detection.
+      const stdout = toolResponse?.stdout || '';
       const stderr = toolResponse?.stderr || '';
+      const isError = toolResponse?.isError || data?.isError || false;
 
-      if (exitCode !== undefined && exitCode !== 0) {
+      // Try to extract an exit code from stdout -- Claude Code often
+      // appends "Exit code: N" to the output even though it doesn't
+      // give us exit_code as a field.  Sneaky, but we can read.
+      const exitMatch = stdout.match(/(?:exit code|exited with|returned?)[:=\s]+(\d+)/i);
+      const inferredExit = exitMatch ? parseInt(exitMatch[1], 10) : null;
+
+      // Signature patterns that scream "something broke" in stdout
+      const stdoutErrorPatterns = [
+        /\bcommand not found\b/i,
+        /\bno such file or directory\b/i,
+        /\bpermission denied\b/i,
+        /\bsegmentation fault\b/i,
+        /\bsyntax error\b/i,
+        /\bENOENT\b/,
+        /\bENOTDIR\b/,
+        /\bEACCES\b/,
+        /\bEPERM\b/,
+        /\bFATAL\b/,
+        /\bPANIC\b/i,
+        /\bUnhandledPromiseRejection\b/,
+        /\bTraceback \(most recent call last\)/,        // Python
+        /\bat Object\.<anonymous>.*\n\s+at /,           // Node stack trace
+        /\bCannot find module\b/,
+        /\bModuleNotFoundError\b/,
+        /\bImportError\b/,
+        /\bCompilation failed\b/i,
+        /\bbuild failed\b/i,
+        /\btest(s)? failed\b/i,
+        /\bfailed with exit code\b/i,
+        /\bnpm ERR!/,
+        /\bcargo error\b/i,
+        /\frustc.*error\[E\d+\]/,                       // Rust compiler errors
+      ];
+
+      // Patterns in stderr that actually mean trouble (not just warnings)
+      const stderrErrorPatterns = [
+        /\berror\b/i,
+        /\bfatal\b/i,
+        /\bfailed\b/i,
+        /\bENOENT\b/,
+        /\bEACCES\b/,
+        /\bcommand not found\b/i,
+        /\bpermission denied\b/i,
+        /\bsegmentation fault\b/i,
+        /\bpanic\b/i,
+      ];
+
+      // False positive guards: these look scary but aren't
+      const falsePositives = [
+        /0 errors?\b/i,
+        /no errors?\b/i,
+        /errors?:\s*0\b/i,
+        /error handling/i,
+        /error\.js/i,                                     // Just a filename
+        /stderr/i,                                        // Talking about stderr
+        /\.error\s*[=(]/,                                 // Property/method named error
+        /error_count.*0/i,
+        /warning/i,                                       // warnings aren't errors
+      ];
+
+      function looksLikeError(text, patterns) {
+        if (!text) return false;
+        const hit = patterns.some(p => p.test(text));
+        if (!hit) return false;
+        // Check it's not a false positive
+        const isFP = falsePositives.some(p => p.test(text));
+        return !isFP;
+      }
+
+      // Colorful error detail based on what we found
+      function errorDetail(stdout, stderr) {
+        if (/command not found/i.test(stdout + stderr)) return 'command not found';
+        if (/permission denied/i.test(stdout + stderr)) return 'permission denied';
+        if (/no such file or directory/i.test(stdout + stderr)) return 'file not found';
+        if (/segmentation fault/i.test(stdout + stderr)) return 'segfault!';
+        if (/ENOENT/.test(stdout + stderr)) return 'missing file/path';
+        if (/syntax error/i.test(stdout + stderr)) return 'syntax error';
+        if (/Traceback|at Object\.<anonymous>|Error:/.test(stdout)) return 'exception thrown';
+        if (/Cannot find module|ModuleNotFound/i.test(stdout + stderr)) return 'missing module';
+        if (/Compilation failed|build failed/i.test(stdout + stderr)) return 'build broke';
+        if (/test(s)? failed|\d+\s+failed/i.test(stdout + stderr)) return 'tests failed';
+        if (/npm ERR!/i.test(stdout + stderr)) return 'npm error';
+        return 'something went wrong';
+      }
+
+      // The decision tree -- in order of confidence
+      if (isError) {
         state = 'error';
-        detail = `command failed (exit ${exitCode})`;
-      } else if (stderr && stderr.toLowerCase().includes('error')) {
+        detail = errorDetail(stdout, stderr);
+      } else if (toolResponse?.interrupted) {
         state = 'error';
-        detail = 'something went wrong';
+        detail = 'interrupted';
+      } else if (inferredExit !== null && inferredExit !== 0) {
+        state = 'error';
+        detail = errorDetail(stdout, stderr) || `exit ${inferredExit}`;
+      } else if (looksLikeError(stderr, stderrErrorPatterns)) {
+        state = 'error';
+        detail = errorDetail(stdout, stderr);
+      } else if (/^bash$/i.test(toolName) && looksLikeError(stdout, stdoutErrorPatterns)) {
+        // Only check stdout patterns for Bash -- other tools have structured output
+        state = 'error';
+        detail = errorDetail(stdout, stderr);
       } else if (/^(edit|multiedit|write|str_replace|create_file)$/i.test(toolName)) {
         state = 'proud';
         const fp = toolInput?.file_path || toolInput?.path || '';
@@ -256,9 +357,23 @@ process.stdin.on('end', () => {
       } else if (/^bash$/i.test(toolName)) {
         state = 'relieved';
         const cmd = toolInput?.command || '';
-        if (/\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|spec)\b/i.test(cmd) ||
-            /\bnpm\s+(run\s+)?test\b/i.test(cmd)) {
-          detail = 'tests passed';
+        const isTest = /\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|spec)\b/i.test(cmd) ||
+                       /\bnpm\s+(run\s+)?test\b/i.test(cmd);
+        const isBuild = /\b(build|compile|tsc|webpack|vite|esbuild|rollup|make)\b/i.test(cmd);
+        const isGit = /\bgit\s/i.test(cmd);
+        const isInstall = /\b(npm\s+install|yarn|pip\s+install|cargo\s+build|pnpm|bun\s+(add|install))\b/i.test(cmd);
+
+        if (isTest) {
+          // Try to pull test count from stdout
+          const testCount = stdout.match(/(\d+)\s+(?:tests?|specs?)\s+passed/i)
+                         || stdout.match(/(\d+)\s+passing/i);
+          detail = testCount ? `${testCount[1]} tests passed` : 'tests passed';
+        } else if (isBuild) {
+          detail = 'build succeeded';
+        } else if (isGit) {
+          detail = 'git done';
+        } else if (isInstall) {
+          detail = 'installed';
         } else {
           detail = 'command succeeded';
         }
