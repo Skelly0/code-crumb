@@ -129,6 +129,9 @@ const TIMELINE_COLORS = {
   subagent:    [120, 80, 180],
 };
 
+// -- Sparkline blocks (activity density) --------------------------------
+const SPARKLINE_BLOCKS = '\u2581\u2582\u2583\u2584\u2585\u2586\u2587';
+
 // How long completion states linger before fading to idle
 const COMPLETION_LINGER = {
   happy: 8000,
@@ -886,6 +889,21 @@ class ClaudeFace {
     this.particles.update();
   }
 
+  _buildSparkline(barWidth, now) {
+    if (this.timeline.length < 3) return null;
+    const tlStart = this.timeline[0].at;
+    const totalDur = now - tlStart;
+    if (totalDur < 2000) return null;
+
+    const buckets = new Array(barWidth).fill(0);
+    const bucketDur = totalDur / barWidth;
+    for (let i = 1; i < this.timeline.length; i++) {
+      const idx = Math.min(barWidth - 1, Math.floor((this.timeline[i].at - tlStart) / bucketDur));
+      if (idx >= 0) buckets[idx]++;
+    }
+    return buckets;
+  }
+
   render() {
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
@@ -914,7 +932,7 @@ class ClaudeFace {
 
     const faceW = 30;
     const faceH = 10;
-    const totalH = faceH + 12; // face + status/detail + thought bubble above + streak/timeline below
+    const totalH = faceH + 13; // face + status/detail + thought bubble above + streak/timeline/sparkline below
 
     const startCol = Math.max(1, Math.floor((cols - faceW) / 2));
     const startRow = Math.max(5, Math.floor((rows - totalH) / 2) + 4);
@@ -1070,6 +1088,24 @@ class ClaudeFace {
         }
         const barPad = Math.floor((faceW - barWidth) / 2) + 4;
         buf += ansi.to(startRow + 13, startCol + barPad) + bar + r;
+      }
+    }
+
+    // Activity sparkline (tool call density below timeline)
+    {
+      const spkWidth = Math.min(faceW - 2, 38);
+      const sparkBuckets = this._buildSparkline(spkWidth, Date.now());
+      if (sparkBuckets) {
+        const maxCount = Math.max(1, ...sparkBuckets);
+        let sparkline = '';
+        for (let i = 0; i < sparkBuckets.length; i++) {
+          const ratio = sparkBuckets[i] / maxCount;
+          const blockIdx = Math.round(ratio * (SPARKLINE_BLOCKS.length - 1));
+          const brightness = sparkBuckets[i] === 0 ? 0.15 : 0.3 + ratio * 0.7;
+          sparkline += ansi.fg(...dimColor(theme.accent, brightness)) + SPARKLINE_BLOCKS[blockIdx];
+        }
+        const barPad = Math.floor((faceW - spkWidth) / 2) + 4;
+        buf += ansi.to(startRow + 14, startCol + barPad) + sparkline + r;
       }
     }
 
@@ -1636,7 +1672,7 @@ if (require.main === module) {
     ClaudeFace, MiniFace, FaceGrid, ParticleSystem,
     lerpColor, dimColor, breathe,
     themes, mouths, eyes, gridMouths,
-    COMPLETION_LINGER, TIMELINE_COLORS,
+    COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,
     IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
   };
 }
