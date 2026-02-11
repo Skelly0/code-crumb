@@ -30,7 +30,7 @@ const {
   ClaudeFace, MiniFace, FaceGrid, ParticleSystem,
   lerpColor, dimColor, breathe,
   themes, mouths, eyes, gridMouths,
-  COMPLETION_LINGER, TIMELINE_COLORS,
+  COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
 } = require('./renderer');
 
@@ -1449,6 +1449,107 @@ describe('renderer.js -- FaceGrid', () => {
     for (const face of grid.faces.values()) {
       assert.strictEqual(face.frame, 1);
     }
+  });
+});
+
+// ====================================================================
+// renderer.js -- SPARKLINE_BLOCKS
+// ====================================================================
+
+describe('renderer.js -- SPARKLINE_BLOCKS', () => {
+  test('contains 7 Unicode block characters', () => {
+    assert.strictEqual(SPARKLINE_BLOCKS.length, 7);
+  });
+
+  test('characters are ascending block elements', () => {
+    // U+2581 through U+2587
+    for (let i = 0; i < SPARKLINE_BLOCKS.length; i++) {
+      assert.strictEqual(SPARKLINE_BLOCKS.charCodeAt(i), 0x2581 + i);
+    }
+  });
+});
+
+// ====================================================================
+// renderer.js -- ClaudeFace._buildSparkline
+// ====================================================================
+
+describe('renderer.js -- ClaudeFace._buildSparkline', () => {
+  test('returns null with fewer than 3 timeline entries', () => {
+    const face = new ClaudeFace();
+    // Default timeline has 1 entry (idle)
+    assert.strictEqual(face._buildSparkline(10, Date.now()), null);
+    face.timeline.push({ state: 'coding', at: Date.now() });
+    assert.strictEqual(face._buildSparkline(10, Date.now()), null);
+  });
+
+  test('returns null when session duration < 2000ms', () => {
+    const face = new ClaudeFace();
+    const now = Date.now();
+    face.timeline = [
+      { state: 'idle', at: now },
+      { state: 'coding', at: now + 500 },
+      { state: 'reading', at: now + 1000 },
+    ];
+    assert.strictEqual(face._buildSparkline(10, now + 1500), null);
+  });
+
+  test('returns array of correct length', () => {
+    const face = new ClaudeFace();
+    const now = Date.now();
+    face.timeline = [
+      { state: 'idle', at: now - 10000 },
+      { state: 'coding', at: now - 8000 },
+      { state: 'reading', at: now - 5000 },
+    ];
+    const buckets = face._buildSparkline(20, now);
+    assert.ok(Array.isArray(buckets));
+    assert.strictEqual(buckets.length, 20);
+  });
+
+  test('counts state transitions in correct buckets', () => {
+    const face = new ClaudeFace();
+    const start = Date.now() - 10000;
+    face.timeline = [
+      { state: 'idle', at: start },
+      { state: 'coding', at: start + 1000 },
+      { state: 'reading', at: start + 1500 },
+      { state: 'executing', at: start + 8000 },
+    ];
+    // 10 buckets over 10000ms = 1000ms per bucket
+    const buckets = face._buildSparkline(10, start + 10000);
+    // Transition at 1000ms -> bucket 1, at 1500ms -> bucket 1, at 8000ms -> bucket 8
+    assert.strictEqual(buckets[1], 2);
+    assert.strictEqual(buckets[8], 1);
+    assert.strictEqual(buckets[0], 0);
+    assert.strictEqual(buckets[5], 0);
+  });
+
+  test('total transitions equals timeline length minus 1', () => {
+    const face = new ClaudeFace();
+    const start = Date.now() - 20000;
+    face.timeline = [
+      { state: 'idle', at: start },
+      { state: 'coding', at: start + 2000 },
+      { state: 'reading', at: start + 5000 },
+      { state: 'executing', at: start + 9000 },
+      { state: 'happy', at: start + 15000 },
+    ];
+    const buckets = face._buildSparkline(10, start + 20000);
+    const total = buckets.reduce((sum, b) => sum + b, 0);
+    assert.strictEqual(total, 4); // 5 entries - 1 (first entry is anchor)
+  });
+
+  test('clamps last-bucket transitions correctly', () => {
+    const face = new ClaudeFace();
+    const start = Date.now() - 5000;
+    face.timeline = [
+      { state: 'idle', at: start },
+      { state: 'coding', at: start + 4999 },
+      { state: 'reading', at: start + 4999 },
+    ];
+    const buckets = face._buildSparkline(5, start + 5000);
+    // Both transitions near the end should land in the last bucket (idx 4)
+    assert.strictEqual(buckets[4], 2);
   });
 });
 
