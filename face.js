@@ -417,7 +417,7 @@ class ClaudeFace {
     const faceH = 10;
     const totalH = faceH + 13; // face + status/detail + thought bubble above + streak/timeline/sparkline below
 
-    const startCol = Math.max(1, Math.floor((cols - faceW) / 2));
+    const startCol = Math.max(1, Math.floor((cols - faceW) / 2) + 1);
     const startRow = Math.max(5, Math.floor((rows - totalH) / 2) + 4);
 
     const fc = ansi.fg(...borderColor);
@@ -480,7 +480,7 @@ class ClaudeFace {
     // Status line
     const emoji = theme.emoji;
     const statusText = `${emoji}  claude is ${theme.status}  ${emoji}`;
-    const statusPad = Math.floor((faceW - statusText.length) / 2) + 4;
+    const statusPad = Math.floor((faceW - statusText.length) / 2);
     buf += ansi.to(startRow + 9, startCol);
     buf += `${ansi.fg(...theme.label)}${' '.repeat(Math.max(0, statusPad))}${statusText}${r}`;
 
@@ -490,7 +490,7 @@ class ClaudeFace {
       const detailText = this.stateDetail.length > maxDetailWidth
         ? this.stateDetail.slice(0, maxDetailWidth - 3) + '...'
         : this.stateDetail;
-      const detailPad = Math.floor((faceW - detailText.length) / 2) + 4;
+      const detailPad = Math.floor((faceW - detailText.length) / 2);
       buf += ansi.to(startRow + 10, startCol);
       buf += `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.6))}${' '.repeat(Math.max(0, detailPad))}${detailText}${r}`;
     }
@@ -533,7 +533,7 @@ class ClaudeFace {
         sc = '';
       }
       if (streakText) {
-        const streakPad = Math.floor((faceW - streakText.length) / 2) + 4;
+        const streakPad = Math.floor((faceW - streakText.length) / 2);
         buf += ansi.to(startRow + 12, startCol);
         buf += `${sc}${' '.repeat(Math.max(0, streakPad))}${streakText}${r}`;
       }
@@ -545,7 +545,7 @@ class ClaudeFace {
         : this.lastBrokenStreak >= 10 ? 'ouch.'
         : '';
       if (severity) {
-        const spad = Math.floor((faceW - severity.length) / 2) + 4;
+        const spad = Math.floor((faceW - severity.length) / 2);
         buf += ansi.to(startRow + 12, startCol);
         buf += `${ansi.fg(230, 80, 80)}${' '.repeat(Math.max(0, spad))}${severity}${r}`;
       }
@@ -569,7 +569,7 @@ class ClaudeFace {
           const color = TIMELINE_COLORS[st] || TIMELINE_COLORS.idle;
           bar += ansi.fg(...color) + '\u2588';
         }
-        const barPad = Math.floor((faceW - barWidth) / 2) + 4;
+        const barPad = Math.floor((faceW - barWidth) / 2);
         buf += ansi.to(startRow + 13, startCol + barPad) + bar + r;
       }
     }
@@ -587,7 +587,7 @@ class ClaudeFace {
           const brightness = sparkBuckets[i] === 0 ? 0.15 : 0.3 + ratio * 0.7;
           sparkline += ansi.fg(...dimColor(theme.accent, brightness)) + SPARKLINE_BLOCKS[blockIdx];
         }
-        const barPad = Math.floor((faceW - spkWidth) / 2) + 4;
+        const barPad = Math.floor((faceW - spkWidth) / 2);
         buf += ansi.to(startRow + 14, startCol + barPad) + sparkline + r;
       }
     }
