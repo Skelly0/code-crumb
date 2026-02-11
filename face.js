@@ -10,6 +10,7 @@ const {
   ansi, breathe, dimColor,
   themes, TIMELINE_COLORS, SPARKLINE_BLOCKS,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
+  PALETTES, PALETTE_NAMES,
 } = require('./themes');
 const { eyes, mouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
@@ -71,6 +72,13 @@ class ClaudeFace {
 
     // Timeline
     this.timeline = [{ state: 'idle', at: Date.now() }];
+
+    // Interactive keypresses
+    this.paletteIndex = 0;
+    this.showStats = true;
+    this.showHelp = false;
+    this.petTimer = 0;
+    this.petWiggle = 0;
   }
 
   _nextBlink() {
@@ -229,8 +237,33 @@ class ClaudeFace {
     return top;
   }
 
+  // -- Interactive methods --------------------------------------------
+
+  pet() {
+    this.particles.spawn(15, 'sparkle');
+    this.petTimer = 22; // ~1.5s at 15fps
+  }
+
+  cycleTheme() {
+    this.paletteIndex = (this.paletteIndex + 1) % PALETTES.length;
+  }
+
+  toggleStats() {
+    this.showStats = !this.showStats;
+  }
+
+  toggleHelp() {
+    this.showHelp = !this.showHelp;
+  }
+
   getTheme() {
-    return themes[this.state] || themes.idle;
+    const palette = PALETTES[this.paletteIndex] || PALETTES[0];
+    return palette.themes[this.state] || palette.themes.idle;
+  }
+
+  getTimelineColors() {
+    const palette = PALETTES[this.paletteIndex] || PALETTES[0];
+    return palette.timelineColors;
   }
 
   getEyes(theme, frame) {
@@ -369,6 +402,14 @@ class ClaudeFace {
     // Milestone display decay
     if (this.milestoneShowTime > 0) this.milestoneShowTime--;
 
+    // Pet wiggle decay
+    if (this.petTimer > 0) {
+      this.petTimer--;
+      this.petWiggle = (this.petTimer % 2 === 0) ? 1 : -1;
+    } else {
+      this.petWiggle = 0;
+    }
+
     this.particles.update();
   }
 
@@ -385,6 +426,34 @@ class ClaudeFace {
       if (idx >= 0) buckets[idx]++;
     }
     return buckets;
+  }
+
+  _renderHelp(cols, rows, theme) {
+    const lines = [
+      ' Keybindings ',
+      '',
+      ' space  pet the face',
+      ' t      cycle palette',
+      ' s      toggle stats',
+      ' h/?    this help',
+      ' q      quit',
+    ];
+    const boxW = 24;
+    const boxH = lines.length + 2;
+    const bx = Math.max(1, Math.floor((cols - boxW) / 2));
+    const by = Math.max(1, Math.floor((rows - boxH) / 2));
+    const bc = ansi.fg(...dimColor(theme.border, 0.8));
+    const tc = ansi.fg(...dimColor(theme.label, 0.9));
+    const r = ansi.reset;
+    let buf = '';
+    buf += ansi.to(by, bx) + `${bc}\u256d${'\u2500'.repeat(boxW)}\u256e${r}`;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const pad = boxW - line.length;
+      buf += ansi.to(by + 1 + i, bx) + `${bc}\u2502${tc}${line}${' '.repeat(Math.max(0, pad))}${bc}\u2502${r}`;
+    }
+    buf += ansi.to(by + 1 + lines.length, bx) + `${bc}\u2570${'\u2500'.repeat(boxW)}\u256f${r}`;
+    return buf;
   }
 
   render() {
@@ -428,12 +497,13 @@ class ClaudeFace {
     const eyeData = this.getEyes(theme, this.frame);
     const mouthStr = this.getMouth(theme, this.frame);
 
-    // Glitch / caffeinated horizontal jitter
+    // Glitch / caffeinated / pet horizontal jitter
     let gx = (this.state === 'error' && this.glitchIntensity > 0.3 && Math.random() < 0.15)
       ? Math.floor(Math.random() * 3) - 1 : 0;
     if (this.state === 'caffeinated' && this.frame % 2 === 0) {
       gx = Math.floor(Math.random() * 3) - 1;
     }
+    gx += this.petWiggle;
 
     let buf = '';
 
@@ -515,81 +585,108 @@ class ClaudeFace {
       }
     }
 
-    // Streak counter
-    if (this.streak > 0 || this.milestoneShowTime > 0) {
-      let streakText, sc;
-      if (this.milestoneShowTime > 0 && this.milestone) {
-        const stars = '\u2605'.repeat(Math.min(5, Math.ceil(this.milestone.value / 20)));
-        streakText = `${stars} ${this.milestone.value} in a row! ${stars}`;
-        sc = ansi.fg(255, 220, 50);
-      } else if (this.streak >= 25) {
-        streakText = `\u2605 ${this.streak} successful in a row`;
-        sc = ansi.fg(...dimColor(theme.label, 0.7));
-      } else if (this.streak > 1) {
-        streakText = `${this.streak} successful in a row`;
-        sc = ansi.fg(...dimColor(theme.label, 0.4));
-      } else {
-        streakText = '';
-        sc = '';
+    // Streak counter, timeline, sparkline (togglable via 's')
+    if (this.showStats) {
+      if (this.streak > 0 || this.milestoneShowTime > 0) {
+        let streakText, sc;
+        if (this.milestoneShowTime > 0 && this.milestone) {
+          const stars = '\u2605'.repeat(Math.min(5, Math.ceil(this.milestone.value / 20)));
+          streakText = `${stars} ${this.milestone.value} in a row! ${stars}`;
+          sc = ansi.fg(255, 220, 50);
+        } else if (this.streak >= 25) {
+          streakText = `\u2605 ${this.streak} successful in a row`;
+          sc = ansi.fg(...dimColor(theme.label, 0.7));
+        } else if (this.streak > 1) {
+          streakText = `${this.streak} successful in a row`;
+          sc = ansi.fg(...dimColor(theme.label, 0.4));
+        } else {
+          streakText = '';
+          sc = '';
+        }
+        if (streakText) {
+          const streakPad = Math.floor((faceW - streakText.length) / 2);
+          buf += ansi.to(startRow + 12, startCol);
+          buf += `${sc}${' '.repeat(Math.max(0, streakPad))}${streakText}${r}`;
+        }
       }
-      if (streakText) {
-        const streakPad = Math.floor((faceW - streakText.length) / 2);
-        buf += ansi.to(startRow + 12, startCol);
-        buf += `${sc}${' '.repeat(Math.max(0, streakPad))}${streakText}${r}`;
+      // Show dramatic broken streak message
+      if (this.state === 'error' && this.lastBrokenStreak > 5) {
+        const severity = this.lastBrokenStreak >= 50 ? 'DEVASTATION.'
+          : this.lastBrokenStreak >= 25 ? 'that really hurt.'
+          : this.lastBrokenStreak >= 10 ? 'ouch.'
+          : '';
+        if (severity) {
+          const spad = Math.floor((faceW - severity.length) / 2);
+          buf += ansi.to(startRow + 12, startCol);
+          buf += `${ansi.fg(230, 80, 80)}${' '.repeat(Math.max(0, spad))}${severity}${r}`;
+        }
       }
-    }
-    // Show dramatic broken streak message
-    if (this.state === 'error' && this.lastBrokenStreak > 5) {
-      const severity = this.lastBrokenStreak >= 50 ? 'DEVASTATION.'
-        : this.lastBrokenStreak >= 25 ? 'that really hurt.'
-        : this.lastBrokenStreak >= 10 ? 'ouch.'
-        : '';
-      if (severity) {
-        const spad = Math.floor((faceW - severity.length) / 2);
-        buf += ansi.to(startRow + 12, startCol);
-        buf += `${ansi.fg(230, 80, 80)}${' '.repeat(Math.max(0, spad))}${severity}${r}`;
-      }
-    }
 
-    // Session timeline bar
-    if (this.timeline.length > 1) {
-      const barWidth = Math.min(faceW - 2, 38);
-      const now = Date.now();
-      const tlStart = this.timeline[0].at;
-      const totalDur = now - tlStart;
+      // Session timeline bar
+      const tlColors = this.getTimelineColors();
+      if (this.timeline.length > 1) {
+        const barWidth = Math.min(faceW - 2, 38);
+        const now = Date.now();
+        const tlStart = this.timeline[0].at;
+        const totalDur = now - tlStart;
 
-      if (totalDur > 2000) {
-        let bar = '';
-        for (let i = 0; i < barWidth; i++) {
-          const t = tlStart + (totalDur * i / barWidth);
-          let st = 'idle';
-          for (let j = this.timeline.length - 1; j >= 0; j--) {
-            if (this.timeline[j].at <= t) { st = this.timeline[j].state; break; }
+        if (totalDur > 2000) {
+          let bar = '';
+          for (let i = 0; i < barWidth; i++) {
+            const t = tlStart + (totalDur * i / barWidth);
+            let st = 'idle';
+            for (let j = this.timeline.length - 1; j >= 0; j--) {
+              if (this.timeline[j].at <= t) { st = this.timeline[j].state; break; }
+            }
+            const color = tlColors[st] || tlColors.idle;
+            bar += ansi.fg(...color) + '\u2588';
           }
-          const color = TIMELINE_COLORS[st] || TIMELINE_COLORS.idle;
-          bar += ansi.fg(...color) + '\u2588';
+          const barPad = Math.floor((faceW - barWidth) / 2);
+          buf += ansi.to(startRow + 13, startCol + barPad) + bar + r;
         }
-        const barPad = Math.floor((faceW - barWidth) / 2);
-        buf += ansi.to(startRow + 13, startCol + barPad) + bar + r;
+      }
+
+      // Activity sparkline (tool call density below timeline)
+      {
+        const spkWidth = Math.min(faceW - 2, 38);
+        const sparkBuckets = this._buildSparkline(spkWidth, Date.now());
+        if (sparkBuckets) {
+          const maxCount = Math.max(1, ...sparkBuckets);
+          let sparkline = '';
+          for (let i = 0; i < sparkBuckets.length; i++) {
+            const ratio = sparkBuckets[i] / maxCount;
+            const blockIdx = Math.round(ratio * (SPARKLINE_BLOCKS.length - 1));
+            const brightness = sparkBuckets[i] === 0 ? 0.15 : 0.3 + ratio * 0.7;
+            sparkline += ansi.fg(...dimColor(theme.accent, brightness)) + SPARKLINE_BLOCKS[blockIdx];
+          }
+          const barPad = Math.floor((faceW - spkWidth) / 2);
+          buf += ansi.to(startRow + 14, startCol + barPad) + sparkline + r;
+        }
       }
     }
 
-    // Activity sparkline (tool call density below timeline)
+    // Palette name (when not default)
+    if (this.paletteIndex > 0) {
+      const pName = PALETTE_NAMES[this.paletteIndex] || '';
+      buf += ansi.to(startRow + 8, startCol + faceW - pName.length);
+      buf += `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.4))}${pName}${r}`;
+    }
+
+    // Key hints bar (bottom of terminal)
     {
-      const spkWidth = Math.min(faceW - 2, 38);
-      const sparkBuckets = this._buildSparkline(spkWidth, Date.now());
-      if (sparkBuckets) {
-        const maxCount = Math.max(1, ...sparkBuckets);
-        let sparkline = '';
-        for (let i = 0; i < sparkBuckets.length; i++) {
-          const ratio = sparkBuckets[i] / maxCount;
-          const blockIdx = Math.round(ratio * (SPARKLINE_BLOCKS.length - 1));
-          const brightness = sparkBuckets[i] === 0 ? 0.15 : 0.3 + ratio * 0.7;
-          sparkline += ansi.fg(...dimColor(theme.accent, brightness)) + SPARKLINE_BLOCKS[blockIdx];
-        }
-        const barPad = Math.floor((faceW - spkWidth) / 2);
-        buf += ansi.to(startRow + 14, startCol + barPad) + sparkline + r;
-      }
+      const dc = `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.3))}`;
+      const kc = ansi.fg(...dimColor(theme.accent, 0.4));
+      const sep = `${dc}\u00b7${r}`;
+      const hint = `${kc}space${dc} pet ${sep} ${kc}t${dc} theme ${sep} ${kc}s${dc} stats ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
+      // Strip ANSI to measure visible length
+      const visible = hint.replace(/\x1b\[[^m]*m/g, '');
+      const hintCol = Math.max(1, Math.floor((cols - visible.length) / 2) + 1);
+      buf += ansi.to(rows, hintCol) + hint;
+    }
+
+    // Help overlay
+    if (this.showHelp) {
+      buf += this._renderHelp(cols, rows, theme);
     }
 
     // Particles (drawn on top of face)

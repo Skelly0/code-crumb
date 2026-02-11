@@ -30,6 +30,7 @@ const {
   lerpColor, dimColor, breathe,
   themes, COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
+  PALETTES, PALETTE_NAMES,
 } = require('./themes');
 const { mouths, eyes, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
@@ -1552,6 +1553,245 @@ describe('renderer.js -- ClaudeFace._buildSparkline', () => {
     const buckets = face._buildSparkline(5, start + 5000);
     // Both transitions near the end should land in the last bucket (idx 4)
     assert.strictEqual(buckets[4], 2);
+  });
+});
+
+// ====================================================================
+// themes.js -- PALETTES
+// ====================================================================
+
+describe('themes.js -- PALETTES', () => {
+  const ALL_STATES = [
+    'idle', 'thinking', 'coding', 'reading', 'searching', 'executing',
+    'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
+    'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
+  ];
+
+  test('PALETTES has 5 entries', () => {
+    assert.strictEqual(PALETTES.length, 5);
+  });
+
+  test('PALETTE_NAMES matches palette names', () => {
+    assert.deepStrictEqual(PALETTE_NAMES, ['default', 'neon', 'pastel', 'mono', 'sunset']);
+  });
+
+  test('all palette names are unique', () => {
+    const names = PALETTES.map(p => p.name);
+    assert.strictEqual(new Set(names).size, names.length);
+  });
+
+  test('every palette has all 17 states in themes', () => {
+    for (const palette of PALETTES) {
+      for (const state of ALL_STATES) {
+        assert.ok(palette.themes[state], `${palette.name}: missing theme for state: ${state}`);
+      }
+    }
+  });
+
+  test('every palette theme has correct color shape', () => {
+    for (const palette of PALETTES) {
+      for (const state of ALL_STATES) {
+        const theme = palette.themes[state];
+        for (const key of ['border', 'eye', 'mouth', 'accent', 'label']) {
+          assert.ok(Array.isArray(theme[key]), `${palette.name}.${state}.${key} should be array`);
+          assert.strictEqual(theme[key].length, 3, `${palette.name}.${state}.${key} should have 3 elements`);
+        }
+        assert.ok(typeof theme.status === 'string', `${palette.name}.${state}.status should be string`);
+        assert.ok(typeof theme.emoji === 'string', `${palette.name}.${state}.emoji should be string`);
+      }
+    }
+  });
+
+  test('status and emoji are consistent across all palettes', () => {
+    for (const state of ALL_STATES) {
+      const defaultTheme = PALETTES[0].themes[state];
+      for (let i = 1; i < PALETTES.length; i++) {
+        const theme = PALETTES[i].themes[state];
+        assert.strictEqual(theme.status, defaultTheme.status,
+          `${PALETTES[i].name}.${state}.status should match default`);
+        assert.strictEqual(theme.emoji, defaultTheme.emoji,
+          `${PALETTES[i].name}.${state}.emoji should match default`);
+      }
+    }
+  });
+
+  test('every palette has all 17 timeline colors', () => {
+    for (const palette of PALETTES) {
+      for (const state of ALL_STATES) {
+        assert.ok(palette.timelineColors[state],
+          `${palette.name}: missing timelineColor for: ${state}`);
+        assert.strictEqual(palette.timelineColors[state].length, 3);
+      }
+    }
+  });
+
+  test('default palette references existing themes/TIMELINE_COLORS', () => {
+    assert.strictEqual(PALETTES[0].themes, themes);
+    assert.strictEqual(PALETTES[0].timelineColors, TIMELINE_COLORS);
+  });
+
+  test('non-default palettes have different border colors than default', () => {
+    for (let i = 1; i < PALETTES.length; i++) {
+      const defBorder = PALETTES[0].themes.idle.border;
+      const palBorder = PALETTES[i].themes.idle.border;
+      const same = defBorder[0] === palBorder[0] && defBorder[1] === palBorder[1] && defBorder[2] === palBorder[2];
+      assert.ok(!same, `${PALETTES[i].name} idle border should differ from default`);
+    }
+  });
+});
+
+// ====================================================================
+// face.js -- pet interaction
+// ====================================================================
+
+describe('face.js -- pet()', () => {
+  test('spawns sparkle particles', () => {
+    const face = new ClaudeFace();
+    face.pet();
+    assert.ok(face.particles.particles.length >= 15);
+    assert.strictEqual(face.particles.particles[0].style, 'sparkle');
+  });
+
+  test('sets petTimer to 22', () => {
+    const face = new ClaudeFace();
+    face.pet();
+    assert.strictEqual(face.petTimer, 22);
+  });
+
+  test('does NOT change state', () => {
+    const face = new ClaudeFace();
+    face.setState('coding');
+    face.minDisplayUntil = 0; // allow state changes
+    face.pet();
+    assert.strictEqual(face.state, 'coding');
+  });
+
+  test('wiggle alternates then decays to 0', () => {
+    const face = new ClaudeFace();
+    face.pet();
+    const wiggles = [];
+    for (let i = 0; i < 25; i++) {
+      face.update(66);
+      wiggles.push(face.petWiggle);
+    }
+    // Should have non-zero wiggles early on
+    assert.ok(wiggles.slice(0, 5).some(w => w !== 0));
+    // Should decay to 0
+    assert.strictEqual(wiggles[wiggles.length - 1], 0);
+  });
+
+  test('wiggle alternates between +1 and -1', () => {
+    const face = new ClaudeFace();
+    face.pet();
+    face.update(66);
+    const w1 = face.petWiggle;
+    face.update(66);
+    const w2 = face.petWiggle;
+    assert.ok((w1 === 1 && w2 === -1) || (w1 === -1 && w2 === 1),
+      'wiggle should alternate between +1 and -1');
+  });
+});
+
+// ====================================================================
+// face.js -- cycleTheme
+// ====================================================================
+
+describe('face.js -- cycleTheme()', () => {
+  test('increments paletteIndex', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.paletteIndex, 0);
+    face.cycleTheme();
+    assert.strictEqual(face.paletteIndex, 1);
+  });
+
+  test('wraps around to 0', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < PALETTES.length; i++) face.cycleTheme();
+    assert.strictEqual(face.paletteIndex, 0);
+  });
+
+  test('getTheme returns different colors per palette', () => {
+    const face = new ClaudeFace();
+    face.state = 'idle';
+    const defaultTheme = face.getTheme();
+    face.cycleTheme(); // now neon
+    const neonTheme = face.getTheme();
+    const sameBorder = defaultTheme.border[0] === neonTheme.border[0] &&
+                       defaultTheme.border[1] === neonTheme.border[1] &&
+                       defaultTheme.border[2] === neonTheme.border[2];
+    assert.ok(!sameBorder, 'neon theme should have different idle border colors');
+  });
+
+  test('getTimelineColors returns palette-specific colors', () => {
+    const face = new ClaudeFace();
+    const defColors = face.getTimelineColors();
+    face.cycleTheme();
+    const neonColors = face.getTimelineColors();
+    assert.notDeepStrictEqual(defColors.idle, neonColors.idle);
+  });
+});
+
+// ====================================================================
+// face.js -- toggleStats / toggleHelp
+// ====================================================================
+
+describe('face.js -- toggleStats()', () => {
+  test('starts true, toggles to false', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.showStats, true);
+    face.toggleStats();
+    assert.strictEqual(face.showStats, false);
+  });
+
+  test('double toggle returns to original', () => {
+    const face = new ClaudeFace();
+    face.toggleStats();
+    face.toggleStats();
+    assert.strictEqual(face.showStats, true);
+  });
+});
+
+describe('face.js -- toggleHelp()', () => {
+  test('starts false, toggles to true', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.showHelp, false);
+    face.toggleHelp();
+    assert.strictEqual(face.showHelp, true);
+  });
+
+  test('double toggle returns to original', () => {
+    const face = new ClaudeFace();
+    face.toggleHelp();
+    face.toggleHelp();
+    assert.strictEqual(face.showHelp, false);
+  });
+});
+
+// ====================================================================
+// grid.js -- FaceGrid theme/help
+// ====================================================================
+
+describe('grid.js -- FaceGrid cycleTheme/toggleHelp', () => {
+  test('cycleTheme increments paletteIndex', () => {
+    const grid = new FaceGrid();
+    assert.strictEqual(grid.paletteIndex, 0);
+    grid.cycleTheme();
+    assert.strictEqual(grid.paletteIndex, 1);
+  });
+
+  test('cycleTheme wraps around', () => {
+    const grid = new FaceGrid();
+    for (let i = 0; i < PALETTES.length; i++) grid.cycleTheme();
+    assert.strictEqual(grid.paletteIndex, 0);
+  });
+
+  test('toggleHelp flips showHelp', () => {
+    const grid = new FaceGrid();
+    assert.strictEqual(grid.showHelp, false);
+    grid.toggleHelp();
+    assert.strictEqual(grid.showHelp, true);
+    grid.toggleHelp();
+    assert.strictEqual(grid.showHelp, false);
   });
 });
 

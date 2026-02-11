@@ -20,6 +20,7 @@ const {
   themes, TIMELINE_COLORS, SPARKLINE_BLOCKS,
   COMPLETION_LINGER,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
+  PALETTES, PALETTE_NAMES,
 } = require('./themes');
 const { mouths, eyes, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
@@ -133,6 +134,22 @@ function runSingleMode() {
     });
   } catch {}
 
+  // Raw stdin keypress handling
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (key) => {
+      // Help dismiss: any key while help is showing closes it
+      if (face.showHelp && key !== '\x03') { face.showHelp = false; return; }
+      if (key === ' ') face.pet();
+      else if (key === 't') face.cycleTheme();
+      else if (key === 's') face.toggleStats();
+      else if (key === 'h' || key === '?') face.toggleHelp();
+      else if (key === 'q' || key === '\x03') cleanup(); // q or Ctrl+C
+    });
+  }
+
   process.stdout.on('resize', () => {
     face.particles.fadeAll(5);
     process.stdout.write(ansi.clear);
@@ -166,6 +183,19 @@ function runGridMode() {
 
   grid.loadSessions();
 
+  // Raw stdin keypress handling
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (key) => {
+      if (grid.showHelp && key !== '\x03') { grid.showHelp = false; return; }
+      if (key === 't') grid.cycleTheme();
+      else if (key === 'h' || key === '?') grid.toggleHelp();
+      else if (key === 'q' || key === '\x03') cleanup();
+    });
+  }
+
   process.stdout.on('resize', () => {
     grid.prevFaceCount = -1;
     process.stdout.write(ansi.clear);
@@ -197,6 +227,7 @@ function main() {
 
   function cleanup() {
     removePid();
+    try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch {}
     process.stdout.write(ansi.show + ansi.clear + ansi.reset);
     process.exit(0);
   }
@@ -226,5 +257,6 @@ if (require.main === module) {
     themes, mouths, eyes, gridMouths,
     COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,
     IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
+    PALETTES, PALETTE_NAMES,
   };
 }

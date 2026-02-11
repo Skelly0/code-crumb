@@ -4,6 +4,20 @@
 
 Claude Face is a zero-dependency terminal tamagotchi that visualizes what Claude Code is doing in real-time. It renders an animated ASCII face that reacts to Claude Code lifecycle events (thinking, coding, reading, executing, errors, etc.) via Claude Code hooks and file-based IPC.
 
+### Interactive Keybindings
+
+| Key | Action | Mode |
+|-----|--------|------|
+| `space` | Pet the face (sparkle particles + wiggle) | single |
+| `t` | Cycle color palette (default/neon/pastel/mono/sunset) | both |
+| `s` | Toggle stats (streak, timeline, sparkline) | single |
+| `h` / `?` | Toggle help overlay | both |
+| `q` / Ctrl+C | Quit | both |
+
+### Color Palettes
+
+5 palettes: **default** (original colors), **neon** (high saturation cyans/magentas/limes), **pastel** (soft pinks/lavenders/mints), **mono** (greyscale), **sunset** (warm oranges/reds/golds/purples). Press `t` to cycle. Grid mode supports theme cycling and help but not pet or stats toggle.
+
 ## Tech Stack
 
 - **Runtime**: Node.js 18+ (no npm dependencies)
@@ -25,7 +39,7 @@ state-machine.js Pure logic — tool→state mapping, error detection, streak tr
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer in a new terminal window
 setup.js         Installs Claude Code hooks into ~/.claude/settings.json
-test.js          Test suite — ~220 tests covering all critical paths (node test.js)
+test.js          Test suite — ~248 tests covering all critical paths (node test.js)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Demo script — simulates 4 concurrent sessions in grid mode
 claude-face.sh   Unix shell wrapper for launch.js

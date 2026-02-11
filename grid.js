@@ -8,7 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const { SESSIONS_DIR, safeFilename } = require('./shared');
-const { ansi, breathe, dimColor, themes, COMPLETION_LINGER } = require('./themes');
+const { ansi, breathe, dimColor, themes, COMPLETION_LINGER, PALETTES, PALETTE_NAMES } = require('./themes');
 const { gridMouths } = require('./animations');
 
 // -- Config --------------------------------------------------------
@@ -161,8 +161,9 @@ class MiniFace {
     return gridMouths[this.state] || '\u25e1\u25e1\u25e1';
   }
 
-  render(startRow, startCol, globalTime) {
-    const theme = themes[this.state] || themes.idle;
+  render(startRow, startCol, globalTime, paletteThemes) {
+    const themeMap = paletteThemes || themes;
+    const theme = themeMap[this.state] || themeMap.idle;
     const breathSpeed = this.state === 'sleeping' ? 0.5
       : this.state === 'caffeinated' ? 2.5 : 1;
     const bc = breathe(theme.border, (globalTime + this.firstSeen % 2000) * breathSpeed);
@@ -213,6 +214,18 @@ class FaceGrid {
     this.frame = 0;
     this.time = 0;
     this.prevFaceCount = 0;
+
+    // Interactive keypresses
+    this.paletteIndex = 0;
+    this.showHelp = false;
+  }
+
+  cycleTheme() {
+    this.paletteIndex = (this.paletteIndex + 1) % PALETTES.length;
+  }
+
+  toggleHelp() {
+    this.showHelp = !this.showHelp;
   }
 
   loadSessions() {
@@ -374,13 +387,52 @@ class FaceGrid {
       const faceRow = baseRow + gridRow * CELL_H;
       const faceCol = baseCol + rowOffset + gridCol * CELL_W;
 
-      buf += faces[i].render(faceRow, faceCol, this.time);
+      const paletteThemes = (PALETTES[this.paletteIndex] || PALETTES[0]).themes;
+      buf += faces[i].render(faceRow, faceCol, this.time, paletteThemes);
     }
 
-    // Session count
-    const countText = `${n} session${n === 1 ? '' : 's'}`;
+    // Session count + palette name
+    const pName = this.paletteIndex > 0 ? ` [${PALETTE_NAMES[this.paletteIndex]}]` : '';
+    const countText = `${n} session${n === 1 ? '' : 's'}${pName}`;
     buf += ansi.to(1, cols - countText.length - 1);
     buf += `${ansi.dim}${ansi.fg(80, 110, 140)}${countText}${ansi.reset}`;
+
+    // Key hints bar (bottom of terminal)
+    {
+      const dc = `${ansi.dim}${ansi.fg(80, 110, 140)}`;
+      const kc = ansi.fg(100, 140, 180);
+      const sep = `${dc}\u00b7${ansi.reset}`;
+      const r = ansi.reset;
+      const hint = `${kc}t${dc} theme ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
+      const visible = hint.replace(/\x1b\[[^m]*m/g, '');
+      const hintCol = Math.max(1, Math.floor((cols - visible.length) / 2) + 1);
+      buf += ansi.to(rows, hintCol) + hint;
+    }
+
+    // Help overlay
+    if (this.showHelp) {
+      const lines = [
+        ' Keybindings ',
+        '',
+        ' t      cycle palette',
+        ' h/?    this help',
+        ' q      quit',
+      ];
+      const boxW = 24;
+      const boxH = lines.length + 2;
+      const bx = Math.max(1, Math.floor((cols - boxW) / 2));
+      const by = Math.max(1, Math.floor((rows - boxH) / 2));
+      const bc = ansi.fg(80, 110, 140);
+      const tc = ansi.fg(140, 170, 200);
+      const r = ansi.reset;
+      buf += ansi.to(by, bx) + `${bc}\u256d${'\u2500'.repeat(boxW)}\u256e${r}`;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const pad = boxW - line.length;
+        buf += ansi.to(by + 1 + i, bx) + `${bc}\u2502${tc}${line}${' '.repeat(Math.max(0, pad))}${bc}\u2502${r}`;
+      }
+      buf += ansi.to(by + 1 + lines.length, bx) + `${bc}\u2570${'\u2500'.repeat(boxW)}\u256f${r}`;
+    }
 
     return buf;
   }
