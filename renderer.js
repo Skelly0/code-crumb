@@ -12,14 +12,12 @@
 
 const fs = require('fs');
 const path = require('path');
+const { HOME, STATE_FILE, SESSIONS_DIR, safeFilename } = require('./shared');
 
 // -- Mode ----------------------------------------------------------
 const GRID_MODE = process.argv.includes('--grid');
 
 // -- Config --------------------------------------------------------
-const HOME = process.env.USERPROFILE || process.env.HOME || '/tmp';
-const STATE_FILE = process.env.CLAUDE_FACE_STATE || path.join(HOME, '.claude-face-state');
-const SESSIONS_DIR = path.join(HOME, '.claude-face-sessions');
 const PID_FILE = path.join(HOME, GRID_MODE ? '.claude-face-grid.pid' : '.claude-face.pid');
 const FPS = 15;
 const FRAME_MS = Math.floor(1000 / FPS);
@@ -292,11 +290,6 @@ const gridMouths = {
   proud:       '  \u25e1\u25e1',
   relieved:    ' \u25e1 ',
 };
-
-// -- Helpers -------------------------------------------------------
-function safeFilename(id) {
-  return String(id).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
-}
 
 // ===================================================================
 // SINGLE FACE MODE
@@ -1633,7 +1626,17 @@ function main() {
   } else {
     runSingleMode();
   }
-
 }
 
-main();
+// -- Module exports (for testing) / Entry ----------------------------
+if (require.main === module) {
+  main();
+} else {
+  module.exports = {
+    ClaudeFace, MiniFace, FaceGrid, ParticleSystem,
+    lerpColor, dimColor, breathe,
+    themes, mouths, eyes, gridMouths,
+    COMPLETION_LINGER, TIMELINE_COLORS,
+    IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
+  };
+}

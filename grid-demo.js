@@ -9,9 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-
-const HOME = process.env.USERPROFILE || process.env.HOME || '/tmp';
-const SESSIONS_DIR = path.join(HOME, '.claude-face-sessions');
+const { SESSIONS_DIR } = require('./shared');
 
 // Ensure dir exists
 try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
