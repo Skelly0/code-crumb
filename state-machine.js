@@ -1,0 +1,307 @@
+'use strict';
+
+// +================================================================+
+// |  State Machine -- pure logic for Claude Face state management   |
+// |  Extracted for testability. No I/O, no side effects.            |
+// |                                                                  |
+// |  Handles:                                                        |
+// |    - Tool name → face state mapping                              |
+// |    - Forensic error detection (50+ regex patterns)               |
+// |    - Post-tool result classification                             |
+// |    - Streak tracking and milestone detection                     |
+// +================================================================+
+
+const path = require('path');
+
+// -- Tool-to-State Mapping -------------------------------------------
+
+function toolToState(toolName, toolInput) {
+  // Writing/editing code
+  if (/^(edit|multiedit|write|str_replace|create_file)$/i.test(toolName)) {
+    const filePath = toolInput?.file_path || toolInput?.path || '';
+    const shortPath = filePath ? path.basename(filePath) : '';
+    return { state: 'coding', detail: shortPath ? `editing ${shortPath}` : 'writing code' };
+  }
+
+  // Running commands
+  if (/^bash$/i.test(toolName)) {
+    const cmd = toolInput?.command || '';
+    const shortCmd = cmd.length > 40 ? cmd.slice(0, 37) + '...' : cmd;
+
+    // Detect test commands
+    if (/\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|spec)\b/i.test(cmd) ||
+        /\bnpm\s+(run\s+)?test\b/i.test(cmd)) {
+      return { state: 'testing', detail: shortCmd || 'running tests' };
+    }
+
+    // Detect install commands
+    if (/\b(npm\s+install|yarn\s+(add|install)|pip\s+install|cargo\s+build|apt(-get)?\s+install|brew\s+install|pnpm\s+(add|install)|bun\s+(add|install))\b/i.test(cmd)) {
+      return { state: 'installing', detail: shortCmd || 'installing' };
+    }
+
+    return { state: 'executing', detail: shortCmd || 'running command' };
+  }
+
+  // Reading files
+  if (/^(read|view|cat)$/i.test(toolName)) {
+    const filePath = toolInput?.file_path || toolInput?.path || '';
+    const shortPath = filePath ? path.basename(filePath) : '';
+    return { state: 'reading', detail: shortPath ? `reading ${shortPath}` : 'reading' };
+  }
+
+  // Searching
+  if (/^(grep|glob|search|ripgrep|find|list)$/i.test(toolName)) {
+    const pattern = toolInput?.pattern || toolInput?.query || '';
+    return { state: 'searching', detail: pattern ? `looking for "${pattern}"` : 'searching' };
+  }
+
+  // Web/fetch
+  if (/^(web_search|web_fetch|fetch|webfetch)$/i.test(toolName)) {
+    const query = toolInput?.query || toolInput?.url || '';
+    const shortQuery = query.length > 30 ? query.slice(0, 27) + '...' : query;
+    return { state: 'searching', detail: shortQuery ? `searching "${shortQuery}"` : 'searching the web' };
+  }
+
+  // Task/subagent
+  if (/^(task|subagent)$/i.test(toolName)) {
+    const desc = toolInput?.description || '';
+    const shortDesc = desc.length > 30 ? desc.slice(0, 27) + '...' : desc;
+    return { state: 'subagent', detail: shortDesc || 'spawning subagent' };
+  }
+
+  // MCP tools
+  if (/^mcp__/.test(toolName)) {
+    const parts = toolName.split('__');
+    const server = parts[1] || 'external';
+    const tool = parts[2] || '';
+    return { state: 'executing', detail: `${server}: ${tool}` };
+  }
+
+  // Default
+  return { state: 'thinking', detail: toolName || '' };
+}
+
+// -- Error Detection -------------------------------------------------
+
+// Signature patterns that scream "something broke" in stdout
+const stdoutErrorPatterns = [
+  /\bcommand not found\b/i,
+  /\bno such file or directory\b/i,
+  /\bpermission denied\b/i,
+  /\bsegmentation fault\b/i,
+  /\bsyntax error\b/i,
+  /\bENOENT\b/,
+  /\bENOTDIR\b/,
+  /\bEACCES\b/,
+  /\bEPERM\b/,
+  /\bFATAL\b/,
+  /\bPANIC\b/i,
+  /\bUnhandledPromiseRejection\b/,
+  /\bTraceback \(most recent call last\)/,        // Python
+  /\bat Object\.<anonymous>.*\n\s+at /,           // Node stack trace
+  /\bCannot find module\b/,
+  /\bModuleNotFoundError\b/,
+  /\bImportError\b/,
+  /\bCompilation failed\b/i,
+  /\bbuild failed\b/i,
+  /\btest(s)? failed\b/i,
+  /\bfailed with exit code\b/i,
+  /\bnpm ERR!/,
+  /\bcargo error\b/i,
+  /\frustc.*error\[E\d+\]/,                       // Rust compiler errors
+];
+
+// Patterns in stderr that actually mean trouble (not just warnings)
+const stderrErrorPatterns = [
+  /\berror\b/i,
+  /\bfatal\b/i,
+  /\bfailed\b/i,
+  /\bENOENT\b/,
+  /\bEACCES\b/,
+  /\bcommand not found\b/i,
+  /\bpermission denied\b/i,
+  /\bsegmentation fault\b/i,
+  /\bpanic\b/i,
+];
+
+// False positive guards: these look scary but aren't
+const falsePositives = [
+  /0 errors?\b/i,
+  /no errors?\b/i,
+  /errors?:\s*0\b/i,
+  /error handling/i,
+  /error\.js/i,                                     // Just a filename
+  /stderr/i,                                        // Talking about stderr
+  /\.error\s*[=(]/,                                 // Property/method named error
+  /error_count.*0/i,
+  /warning/i,                                       // warnings aren't errors
+];
+
+function looksLikeError(text, patterns) {
+  if (!text) return false;
+  const hit = patterns.some(p => p.test(text));
+  if (!hit) return false;
+  // Check it's not a false positive
+  return !falsePositives.some(p => p.test(text));
+}
+
+// Try to extract an exit code from stdout -- Claude Code often
+// appends "Exit code: N" to the output even though it doesn't
+// give us exit_code as a field.
+function extractExitCode(stdout) {
+  const match = stdout.match(/(?:exit code|exited with|returned?)[:=\s]+(\d+)/i);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+// Friendly error detail based on what we found
+function errorDetail(stdout, stderr) {
+  const combined = (stdout || '') + (stderr || '');
+  if (/command not found/i.test(combined)) return 'command not found';
+  if (/permission denied/i.test(combined)) return 'permission denied';
+  if (/no such file or directory/i.test(combined)) return 'file not found';
+  if (/segmentation fault/i.test(combined)) return 'segfault!';
+  if (/ENOENT/.test(combined)) return 'missing file/path';
+  if (/syntax error/i.test(combined)) return 'syntax error';
+  if (/Traceback|at Object\.<anonymous>|Error:/.test(stdout || '')) return 'exception thrown';
+  if (/Cannot find module|ModuleNotFound/i.test(combined)) return 'missing module';
+  if (/Compilation failed|build failed/i.test(combined)) return 'build broke';
+  if (/test(s)? failed|\d+\s+failed/i.test(combined)) return 'tests failed';
+  if (/npm ERR!/i.test(combined)) return 'npm error';
+  return 'something went wrong';
+}
+
+// -- Post-Tool Classification ----------------------------------------
+
+// Encapsulates the full PostToolUse decision tree.
+// Returns { state, detail, diffInfo }
+function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
+  const stdout = toolResponse?.stdout || '';
+  const stderr = toolResponse?.stderr || '';
+  const isError = isErrorFlag || toolResponse?.isError || false;
+  const inferredExit = extractExitCode(stdout);
+
+  let state, detail;
+  let diffInfo = null;
+
+  // Decision tree -- in order of confidence
+  if (isError) {
+    state = 'error';
+    detail = errorDetail(stdout, stderr);
+  } else if (toolResponse?.interrupted) {
+    state = 'error';
+    detail = 'interrupted';
+  } else if (inferredExit !== null && inferredExit !== 0) {
+    state = 'error';
+    detail = errorDetail(stdout, stderr) || `exit ${inferredExit}`;
+  } else if (looksLikeError(stderr, stderrErrorPatterns)) {
+    state = 'error';
+    detail = errorDetail(stdout, stderr);
+  } else if (/^bash$/i.test(toolName) && looksLikeError(stdout, stdoutErrorPatterns)) {
+    // Only check stdout patterns for Bash -- other tools have structured output
+    state = 'error';
+    detail = errorDetail(stdout, stderr);
+  } else if (/^(edit|multiedit|write|str_replace|create_file)$/i.test(toolName)) {
+    state = 'proud';
+    const fp = toolInput?.file_path || toolInput?.path || '';
+    detail = fp ? `saved ${path.basename(fp)}` : 'code written';
+    // Calculate diff info for thought bubbles
+    const oldStr = toolInput?.old_string || toolInput?.old_str || '';
+    const newStr = toolInput?.new_string || toolInput?.new_str || toolInput?.content || '';
+    if (oldStr || newStr) {
+      const removed = oldStr ? oldStr.split('\n').length : 0;
+      const added = newStr ? newStr.split('\n').length : 0;
+      diffInfo = { added, removed };
+    }
+  } else if (/^(read|view|cat)$/i.test(toolName)) {
+    state = 'satisfied';
+    const fp = toolInput?.file_path || toolInput?.path || '';
+    detail = fp ? `read ${path.basename(fp)}` : 'got it';
+  } else if (/^(grep|glob|search|ripgrep|find|list)$/i.test(toolName)) {
+    state = 'satisfied';
+    const pattern = toolInput?.pattern || toolInput?.query || '';
+    detail = pattern ? `found "${pattern.length > 20 ? pattern.slice(0, 17) + '...' : pattern}"` : 'got it';
+  } else if (/^(web_search|web_fetch|fetch|webfetch)$/i.test(toolName)) {
+    state = 'satisfied';
+    detail = 'search complete';
+  } else if (/^bash$/i.test(toolName)) {
+    state = 'relieved';
+    const cmd = toolInput?.command || '';
+    const isTest = /\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|spec)\b/i.test(cmd) ||
+                   /\bnpm\s+(run\s+)?test\b/i.test(cmd);
+    const isBuild = /\b(build|compile|tsc|webpack|vite|esbuild|rollup|make)\b/i.test(cmd);
+    const isGit = /\bgit\s/i.test(cmd);
+    const isInstall = /\b(npm\s+install|yarn|pip\s+install|cargo\s+build|pnpm|bun\s+(add|install))\b/i.test(cmd);
+
+    if (isTest) {
+      // Try to pull test count from stdout
+      const testCount = stdout.match(/(\d+)\s+(?:tests?|specs?)\s+passed/i)
+                       || stdout.match(/(\d+)\s+passing/i);
+      detail = testCount ? `${testCount[1]} tests passed` : 'tests passed';
+    } else if (isBuild) {
+      detail = 'build succeeded';
+    } else if (isGit) {
+      detail = 'git done';
+    } else if (isInstall) {
+      detail = 'installed';
+    } else {
+      detail = 'command succeeded';
+    }
+  } else {
+    state = 'satisfied';
+    detail = 'step complete';
+  }
+
+  return { state, detail, diffInfo };
+}
+
+// -- Streak Management -----------------------------------------------
+
+const MILESTONES = [10, 25, 50, 100, 200, 500];
+
+// Mutates and returns stats. Call after classifyToolResult.
+function updateStreak(stats, isError) {
+  if (isError) {
+    stats.brokenStreak = stats.streak || 0;
+    stats.brokenStreakAt = Date.now();
+    stats.streak = 0;
+    stats.totalErrors = (stats.totalErrors || 0) + 1;
+  } else {
+    stats.streak = (stats.streak || 0) + 1;
+    if (stats.streak > (stats.bestStreak || 0)) {
+      stats.bestStreak = stats.streak;
+    }
+    if (MILESTONES.includes(stats.streak)) {
+      stats.recentMilestone = { type: 'streak', value: stats.streak, at: Date.now() };
+    }
+  }
+  return stats;
+}
+
+// -- Default Stats ---------------------------------------------------
+
+function defaultStats() {
+  return {
+    streak: 0, bestStreak: 0,
+    brokenStreak: 0, brokenStreakAt: 0,
+    totalToolCalls: 0, totalErrors: 0,
+    records: { longestSession: 0, mostSubagents: 0, mostFilesEdited: 0 },
+    session: { id: '', start: 0, toolCalls: 0, filesEdited: [], subagentCount: 0 },
+    recentMilestone: null,
+    daily: { date: '', sessionCount: 0, cumulativeMs: 0 },
+    frequentFiles: {},
+  };
+}
+
+module.exports = {
+  toolToState,
+  stdoutErrorPatterns,
+  stderrErrorPatterns,
+  falsePositives,
+  looksLikeError,
+  errorDetail,
+  extractExitCode,
+  classifyToolResult,
+  MILESTONES,
+  updateStreak,
+  defaultStats,
+};

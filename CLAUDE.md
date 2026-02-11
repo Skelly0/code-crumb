@@ -16,8 +16,11 @@ Claude Face is a zero-dependency terminal tamagotchi that visualizes what Claude
 ```
 renderer.js      Main rendering engine (single face + grid modes, 15 FPS animation loop)
 update-state.js  Hook handler — receives Claude Code events via stdin, writes state files
+state-machine.js Pure logic — tool→state mapping, error detection, streak tracking (testable)
+shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer in a new terminal window
 setup.js         Installs Claude Code hooks into ~/.claude/settings.json
+test.js          Test suite — ~120 tests covering all critical paths (node test.js)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Demo script — simulates 4 concurrent sessions in grid mode
 claude-face.sh   Unix shell wrapper for launch.js
@@ -56,6 +59,7 @@ Four Claude Code hook events are handled: `PreToolUse`, `PostToolUse`, `Stop`, `
 ```sh
 npm start           # Run the renderer (single-face mode)
 npm run grid        # Run the renderer (grid mode)
+npm test            # Run the test suite
 npm run demo        # Run the single-face demo
 npm run demo:grid   # Run the grid demo
 npm run setup       # Install Claude Code hooks into ~/.claude/settings.json
@@ -93,11 +97,21 @@ To develop: run `npm run demo` in one terminal and `npm start` in another.
 
 ## Testing
 
-There are no automated tests. Verification is done via the demo scripts:
+### Automated Tests
+
+Run `npm test` (or `node test.js`). The test suite covers:
+
+- **shared.js**: `safeFilename` edge cases
+- **state-machine.js**: `toolToState` mapping (all tool types), `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
+- **renderer.js**: `lerpColor`/`dimColor`/`breathe` color math, theme completeness (all 17 states), `COMPLETION_LINGER` ordering, thought bubble pools, mouth/eye functions (shape and randomness), `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning), `MiniFace` grid mode, `FaceGrid` lifecycle, `ParticleSystem` (all 10 styles, lifecycle, fadeAll)
+
+### Visual Verification
+
+For visual testing, use the demo scripts:
 
 1. Run `npm start` in one terminal
 2. Run `npm run demo` in another terminal
-3. Observe the face cycling through all 16 states
+3. Observe the face cycling through all 17 states
 
 For grid mode: `npm run grid` + `npm run demo:grid`.
 

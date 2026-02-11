@@ -8,10 +8,7 @@
 // +================================================================+
 
 const fs = require('fs');
-const path = require('path');
-
-const HOME = process.env.USERPROFILE || process.env.HOME || '/tmp';
-const STATE_FILE = process.env.CLAUDE_FACE_STATE || path.join(HOME, '.claude-face-state');
+const { STATE_FILE } = require('./shared');
 
 function writeState(state, detail = '', extra = {}) {
   fs.writeFileSync(STATE_FILE, JSON.stringify({

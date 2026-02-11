@@ -13,7 +13,8 @@
     "launch:grid": "node launch.js --grid",
     "demo": "node demo.js",
     "demo:grid": "node grid-demo.js",
-    "setup": "node setup.js"
+    "setup": "node setup.js",
+    "test": "node test.js"
   },
   "keywords": [
     "claude",
