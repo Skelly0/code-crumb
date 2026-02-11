@@ -27,12 +27,14 @@ const {
   defaultStats,
 } = require('./state-machine');
 const {
-  ClaudeFace, MiniFace, FaceGrid, ParticleSystem,
   lerpColor, dimColor, breathe,
-  themes, mouths, eyes, gridMouths,
-  COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,
+  themes, COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
-} = require('./renderer');
+} = require('./themes');
+const { mouths, eyes, gridMouths } = require('./animations');
+const { ParticleSystem } = require('./particles');
+const { ClaudeFace } = require('./face');
+const { MiniFace, FaceGrid } = require('./grid');
 
 // -- Test runner -----------------------------------------------------
 

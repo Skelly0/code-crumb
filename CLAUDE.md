@@ -14,13 +14,18 @@ Claude Face is a zero-dependency terminal tamagotchi that visualizes what Claude
 ## File Structure
 
 ```
-renderer.js      Main rendering engine (single face + grid modes, 15 FPS animation loop)
+renderer.js      Entry point — runtime loops, PID guard, state polling, re-exports for tests
+themes.js        ANSI codes, color math, theme definitions, thought bubble data
+animations.js    Eye and mouth animation functions (full-size and grid)
+particles.js     ParticleSystem class — 10 visual effect styles
+face.js          ClaudeFace class — single face mode state machine and rendering
+grid.js          MiniFace + FaceGrid classes — multi-session grid mode
 update-state.js  Hook handler — receives Claude Code events via stdin, writes state files
 state-machine.js Pure logic — tool→state mapping, error detection, streak tracking (testable)
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer in a new terminal window
 setup.js         Installs Claude Code hooks into ~/.claude/settings.json
-test.js          Test suite — ~120 tests covering all critical paths (node test.js)
+test.js          Test suite — ~220 tests covering all critical paths (node test.js)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Demo script — simulates 4 concurrent sessions in grid mode
 claude-face.sh   Unix shell wrapper for launch.js
@@ -86,9 +91,9 @@ To develop: run `npm run demo` in one terminal and `npm start` in another.
 | `FPS` | 15 | renderer.js |
 | `IDLE_TIMEOUT` | 8000ms | renderer.js |
 | `SLEEP_TIMEOUT` | 60000ms | renderer.js |
-| `CAFFEINE_THRESHOLD` | 5 calls in 10s | renderer.js |
-| `STALE_MS` | 120000ms | renderer.js (grid session timeout) |
-| `CELL_W` / `CELL_H` | 12 / 7 | renderer.js (grid cell dimensions) |
+| `CAFFEINE_THRESHOLD` | 5 calls in 10s | face.js |
+| `STALE_MS` | 120000ms | grid.js (grid session timeout) |
+| `CELL_W` / `CELL_H` | 12 / 7 | grid.js (grid cell dimensions) |
 
 ## Environment Variables
 
@@ -103,7 +108,11 @@ Run `npm test` (or `node test.js`). The test suite covers:
 
 - **shared.js**: `safeFilename` edge cases
 - **state-machine.js**: `toolToState` mapping (all tool types), `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
-- **renderer.js**: `lerpColor`/`dimColor`/`breathe` color math, theme completeness (all 17 states), `COMPLETION_LINGER` ordering, thought bubble pools, mouth/eye functions (shape and randomness), `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning), `MiniFace` grid mode, `FaceGrid` lifecycle, `ParticleSystem` (all 10 styles, lifecycle, fadeAll)
+- **themes.js**: `lerpColor`/`dimColor`/`breathe` color math, theme completeness (all 17 states), `COMPLETION_LINGER` ordering, thought bubble pools
+- **animations.js**: mouth/eye functions (shape and randomness)
+- **particles.js**: `ParticleSystem` (all 10 styles, lifecycle, fadeAll)
+- **face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline)
+- **grid.js**: `MiniFace` grid mode, `FaceGrid` lifecycle
 
 ### Visual Verification
 
