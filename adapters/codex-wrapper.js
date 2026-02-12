@@ -68,12 +68,16 @@ if (stats.session.id !== sessionId) {
   stats.session = { id: sessionId, start: Date.now(), toolCalls: 0, filesEdited: [], subagentCount: 0 };
 }
 
+// Model name: from env var or default to 'codex'
+const modelName = process.env.CLAUDE_FACE_MODEL || 'codex';
+
 // Track active tool calls by item ID
 const activeTools = new Map();
 
 function buildExtra() {
   const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
   return {
+    modelName,
     toolCalls: stats.session.toolCalls,
     filesEdited: stats.session.filesEdited.length,
     sessionStart: stats.session.start,

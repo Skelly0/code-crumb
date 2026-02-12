@@ -1,6 +1,6 @@
 # Claude Face
 
-A terminal tamagotchi that shows what Claude Code is doing.
+A terminal tamagotchi that shows what your AI coding assistant is doing.
 
 ```
          ╭────────────────────╮
@@ -14,7 +14,9 @@ A terminal tamagotchi that shows what Claude Code is doing.
            ·  claude is idle  ·
 ```
 
-Claude Face hooks into Claude Code's lifecycle events and displays an animated face that reacts in real time — blinking, searching, coding, celebrating, and occasionally glitching when things go wrong.
+Claude Face hooks into AI coding tool lifecycle events and displays an animated face that reacts in real time — blinking, searching, coding, celebrating, and occasionally glitching when things go wrong.
+
+**Supported editors:** Claude Code, OpenAI Codex CLI, OpenCode — and any tool that can pipe JSON events.
 
 Zero dependencies. Just Node.js and vibes.
 
@@ -101,11 +103,25 @@ git clone https://github.com/Skelly0/claude-face.git
 
 ### 2. Install hooks
 
+**Claude Code** (default):
 ```bash
 node claude-face/setup.js
 ```
 
-This adds hooks to `~/.claude/settings.json` so Claude Code writes state updates for the face to read.
+**Codex CLI:**
+```bash
+node claude-face/setup.js codex
+```
+
+**OpenCode:**
+```bash
+node claude-face/setup.js opencode
+```
+
+**As a Claude Code plugin** (alternative to manual hook setup):
+```bash
+claude plugin install --plugin-dir ./claude-face
+```
 
 ### 3. Run
 
@@ -124,13 +140,17 @@ node claude-face/renderer.js --grid
 **Via the launcher** (auto-opens the face in a new terminal tab):
 
 ```bash
-# Single face
+# Claude Code (default)
 node claude-face/launch.js
-
-# Grid mode
 node claude-face/launch.js --grid
 
-# With any Claude arguments
+# Codex CLI (uses wrapper for rich tool-level events)
+node claude-face/launch.js --editor codex "fix the auth bug"
+
+# OpenCode
+node claude-face/launch.js --editor opencode
+
+# With any editor arguments
 node claude-face/launch.js --dangerously-skip-permissions
 node claude-face/launch.js --grid -p "fix the auth bug"
 node claude-face/launch.js --resume
@@ -170,16 +190,31 @@ Or use npm link:
 cd claude-face && npm link
 ```
 
+## Model Name Display
+
+The status line shows the model/tool name: `claude is thinking`, `codex is coding`, etc. This is configurable:
+
+```bash
+# Set via environment variable
+export CLAUDE_FACE_MODEL=kimi-k2.5
+node claude-face/renderer.js
+```
+
+Each adapter sets a sensible default:
+- **Claude Code**: `claude`
+- **Codex CLI**: `codex`
+- **OpenCode**: `opencode`
+
+The model name can also be passed in event JSON via the `model_name` field.
+
 ## How It Works
 
 ```
 ┌───────────────┐     state files     ┌──────────────────┐
-│  Claude Code   │ ──── writes ────▶  │  ~/.claude-face-  │
-│  (hooks fire)  │    JSON per         │  state            │
-│                │    session           │  sessions/*.json  │
-│  Main session  │                     │                   │
-│  Subagent 1    │                     │  main.json        │
-│  Subagent 2    │                     │  sub-2.json       │
+│  Claude Code   │                     │  ~/.claude-face-  │
+│  Codex CLI     │ ──── writes ────▶  │  state            │
+│  OpenCode      │    JSON per         │  sessions/*.json  │
+│  (any editor)  │    session          │                   │
 └───────────────┘                      └────────┬──────────┘
                                                 │
                                            fs.watch
@@ -193,21 +228,52 @@ cd claude-face && npm link
                                     └───────────────────────┘
 ```
 
-1. **Hooks fire** on `PreToolUse`, `PostToolUse`, `Stop`, and `Notification` events
-2. **`update-state.js`** maps tool names to face states and writes:
+1. **Hooks/adapters fire** on tool use events (PreToolUse, PostToolUse, Stop, Notification)
+2. **`update-state.js`** (or an adapter) maps tool names to face states and writes:
    - A single `~/.claude-face-state` file (for the classic renderer)
    - A per-session file in `~/.claude-face-sessions/` (for the grid)
-3. **Session ID** is extracted from the hook data (`session_id`), falling back to the parent process ID — each Claude instance and subagent gets its own face
+3. **Session ID** is extracted from the event data (`session_id`), falling back to the parent process ID — each instance and subagent gets its own face
 4. **`renderer.js`** watches for file changes and animates transitions (single face by default, `--grid` for multi-face)
+
+## Editor-Specific Integration
+
+### Claude Code
+
+Hooks are installed via `setup.js` or by installing as a plugin. Events fire automatically via Claude Code's hook system (`PreToolUse`, `PostToolUse`, `Stop`, `Notification`).
+
+### Codex CLI
+
+Codex doesn't have a hook system, so two adapter modes are provided:
+
+| Mode | How it works | Granularity |
+|---|---|---|
+| **Notify** (`setup.js codex`) | Configures `notify` in `~/.codex/config.toml` | Turn-level (completion only) |
+| **Wrapper** (`launch.js --editor codex`) | Wraps `codex exec --json` and parses JSONL | Tool-level (full reactions) |
+
+The wrapper mode gives rich real-time reactions but only works with `codex exec` (non-interactive). The notify mode works with all Codex modes but only fires on turn completion.
+
+### OpenCode
+
+Use the generic adapter (`adapters/opencode-adapter.js`) which accepts events via stdin JSON:
+
+```bash
+echo '{"event":"tool_start","tool":"file_edit","input":{"file_path":"src/app.ts"}}' | \
+  node adapters/opencode-adapter.js
+```
 
 ## Files
 
 | File | What it does |
 |---|---|
 | `renderer.js` | Unified renderer — single face (default) or grid (`--grid`) |
-| `update-state.js` | Hook script called by Claude Code on each event |
-| `launch.js` | Auto-starts renderer and launches Claude with args |
-| `setup.js` | Installs hooks into Claude Code's settings |
+| `update-state.js` | Hook script — maps tool events to face states |
+| `launch.js` | Auto-starts renderer and launches the editor with args |
+| `setup.js` | Installs hooks (`setup.js [claude\|codex\|opencode]`) |
+| `adapters/codex-wrapper.js` | Wraps `codex exec --json` for rich tool-level events |
+| `adapters/codex-notify.js` | Handles Codex `notify` config events |
+| `adapters/opencode-adapter.js` | Generic adapter for OpenCode and other tools |
+| `.claude-plugin/plugin.json` | Claude Code plugin manifest for marketplace |
+| `hooks/hooks.json` | Hook config for Claude Code plugin system |
 | `demo.js` | Cycles through all expressions (single face) |
 | `grid-demo.js` | Simulates multiple sessions (grid mode) |
 | `claude-face.cmd` | Windows batch wrapper |
@@ -223,7 +289,13 @@ export CLAUDE_FACE_STATE=/tmp/my-claude-face-state
 
 The sessions directory is always `~/.claude-face-sessions/`.
 
-### Manual hook setup
+### Custom model name
+
+```bash
+export CLAUDE_FACE_MODEL=gpt-4.1
+```
+
+### Manual hook setup (Claude Code)
 
 Add this to `~/.claude/settings.json`:
 
@@ -248,6 +320,14 @@ Add this to `~/.claude/settings.json`:
     }]
   }
 }
+```
+
+### Manual setup (Codex CLI)
+
+Add to `~/.codex/config.toml`:
+
+```toml
+notify = ["node", "/path/to/adapters/codex-notify.js"]
 ```
 
 ## Grid Mode Details
@@ -284,7 +364,11 @@ Add this to `~/.claude/settings.json`:
 
 ## Uninstall
 
-Remove the `update-state.js` hook entries from `~/.claude/settings.json` and clean up:
+**Claude Code:** Remove the `update-state.js` hook entries from `~/.claude/settings.json` (or run `claude plugin uninstall claude-face`).
+
+**Codex:** Remove the `notify` line from `~/.codex/config.toml`.
+
+Clean up state files:
 
 ```bash
 rm ~/.claude-face-state

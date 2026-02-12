@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Claude Face is a zero-dependency terminal tamagotchi that visualizes what Claude Code is doing in real-time. It renders an animated ASCII face that reacts to Claude Code lifecycle events (thinking, coding, reading, executing, errors, etc.) via Claude Code hooks and file-based IPC.
+Claude Face is a zero-dependency terminal tamagotchi that visualizes what AI coding assistants are doing in real-time. It renders an animated ASCII face that reacts to lifecycle events (thinking, coding, reading, executing, errors, etc.) via hooks, adapters, and file-based IPC. Supports **Claude Code**, **OpenAI Codex CLI**, **OpenCode**, and any tool that can pipe JSON events.
 
 ### Interactive Keybindings
 
@@ -34,16 +34,24 @@ animations.js    Eye and mouth animation functions (full-size and grid)
 particles.js     ParticleSystem class — 10 visual effect styles
 face.js          ClaudeFace class — single face mode state machine and rendering
 grid.js          MiniFace + FaceGrid classes — multi-session grid mode
-update-state.js  Hook handler — receives Claude Code events via stdin, writes state files
-state-machine.js Pure logic — tool→state mapping, error detection, streak tracking (testable)
+update-state.js  Hook handler — receives editor events via stdin, writes state files
+state-machine.js Pure logic — tool→state mapping (multi-editor), error detection, streaks
 shared.js        Shared constants — paths, config, and utility functions
-launch.js        Platform-specific launcher — opens renderer in a new terminal window
-setup.js         Installs Claude Code hooks into ~/.claude/settings.json
-test.js          Test suite — ~248 tests covering all critical paths (node test.js)
+launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
+setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode])
+test.js          Test suite — ~343 tests covering all critical paths (node test.js)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Demo script — simulates 4 concurrent sessions in grid mode
 claude-face.sh   Unix shell wrapper for launch.js
 claude-face.cmd  Windows batch wrapper for launch.js
+adapters/
+  codex-wrapper.js   Wraps `codex exec --json` for rich tool-level face events
+  codex-notify.js    Handles Codex CLI `notify` config events (turn-level)
+  opencode-adapter.js  Generic adapter for OpenCode and other tools (stdin JSON)
+.claude-plugin/
+  plugin.json      Claude Code plugin manifest for marketplace distribution
+hooks/
+  hooks.json       Hook configuration for Claude Code plugin system
 ```
 
 ## Architecture
@@ -51,7 +59,7 @@ claude-face.cmd  Windows batch wrapper for launch.js
 ### Event Flow
 
 ```
-Claude Code Hook Event → update-state.js (stdin JSON) → State File (JSON) → renderer.js (fs.watch) → Terminal Output
+Editor Event (Claude Code / Codex / OpenCode) → update-state.js or adapter → State File (JSON) → renderer.js (fs.watch) → Terminal Output
 ```
 
 ### File-Based IPC
@@ -71,19 +79,28 @@ States have minimum display durations (1–8 seconds) enforced via a `pendingSta
 
 ### Hook Events
 
-Four Claude Code hook events are handled: `PreToolUse`, `PostToolUse`, `Stop`, `Notification`. Tool names are mapped to face states (e.g., Edit/Write → coding, Grep/Glob → searching, Bash → executing). PostToolUse includes forensic error detection with 50+ regex patterns.
+Four hook event types are handled: `PreToolUse`, `PostToolUse`, `Stop`, `Notification`. Tool names from all supported editors are mapped to face states via shared regex patterns (e.g., Edit/apply_diff/file_edit → coding, Grep/search_files/codebase_search → searching, Bash/shell/terminal → executing). PostToolUse includes forensic error detection with 50+ regex patterns.
+
+### Multi-Editor Tool Mapping
+
+Tool name patterns are defined as shared constants (`EDIT_TOOLS`, `BASH_TOOLS`, `READ_TOOLS`, `SEARCH_TOOLS`, `WEB_TOOLS`, `SUBAGENT_TOOLS`) in `state-machine.js`. Each pattern matches tool names from Claude Code, Codex CLI, and OpenCode. The `modelName` field in state files controls the display name (e.g., "claude is thinking" vs "codex is coding").
 
 ## Development Commands
 
 ```sh
-npm start           # Run the renderer (single-face mode)
-npm run grid        # Run the renderer (grid mode)
-npm test            # Run the test suite
-npm run demo        # Run the single-face demo
-npm run demo:grid   # Run the grid demo
-npm run setup       # Install Claude Code hooks into ~/.claude/settings.json
-npm run launch      # Open renderer in a new terminal + start Claude Code
-npm run launch:grid # Same as above, grid mode
+npm start              # Run the renderer (single-face mode)
+npm run grid           # Run the renderer (grid mode)
+npm test               # Run the test suite
+npm run demo           # Run the single-face demo
+npm run demo:grid      # Run the grid demo
+npm run setup          # Install Claude Code hooks (default)
+npm run setup:claude   # Install Claude Code hooks (explicit)
+npm run setup:codex    # Install Codex CLI integration
+npm run setup:opencode # Show OpenCode integration instructions
+npm run launch         # Open renderer + start Claude Code
+npm run launch:grid    # Same as above, grid mode
+npm run launch:codex   # Open renderer + start Codex wrapper
+npm run launch:opencode # Open renderer + start OpenCode
 ```
 
 To develop: run `npm run demo` in one terminal and `npm start` in another.
@@ -94,7 +111,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another.
 - **CommonJS**: Uses `require()` / no ES modules
 - **Header blocks**: Each file has a boxed comment header explaining its purpose
 - **Section dividers**: Logical sections separated by `// -- Section Name ---...` comments
-- **Silent failures in hooks**: Hook code (update-state.js) wraps all I/O in try-catch and never throws — Claude Code must not be interrupted by a broken face
+- **Silent failures in hooks**: Hook code (update-state.js, adapters) wraps all I/O in try-catch and never throws — the editor must not be interrupted by a broken face
 - **Cross-platform paths**: Uses `process.env.USERPROFILE || process.env.HOME` and normalizes backslashes to forward slashes
 - **No external dependencies**: All functionality is built with Node.js built-in modules (`fs`, `path`, `child_process`)
 
@@ -113,6 +130,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another.
 
 - `CLAUDE_FACE_STATE` — override the single-mode state file path (default: `~/.claude-face-state`)
 - `CLAUDE_SESSION_ID` — set the session identifier (default: parent PID)
+- `CLAUDE_FACE_MODEL` — override the display name in the status line (default: `claude`; adapters default to `codex`/`opencode`)
 
 ## Testing
 
@@ -121,7 +139,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another.
 Run `npm test` (or `node test.js`). The test suite covers:
 
 - **shared.js**: `safeFilename` edge cases
-- **state-machine.js**: `toolToState` mapping (all tool types), `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
+- **state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode), multi-editor tool pattern constants, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
 - **themes.js**: `lerpColor`/`dimColor`/`breathe` color math, theme completeness (all 17 states), `COMPLETION_LINGER` ordering, thought bubble pools
 - **animations.js**: mouth/eye functions (shape and randomness)
 - **particles.js**: `ParticleSystem` (all 10 styles, lifecycle, fadeAll)
@@ -140,7 +158,7 @@ For grid mode: `npm run grid` + `npm run demo:grid`.
 
 ## Important Constraints
 
-- **Hook performance**: update-state.js must complete in ~50ms — it runs synchronously in the Claude Code hook pipeline
+- **Hook performance**: update-state.js must complete in ~50ms — it runs synchronously in the editor hook pipeline
 - **State file size**: Keep state JSON under 200 bytes
 - **Terminal minimum size**: Single mode requires 38x20 chars; grid mode requires 14x9 per cell
 - **No network**: All IPC is file-based, no sockets or HTTP

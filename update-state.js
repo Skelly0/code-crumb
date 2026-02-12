@@ -181,9 +181,13 @@ process.stdin.on('end', () => {
       }
     }
 
+    // Model name: from event data, env var, or default to 'claude'
+    const modelName = data.model_name || process.env.CLAUDE_FACE_MODEL || 'claude';
+
     // Build extra data for state files
     const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
     const extra = {
+      modelName,
       toolCalls: stats.session.toolCalls,
       filesEdited: stats.session.filesEdited.length,
       sessionStart: stats.session.start,

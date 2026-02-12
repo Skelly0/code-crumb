@@ -101,8 +101,12 @@ process.stdin.on('end', () => {
       stats.recentMilestone = null;
     }
 
+    // Model name: from event data, env var, or default to 'opencode'
+    const modelName = data.model_name || process.env.CLAUDE_FACE_MODEL || 'opencode';
+
     const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
     const extra = {
+      modelName,
       toolCalls: stats.session.toolCalls,
       filesEdited: stats.session.filesEdited.length,
       sessionStart: stats.session.start,

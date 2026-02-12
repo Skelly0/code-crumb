@@ -1424,6 +1424,82 @@ describe('renderer.js -- ClaudeFace.setStats', () => {
     face.setStats({ diffInfo: { added: 10, removed: 3 } });
     assert.deepStrictEqual(face.diffInfo, { added: 10, removed: 3 });
   });
+
+  test('updates modelName from state data', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.modelName, 'claude'); // default
+    face.setStats({ modelName: 'codex' });
+    assert.strictEqual(face.modelName, 'codex');
+  });
+
+  test('modelName ignores empty string', () => {
+    const face = new ClaudeFace();
+    face.setStats({ modelName: 'kimi-k2.5' });
+    face.setStats({ modelName: '' }); // empty should not override
+    assert.strictEqual(face.modelName, 'kimi-k2.5');
+  });
+
+  test('modelName updates to different values', () => {
+    const face = new ClaudeFace();
+    face.setStats({ modelName: 'o3' });
+    assert.strictEqual(face.modelName, 'o3');
+    face.setStats({ modelName: 'gpt-4.1' });
+    assert.strictEqual(face.modelName, 'gpt-4.1');
+  });
+});
+
+// ====================================================================
+// renderer.js -- ClaudeFace modelName in rendering
+// ====================================================================
+
+describe('renderer.js -- ClaudeFace modelName', () => {
+  test('default modelName is "claude"', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.modelName, 'claude');
+  });
+
+  test('modelName can be set via setStats', () => {
+    const face = new ClaudeFace();
+    face.setStats({ modelName: 'codex' });
+    assert.strictEqual(face.modelName, 'codex');
+  });
+
+  test('modelName persists across multiple setStats calls', () => {
+    const face = new ClaudeFace();
+    face.setStats({ modelName: 'kimi-k2.5' });
+    face.setStats({ toolCalls: 5 }); // no modelName in this call
+    assert.strictEqual(face.modelName, 'kimi-k2.5');
+  });
+
+  test('modelName supports hyphenated names', () => {
+    const face = new ClaudeFace();
+    face.setStats({ modelName: 'gpt-4.1-mini' });
+    assert.strictEqual(face.modelName, 'gpt-4.1-mini');
+  });
+});
+
+// ====================================================================
+// grid.js -- MiniFace modelName
+// ====================================================================
+
+describe('grid.js -- MiniFace modelName', () => {
+  test('default modelName is empty', () => {
+    const face = new MiniFace('test-session');
+    assert.strictEqual(face.modelName, '');
+  });
+
+  test('updateFromFile sets modelName', () => {
+    const face = new MiniFace('test-session');
+    face.updateFromFile({ state: 'coding', modelName: 'codex' });
+    assert.strictEqual(face.modelName, 'codex');
+  });
+
+  test('updateFromFile ignores missing modelName', () => {
+    const face = new MiniFace('test-session');
+    face.updateFromFile({ state: 'coding', modelName: 'o3' });
+    face.updateFromFile({ state: 'reading' }); // no modelName
+    assert.strictEqual(face.modelName, 'o3');
+  });
 });
 
 describe('renderer.js -- ClaudeFace.update', () => {

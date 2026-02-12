@@ -48,21 +48,22 @@ try {
   const event = JSON.parse(jsonArg);
   const eventType = event.type || '';
   const sessionId = event['thread-id'] || `codex-${process.ppid}`;
+  const modelName = process.env.CLAUDE_FACE_MODEL || 'codex';
 
   if (eventType === 'agent-turn-complete') {
     // Extract info from the turn data
     const lastMsg = event['last-assistant-message'] || '';
     const detail = lastMsg.length > 40 ? lastMsg.slice(0, 37) + '...' : lastMsg;
 
-    writeState('happy', detail || 'turn complete');
-    writeSessionState(sessionId, 'happy', detail || 'turn complete', false);
+    writeState('happy', detail || 'turn complete', { modelName });
+    writeSessionState(sessionId, 'happy', detail || 'turn complete', false, { modelName });
   } else if (eventType === 'approval-requested') {
-    writeState('waiting', 'needs approval');
-    writeSessionState(sessionId, 'waiting', 'needs approval', false);
+    writeState('waiting', 'needs approval', { modelName });
+    writeSessionState(sessionId, 'waiting', 'needs approval', false, { modelName });
   } else {
     // Unknown event -- show as thinking
-    writeState('thinking', eventType || 'codex event');
-    writeSessionState(sessionId, 'thinking', eventType || 'codex event', false);
+    writeState('thinking', eventType || 'codex event', { modelName });
+    writeSessionState(sessionId, 'thinking', eventType || 'codex event', false, { modelName });
   }
 } catch {
   // Silent failure
