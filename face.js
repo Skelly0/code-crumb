@@ -26,7 +26,14 @@ const MIN_ROWS_SINGLE = 20;
 const PET_SPAM_WINDOW = 2000;      // 2s window to detect rapid petting
 const PET_SPAM_THRESHOLD = 8;      // pets in window to trigger easter egg
 const PET_SPAM_DURATION = 45;      // ~3s at 15fps
-const PET_SPAM_THOUGHTS = ['!!!!!!', 'so much love!', ':D :D :D', 'best day ever', 'hehehehe'];
+const PET_SPAM_AFTERGLOW = 30;     // ~2s at 15fps -- post-pet bliss
+const PET_SPAM_ESCALATE_WINDOW = 10000; // 10s to keep escalation level
+const PET_SPAM_THOUGHTS = [
+  ['!!!!!!', 'so much love!', ':D :D :D', 'best day ever', 'hehehehe'],
+  ['AAAAAA', "I'M GONNA EXPLODE", 'TOO MUCH LOVE', 'MAXIMUM PET', 'AAAAAHHHHH'],
+  ['ajksdh', '!!!?!?!', '\u2665\u2665\u2665\u2665\u2665', 'hfjkdsl', 'a;slkdfj', '?!?!?!?!'],
+];
+const PET_AFTERGLOW_THOUGHTS = ['...', 'mmmm', 'purrrr', 'so warm', '\u25e1\u25e1\u25e1'];
 
 // -- ClaudeFace ----------------------------------------------------
 class ClaudeFace {
@@ -86,6 +93,9 @@ class ClaudeFace {
     this.petTimes = [];
     this.petSpamActive = false;
     this.petSpamTimer = 0;
+    this.petSpamLevel = 0;
+    this.petSpamLastAt = 0;
+    this.petAfterglowTimer = 0;
   }
 
   _nextBlink() {
@@ -192,7 +202,23 @@ class ClaudeFace {
 
   _updateThought() {
     if (this.petSpamActive) {
-      this.thoughtText = PET_SPAM_THOUGHTS[this.thoughtIndex % PET_SPAM_THOUGHTS.length];
+      const lvl = Math.min(this.petSpamLevel, PET_SPAM_THOUGHTS.length) - 1;
+      const pool = PET_SPAM_THOUGHTS[Math.max(0, lvl)];
+      if (this.petSpamLevel >= 3 && Math.random() < 0.4) {
+        // Overstimulated -- can't form words anymore
+        const chars = 'abcdefghjklsdf!?';
+        let scramble = '';
+        for (let i = 0; i < 5 + Math.floor(Math.random() * 4); i++) {
+          scramble += chars[Math.floor(Math.random() * chars.length)];
+        }
+        this.thoughtText = scramble;
+      } else {
+        this.thoughtText = pool[this.thoughtIndex % pool.length];
+      }
+      return;
+    }
+    if (this.petAfterglowTimer > 0) {
+      this.thoughtText = PET_AFTERGLOW_THOUGHTS[this.thoughtIndex % PET_AFTERGLOW_THOUGHTS.length];
       return;
     }
     if (this.state === 'sleeping') {
@@ -257,8 +283,18 @@ class ClaudeFace {
 
     if (this.petTimes.length >= PET_SPAM_THRESHOLD) {
       // Easter egg: pet spam detected!
+      // Only escalate on the first threshold hit per trigger sequence
+      if (!this.petSpamActive) {
+        if (now - this.petSpamLastAt < PET_SPAM_ESCALATE_WINDOW) {
+          this.petSpamLevel = Math.min(this.petSpamLevel + 1, 3);
+        } else {
+          this.petSpamLevel = 1;
+        }
+        this.petSpamLastAt = now;
+      }
       this.petSpamActive = true;
       this.petSpamTimer = PET_SPAM_DURATION;
+      this.petAfterglowTimer = 0;
       this.particles.spawn(30, 'heart');
       this.petTimer = PET_SPAM_DURATION;
       this.thoughtIndex++;
@@ -292,6 +328,9 @@ class ClaudeFace {
   }
 
   getEyes(theme, frame) {
+    if (this.petAfterglowTimer > 0) {
+      return eyes.content(theme, frame);
+    }
     if (this.blinkFrame >= 0 && this.blinkFrame < BLINK_FRAMES) {
       return eyes.blink(theme, frame);
     }
@@ -325,6 +364,7 @@ class ClaudeFace {
   }
 
   getMouth(theme, frame) {
+    if (this.petAfterglowTimer > 0) return mouths.smile();
     switch (this.state) {
       case 'idle':      return mouths.smile();
       case 'thinking':  return mouths.neutral();
@@ -416,9 +456,10 @@ class ClaudeFace {
       this.isCaffeinated = false;
     }
 
-    // Thought bubble cycling
+    // Thought bubble cycling (jittery at pet spam level 3+)
     this.thoughtTimer += dt;
-    if (this.thoughtTimer > 4000) {
+    const thoughtInterval = (this.petSpamActive && this.petSpamLevel >= 3) ? 200 : 4000;
+    if (this.thoughtTimer > thoughtInterval) {
       this.thoughtTimer = 0;
       this.thoughtIndex++;
       this._updateThought();
@@ -441,8 +482,18 @@ class ClaudeFace {
       this.petSpamTimer--;
       if (this.frame % 3 === 0) this.particles.spawn(2, 'heart');
     } else if (this.petSpamActive) {
+      // Transition to afterglow: post-pet bliss
       this.petSpamActive = false;
+      this.petAfterglowTimer = PET_SPAM_AFTERGLOW;
+      this.particles.spawn(3, 'heart');
       this._updateThought();
+    }
+
+    // Pet afterglow decay -- lazy drifting hearts
+    if (this.petAfterglowTimer > 0) {
+      this.petAfterglowTimer--;
+      if (this.frame % 20 === 0) this.particles.spawn(1, 'heart');
+      if (this.petAfterglowTimer <= 0) this._updateThought();
     }
 
     this.particles.update();
@@ -510,7 +561,8 @@ class ClaudeFace {
       return buf;
     }
 
-    const breathTime = this.state === 'sleeping' ? this.time * 0.5
+    const breathTime = this.petAfterglowTimer > 0 ? this.time * 0.5
+      : this.state === 'sleeping' ? this.time * 0.5
       : this.state === 'caffeinated' ? this.time * 2.5
       : this.time;
     const borderColor = breathe(theme.border, breathTime);
