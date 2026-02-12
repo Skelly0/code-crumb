@@ -12,7 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, STATE_FILE, SESSIONS_DIR } = require('./shared');
+const { HOME, STATE_FILE, SESSIONS_DIR, loadPrefs, savePrefs } = require('./shared');
 
 // -- Modules -------------------------------------------------------
 const {
@@ -93,6 +93,12 @@ function removePid() {
 function runSingleMode() {
   const face = new ClaudeFace();
 
+  // Load persisted preferences
+  const prefs = loadPrefs();
+  if (typeof prefs.paletteIndex === 'number') face.paletteIndex = prefs.paletteIndex % PALETTES.length;
+  if (typeof prefs.accessoriesEnabled === 'boolean') face.accessoriesEnabled = prefs.accessoriesEnabled;
+  if (typeof prefs.showStats === 'boolean') face.showStats = prefs.showStats;
+
   let lastMtime = 0;
   function checkState() {
     try {
@@ -140,13 +146,21 @@ function runSingleMode() {
     process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdin.setEncoding('utf8');
+    function persistPrefs() {
+      savePrefs({
+        paletteIndex: face.paletteIndex,
+        accessoriesEnabled: face.accessoriesEnabled,
+        showStats: face.showStats,
+      });
+    }
+
     process.stdin.on('data', (key) => {
       // Help dismiss: any key while help is showing closes it
       if (face.showHelp && key !== '\x03') { face.showHelp = false; return; }
       if (key === ' ') face.pet();
-      else if (key === 't') face.cycleTheme();
-      else if (key === 's') face.toggleStats();
-      else if (key === 'a') face.toggleAccessories();
+      else if (key === 't') { face.cycleTheme(); persistPrefs(); }
+      else if (key === 's') { face.toggleStats(); persistPrefs(); }
+      else if (key === 'a') { face.toggleAccessories(); persistPrefs(); }
       else if (key === 'h' || key === '?') face.toggleHelp();
       else if (key === 'q' || key === '\x03') cleanup(); // q or Ctrl+C
     });
@@ -179,6 +193,10 @@ function runGridMode() {
 
   const grid = new FaceGrid();
 
+  // Load persisted preferences
+  const prefs = loadPrefs();
+  if (typeof prefs.paletteIndex === 'number') grid.paletteIndex = prefs.paletteIndex % PALETTES.length;
+
   try {
     fs.watch(SESSIONS_DIR, () => { grid.loadSessions(); });
   } catch {}
@@ -192,7 +210,7 @@ function runGridMode() {
     process.stdin.setEncoding('utf8');
     process.stdin.on('data', (key) => {
       if (grid.showHelp && key !== '\x03') { grid.showHelp = false; return; }
-      if (key === 't') grid.cycleTheme();
+      if (key === 't') { grid.cycleTheme(); savePrefs({ paletteIndex: grid.paletteIndex }); }
       else if (key === 'h' || key === '?') grid.toggleHelp();
       else if (key === 'q' || key === '\x03') cleanup();
     });

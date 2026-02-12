@@ -791,11 +791,16 @@ class ClaudeFace {
       }
     }
 
-    // Palette name (when not default)
-    if (this.paletteIndex > 0) {
-      const pName = PALETTE_NAMES[this.paletteIndex] || '';
-      buf += ansi.to(startRow + 8, startCol + faceW - pName.length);
-      buf += `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.4))}${pName}${r}`;
+    // Indicators row: accessories state (left) + palette name (right)
+    {
+      const dc = `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.4))}`;
+      const accText = this.accessoriesEnabled ? '\u25cf accs' : '\u25cb accs';
+      buf += ansi.to(startRow + 8, startCol + 5) + `${dc}${accText}${r}`;
+      if (this.paletteIndex > 0) {
+        const pName = PALETTE_NAMES[this.paletteIndex] || '';
+        buf += ansi.to(startRow + 8, startCol + faceW - pName.length);
+        buf += `${dc}${pName}${r}`;
+      }
     }
 
     // Key hints bar (bottom of terminal)

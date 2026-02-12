@@ -16,7 +16,7 @@ Claude Face is a zero-dependency terminal tamagotchi that visualizes what AI cod
 
 ### Color Palettes
 
-5 palettes: **default** (original colors), **neon** (high saturation cyans/magentas/limes), **pastel** (soft pinks/lavenders/mints), **mono** (greyscale), **sunset** (warm oranges/reds/golds/purples). Press `t` to cycle. Grid mode supports theme cycling and help but not pet or stats toggle.
+5 palettes: **default** (original colors), **neon** (high saturation cyans/magentas/limes), **pastel** (soft pinks/lavenders/mints), **mono** (greyscale), **sunset** (warm oranges/reds/golds/purples). Press `t` to cycle. Grid mode supports theme cycling and help but not pet or stats toggle. All togglable preferences (theme, accessories, stats) persist between sessions via `~/.claude-face-prefs.json`. Accessories state is shown as `● accs` (on) or `○ accs` (off) below the face box.
 
 ## Tech Stack
 
@@ -39,7 +39,7 @@ state-machine.js Pure logic — tool→state mapping (multi-editor), error detec
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
 setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode|openclaw])
-test.js          Test suite — ~343 tests covering all critical paths (node test.js)
+test.js          Test suite — ~369 tests covering all critical paths (node test.js)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Demo script — simulates 4 concurrent sessions in grid mode
 claude-face.sh   Unix shell wrapper for launch.js
@@ -70,6 +70,7 @@ State is communicated between the hook handler and renderer via JSON files:
 - `~/.claude-face-state` — single-mode state (written by update-state.js, watched by renderer.js)
 - `~/.claude-face-sessions/{session_id}.json` — per-session state for grid mode
 - `~/.claude-face-stats.json` — persistent stats (streaks, records, session counters)
+- `~/.claude-face-prefs.json` — persisted user preferences (theme, accessories, stats toggle)
 - `~/.claude-face.pid` / `~/.claude-face-grid.pid` — renderer process liveness tracking
 
 ### State Machine

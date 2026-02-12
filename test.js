@@ -12,7 +12,8 @@ const assert = require('assert');
 
 // -- Modules under test ----------------------------------------------
 
-const { safeFilename } = require('./shared');
+const fs = require('fs');
+const { safeFilename, PREFS_FILE, loadPrefs, savePrefs } = require('./shared');
 const {
   toolToState,
   EDIT_TOOLS,
@@ -2613,6 +2614,112 @@ describe('face.js -- accessories', () => {
     assert.strictEqual(face.accessoriesEnabled, false);
     face.toggleAccessories();
     assert.strictEqual(face.accessoriesEnabled, true);
+  });
+});
+
+// ====================================================================
+// shared.js -- preferences persistence
+// ====================================================================
+
+describe('shared.js -- preferences persistence', () => {
+  // Save existing prefs to restore after tests
+  let savedPrefs;
+  try { savedPrefs = fs.readFileSync(PREFS_FILE, 'utf8'); } catch { savedPrefs = null; }
+
+  test('PREFS_FILE is a non-empty string', () => {
+    assert.ok(typeof PREFS_FILE === 'string');
+    assert.ok(PREFS_FILE.length > 0);
+    assert.ok(PREFS_FILE.includes('.claude-face-prefs'));
+  });
+
+  test('loadPrefs returns an object', () => {
+    const prefs = loadPrefs();
+    assert.ok(typeof prefs === 'object');
+    assert.ok(prefs !== null);
+  });
+
+  test('savePrefs and loadPrefs roundtrip', () => {
+    savePrefs({ paletteIndex: 3, accessoriesEnabled: false, showStats: false });
+    const prefs = loadPrefs();
+    assert.strictEqual(prefs.paletteIndex, 3);
+    assert.strictEqual(prefs.accessoriesEnabled, false);
+    assert.strictEqual(prefs.showStats, false);
+  });
+
+  test('savePrefs merges with existing prefs', () => {
+    savePrefs({ paletteIndex: 2 });
+    savePrefs({ accessoriesEnabled: true });
+    const prefs = loadPrefs();
+    assert.strictEqual(prefs.paletteIndex, 2);
+    assert.strictEqual(prefs.accessoriesEnabled, true);
+  });
+
+  test('loadPrefs returns {} for corrupt file', () => {
+    fs.writeFileSync(PREFS_FILE, '{broken json!!!', 'utf8');
+    const prefs = loadPrefs();
+    assert.deepStrictEqual(prefs, {});
+  });
+
+  test('loadPrefs returns {} for empty file', () => {
+    fs.writeFileSync(PREFS_FILE, '', 'utf8');
+    const prefs = loadPrefs();
+    assert.deepStrictEqual(prefs, {});
+  });
+
+  // Restore original prefs
+  try {
+    if (savedPrefs !== null) fs.writeFileSync(PREFS_FILE, savedPrefs, 'utf8');
+    else fs.unlinkSync(PREFS_FILE);
+  } catch {}
+});
+
+// ====================================================================
+// face.js -- accessories indicator
+// ====================================================================
+
+describe('face.js -- accessories indicator in render', () => {
+  test('render contains filled circle when accessories enabled', () => {
+    const face = new ClaudeFace();
+    face.accessoriesEnabled = true;
+    // Mock terminal size
+    const origCols = process.stdout.columns;
+    const origRows = process.stdout.rows;
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    const output = face.render();
+    process.stdout.columns = origCols;
+    process.stdout.rows = origRows;
+    const stripped = output.replace(/\x1b\[[^m]*m/g, '');
+    assert.ok(stripped.includes('\u25cf accs'), 'should show filled circle + accs when enabled');
+  });
+
+  test('render contains hollow circle when accessories disabled', () => {
+    const face = new ClaudeFace();
+    face.accessoriesEnabled = false;
+    const origCols = process.stdout.columns;
+    const origRows = process.stdout.rows;
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    const output = face.render();
+    process.stdout.columns = origCols;
+    process.stdout.rows = origRows;
+    const stripped = output.replace(/\x1b\[[^m]*m/g, '');
+    assert.ok(stripped.includes('\u25cb accs'), 'should show hollow circle + accs when disabled');
+  });
+
+  test('indicator changes when toggling accessories', () => {
+    const face = new ClaudeFace();
+    const origCols = process.stdout.columns;
+    const origRows = process.stdout.rows;
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    const out1 = face.render().replace(/\x1b\[[^m]*m/g, '');
+    assert.ok(out1.includes('\u25cf accs'));
+    face.toggleAccessories();
+    const out2 = face.render().replace(/\x1b\[[^m]*m/g, '');
+    assert.ok(out2.includes('\u25cb accs'));
+    process.stdout.columns = origCols;
+    process.stdout.rows = origRows;
   });
 });
 
