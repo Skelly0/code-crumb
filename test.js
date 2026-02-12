@@ -1314,7 +1314,7 @@ describe('renderer.js -- ParticleSystem', () => {
   });
 
   test('all particle styles can be spawned', () => {
-    const styles = ['float', 'sparkle', 'glitch', 'orbit', 'zzz', 'question', 'sweat', 'falling', 'speedline', 'echo'];
+    const styles = ['float', 'sparkle', 'glitch', 'orbit', 'zzz', 'question', 'sweat', 'falling', 'speedline', 'echo', 'heart'];
     for (const style of styles) {
       const ps = new ParticleSystem();
       ps.spawn(3, style);
@@ -1689,6 +1689,253 @@ describe('face.js -- pet()', () => {
     const w2 = face.petWiggle;
     assert.ok((w1 === 1 && w2 === -1) || (w1 === -1 && w2 === 1),
       'wiggle should alternate between +1 and -1');
+  });
+});
+
+// ====================================================================
+// face.js -- pet spam easter egg
+// ====================================================================
+
+describe('face.js -- pet spam easter egg', () => {
+  test('tracks pet timestamps', () => {
+    const face = new ClaudeFace();
+    face.pet();
+    face.pet();
+    assert.strictEqual(face.petTimes.length, 2);
+  });
+
+  test('activates after 8 rapid pets', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.ok(face.petSpamActive);
+  });
+
+  test('does NOT activate below threshold', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 7; i++) face.pet();
+    assert.ok(!face.petSpamActive);
+  });
+
+  test('spawns heart particles on activation', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    const hearts = face.particles.particles.filter(p => p.style === 'heart');
+    assert.ok(hearts.length >= 30);
+  });
+
+  test('spawns sparkles (not hearts) below threshold', () => {
+    const face = new ClaudeFace();
+    face.pet();
+    const hearts = face.particles.particles.filter(p => p.style === 'heart');
+    const sparkles = face.particles.particles.filter(p => p.style === 'sparkle');
+    assert.strictEqual(hearts.length, 0);
+    assert.ok(sparkles.length >= 15);
+  });
+
+  test('wiggle amplitude is 2 during pet spam', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    face.update(66);
+    assert.ok(Math.abs(face.petWiggle) === 2);
+  });
+
+  test('deactivates after timer expires', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.ok(face.petSpamActive);
+    for (let i = 0; i < 50; i++) face.update(66);
+    assert.ok(!face.petSpamActive);
+  });
+
+  test('sets special thought text on activation', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.ok(face.thoughtText.length > 0);
+  });
+
+  test('spawns continuous heart particles while active', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    // Run a few frames to trigger continuous spawning (every 3rd frame)
+    for (let i = 0; i < 6; i++) face.update(66);
+    const heartsAfter = face.particles.particles.filter(p => p.style === 'heart').length;
+    assert.ok(heartsAfter > 0);
+  });
+
+  test('filters out old pet timestamps outside window', () => {
+    const face = new ClaudeFace();
+    face.petTimes = [Date.now() - 3000, Date.now() - 2500];
+    face.pet();
+    assert.strictEqual(face.petTimes.length, 1);
+  });
+
+  test('re-triggering during active spam extends timer', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    for (let i = 0; i < 10; i++) face.update(66);
+    face.pet();
+    assert.ok(face.petSpamActive);
+    assert.strictEqual(face.petSpamTimer, 45);
+  });
+});
+
+// ====================================================================
+// face.js -- pet spam escalation
+// ====================================================================
+
+describe('face.js -- pet spam escalation', () => {
+  test('first trigger sets level 1', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 1);
+  });
+
+  test('re-trigger within 10s escalates to level 2', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    // Let the spam timer expire → afterglow
+    for (let i = 0; i < 50; i++) face.update(66);
+    // Trigger again within 10s window
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 2);
+  });
+
+  test('third re-trigger reaches level 3', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    for (let i = 0; i < 50; i++) face.update(66);
+    for (let i = 0; i < 8; i++) face.pet();
+    for (let i = 0; i < 50; i++) face.update(66);
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 3);
+  });
+
+  test('level caps at 3', () => {
+    const face = new ClaudeFace();
+    for (let round = 0; round < 6; round++) {
+      for (let i = 0; i < 8; i++) face.pet();
+      for (let i = 0; i < 50; i++) face.update(66);
+    }
+    assert.ok(face.petSpamLevel <= 3);
+  });
+
+  test('level resets after 10s gap', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 1);
+    // Simulate 10s passing
+    face.petSpamLastAt = Date.now() - 11000;
+    for (let i = 0; i < 50; i++) face.update(66);
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 1); // reset, not 2
+  });
+
+  test('level 3 thought cycling is faster (200ms interval)', () => {
+    const face = new ClaudeFace();
+    // Get to level 3
+    for (let i = 0; i < 8; i++) face.pet();
+    for (let i = 0; i < 50; i++) face.update(66);
+    for (let i = 0; i < 8; i++) face.pet();
+    for (let i = 0; i < 50; i++) face.update(66);
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 3);
+    // At level 3, thoughts should cycle rapidly
+    const thoughts = new Set();
+    for (let i = 0; i < 30; i++) {
+      face.update(66); // 66ms per frame
+      thoughts.add(face.thoughtText);
+    }
+    // Should have seen multiple different thoughts in ~2 seconds
+    assert.ok(thoughts.size > 1, 'level 3 thoughts should cycle rapidly');
+  });
+});
+
+// ====================================================================
+// face.js -- pet afterglow
+// ====================================================================
+
+describe('face.js -- pet afterglow', () => {
+  test('afterglow activates when pet spam expires', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    // Run until spam timer expires (45 frames + 1 to trigger transition)
+    for (let i = 0; i < 50; i++) face.update(66);
+    assert.ok(!face.petSpamActive);
+    assert.ok(face.petAfterglowTimer > 0);
+  });
+
+  test('afterglow timer is 30 frames (~2s)', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    for (let i = 0; i < 50; i++) face.update(66);
+    // Timer was set to 30 then decremented a few frames
+    assert.ok(face.petAfterglowTimer > 0 && face.petAfterglowTimer <= 30);
+  });
+
+  test('afterglow overrides eyes to content', () => {
+    const face = new ClaudeFace();
+    face.state = 'coding'; // normally focused eyes
+    for (let i = 0; i < 8; i++) face.pet();
+    for (let i = 0; i < 50; i++) face.update(66);
+    assert.ok(face.petAfterglowTimer > 0);
+    face.blinkFrame = -1;
+    const theme = face.getTheme();
+    const eyeResult = face.getEyes(theme, 0);
+    const contentEyes = eyes.content(theme, 0);
+    assert.deepStrictEqual(eyeResult, contentEyes);
+  });
+
+  test('afterglow overrides mouth to smile', () => {
+    const face = new ClaudeFace();
+    face.state = 'error'; // normally frown
+    for (let i = 0; i < 8; i++) face.pet();
+    for (let i = 0; i < 50; i++) face.update(66);
+    assert.ok(face.petAfterglowTimer > 0);
+    const theme = face.getTheme();
+    const mouthResult = face.getMouth(theme, 0);
+    assert.strictEqual(mouthResult, mouths.smile());
+  });
+
+  test('afterglow shows calm thought text', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    for (let i = 0; i < 50; i++) face.update(66);
+    assert.ok(face.petAfterglowTimer > 0);
+    const calmThoughts = ['...', 'mmmm', 'purrrr', 'so warm', '\u25e1\u25e1\u25e1'];
+    assert.ok(calmThoughts.includes(face.thoughtText),
+      `expected afterglow thought, got: "${face.thoughtText}"`);
+  });
+
+  test('afterglow spawns lazy hearts', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    for (let i = 0; i < 50; i++) face.update(66);
+    // Clear existing hearts to isolate lazy ones
+    face.particles.particles = face.particles.particles.filter(p => p.style !== 'heart');
+    // Run 20+ frames to trigger lazy heart spawn (every 20th frame)
+    for (let i = 0; i < 25; i++) face.update(66);
+    const lazyHearts = face.particles.particles.filter(p => p.style === 'heart');
+    assert.ok(lazyHearts.length >= 1, 'should spawn lazy hearts during afterglow');
+  });
+
+  test('afterglow fully expires back to normal', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    // Run through spam (45 frames) + afterglow (30 frames) + buffer
+    for (let i = 0; i < 90; i++) face.update(66);
+    assert.ok(!face.petSpamActive);
+    assert.strictEqual(face.petAfterglowTimer, 0);
+  });
+
+  test('new pet spam cancels afterglow', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    for (let i = 0; i < 50; i++) face.update(66);
+    assert.ok(face.petAfterglowTimer > 0);
+    // Trigger pet spam again during afterglow
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.ok(face.petSpamActive);
+    assert.strictEqual(face.petAfterglowTimer, 0);
   });
 });
 
