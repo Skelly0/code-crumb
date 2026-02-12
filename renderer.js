@@ -145,6 +145,7 @@ function runSingleMode() {
       if (key === ' ') face.pet();
       else if (key === 't') face.cycleTheme();
       else if (key === 's') face.toggleStats();
+      else if (key === 'a') face.toggleAccessories();
       else if (key === 'h' || key === '?') face.toggleHelp();
       else if (key === 'q' || key === '\x03') cleanup(); // q or Ctrl+C
     });
