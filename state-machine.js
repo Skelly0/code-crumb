@@ -14,19 +14,20 @@
 // |    - Claude Code (edit, bash, grep, glob, read, task, etc.)     |
 // |    - OpenAI Codex CLI (shell, apply_diff, apply_patch, etc.)    |
 // |    - OpenCode (file_edit, terminal, search_files, etc.)         |
+// |    - OpenClaw/Pi (read, write, edit, bash, exec, process, etc.) |
 // +================================================================+
 
 const path = require('path');
 
 // -- Tool-to-State Mapping -------------------------------------------
 
-// Tool name patterns per category — covers Claude Code, Codex CLI, and OpenCode
+// Tool name patterns per category — covers Claude Code, Codex CLI, OpenCode, and OpenClaw/Pi
 const EDIT_TOOLS = /^(edit|multiedit|write|str_replace|create_file|file_edit|write_file|create_file_with_contents|apply_diff|apply_patch|code_edit|insert_text|replace_text|patch)$/i;
-const BASH_TOOLS = /^(bash|shell|terminal|execute|run_command|run|exec)$/i;
+const BASH_TOOLS = /^(bash|shell|terminal|execute|run_command|run|exec|process)$/i;
 const READ_TOOLS = /^(read|view|cat|file_read|read_file|get_file_contents|open_file)$/i;
 const SEARCH_TOOLS = /^(grep|glob|search|ripgrep|find|list|search_files|list_files|list_dir|find_files|file_search|codebase_search)$/i;
-const WEB_TOOLS = /^(web_search|web_fetch|fetch|webfetch|browser|browse|http_request|curl)$/i;
-const SUBAGENT_TOOLS = /^(task|subagent|spawn_agent|delegate|codex_agent)$/i;
+const WEB_TOOLS = /^(web_search|web_fetch|fetch|webfetch|browser|browse|http_request|curl|canvas)$/i;
+const SUBAGENT_TOOLS = /^(task|subagent|spawn_agent|delegate|codex_agent|sessions)$/i;
 
 function toolToState(toolName, toolInput) {
   // Writing/editing code

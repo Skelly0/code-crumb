@@ -10,6 +10,7 @@
 // |    node setup.js claude       (Claude Code -- explicit)          |
 // |    node setup.js codex        (Codex CLI)                        |
 // |    node setup.js opencode     (OpenCode)                         |
+// |    node setup.js openclaw     (OpenClaw / Pi)                    |
 // +================================================================+
 
 const fs = require('fs');
@@ -263,6 +264,78 @@ function setupOpenCode() {
 `);
 }
 
+// -- OpenClaw / Pi Setup ---------------------------------------------
+
+function setupOpenClaw() {
+  const adapterPath = path.resolve(__dirname, 'adapters', 'openclaw-adapter.js').replace(/\\/g, '/');
+  const rendererPath = path.resolve(__dirname, 'renderer.js').replace(/\\/g, '/');
+
+  console.log('\n  Claude Face Setup (OpenClaw / Pi)');
+  console.log('  ' + '='.repeat(40) + '\n');
+  console.log(`  Platform: ${process.platform}`);
+  console.log(`  Home:     ${HOME}`);
+  console.log(`  Adapter:  ${adapterPath}\n`);
+
+  console.log(`
+  ${'─'.repeat(42)}
+
+  OpenClaw uses the Pi coding agent engine, which
+  has an extension system with tool lifecycle events.
+
+  OPTION 1: Pi Extension (recommended)
+  ${'─'.repeat(38)}
+
+  Create a Pi extension that pipes events to the adapter.
+  Add this to your OpenClaw workspace or ~/.openclaw/extensions/:
+
+    // claude-face-extension.js
+    module.exports = function(pi) {
+      const { execSync } = require('child_process');
+      const adapter = '${adapterPath}';
+
+      function send(payload) {
+        try {
+          execSync(\`echo '\${JSON.stringify(payload)}' | node "\${adapter}"\`,
+            { timeout: 2000, stdio: 'ignore' });
+        } catch {}
+      }
+
+      pi.on('tool_call', (event) => {
+        send({ event: 'tool_call', toolName: event.toolName,
+               input: event.input });
+      });
+
+      pi.on('tool_result', (event) => {
+        send({ event: 'tool_result', toolName: event.toolName,
+               input: event.input, output: event.result || '',
+               error: event.error || false });
+      });
+    };
+
+  OPTION 2: Standalone adapter (pipe JSON)
+  ${'─'.repeat(38)}
+
+  Pipe events from any script or tool:
+
+    echo '{"event":"tool_call","toolName":"edit","input":{"file_path":"src/app.ts"}}' | \\
+      node "${adapterPath}"
+
+  Pi-native event types:
+    tool_call             → face shows activity state
+    tool_execution_start  → face shows activity state
+    tool_execution_end    → face shows outcome state
+    tool_result           → face shows outcome state
+
+  Generic event types (also accepted):
+    tool_start, tool_end, turn_end, error, waiting
+
+  To start the renderer:
+    node "${rendererPath}"
+
+  ${'─'.repeat(42)}
+`);
+}
+
 // -- Dispatch --------------------------------------------------------
 
 switch (editor) {
@@ -277,9 +350,14 @@ switch (editor) {
   case 'opencode':
     setupOpenCode();
     break;
+  case 'openclaw':
+  case 'claw':
+  case 'pi':
+    setupOpenClaw();
+    break;
   default:
     console.log(`\n  Unknown editor: "${editor}"`);
-    console.log('  Supported editors: claude, codex, opencode');
-    console.log('  Usage: node setup.js [claude|codex|opencode]\n');
+    console.log('  Supported editors: claude, codex, opencode, openclaw');
+    console.log('  Usage: node setup.js [claude|codex|opencode|openclaw]\n');
     process.exit(1);
 }

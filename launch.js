@@ -137,6 +137,13 @@ switch (editorName) {
     editorCmdArgs = editorArgs;
     break;
   }
+  case 'openclaw':
+  case 'claw':
+  case 'pi': {
+    editorCmd = 'openclaw';
+    editorCmdArgs = editorArgs;
+    break;
+  }
   case 'claude':
   case 'claude-code':
   default: {

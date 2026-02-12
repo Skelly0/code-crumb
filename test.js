@@ -395,6 +395,63 @@ describe('state-machine.js -- toolToState (OpenCode)', () => {
 });
 
 // ====================================================================
+// state-machine.js -- toolToState (OpenClaw / Pi tool names)
+// ====================================================================
+
+describe('state-machine.js -- toolToState (OpenClaw / Pi)', () => {
+  test('edit → coding', () => {
+    const r = toolToState('edit', { file_path: '/src/main.ts' });
+    assert.strictEqual(r.state, 'coding');
+    assert.ok(r.detail.includes('main.ts'));
+  });
+
+  test('write → coding (Pi core tool)', () => {
+    const r = toolToState('write', { file_path: '/src/app.js' });
+    assert.strictEqual(r.state, 'coding');
+    assert.ok(r.detail.includes('app.js'));
+  });
+
+  test('read → reading (Pi core tool)', () => {
+    const r = toolToState('read', { file_path: '/package.json' });
+    assert.strictEqual(r.state, 'reading');
+    assert.ok(r.detail.includes('package.json'));
+  });
+
+  test('bash → executing (Pi core tool)', () => {
+    const r = toolToState('bash', { command: 'ls -la' });
+    assert.strictEqual(r.state, 'executing');
+  });
+
+  test('exec → executing (OpenClaw replacement for bash)', () => {
+    const r = toolToState('exec', { command: 'npm run build' });
+    assert.strictEqual(r.state, 'executing');
+  });
+
+  test('process → executing (OpenClaw tool)', () => {
+    const r = toolToState('process', { command: 'node server.js' });
+    assert.strictEqual(r.state, 'executing');
+  });
+
+  test('process with test command → testing', () => {
+    assert.strictEqual(toolToState('process', { command: 'npx jest' }).state, 'testing');
+  });
+
+  test('process with install → installing', () => {
+    assert.strictEqual(toolToState('process', { command: 'pnpm install' }).state, 'installing');
+  });
+
+  test('canvas → searching (OpenClaw web tool)', () => {
+    const r = toolToState('canvas', { url: 'https://example.com' });
+    assert.strictEqual(r.state, 'searching');
+  });
+
+  test('sessions → subagent (OpenClaw tool)', () => {
+    const r = toolToState('sessions', { prompt: 'run analysis' });
+    assert.strictEqual(r.state, 'subagent');
+  });
+});
+
+// ====================================================================
 // state-machine.js -- tool pattern constants
 // ====================================================================
 
@@ -418,7 +475,7 @@ describe('state-machine.js -- tool pattern constants', () => {
   });
 
   test('BASH_TOOLS matches all shell variants', () => {
-    for (const t of ['bash', 'shell', 'terminal', 'execute', 'run_command', 'run', 'exec']) {
+    for (const t of ['bash', 'shell', 'terminal', 'execute', 'run_command', 'run', 'exec', 'process']) {
       assert.ok(BASH_TOOLS.test(t), `BASH_TOOLS should match "${t}"`);
     }
   });
@@ -436,13 +493,13 @@ describe('state-machine.js -- tool pattern constants', () => {
   });
 
   test('WEB_TOOLS matches all web variants', () => {
-    for (const t of ['web_search', 'web_fetch', 'fetch', 'webfetch', 'browser', 'browse', 'http_request', 'curl']) {
+    for (const t of ['web_search', 'web_fetch', 'fetch', 'webfetch', 'browser', 'browse', 'http_request', 'curl', 'canvas']) {
       assert.ok(WEB_TOOLS.test(t), `WEB_TOOLS should match "${t}"`);
     }
   });
 
   test('SUBAGENT_TOOLS matches all subagent variants', () => {
-    for (const t of ['task', 'subagent', 'spawn_agent', 'delegate', 'codex_agent']) {
+    for (const t of ['task', 'subagent', 'spawn_agent', 'delegate', 'codex_agent', 'sessions']) {
       assert.ok(SUBAGENT_TOOLS.test(t), `SUBAGENT_TOOLS should match "${t}"`);
     }
   });
@@ -517,6 +574,26 @@ describe('state-machine.js -- classifyToolResult (multi-editor)', () => {
   test('cmd field used for command (generic)', () => {
     const r = toolToState('shell', { cmd: 'npm test' });
     assert.strictEqual(r.state, 'testing');
+  });
+
+  test('process success → relieved (OpenClaw)', () => {
+    const r = classifyToolResult('process', { command: 'node build.js' }, {}, false);
+    assert.strictEqual(r.state, 'relieved');
+  });
+
+  test('process error via stderr (OpenClaw)', () => {
+    const r = classifyToolResult('process', { command: 'bun build' }, { stderr: 'fatal error' }, false);
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('canvas success → satisfied (OpenClaw)', () => {
+    const r = classifyToolResult('canvas', { url: 'https://example.com' }, {}, false);
+    assert.strictEqual(r.state, 'satisfied');
+  });
+
+  test('sessions success → satisfied (OpenClaw)', () => {
+    const r = classifyToolResult('sessions', { prompt: 'analyze' }, {}, false);
+    assert.strictEqual(r.state, 'satisfied');
   });
 });
 
