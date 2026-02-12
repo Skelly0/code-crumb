@@ -1848,6 +1848,46 @@ describe('face.js -- pet spam escalation', () => {
     // Should have seen multiple different thoughts in ~2 seconds
     assert.ok(thoughts.size > 1, 'level 3 thoughts should cycle rapidly');
   });
+
+  test('eyes override to sparkle during L1-2 spam (even in error state)', () => {
+    const face = new ClaudeFace();
+    face.state = 'error'; // normally cross eyes
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.ok(face.petSpamActive);
+    const theme = face.getTheme();
+    const eyeResult = face.getEyes(theme, 0);
+    const sparkleEyes = eyes.sparkle(theme, 0);
+    assert.deepStrictEqual(eyeResult, sparkleEyes);
+  });
+
+  test('eyes override to vibrate during L3 spam', () => {
+    const face = new ClaudeFace();
+    face.state = 'idle';
+    for (let i = 0; i < 8; i++) face.pet();
+    for (let i = 0; i < 50; i++) face.update(66);
+    for (let i = 0; i < 8; i++) face.pet();
+    for (let i = 0; i < 50; i++) face.update(66);
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 3);
+    const theme = face.getTheme();
+    const eyeResult = face.getEyes(theme, 0);
+    const vibrateEyes = eyes.vibrate(theme, 0);
+    assert.deepStrictEqual(eyeResult, vibrateEyes);
+  });
+
+  test('mouth override to wide at L1, grin at L2+', () => {
+    const face = new ClaudeFace();
+    face.state = 'error'; // normally frown
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 1);
+    const theme = face.getTheme();
+    assert.strictEqual(face.getMouth(theme, 0), mouths.wide());
+    // Escalate to L2
+    for (let i = 0; i < 50; i++) face.update(66);
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 2);
+    assert.strictEqual(face.getMouth(theme, 0), mouths.grin());
+  });
 });
 
 // ====================================================================
