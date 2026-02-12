@@ -36,6 +36,7 @@ const { mouths, eyes, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { ClaudeFace } = require('./face');
 const { MiniFace, FaceGrid } = require('./grid');
+const { ACCESSORIES, STATE_ACCESSORIES, getAccessory } = require('./accessories');
 
 // -- Test runner -----------------------------------------------------
 
@@ -2039,6 +2040,145 @@ describe('grid.js -- FaceGrid cycleTheme/toggleHelp', () => {
     assert.strictEqual(grid.showHelp, true);
     grid.toggleHelp();
     assert.strictEqual(grid.showHelp, false);
+  });
+});
+
+// ====================================================================
+// accessories.js -- ACCESSORIES
+// ====================================================================
+
+describe('accessories.js -- ACCESSORIES', () => {
+  test('all accessories have non-empty lines array', () => {
+    for (const [name, acc] of Object.entries(ACCESSORIES)) {
+      assert.ok(Array.isArray(acc.lines), `${name}.lines should be an array`);
+      assert.ok(acc.lines.length > 0, `${name}.lines should be non-empty`);
+    }
+  });
+
+  test('all accessory lines are non-empty strings', () => {
+    for (const [name, acc] of Object.entries(ACCESSORIES)) {
+      for (let i = 0; i < acc.lines.length; i++) {
+        assert.ok(typeof acc.lines[i] === 'string', `${name}.lines[${i}] should be a string`);
+        assert.ok(acc.lines[i].length > 0, `${name}.lines[${i}] should be non-empty`);
+      }
+    }
+  });
+
+  test('all accessories have at most 3 lines', () => {
+    for (const [name, acc] of Object.entries(ACCESSORIES)) {
+      assert.ok(acc.lines.length <= 3, `${name} should have at most 3 lines (has ${acc.lines.length})`);
+    }
+  });
+
+  test('all accessory lines fit within face width', () => {
+    const faceW = 30;
+    for (const [name, acc] of Object.entries(ACCESSORIES)) {
+      for (let i = 0; i < acc.lines.length; i++) {
+        assert.ok(acc.lines[i].length <= faceW,
+          `${name}.lines[${i}] is ${acc.lines[i].length} chars, exceeds face width ${faceW}`);
+      }
+    }
+  });
+
+  test('has at least 8 distinct accessories', () => {
+    assert.ok(Object.keys(ACCESSORIES).length >= 8,
+      `should have at least 8 accessories, has ${Object.keys(ACCESSORIES).length}`);
+  });
+});
+
+// ====================================================================
+// accessories.js -- STATE_ACCESSORIES
+// ====================================================================
+
+describe('accessories.js -- STATE_ACCESSORIES', () => {
+  test('maps at least 5 states to accessories', () => {
+    const count = Object.keys(STATE_ACCESSORIES).length;
+    assert.ok(count >= 5, `should map at least 5 states, maps ${count}`);
+  });
+
+  test('all mapped names exist in ACCESSORIES', () => {
+    for (const [state, name] of Object.entries(STATE_ACCESSORIES)) {
+      assert.ok(ACCESSORIES[name], `state ${state} maps to "${name}" which does not exist in ACCESSORIES`);
+    }
+  });
+
+  test('installing maps to hardhat', () => {
+    assert.strictEqual(STATE_ACCESSORIES.installing, 'hardhat');
+  });
+
+  test('reading maps to glasses', () => {
+    assert.strictEqual(STATE_ACCESSORIES.reading, 'glasses');
+  });
+
+  test('thinking maps to wizardhat', () => {
+    assert.strictEqual(STATE_ACCESSORIES.thinking, 'wizardhat');
+  });
+
+  test('coding maps to headphones', () => {
+    assert.strictEqual(STATE_ACCESSORIES.coding, 'headphones');
+  });
+
+  test('happy maps to partyhat', () => {
+    assert.strictEqual(STATE_ACCESSORIES.happy, 'partyhat');
+  });
+
+  test('sleeping maps to nightcap', () => {
+    assert.strictEqual(STATE_ACCESSORIES.sleeping, 'nightcap');
+  });
+
+  test('idle has no accessory', () => {
+    assert.strictEqual(STATE_ACCESSORIES.idle, undefined);
+  });
+});
+
+// ====================================================================
+// accessories.js -- getAccessory
+// ====================================================================
+
+describe('accessories.js -- getAccessory', () => {
+  test('returns accessory object for mapped state', () => {
+    const acc = getAccessory('installing');
+    assert.ok(acc);
+    assert.ok(Array.isArray(acc.lines));
+    assert.ok(acc.lines.length > 0);
+  });
+
+  test('returns null for unmapped state', () => {
+    assert.strictEqual(getAccessory('idle'), null);
+    assert.strictEqual(getAccessory('satisfied'), null);
+    assert.strictEqual(getAccessory('relieved'), null);
+  });
+
+  test('returns null for unknown state', () => {
+    assert.strictEqual(getAccessory('nonexistent'), null);
+    assert.strictEqual(getAccessory(''), null);
+  });
+
+  test('returns correct accessory for each mapped state', () => {
+    for (const [state, name] of Object.entries(STATE_ACCESSORIES)) {
+      const acc = getAccessory(state);
+      assert.ok(acc, `getAccessory("${state}") should return an accessory`);
+      assert.deepStrictEqual(acc, ACCESSORIES[name]);
+    }
+  });
+});
+
+// ====================================================================
+// face.js -- accessories toggle
+// ====================================================================
+
+describe('face.js -- accessories', () => {
+  test('accessoriesEnabled defaults to true', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.accessoriesEnabled, true);
+  });
+
+  test('toggleAccessories flips the flag', () => {
+    const face = new ClaudeFace();
+    face.toggleAccessories();
+    assert.strictEqual(face.accessoriesEnabled, false);
+    face.toggleAccessories();
+    assert.strictEqual(face.accessoriesEnabled, true);
   });
 });
 

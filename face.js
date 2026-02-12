@@ -14,6 +14,7 @@ const {
 } = require('./themes');
 const { eyes, mouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
+const { getAccessory } = require('./accessories');
 
 // -- Config --------------------------------------------------------
 const BLINK_MIN = 2500;
@@ -96,6 +97,9 @@ class ClaudeFace {
     this.petSpamLevel = 0;
     this.petSpamLastAt = 0;
     this.petAfterglowTimer = 0;
+
+    // Accessories
+    this.accessoriesEnabled = true;
   }
 
   _nextBlink() {
@@ -317,6 +321,10 @@ class ClaudeFace {
     this.showHelp = !this.showHelp;
   }
 
+  toggleAccessories() {
+    this.accessoriesEnabled = !this.accessoriesEnabled;
+  }
+
   getTheme() {
     const palette = PALETTES[this.paletteIndex] || PALETTES[0];
     return palette.themes[this.state] || palette.themes.idle;
@@ -521,10 +529,11 @@ class ClaudeFace {
       ' space  pet the face',
       ' t      cycle palette',
       ' s      toggle stats',
+      ' a      toggle accessories',
       ' h/?    this help',
       ' q      quit',
     ];
-    const boxW = 24;
+    const boxW = 28;
     const boxH = lines.length + 2;
     const bx = Math.max(1, Math.floor((cols - boxW) / 2));
     const by = Math.max(1, Math.floor((rows - boxH) / 2));
@@ -633,6 +642,23 @@ class ClaudeFace {
 
     buf += ansi.to(startRow + 7, startCol + gx);
     buf += `${fc}    \u2570${'\u2500'.repeat(inner)}\u256f${r}`;
+
+    // Accessories (above face box, rendered before thought bubble so bubble takes priority)
+    if (this.accessoriesEnabled) {
+      const accessory = getAccessory(this.state);
+      if (accessory) {
+        const ac = ansi.fg(...dimColor(breathe(theme.accent, breathTime), 0.85));
+        const lines = accessory.lines;
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          const lineRow = startRow - lines.length + i;
+          const lineCol = Math.max(1, startCol + Math.floor((faceW - line.length) / 2) + gx);
+          if (lineRow >= 1) {
+            buf += ansi.to(lineRow, lineCol) + `${ac}${line}${r}`;
+          }
+        }
+      }
+    }
 
     // Status line
     const emoji = theme.emoji;
@@ -764,7 +790,7 @@ class ClaudeFace {
       const dc = `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.3))}`;
       const kc = ansi.fg(...dimColor(theme.accent, 0.4));
       const sep = `${dc}\u00b7${r}`;
-      const hint = `${kc}space${dc} pet ${sep} ${kc}t${dc} theme ${sep} ${kc}s${dc} stats ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
+      const hint = `${kc}space${dc} pet ${sep} ${kc}t${dc} theme ${sep} ${kc}s${dc} stats ${sep} ${kc}a${dc} accs ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
       // Strip ANSI to measure visible length
       const visible = hint.replace(/\x1b\[[^m]*m/g, '');
       const hintCol = Math.max(1, Math.floor((cols - visible.length) / 2) + 1);
