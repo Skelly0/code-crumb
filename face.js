@@ -336,6 +336,12 @@ class ClaudeFace {
   }
 
   getEyes(theme, frame) {
+    if (this.petSpamActive) {
+      // L3: overstimulated vibrating eyes, L1-2: sparkle eyes
+      return this.petSpamLevel >= 3
+        ? eyes.vibrate(theme, frame)
+        : eyes.sparkle(theme, frame);
+    }
     if (this.petAfterglowTimer > 0) {
       return eyes.content(theme, frame);
     }
@@ -372,6 +378,9 @@ class ClaudeFace {
   }
 
   getMouth(theme, frame) {
+    if (this.petSpamActive) {
+      return this.petSpamLevel >= 2 ? mouths.grin() : mouths.wide();
+    }
     if (this.petAfterglowTimer > 0) return mouths.smile();
     switch (this.state) {
       case 'idle':      return mouths.smile();
