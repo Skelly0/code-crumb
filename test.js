@@ -15,6 +15,12 @@ const assert = require('assert');
 const { safeFilename } = require('./shared');
 const {
   toolToState,
+  EDIT_TOOLS,
+  BASH_TOOLS,
+  READ_TOOLS,
+  SEARCH_TOOLS,
+  WEB_TOOLS,
+  SUBAGENT_TOOLS,
   stdoutErrorPatterns,
   stderrErrorPatterns,
   falsePositives,
@@ -276,6 +282,241 @@ describe('state-machine.js -- toolToState', () => {
   test('Empty tool name → thinking', () => {
     const r = toolToState('', {});
     assert.strictEqual(r.state, 'thinking');
+  });
+});
+
+// ====================================================================
+// state-machine.js -- toolToState (Codex CLI tool names)
+// ====================================================================
+
+describe('state-machine.js -- toolToState (Codex CLI)', () => {
+  test('shell → executing', () => {
+    const r = toolToState('shell', { command: 'ls -la' });
+    assert.strictEqual(r.state, 'executing');
+  });
+
+  test('shell with test command → testing', () => {
+    assert.strictEqual(toolToState('shell', { command: 'npx jest' }).state, 'testing');
+  });
+
+  test('shell with install → installing', () => {
+    assert.strictEqual(toolToState('shell', { command: 'npm install express' }).state, 'installing');
+  });
+
+  test('apply_diff → coding', () => {
+    const r = toolToState('apply_diff', { target_file: '/src/index.ts' });
+    assert.strictEqual(r.state, 'coding');
+    assert.ok(r.detail.includes('index.ts'));
+  });
+
+  test('apply_patch → coding', () => {
+    assert.strictEqual(toolToState('apply_patch', {}).state, 'coding');
+  });
+
+  test('file_edit → coding', () => {
+    const r = toolToState('file_edit', { path: '/src/app.js' });
+    assert.strictEqual(r.state, 'coding');
+    assert.ok(r.detail.includes('app.js'));
+  });
+
+  test('file_read → reading', () => {
+    const r = toolToState('file_read', { file_path: '/README.md' });
+    assert.strictEqual(r.state, 'reading');
+    assert.ok(r.detail.includes('README.md'));
+  });
+
+  test('list_dir → searching', () => {
+    assert.strictEqual(toolToState('list_dir', {}).state, 'searching');
+  });
+
+  test('search_files → searching', () => {
+    const r = toolToState('search_files', { search_term: 'TODO' });
+    assert.strictEqual(r.state, 'searching');
+    assert.ok(r.detail.includes('TODO'));
+  });
+
+  test('codex_agent → subagent', () => {
+    assert.strictEqual(toolToState('codex_agent', {}).state, 'subagent');
+  });
+});
+
+// ====================================================================
+// state-machine.js -- toolToState (OpenCode tool names)
+// ====================================================================
+
+describe('state-machine.js -- toolToState (OpenCode)', () => {
+  test('write_file → coding', () => {
+    const r = toolToState('write_file', { file_path: '/src/main.go' });
+    assert.strictEqual(r.state, 'coding');
+    assert.ok(r.detail.includes('main.go'));
+  });
+
+  test('terminal → executing', () => {
+    const r = toolToState('terminal', { command: 'go build' });
+    assert.strictEqual(r.state, 'executing');
+  });
+
+  test('terminal with test → testing', () => {
+    assert.strictEqual(toolToState('terminal', { command: 'pytest tests/' }).state, 'testing');
+  });
+
+  test('read_file → reading', () => {
+    const r = toolToState('read_file', { file_path: '/go.mod' });
+    assert.strictEqual(r.state, 'reading');
+    assert.ok(r.detail.includes('go.mod'));
+  });
+
+  test('list_files → searching', () => {
+    assert.strictEqual(toolToState('list_files', {}).state, 'searching');
+  });
+
+  test('find_files → searching', () => {
+    assert.strictEqual(toolToState('find_files', { pattern: '*.go' }).state, 'searching');
+  });
+
+  test('codebase_search → searching', () => {
+    const r = toolToState('codebase_search', { query: 'handleRequest' });
+    assert.strictEqual(r.state, 'searching');
+    assert.ok(r.detail.includes('handleRequest'));
+  });
+
+  test('browser → searching', () => {
+    const r = toolToState('browser', { url: 'https://docs.go.dev' });
+    assert.strictEqual(r.state, 'searching');
+  });
+
+  test('execute → executing', () => {
+    assert.strictEqual(toolToState('execute', { command: 'make' }).state, 'executing');
+  });
+
+  test('spawn_agent → subagent', () => {
+    assert.strictEqual(toolToState('spawn_agent', { prompt: 'fix tests' }).state, 'subagent');
+  });
+});
+
+// ====================================================================
+// state-machine.js -- tool pattern constants
+// ====================================================================
+
+describe('state-machine.js -- tool pattern constants', () => {
+  test('EDIT_TOOLS matches Claude Code tools', () => {
+    for (const t of ['edit', 'multiedit', 'write', 'str_replace', 'create_file']) {
+      assert.ok(EDIT_TOOLS.test(t), `EDIT_TOOLS should match "${t}"`);
+    }
+  });
+
+  test('EDIT_TOOLS matches Codex tools', () => {
+    for (const t of ['apply_diff', 'apply_patch', 'file_edit', 'code_edit']) {
+      assert.ok(EDIT_TOOLS.test(t), `EDIT_TOOLS should match "${t}"`);
+    }
+  });
+
+  test('EDIT_TOOLS matches OpenCode tools', () => {
+    for (const t of ['write_file', 'create_file_with_contents', 'insert_text', 'replace_text', 'patch']) {
+      assert.ok(EDIT_TOOLS.test(t), `EDIT_TOOLS should match "${t}"`);
+    }
+  });
+
+  test('BASH_TOOLS matches all shell variants', () => {
+    for (const t of ['bash', 'shell', 'terminal', 'execute', 'run_command', 'run', 'exec']) {
+      assert.ok(BASH_TOOLS.test(t), `BASH_TOOLS should match "${t}"`);
+    }
+  });
+
+  test('READ_TOOLS matches all read variants', () => {
+    for (const t of ['read', 'view', 'cat', 'file_read', 'read_file', 'get_file_contents', 'open_file']) {
+      assert.ok(READ_TOOLS.test(t), `READ_TOOLS should match "${t}"`);
+    }
+  });
+
+  test('SEARCH_TOOLS matches all search variants', () => {
+    for (const t of ['grep', 'glob', 'search', 'ripgrep', 'find', 'list', 'search_files', 'list_files', 'list_dir', 'find_files', 'file_search', 'codebase_search']) {
+      assert.ok(SEARCH_TOOLS.test(t), `SEARCH_TOOLS should match "${t}"`);
+    }
+  });
+
+  test('WEB_TOOLS matches all web variants', () => {
+    for (const t of ['web_search', 'web_fetch', 'fetch', 'webfetch', 'browser', 'browse', 'http_request', 'curl']) {
+      assert.ok(WEB_TOOLS.test(t), `WEB_TOOLS should match "${t}"`);
+    }
+  });
+
+  test('SUBAGENT_TOOLS matches all subagent variants', () => {
+    for (const t of ['task', 'subagent', 'spawn_agent', 'delegate', 'codex_agent']) {
+      assert.ok(SUBAGENT_TOOLS.test(t), `SUBAGENT_TOOLS should match "${t}"`);
+    }
+  });
+
+  test('Patterns are case-insensitive', () => {
+    assert.ok(EDIT_TOOLS.test('APPLY_DIFF'));
+    assert.ok(BASH_TOOLS.test('Shell'));
+    assert.ok(READ_TOOLS.test('FILE_READ'));
+    assert.ok(SEARCH_TOOLS.test('Codebase_Search'));
+  });
+
+  test('Patterns do not match partial strings', () => {
+    assert.ok(!EDIT_TOOLS.test('my_edit_tool'));
+    assert.ok(!BASH_TOOLS.test('bash_extended'));
+    assert.ok(!READ_TOOLS.test('unread'));
+  });
+});
+
+// ====================================================================
+// state-machine.js -- classifyToolResult (Codex/OpenCode tools)
+// ====================================================================
+
+describe('state-machine.js -- classifyToolResult (multi-editor)', () => {
+  test('apply_diff success → proud', () => {
+    const r = classifyToolResult('apply_diff', { target_file: '/src/app.ts' }, {}, false);
+    assert.strictEqual(r.state, 'proud');
+    assert.ok(r.detail.includes('app.ts'));
+  });
+
+  test('file_read success → satisfied', () => {
+    const r = classifyToolResult('file_read', { file_path: '/go.mod' }, {}, false);
+    assert.strictEqual(r.state, 'satisfied');
+    assert.ok(r.detail.includes('go.mod'));
+  });
+
+  test('shell success → relieved', () => {
+    const r = classifyToolResult('shell', { command: 'echo hello' }, {}, false);
+    assert.strictEqual(r.state, 'relieved');
+  });
+
+  test('shell with test → relieved with test detail', () => {
+    const r = classifyToolResult('shell', { command: 'npm test' }, { stdout: '42 tests passed' }, false);
+    assert.strictEqual(r.state, 'relieved');
+    assert.strictEqual(r.detail, '42 tests passed');
+  });
+
+  test('shell error detected via stdout', () => {
+    const r = classifyToolResult('shell', { command: 'bad' }, { stdout: 'command not found' }, false);
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('terminal error detected via stderr', () => {
+    const r = classifyToolResult('terminal', { command: 'go build' }, { stderr: 'fatal error' }, false);
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('search_files success → satisfied', () => {
+    const r = classifyToolResult('search_files', { search_term: 'TODO' }, {}, false);
+    assert.strictEqual(r.state, 'satisfied');
+  });
+
+  test('browser success → satisfied', () => {
+    const r = classifyToolResult('browser', { url: 'https://docs.go.dev' }, {}, false);
+    assert.strictEqual(r.state, 'satisfied');
+  });
+
+  test('target_file field used for file path (Codex)', () => {
+    const r = classifyToolResult('apply_diff', { target_file: '/src/main.rs' }, {}, false);
+    assert.strictEqual(r.detail, 'saved main.rs');
+  });
+
+  test('cmd field used for command (generic)', () => {
+    const r = toolToState('shell', { cmd: 'npm test' });
+    assert.strictEqual(r.state, 'testing');
   });
 });
 

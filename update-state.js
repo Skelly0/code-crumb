@@ -3,9 +3,11 @@
 
 // +================================================================+
 // |  Claude Face Hook -- writes state for the face renderer         |
-// |  Called by Claude Code hooks via stdin JSON                     |
-// |  Usage: node update-state.js <event>                           |
-// |  Events: PreToolUse, PostToolUse, Stop, Notification           |
+// |  Called by editor hooks via stdin JSON                           |
+// |  Usage: node update-state.js <event>                            |
+// |  Events: PreToolUse, PostToolUse, Stop, Notification            |
+// |                                                                  |
+// |  Works with Claude Code, Codex CLI, and OpenCode                |
 // +================================================================+
 
 const fs = require('fs');
@@ -13,6 +15,7 @@ const path = require('path');
 const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename } = require('./shared');
 const {
   toolToState, classifyToolResult, updateStreak, defaultStats,
+  EDIT_TOOLS, SUBAGENT_TOOLS,
 } = require('./state-machine');
 
 // Event type passed as CLI argument (cross-platform -- no env var tricks)
@@ -123,9 +126,9 @@ process.stdin.on('end', () => {
       stats.session.toolCalls++;
       stats.totalToolCalls = (stats.totalToolCalls || 0) + 1;
 
-      // Track files edited
-      if (/^(edit|multiedit|write|str_replace|create_file)$/i.test(toolName)) {
-        const fp = toolInput?.file_path || toolInput?.path || '';
+      // Track files edited (multi-editor: Claude Code, Codex, OpenCode)
+      if (EDIT_TOOLS.test(toolName)) {
+        const fp = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
         const base = fp ? path.basename(fp) : '';
         if (base && !stats.session.filesEdited.includes(base)) {
           stats.session.filesEdited.push(base);
@@ -136,7 +139,7 @@ process.stdin.on('end', () => {
       }
 
       // Track subagents
-      if (/^(task|subagent)$/i.test(toolName)) {
+      if (SUBAGENT_TOOLS.test(toolName)) {
         stats.session.subagentCount++;
         if (stats.session.subagentCount > (stats.records.mostSubagents || 0)) {
           stats.records.mostSubagents = stats.session.subagentCount;
