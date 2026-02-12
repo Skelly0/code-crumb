@@ -5,27 +5,41 @@
 // |  Extracted for testability. No I/O, no side effects.            |
 // |                                                                  |
 // |  Handles:                                                        |
-// |    - Tool name → face state mapping                              |
+// |    - Tool name → face state mapping (multi-editor)              |
 // |    - Forensic error detection (50+ regex patterns)               |
 // |    - Post-tool result classification                             |
 // |    - Streak tracking and milestone detection                     |
+// |                                                                  |
+// |  Supported editors:                                              |
+// |    - Claude Code (edit, bash, grep, glob, read, task, etc.)     |
+// |    - OpenAI Codex CLI (shell, apply_diff, apply_patch, etc.)    |
+// |    - OpenCode (file_edit, terminal, search_files, etc.)         |
+// |    - OpenClaw/Pi (read, write, edit, bash, exec, process, etc.) |
 // +================================================================+
 
 const path = require('path');
 
 // -- Tool-to-State Mapping -------------------------------------------
 
+// Tool name patterns per category — covers Claude Code, Codex CLI, OpenCode, and OpenClaw/Pi
+const EDIT_TOOLS = /^(edit|multiedit|write|str_replace|create_file|file_edit|write_file|create_file_with_contents|apply_diff|apply_patch|code_edit|insert_text|replace_text|patch)$/i;
+const BASH_TOOLS = /^(bash|shell|terminal|execute|run_command|run|exec|process)$/i;
+const READ_TOOLS = /^(read|view|cat|file_read|read_file|get_file_contents|open_file)$/i;
+const SEARCH_TOOLS = /^(grep|glob|search|ripgrep|find|list|search_files|list_files|list_dir|find_files|file_search|codebase_search)$/i;
+const WEB_TOOLS = /^(web_search|web_fetch|fetch|webfetch|browser|browse|http_request|curl|canvas)$/i;
+const SUBAGENT_TOOLS = /^(task|subagent|spawn_agent|delegate|codex_agent|sessions)$/i;
+
 function toolToState(toolName, toolInput) {
   // Writing/editing code
-  if (/^(edit|multiedit|write|str_replace|create_file)$/i.test(toolName)) {
-    const filePath = toolInput?.file_path || toolInput?.path || '';
+  if (EDIT_TOOLS.test(toolName)) {
+    const filePath = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
     const shortPath = filePath ? path.basename(filePath) : '';
     return { state: 'coding', detail: shortPath ? `editing ${shortPath}` : 'writing code' };
   }
 
   // Running commands
-  if (/^bash$/i.test(toolName)) {
-    const cmd = toolInput?.command || '';
+  if (BASH_TOOLS.test(toolName)) {
+    const cmd = toolInput?.command || toolInput?.cmd || toolInput?.input || '';
     const shortCmd = cmd.length > 40 ? cmd.slice(0, 37) + '...' : cmd;
 
     // Detect test commands
@@ -43,28 +57,28 @@ function toolToState(toolName, toolInput) {
   }
 
   // Reading files
-  if (/^(read|view|cat)$/i.test(toolName)) {
-    const filePath = toolInput?.file_path || toolInput?.path || '';
+  if (READ_TOOLS.test(toolName)) {
+    const filePath = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
     const shortPath = filePath ? path.basename(filePath) : '';
     return { state: 'reading', detail: shortPath ? `reading ${shortPath}` : 'reading' };
   }
 
   // Searching
-  if (/^(grep|glob|search|ripgrep|find|list)$/i.test(toolName)) {
-    const pattern = toolInput?.pattern || toolInput?.query || '';
+  if (SEARCH_TOOLS.test(toolName)) {
+    const pattern = toolInput?.pattern || toolInput?.query || toolInput?.search_term || '';
     return { state: 'searching', detail: pattern ? `looking for "${pattern}"` : 'searching' };
   }
 
   // Web/fetch
-  if (/^(web_search|web_fetch|fetch|webfetch)$/i.test(toolName)) {
+  if (WEB_TOOLS.test(toolName)) {
     const query = toolInput?.query || toolInput?.url || '';
     const shortQuery = query.length > 30 ? query.slice(0, 27) + '...' : query;
     return { state: 'searching', detail: shortQuery ? `searching "${shortQuery}"` : 'searching the web' };
   }
 
   // Task/subagent
-  if (/^(task|subagent)$/i.test(toolName)) {
-    const desc = toolInput?.description || '';
+  if (SUBAGENT_TOOLS.test(toolName)) {
+    const desc = toolInput?.description || toolInput?.prompt || '';
     const shortDesc = desc.length > 30 ? desc.slice(0, 27) + '...' : desc;
     return { state: 'subagent', detail: shortDesc || 'spawning subagent' };
   }
@@ -196,13 +210,13 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
   } else if (looksLikeError(stderr, stderrErrorPatterns)) {
     state = 'error';
     detail = errorDetail(stdout, stderr);
-  } else if (/^bash$/i.test(toolName) && looksLikeError(stdout, stdoutErrorPatterns)) {
-    // Only check stdout patterns for Bash -- other tools have structured output
+  } else if (BASH_TOOLS.test(toolName) && looksLikeError(stdout, stdoutErrorPatterns)) {
+    // Only check stdout patterns for shell commands -- other tools have structured output
     state = 'error';
     detail = errorDetail(stdout, stderr);
-  } else if (/^(edit|multiedit|write|str_replace|create_file)$/i.test(toolName)) {
+  } else if (EDIT_TOOLS.test(toolName)) {
     state = 'proud';
-    const fp = toolInput?.file_path || toolInput?.path || '';
+    const fp = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
     detail = fp ? `saved ${path.basename(fp)}` : 'code written';
     // Calculate diff info for thought bubbles
     const oldStr = toolInput?.old_string || toolInput?.old_str || '';
@@ -212,20 +226,20 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
       const added = newStr ? newStr.split('\n').length : 0;
       diffInfo = { added, removed };
     }
-  } else if (/^(read|view|cat)$/i.test(toolName)) {
+  } else if (READ_TOOLS.test(toolName)) {
     state = 'satisfied';
-    const fp = toolInput?.file_path || toolInput?.path || '';
+    const fp = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
     detail = fp ? `read ${path.basename(fp)}` : 'got it';
-  } else if (/^(grep|glob|search|ripgrep|find|list)$/i.test(toolName)) {
+  } else if (SEARCH_TOOLS.test(toolName)) {
     state = 'satisfied';
-    const pattern = toolInput?.pattern || toolInput?.query || '';
+    const pattern = toolInput?.pattern || toolInput?.query || toolInput?.search_term || '';
     detail = pattern ? `found "${pattern.length > 20 ? pattern.slice(0, 17) + '...' : pattern}"` : 'got it';
-  } else if (/^(web_search|web_fetch|fetch|webfetch)$/i.test(toolName)) {
+  } else if (WEB_TOOLS.test(toolName)) {
     state = 'satisfied';
     detail = 'search complete';
-  } else if (/^bash$/i.test(toolName)) {
+  } else if (BASH_TOOLS.test(toolName)) {
     state = 'relieved';
-    const cmd = toolInput?.command || '';
+    const cmd = toolInput?.command || toolInput?.cmd || toolInput?.input || '';
     const isTest = /\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|spec)\b/i.test(cmd) ||
                    /\bnpm\s+(run\s+)?test\b/i.test(cmd);
     const isBuild = /\b(build|compile|tsc|webpack|vite|esbuild|rollup|make)\b/i.test(cmd);
@@ -294,6 +308,12 @@ function defaultStats() {
 
 module.exports = {
   toolToState,
+  EDIT_TOOLS,
+  BASH_TOOLS,
+  READ_TOOLS,
+  SEARCH_TOOLS,
+  WEB_TOOLS,
+  SUBAGENT_TOOLS,
   stdoutErrorPatterns,
   stderrErrorPatterns,
   falsePositives,

@@ -11,18 +11,29 @@
     "grid": "node renderer.js --grid",
     "launch": "node launch.js",
     "launch:grid": "node launch.js --grid",
+    "launch:codex": "node launch.js --editor codex",
+    "launch:opencode": "node launch.js --editor opencode",
+    "launch:openclaw": "node launch.js --editor openclaw",
     "demo": "node demo.js",
     "demo:grid": "node grid-demo.js",
     "setup": "node setup.js",
+    "setup:claude": "node setup.js claude",
+    "setup:codex": "node setup.js codex",
+    "setup:opencode": "node setup.js opencode",
+    "setup:openclaw": "node setup.js openclaw",
     "test": "node test.js"
   },
   "keywords": [
     "claude",
     "claude-code",
+    "codex",
+    "opencode",
+    "openclaw",
     "terminal",
     "ascii-art",
     "tamagotchi",
-    "hooks"
+    "hooks",
+    "plugin"
   ],
   "license": "MIT",
   "engines": {

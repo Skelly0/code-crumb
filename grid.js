@@ -31,6 +31,7 @@ class MiniFace {
     this.detail = '';
     this.label = '';
     this.cwd = '';
+    this.modelName = '';
     this.lastUpdate = Date.now();
     this.firstSeen = Date.now();
     this.stopped = false;
@@ -49,6 +50,7 @@ class MiniFace {
     this.detail = data.detail || '';
     this.lastUpdate = data.timestamp || Date.now();
     if (data.cwd) this.cwd = data.cwd;
+    if (data.modelName) this.modelName = data.modelName;
     if (data.stopped && !this.stopped) {
       this.stopped = true;
       this.stoppedAt = Date.now();
@@ -284,7 +286,7 @@ class FaceGrid {
       const base = face.cwd ? path.basename(face.cwd) : '';
 
       if (sorted.length === 1) {
-        face.label = base ? base.slice(0, 8) : 'claude';
+        face.label = base ? base.slice(0, 8) : (face.modelName || 'claude').slice(0, 8);
       } else if (base && cwdCounts[base] === 1) {
         face.label = base.slice(0, 8);
       } else {
@@ -343,7 +345,7 @@ class FaceGrid {
         '\u2502 \u25e1\u25e1\u25e1  \u2502',
         '\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u256f',
         '',
-        'waiting for claude...',
+        `waiting for ${process.env.CLAUDE_FACE_MODEL || 'claude'}...`,
       ];
       const maxLen = Math.max(...lines.map(l => l.length));
       const baseRow = Math.max(1, Math.floor((rows - lines.length) / 2));

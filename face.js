@@ -100,6 +100,9 @@ class ClaudeFace {
 
     // Accessories
     this.accessoriesEnabled = true;
+
+    // Model name (shown in status line: "{name} is thinking")
+    this.modelName = process.env.CLAUDE_FACE_MODEL || 'claude';
   }
 
   _nextBlink() {
@@ -175,6 +178,7 @@ class ClaudeFace {
   }
 
   setStats(data) {
+    if (data.modelName) this.modelName = data.modelName;
     this.toolCallCount = data.toolCalls || 0;
     this.filesEditedCount = data.filesEdited || 0;
     this.sessionStart = data.sessionStart || 0;
@@ -671,7 +675,7 @@ class ClaudeFace {
 
     // Status line
     const emoji = theme.emoji;
-    const statusText = `${emoji}  claude is ${theme.status}  ${emoji}`;
+    const statusText = `${emoji}  ${this.modelName} is ${theme.status}  ${emoji}`;
     const statusPad = Math.floor((faceW - statusText.length) / 2);
     buf += ansi.to(startRow + 9, startCol);
     buf += `${ansi.fg(...theme.label)}${' '.repeat(Math.max(0, statusPad))}${statusText}${r}`;

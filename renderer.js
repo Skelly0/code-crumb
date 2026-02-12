@@ -50,6 +50,7 @@ function readState() {
       state: data.state || 'idle',
       detail: data.detail || '',
       timestamp: data.timestamp || 0,
+      modelName: data.modelName || '',
       toolCalls: data.toolCalls || 0,
       filesEdited: data.filesEdited || 0,
       sessionStart: data.sessionStart || 0,

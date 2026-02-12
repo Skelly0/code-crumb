@@ -4,11 +4,13 @@
 // +================================================================+
 // |  Claude Face Launcher                                           |
 // |  Starts the face renderer (if not running) then launches        |
-// |  Claude Code, passing through all arguments.                    |
+// |  the specified editor, passing through all arguments.           |
 // |                                                                 |
 // |  Usage:                                                         |
-// |    node launch.js                        (single face)          |
+// |    node launch.js                        (single face + claude) |
 // |    node launch.js --grid                 (multi-face grid)      |
+// |    node launch.js --editor codex "fix bug" (use codex wrapper)  |
+// |    node launch.js --editor claude -p "fix the bug"              |
 // |    node launch.js --dangerously-skip-permissions                |
 // |    node launch.js --grid -p "fix the bug"                       |
 // |                                                                 |
@@ -25,10 +27,21 @@ const HOME = process.env.USERPROFILE || process.env.HOME || '/tmp';
 const SINGLE_PID = path.join(HOME, '.claude-face.pid');
 const GRID_PID = path.join(HOME, '.claude-face-grid.pid');
 
-// Parse our own flags (consumed here, not passed to claude)
+// Parse our own flags (consumed here, not passed to the editor)
 const rawArgs = process.argv.slice(2);
 const gridMode = rawArgs.includes('--grid');
-const claudeArgs = rawArgs.filter(a => a !== '--grid');
+
+// Parse --editor flag
+let editorName = 'claude';
+const editorIdx = rawArgs.indexOf('--editor');
+if (editorIdx !== -1 && rawArgs[editorIdx + 1]) {
+  editorName = rawArgs[editorIdx + 1].toLowerCase();
+}
+
+// Remove our consumed flags, pass the rest to the editor
+const editorArgs = rawArgs.filter((a, i) =>
+  a !== '--grid' && a !== '--editor' && (editorIdx === -1 || i !== editorIdx + 1)
+);
 
 const pidFile = gridMode ? GRID_PID : SINGLE_PID;
 const rendererPath = path.resolve(__dirname, 'renderer.js');
@@ -107,17 +120,50 @@ if (!isRendererRunning()) {
   while (Date.now() - start < 500) { /* spin */ }
 }
 
-// Pass remaining arguments through to claude
-const claude = spawn('claude', claudeArgs, {
+// Resolve editor command and args
+let editorCmd, editorCmdArgs;
+
+switch (editorName) {
+  case 'codex':
+  case 'openai': {
+    // Use the Codex wrapper for rich tool-level events
+    const wrapperPath = path.resolve(__dirname, 'adapters', 'codex-wrapper.js');
+    editorCmd = 'node';
+    editorCmdArgs = [wrapperPath, ...editorArgs];
+    break;
+  }
+  case 'opencode': {
+    editorCmd = 'opencode';
+    editorCmdArgs = editorArgs;
+    break;
+  }
+  case 'openclaw':
+  case 'claw':
+  case 'pi': {
+    editorCmd = 'openclaw';
+    editorCmdArgs = editorArgs;
+    break;
+  }
+  case 'claude':
+  case 'claude-code':
+  default: {
+    editorCmd = 'claude';
+    editorCmdArgs = editorArgs;
+    break;
+  }
+}
+
+// Pass remaining arguments through to the editor
+const child = spawn(editorCmd, editorCmdArgs, {
   stdio: 'inherit',
   shell: true,
 });
 
-claude.on('error', (err) => {
-  console.error('Failed to start claude:', err.message);
+child.on('error', (err) => {
+  console.error(`Failed to start ${editorName}:`, err.message);
   process.exit(1);
 });
 
-claude.on('exit', (code) => {
+child.on('exit', (code) => {
   process.exit(code || 0);
 });
