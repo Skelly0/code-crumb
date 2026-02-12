@@ -23,6 +23,10 @@ const CAFFEINE_WINDOW = 10000;
 const CAFFEINE_THRESHOLD = 5;
 const MIN_COLS_SINGLE = 38;
 const MIN_ROWS_SINGLE = 20;
+const PET_SPAM_WINDOW = 2000;      // 2s window to detect rapid petting
+const PET_SPAM_THRESHOLD = 8;      // pets in window to trigger easter egg
+const PET_SPAM_DURATION = 45;      // ~3s at 15fps
+const PET_SPAM_THOUGHTS = ['!!!!!!', 'so much love!', ':D :D :D', 'best day ever', 'hehehehe'];
 
 // -- ClaudeFace ----------------------------------------------------
 class ClaudeFace {
@@ -79,6 +83,9 @@ class ClaudeFace {
     this.showHelp = false;
     this.petTimer = 0;
     this.petWiggle = 0;
+    this.petTimes = [];
+    this.petSpamActive = false;
+    this.petSpamTimer = 0;
   }
 
   _nextBlink() {
@@ -184,6 +191,10 @@ class ClaudeFace {
   }
 
   _updateThought() {
+    if (this.petSpamActive) {
+      this.thoughtText = PET_SPAM_THOUGHTS[this.thoughtIndex % PET_SPAM_THOUGHTS.length];
+      return;
+    }
     if (this.state === 'sleeping') {
       this.thoughtText = '';
     } else if (this.state === 'idle') {
@@ -240,8 +251,22 @@ class ClaudeFace {
   // -- Interactive methods --------------------------------------------
 
   pet() {
-    this.particles.spawn(15, 'sparkle');
-    this.petTimer = 22; // ~1.5s at 15fps
+    const now = Date.now();
+    this.petTimes.push(now);
+    this.petTimes = this.petTimes.filter(t => now - t < PET_SPAM_WINDOW);
+
+    if (this.petTimes.length >= PET_SPAM_THRESHOLD) {
+      // Easter egg: pet spam detected!
+      this.petSpamActive = true;
+      this.petSpamTimer = PET_SPAM_DURATION;
+      this.particles.spawn(30, 'heart');
+      this.petTimer = PET_SPAM_DURATION;
+      this.thoughtIndex++;
+      this._updateThought();
+    } else {
+      this.particles.spawn(15, 'sparkle');
+      this.petTimer = 22; // ~1.5s at 15fps
+    }
   }
 
   cycleTheme() {
@@ -405,9 +430,19 @@ class ClaudeFace {
     // Pet wiggle decay
     if (this.petTimer > 0) {
       this.petTimer--;
-      this.petWiggle = (this.petTimer % 2 === 0) ? 1 : -1;
+      const amp = this.petSpamActive ? 2 : 1;
+      this.petWiggle = (this.petTimer % 2 === 0) ? amp : -amp;
     } else {
       this.petWiggle = 0;
+    }
+
+    // Pet spam decay & continuous hearts
+    if (this.petSpamTimer > 0) {
+      this.petSpamTimer--;
+      if (this.frame % 3 === 0) this.particles.spawn(2, 'heart');
+    } else if (this.petSpamActive) {
+      this.petSpamActive = false;
+      this._updateThought();
     }
 
     this.particles.update();
