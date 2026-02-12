@@ -795,7 +795,7 @@ class ClaudeFace {
     {
       const dc = `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.4))}`;
       const accText = this.accessoriesEnabled ? '\u25cf accs' : '\u25cb accs';
-      buf += ansi.to(startRow + 8, startCol + 5) + `${dc}${accText}${r}`;
+      buf += ansi.to(startRow + 8, startCol) + `${dc}${accText}${r}`;
       if (this.paletteIndex > 0) {
         const pName = PALETTE_NAMES[this.paletteIndex] || '';
         buf += ansi.to(startRow + 8, startCol + faceW - pName.length);
