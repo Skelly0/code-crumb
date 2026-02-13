@@ -2499,9 +2499,9 @@ describe('accessories.js -- ACCESSORIES', () => {
     }
   });
 
-  test('all accessories have at most 3 lines', () => {
+  test('all accessories have at most 5 lines', () => {
     for (const [name, acc] of Object.entries(ACCESSORIES)) {
-      assert.ok(acc.lines.length <= 3, `${name} should have at most 3 lines (has ${acc.lines.length})`);
+      assert.ok(acc.lines.length <= 5, `${name} should have at most 5 lines (has ${acc.lines.length})`);
     }
   });
 

@@ -593,10 +593,10 @@ class ClaudeFace {
 
     const faceW = 30;
     const faceH = 10;
-    const totalH = faceH + 13; // face + status/detail + thought bubble above + streak/timeline/sparkline below
+    const totalH = faceH + 15; // face + status/detail + thought bubble above + accessories above + streak/timeline/sparkline below
 
     const startCol = Math.max(1, Math.floor((cols - faceW) / 2) + 1);
-    const startRow = Math.max(5, Math.floor((rows - totalH) / 2) + 4);
+    const startRow = Math.max(7, Math.floor((rows - totalH) / 2) + 4);
 
     const fc = ansi.fg(...borderColor);
     const ec = ansi.fg(...eyeColor);
