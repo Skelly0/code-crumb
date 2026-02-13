@@ -19,7 +19,7 @@
 // |    claude-face --grid --dangerously-skip-permissions             |
 // +================================================================+
 
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -64,13 +64,16 @@ function startRenderer() {
 
   if (platform === 'win32') {
     // Try Windows Terminal first, fall back to cmd start
-    try {
+    let hasWt = false;
+    try { execSync('where wt', { stdio: 'ignore' }); hasWt = true; } catch {}
+
+    if (hasWt) {
       spawn('wt', ['-w', '0', 'new-tab', '--title', windowTitle, 'node', ...rendererArgs], {
         detached: true,
         stdio: 'ignore',
         shell: true,
       }).unref();
-    } catch {
+    } else {
       spawn('cmd', ['/c', 'start', `"${windowTitle}"`, 'node', ...rendererArgs], {
         detached: true,
         stdio: 'ignore',
@@ -93,8 +96,8 @@ function startRenderer() {
     let launched = false;
     for (const [cmd, args] of terminals) {
       try {
-        const which = require('child_process').execSync(`which ${cmd} 2>/dev/null`);
-        if (which) {
+        execSync(`command -v ${cmd}`, { stdio: 'ignore' });
+        {
           spawn(cmd, args, { detached: true, stdio: 'ignore' }).unref();
           launched = true;
           break;

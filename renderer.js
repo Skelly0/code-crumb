@@ -137,7 +137,8 @@ function runSingleMode() {
     const dir = path.dirname(STATE_FILE);
     const basename = path.basename(STATE_FILE);
     fs.watch(dir, (eventType, filename) => {
-      if (filename === basename) checkState();
+      // filename can be null on some platforms (macOS with certain filesystems)
+      if (!filename || filename === basename) checkState();
     });
   } catch {}
 
