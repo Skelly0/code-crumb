@@ -254,12 +254,44 @@ The wrapper mode gives rich real-time reactions but only works with `codex exec`
 
 ### OpenCode
 
-Use the generic adapter (`adapters/opencode-adapter.js`) which accepts events via stdin JSON:
+OpenCode uses a plugin system. Create a plugin that pipes events to the adapter:
 
-```bash
-echo '{"event":"tool_start","tool":"file_edit","input":{"file_path":"src/app.ts"}}' | \
-  node adapters/opencode-adapter.js
+1. Create `~/.config/opencode/plugins/claude-face.js`:
+```js
+const { execSync } = require('child_process');
+const adapter = '/path/to/claude-face/adapters/opencode-adapter.js';
+
+function send(payload) {
+  try {
+    execSync(`node "${adapter}"`,
+      { input: JSON.stringify(payload), timeout: 200, stdio: ['pipe','ignore','ignore'] });
+  } catch {}
+}
+
+export const ClaudeFacePlugin = async (ctx) => {
+  return {
+    'tool.execute.before': async (input, output) => {
+      send({ type: 'tool.execute.before', input: { tool: input.tool, args: input.args } });
+    },
+    'tool.execute.after': async (input, output) => {
+      send({ type: 'tool.execute.after', input: { tool: input.tool, args: input.args }, output });
+    },
+    'session.idle': async (input, output) => {
+      send({ type: 'session.idle' });
+    },
+    'session.error': async (input, output) => {
+      send({ type: 'session.error', output: { error: input.error || 'Session error' } });
+    },
+  };
+};
 ```
+
+2. Add to `~/.config/opencode/opencode.json`:
+```json
+{ "plugins": ["./plugins/claude-face.js"] }
+```
+
+The adapter also accepts a generic format (`{"event":"tool_start",...}`) for backward compatibility.
 
 ## Files
 
@@ -268,10 +300,11 @@ echo '{"event":"tool_start","tool":"file_edit","input":{"file_path":"src/app.ts"
 | `renderer.js` | Unified renderer — single face (default) or grid (`--grid`) |
 | `update-state.js` | Hook script — maps tool events to face states |
 | `launch.js` | Auto-starts renderer and launches the editor with args |
-| `setup.js` | Installs hooks (`setup.js [claude\|codex\|opencode]`) |
+| `setup.js` | Installs hooks (`setup.js [claude|codex|opencode|openclaw]`) |
 | `adapters/codex-wrapper.js` | Wraps `codex exec --json` for rich tool-level events |
 | `adapters/codex-notify.js` | Handles Codex `notify` config events |
-| `adapters/opencode-adapter.js` | Generic adapter for OpenCode and other tools |
+| `adapters/opencode-adapter.js` | Adapter for OpenCode plugin events |
+| `adapters/openclaw-adapter.js` | Adapter for OpenClaw/Pi agent events |
 | `.claude-plugin/plugin.json` | Claude Code plugin manifest for marketplace |
 | `hooks/hooks.json` | Hook config for Claude Code plugin system |
 | `demo.js` | Cycles through all expressions (single face) |
