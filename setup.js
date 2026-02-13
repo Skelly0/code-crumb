@@ -237,28 +237,63 @@ function setupOpenCode() {
   console.log(`
   ${'─'.repeat(42)}
 
-  OpenCode integration uses the generic adapter.
-  Pipe events from OpenCode to the adapter via stdin:
+  OpenCode uses a plugin system to emit events. Create a plugin
+  that pipes events to the Claude Face adapter.
 
-    echo '{"event":"tool_start","tool":"file_edit","input":{"file_path":"src/app.ts"}}' | \\
-      node "${adapterPath}"
+  STEP 1: Create the plugin file
+  ${'─'.repeat(38)}
 
-  Event types:
-    tool_start  - Before a tool runs (maps to face activity states)
-    tool_end    - After a tool completes (maps to outcome states)
-    turn_end    - Session/turn finished (happy face)
-    error       - Something went wrong (error face)
-    waiting     - Needs user attention (waiting face)
+  Create: ~/.config/opencode/plugins/claude-face.js
 
-  The adapter accepts the same JSON fields as Claude Code
-  hooks (tool_name, tool_input, tool_response) plus generic
-  fields (tool, input, output, error) for flexibility.
+    const { execSync } = require('child_process');
+    const adapter = '${adapterPath}';
 
-  To start the renderer:
+    function send(payload) {
+      try {
+        execSync(\`node "\${adapter}"\`,
+          { input: JSON.stringify(payload), timeout: 200, stdio: ['pipe','ignore','ignore'] });
+      } catch {}
+    }
+
+    export const ClaudeFacePlugin = async ({ project, client, $, directory, worktree }) => {
+      return {
+        'tool.execute.before': async (input, output) => {
+          send({ type: 'tool.execute.before', input: { tool: input.tool, args: input.args } });
+        },
+        'tool.execute.after': async (input, output) => {
+          send({ type: 'tool.execute.after', input: { tool: input.tool, args: input.args }, output });
+        },
+        'session.idle': async (input, output) => {
+          send({ type: 'session.idle' });
+        },
+        'session.error': async (input, output) => {
+          send({ type: 'session.error', output: { error: input.error || 'Session error' } });
+        },
+      };
+    };
+
+  STEP 2: Load the plugin
+  ${'─'.repeat(38)}
+
+  Add to ~/.config/opencode/opencode.json:
+
+    {
+      "plugins": ["./plugins/claude-face.js"]
+    }
+
+  STEP 3: Run the renderer
+  ${'─'.repeat(38)}
+
+  Start the renderer before using OpenCode:
     node "${rendererPath}"
 
-  For integration help, see:
-    https://github.com/Skelly0/claude-face
+  Then use OpenCode normally -- the face will react to tools!
+
+  OpenCode events handled:
+    tool.execute.before → shows tool activity (reading/editing/running)
+    tool.execute.after  → shows outcome (happy/error/relieved)
+    session.idle        → shows happy face (all done)
+    session.error       → shows error face
 
   ${'─'.repeat(42)}
 `);

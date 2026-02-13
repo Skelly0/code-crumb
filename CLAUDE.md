@@ -47,7 +47,7 @@ claude-face.cmd  Windows batch wrapper for launch.js
 adapters/
   codex-wrapper.js   Wraps `codex exec --json` for rich tool-level face events
   codex-notify.js    Handles Codex CLI `notify` config events (turn-level)
-  opencode-adapter.js  Generic adapter for OpenCode and other tools (stdin JSON)
+  opencode-adapter.js  Adapter for OpenCode plugin events (stdin JSON)
   openclaw-adapter.js  Adapter for OpenClaw/Pi agent events (stdin JSON)
 .claude-plugin/
   plugin.json      Claude Code plugin manifest for marketplace distribution

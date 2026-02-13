@@ -4,33 +4,24 @@
 // +================================================================+
 // |  OpenCode Adapter -- bridges OpenCode events to Claude Face     |
 // |                                                                  |
-// |  OpenCode is a Go-based terminal AI coding tool. It doesn't     |
-// |  have a native hook system like Claude Code, but it can be      |
-// |  integrated via its config plugin system or by wrapping its     |
-// |  commands with this adapter.                                     |
+// |  OpenCode uses a plugin system that emits events like:         |
+// |    - tool.execute.before  (maps to tool_start state)           |
+// |    - tool.execute.after   (maps to tool_end state)             |
+// |    - session.idle         (maps to turn_end/happy)            |
+// |    - session.error        (maps to error state)                |
 // |                                                                  |
-// |  This adapter accepts events via stdin JSON in a generic format |
-// |  and translates them into Claude Face state file writes.        |
+// |  Usage (with OpenCode plugin):                                  |
+// |    Add a plugin that pipes events to this adapter via stdin.   |
 // |                                                                  |
-// |  Usage (standalone):                                             |
-// |    echo '{"event":"tool_start","tool":"file_edit",...}' |       |
-// |      node adapters/opencode-adapter.js                           |
-// |                                                                  |
-// |  Usage (with OpenCode key bindings or custom hooks):             |
-// |    Configure OpenCode to pipe events to this script.            |
-// |                                                                  |
-// |  Generic Event Schema:                                           |
+// |  Event Schema from OpenCode plugins:                            |
 // |    {                                                             |
-// |      "event": "tool_start"|"tool_end"|"turn_end"|"error",      |
-// |      "tool": "file_edit"|"terminal"|"search_files"|...,         |
-// |      "input": { ... },                                           |
-// |      "output": "...",                                            |
-// |      "error": false,                                             |
-// |      "session_id": "..."                                         |
+// |      "type": "tool.execute.before"|"tool.execute.after"|...    |
+// |      "input": { "tool": "...", "args": {...} },                |
+// |      "output": {...}                                            |
 // |    }                                                             |
 // |                                                                  |
-// |  This same schema works for ANY editor that wants to integrate  |
-// |  with Claude Face -- it's the universal adapter format.          |
+// |  Also supports generic format for compatibility:               |
+// |    { "event": "tool_start"|"tool_end"|"turn_end"|"error", ... } |
 // +================================================================+
 
 const fs = require('fs');
@@ -77,11 +68,21 @@ process.stdin.on('data', chunk => { input += chunk; });
 process.stdin.on('end', () => {
   try {
     const data = JSON.parse(input);
-    const event = data.event || '';
-    const toolName = data.tool || data.tool_name || '';
-    const toolInput = data.input || data.tool_input || {};
-    const toolOutput = data.output || '';
-    const isError = data.error || data.is_error || false;
+    
+    // OpenCode uses "type" for event name, generic uses "event"
+    const event = data.type || data.event || '';
+    
+    // OpenCode: input.tool, input.args; Generic: tool, tool_input
+    const opencodeInput = data.input || {};
+    const toolName = opencodeInput.tool || data.tool || data.tool_name || '';
+    const toolArgs = opencodeInput.args || {};
+    const toolInput = data.input || data.tool_input || toolArgs;
+    const toolOutput = data.output?.content?.[0]?.text 
+      || data.output?.output 
+      || data.output 
+      || '';
+    const isError = data.output?.error || data.error || data.is_error || false;
+    
     const sessionId = data.session_id
       || process.env.CLAUDE_SESSION_ID
       || String(process.ppid);
@@ -122,7 +123,15 @@ process.stdin.on('end', () => {
     let detail = '';
     let stopped = false;
 
-    if (event === 'tool_start' || event === 'PreToolUse') {
+    // Map OpenCode event types to internal event names
+    const mappedEvent = 
+      event === 'tool.execute.before' ? 'tool_start' :
+      event === 'tool.execute.after' ? 'tool_end' :
+      event === 'session.idle' ? 'turn_end' :
+      event === 'session.error' ? 'error' :
+      event;
+
+    if (mappedEvent === 'tool_start' || mappedEvent === 'PreToolUse') {
       ({ state, detail } = toolToState(toolName, toolInput));
       stats.session.toolCalls++;
       stats.totalToolCalls = (stats.totalToolCalls || 0) + 1;
@@ -137,25 +146,25 @@ process.stdin.on('end', () => {
       }
       if (SUBAGENT_TOOLS.test(toolName)) stats.session.subagentCount++;
     }
-    else if (event === 'tool_end' || event === 'PostToolUse') {
-      const toolResponse = { stdout: toolOutput, stderr: data.stderr || '', isError };
+    else if (mappedEvent === 'tool_end' || mappedEvent === 'PostToolUse') {
+      const toolResponse = { stdout: toolOutput, stderr: data.output?.error || '', isError };
       const result = classifyToolResult(toolName, toolInput, toolResponse, isError);
       state = result.state;
       detail = result.detail;
       extra.diffInfo = result.diffInfo;
       updateStreak(stats, state === 'error');
     }
-    else if (event === 'turn_end' || event === 'Stop' || event === 'session_end') {
+    else if (mappedEvent === 'turn_end' || mappedEvent === 'Stop' || mappedEvent === 'session_end') {
       state = 'happy';
       detail = 'all done!';
       stopped = true;
     }
-    else if (event === 'error') {
+    else if (mappedEvent === 'error') {
       state = 'error';
-      detail = data.message || 'something went wrong';
+      detail = data.output?.error || data.message || 'something went wrong';
       updateStreak(stats, true);
     }
-    else if (event === 'waiting' || event === 'Notification') {
+    else if (mappedEvent === 'waiting' || mappedEvent === 'Notification') {
       state = 'waiting';
       detail = 'needs attention';
     }
