@@ -197,7 +197,7 @@ const codex = spawn('codex', ['exec', '--json', ...args], {
 let buffer = '';
 codex.stdout.on('data', (chunk) => {
   buffer += chunk.toString();
-  const lines = buffer.split('\n');
+  const lines = buffer.split(/\r?\n/);
   buffer = lines.pop(); // Keep incomplete line in buffer
   for (const line of lines) {
     if (!line.trim()) continue;

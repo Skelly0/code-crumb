@@ -16,7 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const HOME = process.env.USERPROFILE || process.env.HOME;
+const HOME = process.env.USERPROFILE || process.env.HOME || '/tmp';
 const HOOK_SCRIPT = path.resolve(__dirname, 'update-state.js');
 
 // Normalise to forward slashes -- works in Node on all platforms
@@ -295,8 +295,8 @@ function setupOpenClaw() {
 
       function send(payload) {
         try {
-          execSync(\`echo '\${JSON.stringify(payload)}' | node "\${adapter}"\`,
-            { timeout: 2000, stdio: 'ignore' });
+          execSync(\`node "\${adapter}"\`,
+            { input: JSON.stringify(payload), timeout: 2000, stdio: ['pipe','ignore','ignore'] });
         } catch {}
       }
 
