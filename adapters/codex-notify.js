@@ -2,17 +2,17 @@
 'use strict';
 
 // +================================================================+
-// |  Codex Notify Handler -- receives Codex `notify` events         |
+// |  Codex Notify Handler -- receives Codex `notify` events           |
 // |                                                                  |
-// |  Codex fires its `notify` program with a single JSON argument   |
-// |  containing turn-level data. This handler writes Claude Face    |
+// |  Codex fires its `notify` program with a single JSON argument    |
+// |  containing turn-level data. This handler writes Code Crumb     |
 // |  state files based on that data.                                |
 // |                                                                  |
 // |  Setup in ~/.codex/config.toml:                                 |
 // |    notify = ["node", "/path/to/adapters/codex-notify.js"]       |
 // |                                                                  |
-// |  Limitation: Codex only fires `agent-turn-complete` events,     |
-// |  so this handler can only show turn completions -- not          |
+// |  Limitation: Codex only fires `agent-turn-complete` events,      |
+// |  so this handler can only show turn completions -- not           |
 // |  individual tool calls. For richer output, use codex-wrapper.js |
 // +================================================================+
 
@@ -48,7 +48,7 @@ try {
   const event = JSON.parse(jsonArg);
   const eventType = event.type || '';
   const sessionId = event['thread-id'] || `codex-${process.ppid}`;
-  const modelName = process.env.CLAUDE_FACE_MODEL || 'codex';
+  const modelName = process.env.CODE_CRUMB_MODEL || 'codex';
 
   if (eventType === 'agent-turn-complete') {
     // Extract info from the turn data

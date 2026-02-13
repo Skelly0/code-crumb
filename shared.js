@@ -11,10 +11,10 @@ const path = require('path');
 // -- Paths -----------------------------------------------------------
 
 const HOME = process.env.USERPROFILE || process.env.HOME || '/tmp';
-const STATE_FILE = process.env.CLAUDE_FACE_STATE || path.join(HOME, '.claude-face-state');
-const SESSIONS_DIR = path.join(HOME, '.claude-face-sessions');
-const STATS_FILE = path.join(HOME, '.claude-face-stats.json');
-const PREFS_FILE = path.join(HOME, '.claude-face-prefs.json');
+const STATE_FILE = process.env.CODE_CRUMB_STATE || path.join(HOME, '.code-crumb-state');
+const SESSIONS_DIR = path.join(HOME, '.code-crumb-sessions');
+const STATS_FILE = path.join(HOME, '.code-crumb-stats.json');
+const PREFS_FILE = path.join(HOME, '.code-crumb-prefs.json');
 
 // -- Utilities -------------------------------------------------------
 

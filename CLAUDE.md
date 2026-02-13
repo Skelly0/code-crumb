@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Claude Face is a zero-dependency terminal tamagotchi that visualizes what AI coding assistants are doing in real-time. It renders an animated ASCII face that reacts to lifecycle events (thinking, coding, reading, executing, errors, etc.) via hooks, adapters, and file-based IPC. Supports **Claude Code**, **OpenAI Codex CLI**, **OpenCode**, **OpenClaw/Pi**, and any tool that can pipe JSON events.
+Code Crumb is a zero-dependency terminal tamagotchi that visualizes what AI coding assistants are doing in real-time. It renders an animated ASCII face that reacts to lifecycle events (thinking, coding, reading, executing, errors, etc.) via hooks, adapters, and file-based IPC. Supports **Claude Code**, **OpenAI Codex CLI**, **OpenCode**, **OpenClaw/Pi**, and any tool that can pipe JSON events.
 
 ### Interactive Keybindings
 
@@ -16,7 +16,7 @@ Claude Face is a zero-dependency terminal tamagotchi that visualizes what AI cod
 
 ### Color Palettes
 
-5 palettes: **default** (original colors), **neon** (high saturation cyans/magentas/limes), **pastel** (soft pinks/lavenders/mints), **mono** (greyscale), **sunset** (warm oranges/reds/golds/purples). Press `t` to cycle. Grid mode supports theme cycling and help but not pet or stats toggle. All togglable preferences (theme, accessories, stats) persist between sessions via `~/.claude-face-prefs.json`. Accessories state is shown as `● accs` (on) or `○ accs` (off) below the face box.
+5 palettes: **default** (original colors), **neon** (high saturation cyans/magentas/limes), **pastel** (soft pinks/lavenders/mints), **mono** (greyscale), **sunset** (warm oranges/reds/golds/purples). Press `t` to cycle. Grid mode supports theme cycling and help but not pet or stats toggle. All togglable preferences (theme, accessories, stats) persist between sessions via `~/.code-crumb-prefs.json`. Accessories state is shown as `● accs` (on) or `○ accs` (off) below the face box.
 
 ## Tech Stack
 
@@ -32,7 +32,7 @@ renderer.js      Entry point — runtime loops, PID guard, state polling, re-exp
 themes.js        ANSI codes, color math, theme definitions, thought bubble data
 animations.js    Eye and mouth animation functions (full-size and grid)
 particles.js     ParticleSystem class — 10 visual effect styles
-face.js          ClaudeFace class — single face mode state machine and rendering
+face.js          CodeCrumb class — single face mode state machine and rendering
 grid.js          MiniFace + FaceGrid classes — multi-session grid mode
 update-state.js  Hook handler — receives editor events via stdin, writes state files
 state-machine.js Pure logic — tool→state mapping (multi-editor), error detection, streaks
@@ -42,8 +42,8 @@ setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|o
 test.js          Test suite — ~369 tests covering all critical paths (node test.js)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Demo script — simulates 4 concurrent sessions in grid mode
-claude-face.sh   Unix shell wrapper for launch.js
-claude-face.cmd  Windows batch wrapper for launch.js
+code-crumb.sh   Unix shell wrapper for launch.js
+code-crumb.cmd  Windows batch wrapper for launch.js
 adapters/
   codex-wrapper.js   Wraps `codex exec --json` for rich tool-level face events
   codex-notify.js    Handles Codex CLI `notify` config events (turn-level)
@@ -67,11 +67,11 @@ Editor Event (Claude Code / Codex / OpenCode / OpenClaw) → update-state.js or 
 
 State is communicated between the hook handler and renderer via JSON files:
 
-- `~/.claude-face-state` — single-mode state (written by update-state.js, watched by renderer.js)
-- `~/.claude-face-sessions/{session_id}.json` — per-session state for grid mode
-- `~/.claude-face-stats.json` — persistent stats (streaks, records, session counters)
-- `~/.claude-face-prefs.json` — persisted user preferences (theme, accessories, stats toggle)
-- `~/.claude-face.pid` / `~/.claude-face-grid.pid` — renderer process liveness tracking
+- `~/.code-crumb-state` — single-mode state (written by update-state.js, watched by renderer.js)
+- `~/.code-crumb-sessions/{session_id}.json` — per-session state for grid mode
+- `~/.code-crumb-stats.json` — persistent stats (streaks, records, session counters)
+- `~/.code-crumb-prefs.json` — persisted user preferences (theme, accessories, stats toggle)
+- `~/.code-crumb.pid` / `~/.code-crumb-grid.pid` — renderer process liveness tracking
 
 ### State Machine
 
@@ -132,9 +132,9 @@ To develop: run `npm run demo` in one terminal and `npm start` in another.
 
 ## Environment Variables
 
-- `CLAUDE_FACE_STATE` — override the single-mode state file path (default: `~/.claude-face-state`)
+- `CODE_CRUMB_STATE` — override the single-mode state file path (default: `~/.code-crumb-state`)
 - `CLAUDE_SESSION_ID` — set the session identifier (default: parent PID)
-- `CLAUDE_FACE_MODEL` — override the display name in the status line (default: `claude`; adapters default to `codex`/`opencode`/`openclaw`)
+- `CODE_CRUMB_MODEL` — override the display name in the status line (default: `claude`; adapters default to `codex`/`opencode`/`openclaw`)
 
 ## Testing
 

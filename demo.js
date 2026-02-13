@@ -2,7 +2,7 @@
 'use strict';
 
 // +================================================================+
-// |  Claude Face Demo -- cycles through all states                  |
+// |  Code Crumb Demo -- cycles through all states                     |
 // |  Run this to preview all the face expressions!                  |
 // |  Now includes thought bubbles, streaks, and timeline demo       |
 // +================================================================+
@@ -47,7 +47,7 @@ const states = [
   { state: 'idle',      detail: '',                     duration: 2000, label: 'Back to idle -- the cycle of life' },
 ];
 
-console.log('\n  Claude Face Demo');
+console.log('\n  Code Crumb Demo');
 console.log('  ' + '='.repeat(40));
 console.log('  Make sure the renderer is running in another terminal!');
 console.log('  (node renderer.js)\n');

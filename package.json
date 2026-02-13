@@ -1,10 +1,10 @@
 {
-  "name": "claude-face",
+  "name": "code-crumb",
   "version": "1.1.0",
-  "description": "A terminal tamagotchi that shows what Claude Code is doing",
+  "description": "A terminal tamagotchi that shows what AI coding assistants are doing",
   "main": "renderer.js",
   "bin": {
-    "claude-face": "./launch.js"
+    "code-crumb": "./launch.js"
   },
   "scripts": {
     "start": "node renderer.js",
@@ -24,8 +24,6 @@
     "test": "node test.js"
   },
   "keywords": [
-    "claude",
-    "claude-code",
     "codex",
     "opencode",
     "openclaw",
@@ -33,7 +31,8 @@
     "ascii-art",
     "tamagotchi",
     "hooks",
-    "plugin"
+    "plugin",
+    "ai-assistant"
   ],
   "license": "MIT",
   "engines": {
@@ -41,6 +40,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Skelly0/claude-face.git"
+    "url": "https://github.com/Skelly0/code-crumb.git"
   }
 }

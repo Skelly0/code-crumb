@@ -2,17 +2,17 @@
 'use strict';
 
 // +================================================================+
-// |  Codex Wrapper -- bridges OpenAI Codex CLI to Claude Face       |
+// |  Codex Wrapper -- bridges OpenAI Codex CLI to Code Crumb           |
 // |                                                                  |
 // |  Wraps `codex exec --json` and translates JSONL events into     |
-// |  Claude Face state file writes. Only works in non-interactive   |
+// |  Code Crumb state file writes. Only works in non-interactive    |
 // |  (headless) mode since Codex lacks a hook system.               |
 // |                                                                  |
 // |  Usage:                                                          |
 // |    node adapters/codex-wrapper.js "your prompt here"            |
 // |    node adapters/codex-wrapper.js --approval auto "fix the bug" |
 // |                                                                  |
-// |  All flags before the last argument are passed to codex exec.   |
+// |  All flags before the last argument are passed to codex exec.    |
 // +================================================================+
 
 const { spawn } = require('child_process');
@@ -69,7 +69,7 @@ if (stats.session.id !== sessionId) {
 }
 
 // Model name: from env var or default to 'codex'
-const modelName = process.env.CLAUDE_FACE_MODEL || 'codex';
+const modelName = process.env.CODE_CRUMB_MODEL || 'codex';
 
 // Track active tool calls by item ID
 const activeTools = new Map();
@@ -182,7 +182,7 @@ function handleEvent(event) {
 const args = process.argv.slice(2);
 if (args.length === 0) {
   console.error('Usage: node codex-wrapper.js [codex-flags] "your prompt"');
-  console.error('  Wraps `codex exec --json` and shows Claude Face reactions.');
+  console.error('  Wraps `codex exec --json` and shows Code Crumb reactions.');
   process.exit(1);
 }
 

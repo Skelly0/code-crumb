@@ -345,7 +345,7 @@ class FaceGrid {
         '\u2502 \u25e1\u25e1\u25e1  \u2502',
         '\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u256f',
         '',
-        `waiting for ${process.env.CLAUDE_FACE_MODEL || 'claude'}...`,
+        `waiting for ${process.env.CODE_CRUMB_MODEL || 'claude'}...`,
       ];
       const maxLen = Math.max(...lines.map(l => l.length));
       const baseRow = Math.max(1, Math.floor((rows - lines.length) / 2));

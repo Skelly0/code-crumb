@@ -102,7 +102,7 @@ class ClaudeFace {
     this.accessoriesEnabled = true;
 
     // Model name (shown in status line: "{name} is thinking")
-    this.modelName = process.env.CLAUDE_FACE_MODEL || 'claude';
+    this.modelName = process.env.CODE_CRUMB_MODEL || 'claude';
   }
 
   _nextBlink() {
@@ -692,7 +692,12 @@ class ClaudeFace {
     }
 
     // Thought bubble (above face, right of center)
-    if (this.thoughtText && startRow >= 5) {
+    // Offset upward when accessories are present to avoid overlap
+    let bubbleOffset = 0;
+    if (this.accessoriesEnabled && getAccessory(this.state)) {
+      bubbleOffset = getAccessory(this.state).lines.length;
+    }
+    if (this.thoughtText && startRow >= 5 + bubbleOffset) {
       const txt = this.thoughtText;
       const bubbleInner = txt.length + 2;
       const bubbleLeft = startCol + Math.floor(faceW / 2);
@@ -700,13 +705,13 @@ class ClaudeFace {
       const tc = `${ansi.italic}${ansi.fg(...dimColor(theme.label, 0.7))}`;
 
       if (bubbleLeft + bubbleInner + 2 < cols) {
-        buf += ansi.to(startRow - 4, bubbleLeft);
+        buf += ansi.to(startRow - 4 - bubbleOffset, bubbleLeft);
         buf += `${bc}\u256d${'\u2500'.repeat(bubbleInner)}\u256e${r}`;
-        buf += ansi.to(startRow - 3, bubbleLeft);
+        buf += ansi.to(startRow - 3 - bubbleOffset, bubbleLeft);
         buf += `${bc}\u2502 ${tc}${txt}${r} ${bc}\u2502${r}`;
-        buf += ansi.to(startRow - 2, bubbleLeft);
+        buf += ansi.to(startRow - 2 - bubbleOffset, bubbleLeft);
         buf += `${bc}\u2570${'\u2500'.repeat(bubbleInner)}\u256f${r}`;
-        buf += ansi.to(startRow - 1, bubbleLeft + 2);
+        buf += ansi.to(startRow - 1 - bubbleOffset, bubbleLeft + 2);
         buf += `${bc}\u25cb${r}`;
       }
     }

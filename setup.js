@@ -2,7 +2,7 @@
 'use strict';
 
 // +================================================================+
-// |  Claude Face Setup -- configures hooks for supported editors     |
+// |  Code Crumb Setup -- configures hooks for supported editors         |
 // |  Works on Windows, macOS, and Linux                              |
 // |                                                                  |
 // |  Usage:                                                          |
@@ -71,7 +71,7 @@ function setupClaude() {
     ],
   };
 
-  console.log('\n  Claude Face Setup (Claude Code)');
+  console.log('\n  Code Crumb Setup (Claude Code)');
   console.log('  ' + '='.repeat(40) + '\n');
   console.log(`  Platform: ${process.platform}`);
   console.log(`  Home:     ${HOME}`);
@@ -129,10 +129,10 @@ function setupClaude() {
   const rendererPath = path.resolve(__dirname, 'renderer.js').replace(/\\/g, '/');
   const demoPath = path.resolve(__dirname, 'demo.js').replace(/\\/g, '/');
 
-  console.log(`
+console.log(`
   ${'─'.repeat(42)}
 
-  To use Claude Face:
+  To use Code Crumb:
 
   1. Open a terminal and run:
      node "${rendererPath}"
@@ -146,7 +146,7 @@ function setupClaude() {
   Plugin install (alternative to manual setup):
      claude plugin install --plugin-dir "${path.resolve(__dirname).replace(/\\/g, '/')}"
 
-  To uninstall, remove the claude-face hooks from:
+  To uninstall, remove the code-crumb hooks from:
      ${CLAUDE_SETTINGS}
 
   ${'─'.repeat(42)}
@@ -161,7 +161,7 @@ function setupCodex() {
   const wrapperPath = path.resolve(__dirname, 'adapters', 'codex-wrapper.js').replace(/\\/g, '/');
   const rendererPath = path.resolve(__dirname, 'renderer.js').replace(/\\/g, '/');
 
-  console.log('\n  Claude Face Setup (Codex CLI)');
+  console.log('\n  Code Crumb Setup (Codex CLI)');
   console.log('  ' + '='.repeat(40) + '\n');
   console.log(`  Platform: ${process.platform}`);
   console.log(`  Home:     ${HOME}`);
@@ -180,16 +180,16 @@ function setupCodex() {
 
   if (hasNotify) {
     // Check if our handler is already configured
-    if (configText.includes('codex-notify.js')) {
-      console.log('  [ok] Claude Face notify handler already configured');
+if (configText.includes('codex-notify.js')) {
+      console.log('  [ok] Code Crumb notify handler already configured');
     } else {
       console.log('\n  [!!] Codex already has a notify handler configured.');
-      console.log('  To add Claude Face, edit ~/.codex/config.toml:');
+      console.log('  To add Code Crumb, edit ~/.codex/config.toml:');
       console.log(`  notify = ["node", "${notifyPath}"]`);
     }
   } else {
     // Append notify config
-    const notifyLine = `\n# Claude Face integration\nnotify = ["node", "${notifyPath}"]\n`;
+    const notifyLine = `\n# Code Crumb integration\nnotify = ["node", "${notifyPath}"]\n`;
     const codexDir = path.dirname(CODEX_CONFIG);
     if (!fs.existsSync(codexDir)) {
       fs.mkdirSync(codexDir, { recursive: true });
@@ -228,7 +228,7 @@ function setupOpenCode() {
   const adapterPath = path.resolve(__dirname, 'adapters', 'opencode-adapter.js').replace(/\\/g, '/');
   const rendererPath = path.resolve(__dirname, 'renderer.js').replace(/\\/g, '/');
 
-  console.log('\n  Claude Face Setup (OpenCode)');
+  console.log('\n  Code Crumb Setup (OpenCode)');
   console.log('  ' + '='.repeat(40) + '\n');
   console.log(`  Platform: ${process.platform}`);
   console.log(`  Home:     ${HOME}`);
@@ -238,12 +238,12 @@ function setupOpenCode() {
   ${'─'.repeat(42)}
 
   OpenCode uses a plugin system to emit events. Create a plugin
-  that pipes events to the Claude Face adapter.
+  that pipes events to the Code Crumb adapter.
 
   STEP 1: Create the plugin file
   ${'─'.repeat(38)}
 
-  Create: ~/.config/opencode/plugins/claude-face.js
+  Create: ~/.config/opencode/plugins/code-crumb.js
 
     const { execSync } = require('child_process');
     const adapter = '${adapterPath}';
@@ -255,7 +255,7 @@ function setupOpenCode() {
       } catch {}
     }
 
-    export const ClaudeFacePlugin = async ({ project, client, $, directory, worktree }) => {
+    export const CodeCrumbPlugin = async ({ project, client, $, directory, worktree }) => {
       return {
         'tool.execute.before': async (input, output) => {
           send({ type: 'tool.execute.before', input: { tool: input.tool, args: input.args } });
@@ -278,7 +278,7 @@ function setupOpenCode() {
   Add to ~/.config/opencode/opencode.json:
 
     {
-      "plugins": ["./plugins/claude-face.js"]
+      "plugins": ["./plugins/code-crumb.js"]
     }
 
   STEP 3: Run the renderer
@@ -305,7 +305,7 @@ function setupOpenClaw() {
   const adapterPath = path.resolve(__dirname, 'adapters', 'openclaw-adapter.js').replace(/\\/g, '/');
   const rendererPath = path.resolve(__dirname, 'renderer.js').replace(/\\/g, '/');
 
-  console.log('\n  Claude Face Setup (OpenClaw / Pi)');
+  console.log('\n  Code Crumb Setup (OpenClaw / Pi)');
   console.log('  ' + '='.repeat(40) + '\n');
   console.log(`  Platform: ${process.platform}`);
   console.log(`  Home:     ${HOME}`);
@@ -323,7 +323,7 @@ function setupOpenClaw() {
   Create a Pi extension that pipes events to the adapter.
   Add this to your OpenClaw workspace or ~/.openclaw/extensions/:
 
-    // claude-face-extension.js
+    // code-crumb-extension.js
     module.exports = function(pi) {
       const { execSync } = require('child_process');
       const adapter = '${adapterPath}';

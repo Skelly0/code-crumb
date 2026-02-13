@@ -2,7 +2,7 @@
 'use strict';
 
 // +================================================================+
-// |  Claude Face Grid Demo                                          |
+// |  Code Crumb Grid Demo                                              |
 // |  Simulates multiple sessions with different states to           |
 // |  preview the grid renderer. Run grid-renderer.js first!         |
 // +================================================================+
@@ -101,7 +101,7 @@ const script = [
   },
 ];
 
-console.log('\n  Claude Face Grid Demo');
+console.log('\n  Code Crumb Grid Demo');
 console.log('  ' + '='.repeat(40));
 console.log('  Make sure renderer.js --grid is running!');
 console.log('  (node renderer.js --grid)\n');
