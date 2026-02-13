@@ -11,12 +11,14 @@ Code Crumb is a zero-dependency terminal tamagotchi that visualizes what AI codi
 | `space` | Pet the face (sparkle particles + wiggle) | single |
 | `t` | Cycle color palette (default/neon/pastel/mono/sunset) | both |
 | `s` | Toggle stats (streak, timeline, sparkline) | single |
+| `g` | Toggle surround mode (mini faces on sides) | single |
+| `a` | Toggle accessories | single |
 | `h` / `?` | Toggle help overlay | both |
 | `q` / Ctrl+C | Quit | both |
 
 ### Color Palettes
 
-5 palettes: **default** (original colors), **neon** (high saturation cyans/magentas/limes), **pastel** (soft pinks/lavenders/mints), **mono** (greyscale), **sunset** (warm oranges/reds/golds/purples). Press `t` to cycle. Grid mode supports theme cycling and help but not pet or stats toggle. All togglable preferences (theme, accessories, stats) persist between sessions via `~/.code-crumb-prefs.json`. Accessories state is shown as `● accs` (on) or `○ accs` (off) below the face box.
+5 palettes: **default** (original colors), **neon** (high saturation cyans/magentas/limes), **pastel** (soft pinks/lavenders/mints), **mono** (greyscale), **sunset** (warm oranges/reds/golds/purples). Press `t` to cycle. Grid mode supports theme cycling and help but not pet or stats toggle. Surround mode shows mini faces of other sessions on the sides of the main face. All togglable preferences (theme, accessories, stats, surround mode) persist between sessions via `~/.code-crumb-prefs.json`. Accessories state is shown as `● accs` (on) or `○ accs` (off) below the face box.
 
 ## Tech Stack
 
@@ -32,14 +34,14 @@ renderer.js      Entry point — runtime loops, PID guard, state polling, re-exp
 themes.js        ANSI codes, color math, theme definitions, thought bubble data
 animations.js    Eye and mouth animation functions (full-size and grid)
 particles.js     ParticleSystem class — 10 visual effect styles
-face.js          CodeCrumb class — single face mode state machine and rendering
+face.js          ClaudeFace + SurroundMiniFace classes — single face mode with surround option
 grid.js          MiniFace + FaceGrid classes — multi-session grid mode
 update-state.js  Hook handler — receives editor events via stdin, writes state files
 state-machine.js Pure logic — tool→state mapping (multi-editor), error detection, streaks
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
 setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode|openclaw])
-test.js          Test suite — ~369 tests covering all critical paths (node test.js)
+test.js          Test suite — ~387 tests covering all critical paths (node test.js)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Demo script — simulates 4 concurrent sessions in grid mode
 code-crumb.sh   Unix shell wrapper for launch.js
@@ -49,7 +51,7 @@ adapters/
   codex-notify.js    Handles Codex CLI `notify` config events (turn-level)
   opencode-adapter.js  Adapter for OpenCode plugin events (stdin JSON)
   openclaw-adapter.js  Adapter for OpenClaw/Pi agent events (stdin JSON)
-.claude-plugin/
+.claude-plugin/ 
   plugin.json      Claude Code plugin manifest for marketplace distribution
 hooks/
   hooks.json       Hook configuration for Claude Code plugin system
@@ -129,6 +131,8 @@ To develop: run `npm run demo` in one terminal and `npm start` in another.
 | `CAFFEINE_THRESHOLD` | 5 calls in 10s | face.js |
 | `STALE_MS` | 120000ms | grid.js (grid session timeout) |
 | `CELL_W` / `CELL_H` | 12 / 7 | grid.js (grid cell dimensions) |
+| `SURROUND_STALE_MS` | 120000ms | face.js (surround session timeout) |
+| `SURROUND_CELL_W` / `SURROUND_CELL_H` | 12 / 7 | face.js (surround cell dimensions) |
 
 ## Environment Variables
 
@@ -147,7 +151,7 @@ Run `npm test` (or `node test.js`). The test suite covers:
 - **themes.js**: `lerpColor`/`dimColor`/`breathe` color math, theme completeness (all 17 states), `COMPLETION_LINGER` ordering, thought bubble pools
 - **animations.js**: mouth/eye functions (shape and randomness)
 - **particles.js**: `ParticleSystem` (all 10 styles, lifecycle, fadeAll)
-- **face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline)
+- **face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline), `SurroundMiniFace` for surround mode, surround mode toggle, session loading, positioning logic
 - **grid.js**: `MiniFace` grid mode, `FaceGrid` lifecycle
 
 ### Visual Verification

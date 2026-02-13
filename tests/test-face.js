@@ -867,4 +867,178 @@ describe('face.js -- accessories indicator in render', () => {
   });
 });
 
+describe('face.js -- surround mode', () => {
+  test('surroundMode defaults to false', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.surroundMode, false);
+  });
+
+  test('surroundFaces is initialized as empty Map', () => {
+    const face = new ClaudeFace();
+    assert.ok(face.surroundFaces instanceof Map);
+    assert.strictEqual(face.surroundFaces.size, 0);
+  });
+
+  test('toggleSurroundMode flips the flag', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.surroundMode, false);
+    face.toggleSurroundMode();
+    assert.strictEqual(face.surroundMode, true);
+    face.toggleSurroundMode();
+    assert.strictEqual(face.surroundMode, false);
+  });
+
+  test('toggleSurroundMode triggers session load when enabling', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.surroundFaces.size, 0);
+    face.surroundMode = true;
+    face.loadSurroundSessions();
+    // Should not throw even if sessions dir doesn't exist
+    assert.ok(face.surroundFaces instanceof Map);
+  });
+
+  test('calculateSurroundPositions returns empty for no faces', () => {
+    const face = new ClaudeFace();
+    const positions = face.calculateSurroundPositions(80, 24, 30, 10, 8, 25);
+    assert.strictEqual(positions.length, 0);
+  });
+
+  test('calculateSurroundPositions respects terminal boundaries', () => {
+    const face = new ClaudeFace();
+    face.surroundFaces.set('test1', {
+      sessionId: 'test1',
+      state: 'idle',
+      firstSeen: Date.now(),
+      cwd: '',
+      label: 'test1',
+    });
+    const positions = face.calculateSurroundPositions(80, 24, 30, 10, 8, 25);
+    assert.strictEqual(positions.length, 1);
+    assert.ok(positions[0].row >= 1);
+    assert.ok(positions[0].row < 24);
+    assert.ok(positions[0].col >= 1);
+    assert.ok(positions[0].col < 80);
+  });
+
+  test('calculateSurroundPositions uses multiple columns when needed', () => {
+    const face = new ClaudeFace();
+    const now = Date.now();
+    for (let i = 0; i < 8; i++) {
+      face.surroundFaces.set(`test${i}`, {
+        sessionId: `test${i}`,
+        state: 'idle',
+        firstSeen: now + i,
+        cwd: '',
+        label: `test${i}`,
+      });
+    }
+    const positions = face.calculateSurroundPositions(80, 30, 30, 10, 8, 25);
+    assert.strictEqual(positions.length, 8);
+    // Check that faces are distributed across columns
+    const cols = positions.map(p => p.col);
+    const uniqueCols = [...new Set(cols)];
+    assert.ok(uniqueCols.length > 1, 'Should use multiple columns');
+  });
+
+  test('calculateSurroundPositions does not overflow into key hints area', () => {
+    const face = new ClaudeFace();
+    const now = Date.now();
+    for (let i = 0; i < 10; i++) {
+      face.surroundFaces.set(`test${i}`, {
+        sessionId: `test${i}`,
+        state: 'idle',
+        firstSeen: now + i,
+        cwd: '',
+        label: `test${i}`,
+      });
+    }
+    const positions = face.calculateSurroundPositions(80, 24, 30, 10, 8, 25);
+    // Key hints are at row 24 (last row), so faces should not extend there
+    for (const pos of positions) {
+      assert.ok(pos.row < 22, `Face at row ${pos.row} should be above key hints area`);
+    }
+  });
+});
+
+describe('face.js -- SurroundMiniFace', () => {
+  const { SurroundMiniFace } = require('../face');
+
+  test('SurroundMiniFace is exported', () => {
+    assert.ok(typeof SurroundMiniFace === 'function');
+  });
+
+  test('SurroundMiniFace constructor initializes correctly', () => {
+    const face = new SurroundMiniFace('test-id');
+    assert.strictEqual(face.sessionId, 'test-id');
+    assert.strictEqual(face.state, 'idle');
+    assert.strictEqual(face.label, '');
+    assert.ok(face.firstSeen > 0);
+  });
+
+  test('SurroundMiniFace updateFromFile changes state', () => {
+    const face = new SurroundMiniFace('test-id');
+    face.updateFromFile({ state: 'coding', detail: 'test.js' });
+    assert.strictEqual(face.state, 'coding');
+    assert.strictEqual(face.detail, 'test.js');
+  });
+
+  test('SurroundMiniFace updateFromFile tracks stopped', () => {
+    const face = new SurroundMiniFace('test-id');
+    assert.strictEqual(face.stopped, false);
+    face.updateFromFile({ stopped: true });
+    assert.strictEqual(face.stopped, true);
+    assert.ok(face.stoppedAt > 0);
+  });
+
+  test('SurroundMiniFace isStale returns false for fresh face', () => {
+    const face = new SurroundMiniFace('test-id');
+    assert.strictEqual(face.isStale(), false);
+  });
+
+  test('SurroundMiniFace isStale returns true for old stopped face', () => {
+    const face = new SurroundMiniFace('test-id');
+    face.stopped = true;
+    face.stoppedAt = Date.now() - 10000;
+    assert.strictEqual(face.isStale(), true);
+  });
+
+  test('SurroundMiniFace getEyes returns string for all states', () => {
+    const face = new SurroundMiniFace('test-id');
+    const states = ['idle', 'thinking', 'reading', 'searching', 'coding', 'executing', 'happy', 'error', 'sleeping', 'waiting', 'testing', 'installing', 'caffeinated', 'subagent', 'satisfied', 'proud', 'relieved'];
+    for (const state of states) {
+      face.state = state;
+      const eyes = face.getEyes();
+      assert.ok(typeof eyes === 'string', `getEyes should return string for state ${state}`);
+      assert.ok(eyes.length > 0, `getEyes should return non-empty string for state ${state}`);
+    }
+  });
+
+  test('SurroundMiniFace getMouth returns string for all states', () => {
+    const face = new SurroundMiniFace('test-id');
+    const states = ['idle', 'thinking', 'reading', 'searching', 'coding', 'executing', 'happy', 'error', 'sleeping', 'waiting', 'testing', 'installing', 'caffeinated', 'subagent', 'satisfied', 'proud', 'relieved'];
+    for (const state of states) {
+      face.state = state;
+      const mouth = face.getMouth();
+      assert.ok(typeof mouth === 'string', `getMouth should return string for state ${state}`);
+      assert.ok(mouth.length > 0, `getMouth should return non-empty string for state ${state}`);
+    }
+  });
+
+  test('SurroundMiniFace tick updates frame and time', () => {
+    const face = new SurroundMiniFace('test-id');
+    const initialFrame = face.frame;
+    face.tick(16);
+    assert.strictEqual(face.frame, initialFrame + 1);
+    assert.ok(face.time > 0);
+  });
+
+  test('SurroundMiniFace render returns string', () => {
+    const face = new SurroundMiniFace('test-id');
+    face.label = 'test';
+    const output = face.render(5, 10, 0, null);
+    assert.ok(typeof output === 'string');
+    assert.ok(output.length > 0);
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

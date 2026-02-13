@@ -12,9 +12,12 @@ const {
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
   PALETTES, PALETTE_NAMES,
 } = require('./themes');
-const { eyes, mouths } = require('./animations');
+const { eyes, mouths, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { getAccessory } = require('./accessories');
+const { SESSIONS_DIR, safeFilename } = require('./shared');
+const path = require('path');
+const fs = require('fs');
 
 // -- Config --------------------------------------------------------
 const BLINK_MIN = 2500;
@@ -35,6 +38,186 @@ const PET_SPAM_THOUGHTS = [
   ['ajksdh', '!!!?!?!', '\u2665\u2665\u2665\u2665\u2665', 'hfjkdsl', 'a;slkdfj', '?!?!?!?!'],
 ];
 const PET_AFTERGLOW_THOUGHTS = ['...', 'mmmm', 'purrrr', 'so warm', '\u25e1\u25e1\u25e1'];
+
+// -- Surround mode config --------------------------------------------
+const SURROUND_CELL_W = 12;
+const SURROUND_CELL_H = 7;
+const SURROUND_STALE_MS = 120000;
+const SURROUND_STOPPED_LINGER_MS = 5000;
+const BOX_W = 8;
+const BOX_INNER = 6;
+
+// -- SurroundMiniFace (mini face for surround mode) -----------------
+class SurroundMiniFace {
+  constructor(sessionId) {
+    this.sessionId = sessionId;
+    this.state = 'idle';
+    this.detail = '';
+    this.label = '';
+    this.cwd = '';
+    this.modelName = '';
+    this.lastUpdate = Date.now();
+    this.firstSeen = Date.now();
+    this.stopped = false;
+    this.stoppedAt = 0;
+    this.frame = 0;
+    this.time = 0;
+    this.blinkTimer = 2500 + Math.random() * 3500;
+    this.blinkFrame = -1;
+    this.lookDir = 0;
+    this.lookTimer = 0;
+  }
+
+  updateFromFile(data) {
+    const newState = data.state || 'idle';
+    if (newState !== this.state) this.state = newState;
+    this.detail = data.detail || '';
+    this.lastUpdate = data.timestamp || Date.now();
+    if (data.cwd) this.cwd = data.cwd;
+    if (data.modelName) this.modelName = data.modelName;
+    if (data.stopped && !this.stopped) {
+      this.stopped = true;
+      this.stoppedAt = Date.now();
+    }
+  }
+
+  isStale() {
+    if (this.stopped) return Date.now() - this.stoppedAt > SURROUND_STOPPED_LINGER_MS;
+    return Date.now() - this.lastUpdate > SURROUND_STALE_MS;
+  }
+
+  tick(dt) {
+    this.time += dt;
+    this.frame++;
+
+    this.blinkTimer -= dt;
+    if (this.blinkTimer <= 0) {
+      this.blinkFrame = 0;
+      this.blinkTimer = 2500 + Math.random() * 3500;
+    }
+    if (this.blinkFrame >= 0) {
+      this.blinkFrame++;
+      if (this.blinkFrame >= 3) this.blinkFrame = -1;
+    }
+
+    if (this.state === 'searching') {
+      this.lookTimer += dt;
+      if (this.lookTimer > 600) {
+        this.lookDir = [-1, 0, 1, 0][Math.floor(Math.random() * 4)];
+        this.lookTimer = 0;
+      }
+    }
+  }
+
+  getEyes() {
+    if (this.blinkFrame >= 0) return ' \u2584\u2584 \u2584\u2584';
+
+    switch (this.state) {
+      case 'idle':        return ' \u2588\u2588 \u2588\u2588';
+      case 'thinking': {
+        const p = Math.floor(this.frame / 4) % 4;
+        return [' \u25cf\u00b7 \u00b7\u25cf', ' \u00b7\u25cf \u25cf\u00b7', ' \u25cf\u00b7 \u25cf\u00b7', ' \u00b7\u25cf \u00b7\u25cf'][p];
+      }
+      case 'reading':     return ' \u2500\u2500 \u2500\u2500';
+      case 'searching':
+        if (this.lookDir < 0) return ' \u2588\u2588 \u2588\u00b7';
+        if (this.lookDir > 0) return ' \u00b7\u2588 \u2588\u2588';
+        return ' \u2588\u2588 \u2588\u2588';
+      case 'coding':      return ' \u2580\u2580 \u2580\u2580';
+      case 'executing':   return ' \u2588\u2588 \u2588\u2588';
+      case 'happy': {
+        const h = Math.floor(this.frame / 3) % 2;
+        return [' \u2726\u2727 \u2727\u2726', ' \u2727\u2726 \u2726\u2727'][h];
+      }
+      case 'error': {
+        if (Math.random() < 0.12) {
+          const g = ['\u2593\u2591', '\u2591\u2592', '\u2592\u2593', '\u2588\u2591'];
+          const i = Math.floor(Math.random() * g.length);
+          const j = (i + 2) % g.length;
+          return ` ${g[i]} ${g[j]}`;
+        }
+        return ' \u2572\u2571 \u2572\u2571';
+      }
+      case 'sleeping': {
+        if (this.frame % 150 > 145) return ' \u2584\u2584 \u2584\u2584';
+        return ' \u2500\u2500 \u2500\u2500';
+      }
+      case 'waiting': {
+        const drift = Math.floor(this.frame / 40) % 3;
+        if (drift === 1) return ' \u2584\u2588 \u2584\u2588';
+        return ' \u2584\u2584 \u2584\u2584';
+      }
+      case 'testing': {
+        if (this.frame % 25 < 2) return ' \u2580\u2588 \u2588\u2580';
+        return ' \u2588\u2588 \u2588\u2588';
+      }
+      case 'installing':  return ' \u2584\u2584 \u2584\u2584';
+      case 'caffeinated': {
+        const j = this.frame % 3;
+        if (j === 1) return '  \u2588\u2588\u2588 ';
+        if (j === 2) return ' \u2588 \u2588 \u2588';
+        return ' \u2588\u2588 \u2588\u2588';
+      }
+      case 'subagent':    return ' \u2588\u2588 \u2588\u2588';
+      case 'satisfied':   return ' \u2580\u2580 \u2580\u2580';
+      case 'proud':       return ' \u2584\u2584 \u2584\u2584';
+      case 'relieved':    return ' \u2588\u2588 \u2588\u2588';
+      default:            return ' \u2588\u2588 \u2588\u2588';
+    }
+  }
+
+  getMouth() {
+    if (this.state === 'error' && Math.random() < 0.08) {
+      return ['\u25e1\u25e0\u25e1', '\u25e0\u25e1\u25e0', '\u2500\u25e1\u2500'][Math.floor(Math.random() * 3)];
+    }
+    return gridMouths[this.state] || '\u25e1\u25e1\u25e1';
+  }
+
+  render(startRow, startCol, globalTime, paletteThemes) {
+    const themeMap = paletteThemes || themes;
+    const theme = themeMap[this.state] || themeMap.idle;
+    const breathSpeed = this.state === 'sleeping' ? 0.5
+      : this.state === 'caffeinated' ? 2.5 : 1;
+    const bc = breathe(theme.border, (globalTime + this.firstSeen % 2000) * breathSpeed);
+    const fc = ansi.fg(...bc);
+    const ec = ansi.fg(...theme.eye);
+    const mc = ansi.fg(...theme.mouth);
+    const lc = ansi.fg(...theme.label);
+    const dc = ansi.fg(...dimColor(theme.label, 0.55));
+    const r = ansi.reset;
+
+    const eyeStr = this.getEyes();
+    const mouthStr = this.getMouth();
+    const mPad = Math.floor((BOX_INNER - mouthStr.length) / 2);
+    const mRight = BOX_INNER - mPad - mouthStr.length;
+
+    let buf = '';
+
+    buf += ansi.to(startRow, startCol);
+    buf += `${fc}\u256d${'\u2500'.repeat(BOX_INNER)}\u256e${r}`;
+
+    buf += ansi.to(startRow + 1, startCol);
+    buf += `${fc}\u2502${ec}${eyeStr}${fc}\u2502${r}`;
+
+    buf += ansi.to(startRow + 2, startCol);
+    buf += `${fc}\u2502${' '.repeat(mPad)}${mc}${mouthStr}${r}${' '.repeat(Math.max(0, mRight))}${fc}\u2502${r}`;
+
+    buf += ansi.to(startRow + 3, startCol);
+    buf += `${fc}\u2570${'\u2500'.repeat(BOX_INNER)}\u256f${r}`;
+
+    const lbl = (this.label || '?').slice(0, BOX_W);
+    const lPad = Math.max(0, Math.floor((BOX_W - lbl.length) / 2));
+    buf += ansi.to(startRow + 4, startCol);
+    buf += `${lc}${' '.repeat(lPad)}${lbl}${r}`;
+
+    const st = (theme.status || '').slice(0, BOX_W);
+    const sPad = Math.max(0, Math.floor((BOX_W - st.length) / 2));
+    buf += ansi.to(startRow + 5, startCol);
+    buf += `${ansi.dim}${dc}${' '.repeat(sPad)}${st}${r}`;
+
+    return buf;
+  }
+}
 
 // -- ClaudeFace ----------------------------------------------------
 class ClaudeFace {
@@ -103,6 +286,10 @@ class ClaudeFace {
 
     // Model name (shown in status line: "{name} is thinking")
     this.modelName = process.env.CODE_CRUMB_MODEL || 'claude';
+
+    // Surround mode (mini faces on sides)
+    this.surroundMode = false;
+    this.surroundFaces = new Map();
   }
 
   _nextBlink() {
@@ -329,6 +516,149 @@ class ClaudeFace {
     this.accessoriesEnabled = !this.accessoriesEnabled;
   }
 
+  toggleSurroundMode() {
+    this.surroundMode = !this.surroundMode;
+    if (this.surroundMode) {
+      this.loadSurroundSessions();
+    }
+  }
+
+  loadSurroundSessions() {
+    // Get main session info to exclude it from surround faces
+    let mainModelName = null;
+    let mainCwd = null;
+    try {
+      const raw = fs.readFileSync(STATE_FILE, 'utf8').trim();
+      if (raw) {
+        const data = JSON.parse(raw);
+        mainModelName = data.modelName || null;
+        mainCwd = data.cwd || null;
+      }
+    } catch {}
+
+    let files;
+    try {
+      files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'));
+    } catch {
+      return;
+    }
+
+    const seenIds = new Set();
+
+    for (const file of files) {
+      try {
+        const raw = fs.readFileSync(path.join(SESSIONS_DIR, file), 'utf8').trim();
+        if (!raw) continue;
+        const data = JSON.parse(raw);
+        const id = data.session_id || path.basename(file, '.json');
+
+        // Skip the main session - match by modelName and cwd
+        if (mainModelName && data.modelName === mainModelName) {
+          // If cwd matches too, skip it
+          if (!mainCwd || !data.cwd || path.basename(data.cwd) === path.basename(mainCwd)) {
+            continue;
+          }
+        }
+
+        seenIds.add(id);
+
+        if (!this.surroundFaces.has(id)) {
+          this.surroundFaces.set(id, new SurroundMiniFace(id));
+        }
+        this.surroundFaces.get(id).updateFromFile(data);
+      } catch {
+        continue;
+      }
+    }
+
+    for (const [id, face] of this.surroundFaces) {
+      if (!seenIds.has(id) || face.isStale()) {
+        this.surroundFaces.delete(id);
+      }
+    }
+
+    this.assignSurroundLabels();
+  }
+
+  assignSurroundLabels() {
+    const sorted = [...this.surroundFaces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+    if (sorted.length === 0) return;
+
+    const cwdCounts = {};
+    for (const face of sorted) {
+      const base = face.cwd ? path.basename(face.cwd) : '';
+      cwdCounts[base] = (cwdCounts[base] || 0) + 1;
+    }
+
+    const cwdIndex = {};
+    for (let i = 0; i < sorted.length; i++) {
+      const face = sorted[i];
+      const base = face.cwd ? path.basename(face.cwd) : '';
+
+      if (sorted.length === 1) {
+        face.label = base ? base.slice(0, 8) : (face.modelName || 'claude').slice(0, 8);
+      } else if (base && cwdCounts[base] === 1) {
+        face.label = base.slice(0, 8);
+      } else {
+        cwdIndex[base] = (cwdIndex[base] || 0) + 1;
+        if (cwdIndex[base] === 1) {
+          face.label = i === 0 ? 'main' : (base || 'sub').slice(0, 6) + '-' + cwdIndex[base];
+        } else {
+          face.label = 'sub-' + (cwdIndex[base] - 1);
+        }
+      }
+    }
+  }
+
+  calculateSurroundPositions(cols, rows, faceW, faceH, startRow, startCol) {
+    const faces = [...this.surroundFaces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+    const n = faces.length;
+    if (n === 0) return [];
+
+    // Reserve space at bottom for key hints (last 2 rows)
+    const availableRows = rows - 3;
+    const maxPerColumn = Math.floor((availableRows - startRow) / SURROUND_CELL_H);
+    const columnCapacity = Math.max(1, maxPerColumn);
+
+    // Symmetrical columns: equal distance from face edges
+    // Left: SURROUND_CELL_W + 2 chars left of face left edge
+    // Right: SURROUND_CELL_W + 2 chars right of face right edge
+    const gap = 2;
+    const leftCol = Math.max(1, startCol - SURROUND_CELL_W - gap);
+    const rightCol = Math.min(cols - SURROUND_CELL_W, startCol + faceW + gap);
+    const leftCol2 = Math.max(1, leftCol - SURROUND_CELL_W - gap);
+    const rightCol2 = Math.min(cols - SURROUND_CELL_W, rightCol + SURROUND_CELL_W + gap);
+
+    // Place faces in columns starting from center outward
+    const positions = [];
+    for (let i = 0; i < n; i++) {
+      const colIndex = Math.floor(i / columnCapacity);
+      const rowIndex = i % columnCapacity;
+
+      let col;
+      if (colIndex === 0) {
+        col = i < columnCapacity ? leftCol : rightCol;
+      } else if (colIndex === 1) {
+        col = i < columnCapacity * 2 ? rightCol : leftCol;
+      } else if (colIndex === 2) {
+        col = leftCol2;
+      } else if (colIndex === 3) {
+        col = rightCol2;
+      } else {
+        // Fallback - just use right side for overflow
+        col = rightCol2;
+      }
+
+      positions.push({
+        face: faces[i],
+        row: startRow + rowIndex * SURROUND_CELL_H,
+        col: col,
+      });
+    }
+
+    return positions;
+  }
+
   getTheme() {
     const palette = PALETTES[this.paletteIndex] || PALETTES[0];
     return palette.themes[this.state] || palette.themes.idle;
@@ -542,6 +872,7 @@ class ClaudeFace {
       ' space  pet the face',
       ' t      cycle palette',
       ' s      toggle stats',
+      ' g      toggle surround',
       ' a      toggle accessories',
       ' h/?    this help',
       ' q      quit',
@@ -813,7 +1144,7 @@ class ClaudeFace {
       const dc = `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.3))}`;
       const kc = ansi.fg(...dimColor(theme.accent, 0.4));
       const sep = `${dc}\u00b7${r}`;
-      const hint = `${kc}space${dc} pet ${sep} ${kc}t${dc} theme ${sep} ${kc}s${dc} stats ${sep} ${kc}a${dc} accs ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
+      const hint = `${kc}space${dc} pet ${sep} ${kc}t${dc} theme ${sep} ${kc}s${dc} stats ${sep} ${kc}g${dc} surround ${sep} ${kc}a${dc} accs ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
       // Strip ANSI to measure visible length
       const visible = hint.replace(/\x1b\[[^m]*m/g, '');
       const hintCol = Math.max(1, Math.floor((cols - visible.length) / 2) + 1);
@@ -825,6 +1156,16 @@ class ClaudeFace {
       buf += this._renderHelp(cols, rows, theme);
     }
 
+    // Surround mode mini faces
+    if (this.surroundMode) {
+      const positions = this.calculateSurroundPositions(cols, rows, faceW, faceH, startRow, startCol);
+      const paletteThemes = (PALETTES[this.paletteIndex] || PALETTES[0]).themes;
+      for (const pos of positions) {
+        pos.face.tick(16);
+        buf += pos.face.render(pos.row, pos.col, this.time, paletteThemes);
+      }
+    }
+
     // Particles (drawn on top of face)
     buf += this.particles.render(startRow - 2, startCol - 5, theme.accent);
     buf += r;
@@ -833,4 +1174,4 @@ class ClaudeFace {
   }
 }
 
-module.exports = { ClaudeFace };
+module.exports = { ClaudeFace, SurroundMiniFace };

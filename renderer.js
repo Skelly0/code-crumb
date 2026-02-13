@@ -98,6 +98,10 @@ function runSingleMode() {
   if (typeof prefs.paletteIndex === 'number') face.paletteIndex = prefs.paletteIndex % PALETTES.length;
   if (typeof prefs.accessoriesEnabled === 'boolean') face.accessoriesEnabled = prefs.accessoriesEnabled;
   if (typeof prefs.showStats === 'boolean') face.showStats = prefs.showStats;
+  if (typeof prefs.surroundMode === 'boolean') {
+    face.surroundMode = prefs.surroundMode;
+    if (face.surroundMode) face.loadSurroundSessions();
+  }
 
   let lastMtime = 0;
   function checkState() {
@@ -129,6 +133,11 @@ function runSingleMode() {
     if (face.state === 'idle' && now - face.lastStateChange > SLEEP_TIMEOUT) {
       face.setState('sleeping');
     }
+
+    // Load surround sessions periodically when in surround mode
+    if (face.surroundMode && face.frame % (FPS * 2) === 0) {
+      face.loadSurroundSessions();
+    }
   }
 
   checkState();
@@ -152,6 +161,7 @@ function runSingleMode() {
         paletteIndex: face.paletteIndex,
         accessoriesEnabled: face.accessoriesEnabled,
         showStats: face.showStats,
+        surroundMode: face.surroundMode,
       });
     }
 
@@ -161,6 +171,7 @@ function runSingleMode() {
       if (key === ' ') face.pet();
       else if (key === 't') { face.cycleTheme(); persistPrefs(); }
       else if (key === 's') { face.toggleStats(); persistPrefs(); }
+      else if (key === 'g') { face.toggleSurroundMode(); persistPrefs(); }
       else if (key === 'a') { face.toggleAccessories(); persistPrefs(); }
       else if (key === 'h' || key === '?') face.toggleHelp();
       else if (key === 'q' || key === '\x03') cleanup(); // q or Ctrl+C
