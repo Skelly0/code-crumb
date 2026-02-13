@@ -2,14 +2,14 @@
 'use strict';
 
 // +================================================================+
-// |  OpenClaw Adapter -- bridges OpenClaw/Pi events to Claude Face  |
+// |  OpenClaw Adapter -- bridges OpenClaw/Pi events to Code Crumb    |
 // |                                                                  |
 // |  OpenClaw (formerly Clawdbot/Moltbot) uses the Pi coding agent  |
-// |  engine. Pi's core tools: read, write, edit, bash.              |
+// |  engine. Pi's core tools: read, write, edit, bash.            |
 // |  OpenClaw adds: exec, process, browser, canvas, sessions, etc.  |
 // |                                                                  |
 // |  This adapter accepts events via stdin JSON, supporting both    |
-// |  Pi-native event names and the generic Claude Face format.      |
+// |  Pi-native event names and the generic Code Crumb format.        |
 // |                                                                  |
 // |  Pi-native events:                                               |
 // |    tool_call            → before tool execution                 |
@@ -128,7 +128,7 @@ process.stdin.on('end', () => {
     }
 
     // Model name: from event data, env var, or default to 'openclaw'
-    const modelName = data.model_name || process.env.CLAUDE_FACE_MODEL || 'openclaw';
+    const modelName = data.model_name || process.env.CODE_CRUMB_MODEL || 'openclaw';
 
     const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
     const extra = {

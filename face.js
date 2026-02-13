@@ -102,7 +102,7 @@ class ClaudeFace {
     this.accessoriesEnabled = true;
 
     // Model name (shown in status line: "{name} is thinking")
-    this.modelName = process.env.CLAUDE_FACE_MODEL || 'claude';
+    this.modelName = process.env.CODE_CRUMB_MODEL || 'claude';
   }
 
   _nextBlink() {

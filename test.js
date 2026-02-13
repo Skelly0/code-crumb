@@ -2,8 +2,8 @@
 'use strict';
 
 // +================================================================+
-// |  Claude Face Test Suite                                          |
-// |  Zero-dependency tests using Node.js built-in assert            |
+// |  Code Crumb Test Suite                                             |
+// |  Zero-dependency tests using Node.js built-in assert              |
 // |                                                                  |
 // |  Run: node test.js  or  npm test                                |
 // +================================================================+
@@ -22,7 +22,7 @@ const testModules = [
 let totalPassed = 0;
 let totalFailed = 0;
 
-console.log('\n  Claude Face Test Suite');
+console.log('\n  Code Crumb Test Suite');
 console.log('  ' + '='.repeat(40));
 
 for (const modulePath of testModules) {

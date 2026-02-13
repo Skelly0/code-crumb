@@ -1,13 +1,13 @@
 {
-  "name": "claude-face",
+  "name": "code-crumb",
   "version": "1.1.0",
-  "description": "Terminal tamagotchi that visualizes Claude Code activity as an animated ASCII face",
+  "description": "Terminal tamagotchi that visualizes AI coding assistant activity as an animated ASCII face",
   "author": {
     "name": "Skelly0",
     "url": "https://github.com/Skelly0"
   },
-  "repository": "https://github.com/Skelly0/claude-face",
-  "homepage": "https://github.com/Skelly0/claude-face",
+  "repository": "https://github.com/Skelly0/code-crumb",
+  "homepage": "https://github.com/Skelly0/code-crumb",
   "license": "MIT",
   "keywords": ["visualization", "terminal", "tamagotchi", "ascii-art", "hooks", "face"],
   "hooks": "./hooks/hooks.json"

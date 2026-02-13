@@ -2,8 +2,8 @@
 'use strict';
 
 // +================================================================+
-// |  Claude Face -- A tamagotchi for Claude Code                    |
-// |  Shows what Claude is doing with an animated terminal face      |
+// |  Code Crumb -- A terminal tamagotchi for AI coding assistants   |
+// |  Shows what your AI coding assistant is doing                   |
 // |                                                                 |
 // |  Modes:                                                         |
 // |    node renderer.js            Single face (default)            |
@@ -31,7 +31,7 @@ const { MiniFace, FaceGrid } = require('./grid');
 const GRID_MODE = process.argv.includes('--grid');
 
 // -- Config --------------------------------------------------------
-const PID_FILE = path.join(HOME, GRID_MODE ? '.claude-face-grid.pid' : '.claude-face.pid');
+const PID_FILE = path.join(HOME, GRID_MODE ? '.code-crumb-grid.pid' : '.code-crumb.pid');
 const FPS = 15;
 const FRAME_MS = Math.floor(1000 / FPS);
 const IDLE_TIMEOUT = 8000;
@@ -241,7 +241,7 @@ function runGridMode() {
 // -- Entry ---------------------------------------------------------
 function main() {
   if (isAlreadyRunning()) {
-    console.log(`Claude Face${GRID_MODE ? ' Grid' : ''} is already running in another window.`);
+    console.log(`Code Crumb${GRID_MODE ? ' Grid' : ''} is already running in another window.`);
     process.exit(0);
   }
   writePid();
@@ -258,7 +258,7 @@ function main() {
   process.on('exit', removePid);
 
   process.stdout.write(ansi.hide + ansi.clear);
-  const title = GRID_MODE ? 'Claude Face Grid' : 'Claude Face';
+  const title = GRID_MODE ? 'Code Crumb Grid' : 'Code Crumb';
   process.stdout.write(`\x1b]0;${title}\x07`);
 
   if (GRID_MODE) {

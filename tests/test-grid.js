@@ -2,7 +2,7 @@
 'use strict';
 
 // +================================================================+
-// |  Claude Face Test Suite - grid.js                              |
+// |  Code Crumb Test Suite - grid.js                                  |
 // +================================================================+
 
 const assert = require('assert');

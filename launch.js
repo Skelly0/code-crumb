@@ -2,21 +2,21 @@
 'use strict';
 
 // +================================================================+
-// |  Claude Face Launcher                                           |
+// |  Code Crumb Launcher                                             |
 // |  Starts the face renderer (if not running) then launches        |
-// |  the specified editor, passing through all arguments.           |
+// |  the specified editor, passing through all arguments.             |
 // |                                                                 |
 // |  Usage:                                                         |
 // |    node launch.js                        (single face + claude) |
-// |    node launch.js --grid                 (multi-face grid)      |
-// |    node launch.js --editor codex "fix bug" (use codex wrapper)  |
-// |    node launch.js --editor claude -p "fix the bug"              |
-// |    node launch.js --dangerously-skip-permissions                |
-// |    node launch.js --grid -p "fix the bug"                       |
+// |    node launch.js --grid                 (multi-face grid)       |
+// |    node launch.js --editor codex "fix bug" (use codex wrapper)   |
+// |    node launch.js --editor claude -p "fix the bug"               |
+// |    node launch.js --dangerously-skip-permissions                 |
+// |    node launch.js --grid -p "fix the bug"                        |
 // |                                                                 |
 // |  Or via the batch/shell wrappers:                               |
-// |    claude-face                                                  |
-// |    claude-face --grid --dangerously-skip-permissions             |
+// |    code-crumb                                                   |
+// |    code-crumb --grid --dangerously-skip-permissions              |
 // +================================================================+
 
 const { spawn, execSync } = require('child_process');
@@ -24,8 +24,8 @@ const fs = require('fs');
 const path = require('path');
 
 const HOME = process.env.USERPROFILE || process.env.HOME || '/tmp';
-const SINGLE_PID = path.join(HOME, '.claude-face.pid');
-const GRID_PID = path.join(HOME, '.claude-face-grid.pid');
+const SINGLE_PID = path.join(HOME, '.code-crumb.pid');
+const GRID_PID = path.join(HOME, '.code-crumb-grid.pid');
 
 // Parse our own flags (consumed here, not passed to the editor)
 const rawArgs = process.argv.slice(2);
@@ -46,7 +46,7 @@ const editorArgs = rawArgs.filter((a, i) =>
 const pidFile = gridMode ? GRID_PID : SINGLE_PID;
 const rendererPath = path.resolve(__dirname, 'renderer.js');
 const rendererArgs = gridMode ? [rendererPath, '--grid'] : [rendererPath];
-const windowTitle = gridMode ? 'Claude Face Grid' : 'Claude Face';
+const windowTitle = gridMode ? 'Code Crumb Grid' : 'Code Crumb';
 
 function isRendererRunning() {
   try {

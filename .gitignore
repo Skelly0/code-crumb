@@ -1,4 +1,8 @@
 node_modules/
-.claude-face-state
-.claude-face.pid
+.code-crumb-state
+.code-crumb.pid
+.code-crumb-grid.pid
+.code-crumb-sessions/
+.Related Images
 nul
+

@@ -2,7 +2,7 @@
 'use strict';
 
 // +================================================================+
-// |  OpenCode Adapter -- bridges OpenCode events to Claude Face     |
+// |  OpenCode Adapter -- bridges OpenCode events to Code Crumb          |
 // |                                                                  |
 // |  OpenCode uses a plugin system that emits events like:         |
 // |    - tool.execute.before  (maps to tool_start state)           |
@@ -103,7 +103,7 @@ process.stdin.on('end', () => {
     }
 
     // Model name: from event data, env var, or default to 'opencode'
-    const modelName = data.model_name || process.env.CLAUDE_FACE_MODEL || 'opencode';
+    const modelName = data.model_name || process.env.CODE_CRUMB_MODEL || 'opencode';
 
     const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
     const extra = {

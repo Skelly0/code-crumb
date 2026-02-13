@@ -2,7 +2,7 @@
 'use strict';
 
 // +================================================================+
-// |  Claude Face Test Suite - shared.js                              |
+// |  Code Crumb Test Suite - shared.js                                  |
 // +================================================================+
 
 const assert = require('assert');
@@ -70,7 +70,7 @@ describe('shared.js -- preferences persistence', () => {
   test('PREFS_FILE is a non-empty string', () => {
     assert.ok(typeof PREFS_FILE === 'string');
     assert.ok(PREFS_FILE.length > 0);
-    assert.ok(PREFS_FILE.includes('.claude-face-prefs'));
+    assert.ok(PREFS_FILE.includes('.code-crumb-prefs'));
   });
 
   test('loadPrefs returns an object', () => {

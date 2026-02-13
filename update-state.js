@@ -2,7 +2,7 @@
 'use strict';
 
 // +================================================================+
-// |  Claude Face Hook -- writes state for the face renderer         |
+// |  Code Crumb Hook -- writes state for the face renderer              |
 // |  Called by editor hooks via stdin JSON                           |
 // |  Usage: node update-state.js <event>                            |
 // |  Events: PreToolUse, PostToolUse, Stop, Notification            |
@@ -182,7 +182,7 @@ process.stdin.on('end', () => {
     }
 
     // Model name: from event data, env var, or default to 'claude'
-    const modelName = data.model_name || process.env.CLAUDE_FACE_MODEL || 'claude';
+    const modelName = data.model_name || process.env.CODE_CRUMB_MODEL || 'claude';
 
     // Build extra data for state files
     const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;

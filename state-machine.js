@@ -1,7 +1,7 @@
 'use strict';
 
 // +================================================================+
-// |  State Machine -- pure logic for Claude Face state management   |
+// |  State Machine -- pure logic for Code Crumb state management         |
 // |  Extracted for testability. No I/O, no side effects.            |
 // |                                                                  |
 // |  Handles:                                                        |

@@ -2,7 +2,7 @@
 'use strict';
 
 // +================================================================+
-// |  Claude Face Test Suite - themes.js                             |
+// |  Code Crumb Test Suite - themes.js                               |
 // +================================================================+
 
 const assert = require('assert');

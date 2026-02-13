@@ -1,4 +1,4 @@
-# Claude Face
+# Code Crumb
 
 A terminal tamagotchi that shows what your AI coding assistant is doing.
 
@@ -14,7 +14,7 @@ A terminal tamagotchi that shows what your AI coding assistant is doing.
            ·  claude is idle  ·
 ```
 
-Claude Face hooks into AI coding tool lifecycle events and displays an animated face that reacts in real time — blinking, searching, coding, celebrating, and occasionally glitching when things go wrong.
+Code Crumb hooks into AI coding tool lifecycle events and displays an animated face that reacts in real time — blinking, searching, coding, celebrating, and occasionally glitching when things go wrong.
 
 **Supported editors:** Claude Code, OpenAI Codex CLI, OpenCode — and any tool that can pipe JSON events.
 
@@ -40,7 +40,7 @@ Content adapts to what's happening: file count when editing multiple files, tool
 
 ## Streaks & Achievements
 
-A persistent counter tracks consecutive successful tool calls. The face gets increasingly confident during long streaks, and when a build finally fails, the reaction is proportional to how long the streak was — first error after 50 successes? *DEVASTATION.* Milestones at 10, 25, 50, 100, 200, and 500 trigger sparkle celebrations. Stats persist across sessions in `~/.claude-face-stats.json`.
+A persistent counter tracks consecutive successful tool calls. The face gets increasingly confident during long streaks, and when a build finally fails, the reaction is proportional to how long the streak was — first error after 50 successes? *DEVASTATION.* Milestones at 10, 25, 50, 100, 200, and 500 trigger sparkle celebrations. Stats persist across sessions in `~/.code-crumb-stats.json`.
 
 ## Session Timeline
 
@@ -98,29 +98,29 @@ Works on **Windows**, **macOS**, and **Linux**.
 ### 1. Clone
 
 ```bash
-git clone https://github.com/Skelly0/claude-face.git
+git clone https://github.com/Skelly0/code-crumb.git
 ```
 
 ### 2. Install hooks
 
 **Claude Code** (default):
 ```bash
-node claude-face/setup.js
+node code-crumb/setup.js
 ```
 
 **Codex CLI:**
 ```bash
-node claude-face/setup.js codex
+node code-crumb/setup.js codex
 ```
 
 **OpenCode:**
 ```bash
-node claude-face/setup.js opencode
+node code-crumb/setup.js opencode
 ```
 
 **As a Claude Code plugin** (alternative to manual hook setup):
 ```bash
-claude plugin install --plugin-dir ./claude-face
+claude plugin install --plugin-dir ./code-crumb
 ```
 
 ### 3. Run
@@ -128,66 +128,66 @@ claude plugin install --plugin-dir ./claude-face
 **Single face** (the classic big animated face):
 
 ```bash
-node claude-face/renderer.js
+node code-crumb/renderer.js
 ```
 
 **Grid mode** (one mini-face per session/subagent):
 
 ```bash
-node claude-face/renderer.js --grid
+node code-crumb/renderer.js --grid
 ```
 
 **Via the launcher** (auto-opens the face in a new terminal tab):
 
 ```bash
 # Claude Code (default)
-node claude-face/launch.js
-node claude-face/launch.js --grid
+node code-crumb/launch.js
+node code-crumb/launch.js --grid
 
 # Codex CLI (uses wrapper for rich tool-level events)
-node claude-face/launch.js --editor codex "fix the auth bug"
+node code-crumb/launch.js --editor codex "fix the auth bug"
 
 # OpenCode
-node claude-face/launch.js --editor opencode
+node code-crumb/launch.js --editor opencode
 
 # With any editor arguments
-node claude-face/launch.js --dangerously-skip-permissions
-node claude-face/launch.js --grid -p "fix the auth bug"
-node claude-face/launch.js --resume
+node code-crumb/launch.js --dangerously-skip-permissions
+node code-crumb/launch.js --grid -p "fix the auth bug"
+node code-crumb/launch.js --resume
 ```
 
 On Windows you can also use the batch wrapper:
 
 ```powershell
-claude-face\claude-face.cmd --grid --dangerously-skip-permissions
+code-crumb\code-crumb.cmd --grid --dangerously-skip-permissions
 ```
 
 ### 4. Preview
 
 ```bash
 # Single face demo (run renderer.js in another pane first)
-node claude-face/demo.js
+node code-crumb/demo.js
 
 # Grid demo with simulated sessions (run renderer.js --grid first)
-node claude-face/grid-demo.js
+node code-crumb/grid-demo.js
 ```
 
 ### 5. (Optional) Add to PATH
 
 **Windows (PowerShell):**
 ```powershell
-function claude-face { node "C:\path\to\claude-face\launch.js" @args }
+function code-crumb { node "C:\path\to\code-crumb\launch.js" @args }
 ```
 
 **macOS / Linux:**
 ```bash
-chmod +x ~/claude-face/claude-face.sh
-ln -s ~/claude-face/claude-face.sh /usr/local/bin/claude-face
+chmod +x ~/code-crumb/code-crumb.sh
+ln -s ~/code-crumb/code-crumb.sh /usr/local/bin/code-crumb
 ```
 
 Or use npm link:
 ```bash
-cd claude-face && npm link
+cd code-crumb && npm link
 ```
 
 ## Model Name Display
@@ -196,8 +196,8 @@ The status line shows the model/tool name: `claude is thinking`, `codex is codin
 
 ```bash
 # Set via environment variable
-export CLAUDE_FACE_MODEL=kimi-k2.5
-node claude-face/renderer.js
+export CODE_CRUMB_MODEL=kimi-k2.5
+node code-crumb/renderer.js
 ```
 
 Each adapter sets a sensible default:
@@ -211,7 +211,7 @@ The model name can also be passed in event JSON via the `model_name` field.
 
 ```
 ┌───────────────┐     state files     ┌──────────────────┐
-│  Claude Code   │                     │  ~/.claude-face-  │
+│  Claude Code   │                     │  ~/.code-crumb-  │
 │  Codex CLI     │ ──── writes ────▶  │  state            │
 │  OpenCode      │    JSON per         │  sessions/*.json  │
 │  (any editor)  │    session          │                   │
@@ -230,8 +230,8 @@ The model name can also be passed in event JSON via the `model_name` field.
 
 1. **Hooks/adapters fire** on tool use events (PreToolUse, PostToolUse, Stop, Notification)
 2. **`update-state.js`** (or an adapter) maps tool names to face states and writes:
-   - A single `~/.claude-face-state` file (for the classic renderer)
-   - A per-session file in `~/.claude-face-sessions/` (for the grid)
+   - A single `~/.code-crumb-state` file (for the classic renderer)
+   - A per-session file in `~/.code-crumb-sessions/` (for the grid)
 3. **Session ID** is extracted from the event data (`session_id`), falling back to the parent process ID — each instance and subagent gets its own face
 4. **`renderer.js`** watches for file changes and animates transitions (single face by default, `--grid` for multi-face)
 
@@ -256,10 +256,10 @@ The wrapper mode gives rich real-time reactions but only works with `codex exec`
 
 OpenCode uses a plugin system. Create a plugin that pipes events to the adapter:
 
-1. Create `~/.config/opencode/plugins/claude-face.js`:
+1. Create `~/.config/opencode/plugins/code-crumb.js`:
 ```js
 const { execSync } = require('child_process');
-const adapter = '/path/to/claude-face/adapters/opencode-adapter.js';
+const adapter = '/path/to/code-crumb/adapters/opencode-adapter.js';
 
 function send(payload) {
   try {
@@ -268,7 +268,7 @@ function send(payload) {
   } catch {}
 }
 
-export const ClaudeFacePlugin = async (ctx) => {
+export const CodeCrumbPlugin = async (ctx) => {
   return {
     'tool.execute.before': async (input, output) => {
       send({ type: 'tool.execute.before', input: { tool: input.tool, args: input.args } });
@@ -288,7 +288,7 @@ export const ClaudeFacePlugin = async (ctx) => {
 
 2. Add to `~/.config/opencode/opencode.json`:
 ```json
-{ "plugins": ["./plugins/claude-face.js"] }
+{ "plugins": ["./plugins/code-crumb.js"] }
 ```
 
 The adapter also accepts a generic format (`{"event":"tool_start",...}`) for backward compatibility.
@@ -309,23 +309,23 @@ The adapter also accepts a generic format (`{"event":"tool_start",...}`) for bac
 | `hooks/hooks.json` | Hook config for Claude Code plugin system |
 | `demo.js` | Cycles through all expressions (single face) |
 | `grid-demo.js` | Simulates multiple sessions (grid mode) |
-| `claude-face.cmd` | Windows batch wrapper |
-| `claude-face.sh` | Unix shell wrapper |
+| `code-crumb.cmd` | Windows batch wrapper |
+| `code-crumb.sh` | Unix shell wrapper |
 
 ## Configuration
 
 ### Custom state file location
 
 ```bash
-export CLAUDE_FACE_STATE=/tmp/my-claude-face-state
+export CODE_CRUMB_STATE=/tmp/my-code-crumb-state
 ```
 
-The sessions directory is always `~/.claude-face-sessions/`.
+The sessions directory is always `~/.code-crumb-sessions/`.
 
 ### Custom model name
 
 ```bash
-export CLAUDE_FACE_MODEL=gpt-4.1
+export CODE_CRUMB_MODEL=gpt-4.1
 ```
 
 ### Manual hook setup (Claude Code)
@@ -365,7 +365,7 @@ notify = ["node", "/path/to/adapters/codex-notify.js"]
 
 ## Grid Mode Details
 
-- Each session writes to `~/.claude-face-sessions/{session_id}.json`
+- Each session writes to `~/.code-crumb-sessions/{session_id}.json`
 - The grid auto-layouts based on terminal size (up to ~8 faces across in an 80-col terminal)
 - Sessions are labeled by working directory name — different projects get different labels
 - Sessions sharing a directory get `main` / `sub-1` / `sub-2` labels
@@ -397,18 +397,18 @@ notify = ["node", "/path/to/adapters/codex-notify.js"]
 
 ## Uninstall
 
-**Claude Code:** Remove the `update-state.js` hook entries from `~/.claude/settings.json` (or run `claude plugin uninstall claude-face`).
+**Claude Code:** Remove the `update-state.js` hook entries from `~/.claude/settings.json` (or run `claude plugin uninstall code-crumb`).
 
 **Codex:** Remove the `notify` line from `~/.codex/config.toml`.
 
 Clean up state files:
 
 ```bash
-rm ~/.claude-face-state
-rm ~/.claude-face-stats.json
-rm ~/.claude-face.pid
-rm ~/.claude-face-grid.pid
-rm -rf ~/.claude-face-sessions
+rm ~/.code-crumb-state
+rm ~/.code-crumb-stats.json
+rm ~/.code-crumb.pid
+rm ~/.code-crumb-grid.pid
+rm -rf ~/.code-crumb-sessions
 ```
 
 ## License
