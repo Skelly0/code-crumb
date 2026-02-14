@@ -205,23 +205,51 @@ process.stdin.on('end', () => {
 
     if (stopped) extra.stopped = true;
 
-    // Write both: single state file + per-session file (orbital subagents)
-    writeState(state, detail, extra);
+    // Only write to global state file if this session "owns" it.
+    // Subagents should only write to their per-session file so they
+    // don't overwrite the main session's state in the renderer.
+    let shouldWriteGlobal = true;
+    try {
+      const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      if (existing.sessionId && existing.sessionId !== sessionId &&
+          !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
+        shouldWriteGlobal = false;
+      }
+    } catch {}
+
+    if (shouldWriteGlobal) writeState(state, detail, extra);
     writeSessionState(sessionId, state, detail, stopped, extra);
     writeStats(stats);
   } catch {
     // JSON parse may fail for Stop/Notification events with empty or
     // non-JSON stdin -- still write the correct state for the hook event.
-    // Include sessionId so the renderer can identify the session even on parse failure.
     const fallbackSessionId = process.env.CLAUDE_SESSION_ID || String(process.ppid);
     const fallbackExtra = { sessionId: fallbackSessionId };
+
+    // Guard global state file — don't let subagents overwrite the main session
+    let shouldWriteGlobal = true;
+    try {
+      const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      if (existing.sessionId && existing.sessionId !== fallbackSessionId &&
+          !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
+        shouldWriteGlobal = false;
+      }
+    } catch {}
+
+    let fallbackState = 'thinking';
+    let fallbackDetail = '';
     if (hookEvent === 'Stop') {
-      writeState('responding', 'wrapping up', fallbackExtra);
+      fallbackState = 'responding';
+      fallbackDetail = 'wrapping up';
+      fallbackExtra.stopped = true;
     } else if (hookEvent === 'Notification') {
-      writeState('waiting', 'needs attention', fallbackExtra);
-    } else {
-      writeState('thinking', '', fallbackExtra);
+      fallbackState = 'waiting';
+      fallbackDetail = 'needs attention';
     }
+
+    if (shouldWriteGlobal) writeState(fallbackState, fallbackDetail, fallbackExtra);
+    writeSessionState(fallbackSessionId, fallbackState, fallbackDetail,
+      hookEvent === 'Stop', fallbackExtra);
   }
 
   process.exit(0);

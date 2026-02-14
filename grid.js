@@ -356,9 +356,10 @@ class OrbitalSystem {
         const col = Math.round(mainPos.centerX + dx * t);
         const row = Math.round(mainPos.centerY + dy * t);
 
-        // Skip if inside main face box (with 1 char padding)
-        if (col >= mainLeft - 1 && col <= mainRight + 1 &&
-            row >= mainTop - 1 && row <= mainBot + 1) continue;
+        // Skip if inside main face area (extended for thought bubbles,
+        // accessories above, and status/indicators below)
+        if (col >= mainLeft - 2 && col <= mainRight + 16 &&
+            row >= mainTop - 5 && row <= mainBot + 4) continue;
 
         // Skip if inside orbital box
         if (col >= pos.col - 1 && col <= pos.col + MINI_W + 1 &&
