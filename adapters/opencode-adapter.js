@@ -141,6 +141,9 @@ process.stdin.on('end', () => {
       if (data.is_thinking) {
         state = 'thinking';
         detail = data.thinking || 'analyzing';
+      } else if (data.tools_called) {
+        state = 'responding';
+        detail = 'generating response';
       } else {
         state = 'waiting';
         detail = 'receiving message';

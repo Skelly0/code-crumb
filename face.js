@@ -112,7 +112,7 @@ class ClaudeFace {
   _getMinDisplayMs(state) {
     const times = {
       happy: 5000, proud: 4500, satisfied: 4000, relieved: 4500,
-      error: 3500, coding: 2500, thinking: 2500, reading: 2000,
+      error: 3500, coding: 2500, thinking: 2500, responding: 3000, reading: 2000,
       searching: 2000, executing: 2500, testing: 2500, installing: 2500,
       caffeinated: 2500, subagent: 2500, waiting: 1500, sleeping: 1000,
     };
@@ -355,6 +355,7 @@ class ClaudeFace {
     switch (this.state) {
       case 'idle':        return eyes.open(theme, frame);
       case 'thinking':    return eyes.spin(theme, Math.floor(frame / 4));
+      case 'responding':  return eyes.responding(theme, frame);
       case 'coding':      return eyes.focused(theme, frame);
       case 'reading':     return eyes.narrowed(theme, frame);
       case 'searching':
@@ -389,6 +390,7 @@ class ClaudeFace {
     switch (this.state) {
       case 'idle':      return mouths.smile();
       case 'thinking':  return mouths.neutral();
+      case 'responding': return mouths.responding();
       case 'coding':    return mouths.determined();
       case 'reading':   return mouths.neutral();
       case 'searching': return mouths.curious();

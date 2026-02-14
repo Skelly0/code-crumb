@@ -257,8 +257,10 @@ function setupOpenCode() {
 
     export const CodeCrumbPlugin = async ({ project, client, $, directory, worktree }) => {
       let lastMessageContent = '';
+      let toolsCalledThisTurn = false;
       return {
         'session.created': async (input, output) => {
+          toolsCalledThisTurn = false;
           send({ type: 'session.created', session_id: input.sessionId });
         },
         'message.part.updated': async (input, output) => {
@@ -266,7 +268,7 @@ function setupOpenCode() {
           const role = input.part?.role || '';
           if (content !== lastMessageContent) {
             lastMessageContent = content;
-            const isThinking = role === 'assistant' && content.length > 0;
+            const isThinking = role === 'assistant' && !toolsCalledThisTurn && content.length > 0;
             const thinkingText = isThinking 
               ? (content.split(' ').slice(0, 3).join(' ') || 'analyzing')
               : '';
@@ -275,17 +277,20 @@ function setupOpenCode() {
               content: content.substring(0, 500),
               role,
               is_thinking: isThinking,
-              thinking: thinkingText
+              thinking: thinkingText,
+              tools_called: toolsCalledThisTurn
             });
           }
         },
         'tool.execute.before': async (input, output) => {
+          toolsCalledThisTurn = true;
           send({ type: 'tool.execute.before', input: { tool: input.tool, args: input.args } });
         },
         'tool.execute.after': async (input, output) => {
           send({ type: 'tool.execute.after', input: { tool: input.tool, args: input.args }, output });
         },
         'session.idle': async (input, output) => {
+          toolsCalledThisTurn = false;
           send({ type: 'session.idle' });
         },
         'session.error': async (input, output) => {
