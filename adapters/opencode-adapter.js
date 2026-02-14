@@ -129,6 +129,12 @@ process.stdin.on('end', () => {
       event === 'tool.execute.after' ? 'tool_end' :
       event === 'session.idle' ? 'turn_end' :
       event === 'session.error' ? 'error' :
+      event === 'message.part.updated' ? 'thinking' :
+      event === 'message.part.removed' ? 'thinking' :
+      event === 'message.updated' ? 'thinking' :
+      event === 'message.removed' ? 'thinking' :
+      event === 'command.executed' ? 'command_done' :
+      event === 'file.edited' ? 'file_done' :
       event;
 
     if (mappedEvent === 'tool_start' || mappedEvent === 'PreToolUse') {
@@ -167,6 +173,18 @@ process.stdin.on('end', () => {
     else if (mappedEvent === 'waiting' || mappedEvent === 'Notification') {
       state = 'waiting';
       detail = 'needs attention';
+    }
+    else if (mappedEvent === 'thinking') {
+      state = 'thinking';
+      detail = 'thinking...';
+    }
+    else if (mappedEvent === 'command_done') {
+      state = 'relieved';
+      detail = 'command done';
+    }
+    else if (mappedEvent === 'file_done') {
+      state = 'proud';
+      detail = 'file edited';
     }
 
     extra.toolCalls = stats.session.toolCalls;
