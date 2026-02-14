@@ -15,7 +15,6 @@ const testModules = [
   './tests/test-animations.js',
   './tests/test-particles.js',
   './tests/test-face.js',
-  './tests/test-grid.js',
   './tests/test-accessories.js',
 ];
 

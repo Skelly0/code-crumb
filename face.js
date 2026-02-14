@@ -44,10 +44,24 @@ const SUBAGENT_CELL_W = 12;
 const SUBAGENT_CELL_H = 7;
 const SUBAGENT_STALE_MS = 120000;
 const SUBAGENT_STOPPED_LINGER_MS = 5000;
+const SUBAGENT_MAX_AGE_MS = 300000; // 5 minutes - ignore sessions older than this
 const BOX_W = 8;
 const BOX_INNER = 6;
 
 // -- SubagentMiniFace (mini face for subagent mode) -----------------
+const SUBAGENT_THOUGHT_TAILS = ['\u203e', '\u203e\u203e', '\u203e'];
+const SUBAGENT_THOUGHTS = {
+  thinking: ['...', 'hmm', '?', '...'],
+  reading: ['...', 'ok', 'mm', '...'],
+  searching: ['...', 'find', '?', '...'],
+  coding: ['...', '->', '->', '...'],
+  executing: ['...', '>>>', '...', '...'],
+  error: ['!', 'oh', 'no', '...'],
+  testing: ['...', 'test', '...', '...'],
+  installing: ['...', 'dl', '...', '...'],
+  subagent: ['...', 'spawn', '...', '...'],
+};
+
 class SubagentMiniFace {
   constructor(sessionId) {
     this.sessionId = sessionId;
@@ -66,11 +80,16 @@ class SubagentMiniFace {
     this.blinkFrame = -1;
     this.lookDir = 0;
     this.lookTimer = 0;
+    this.thoughtTimer = 0;
+    this.thoughtFrame = 0;
   }
 
   updateFromFile(data) {
     const newState = data.state || 'idle';
-    if (newState !== this.state) this.state = newState;
+    if (newState !== this.state) {
+      this.state = newState;
+      this.thoughtFrame = 0;
+    }
     this.detail = data.detail || '';
     this.lastUpdate = data.timestamp || Date.now();
     if (data.cwd) this.cwd = data.cwd;
@@ -107,6 +126,12 @@ class SubagentMiniFace {
         this.lookTimer = 0;
       }
     }
+
+    this.thoughtTimer += dt;
+    if (this.thoughtTimer > 800) {
+      this.thoughtFrame = (this.thoughtFrame + 1) % 4;
+      this.thoughtTimer = 0;
+    }
   }
 
   getEyes() {
@@ -115,8 +140,8 @@ class SubagentMiniFace {
     switch (this.state) {
       case 'idle':        return ' \u2588\u2588 \u2588\u2588';
       case 'thinking': {
-        const p = Math.floor(this.frame / 4) % 4;
-        return [' \u25cf\u00b7 \u00b7\u25cf', ' \u00b7\u25cf \u25cf\u00b7', ' \u25cf\u00b7 \u25cf\u00b7', ' \u00b7\u25cf \u00b7\u25cf'][p];
+        const p = Math.floor(this.frame / 3) % 4;
+        return [' \u25cb\u00b0 \u00b0\u25cb', ' \u00b0\u25cb \u25cb\u00b0', ' \u25cb\u00b0 \u25cb\u00b0', ' \u00b0\u25cb \u00b0\u25cb'][p];
       }
       case 'reading':     return ' \u2500\u2500 \u2500\u2500';
       case 'searching':
@@ -130,7 +155,7 @@ class SubagentMiniFace {
         return [' \u2726\u2727 \u2727\u2726', ' \u2727\u2726 \u2726\u2727'][h];
       }
       case 'error': {
-        if (Math.random() < 0.12) {
+        if (Math.random() < 0.15) {
           const g = ['\u2593\u2591', '\u2591\u2592', '\u2592\u2593', '\u2588\u2591'];
           const i = Math.floor(Math.random() * g.length);
           const j = (i + 2) % g.length;
@@ -151,26 +176,44 @@ class SubagentMiniFace {
         if (this.frame % 25 < 2) return ' \u2580\u2588 \u2588\u2580';
         return ' \u2588\u2588 \u2588\u2588';
       }
-      case 'installing':  return ' \u2584\u2584 \u2584\u2584';
+      case 'installing': {
+        const j = Math.floor(this.frame / 8) % 3;
+        if (j === 1) return ' \u2584\u2595 \u2595\u2584';
+        if (j === 2) return ' \u2595\u2584 \u2584\u2595';
+        return ' \u2584\u2584 \u2584\u2584';
+      }
       case 'caffeinated': {
         const j = this.frame % 3;
         if (j === 1) return '  \u2588\u2588\u2588 ';
         if (j === 2) return ' \u2588 \u2588 \u2588';
         return ' \u2588\u2588 \u2588\u2588';
       }
-      case 'subagent':    return ' \u2588\u2588 \u2588\u2588';
-      case 'satisfied':   return ' \u2580\u2580 \u2580\u2580';
-      case 'proud':       return ' \u2584\u2584 \u2584\u2584';
+      case 'subagent': {
+        const e = Math.floor(this.frame / 6) % 2;
+        if (e === 0) return ' \u2592\u2588 \u2588\u2592';
+        return ' \u2588\u2592 \u2592\u2588';
+      }
+      case 'satisfied':   return ' \u00b0\u2588 \u2588\u00b0';
+      case 'proud': {
+        const p = Math.floor(this.frame / 4) % 2;
+        return p === 0 ? ' \u2727\u2588 \u2588\u2726' : ' \u2726\u2588 \u2588\u2727';
+      }
       case 'relieved':    return ' \u2588\u2588 \u2588\u2588';
       default:            return ' \u2588\u2588 \u2588\u2588';
     }
   }
 
   getMouth() {
-    if (this.state === 'error' && Math.random() < 0.08) {
+    if (this.state === 'error' && Math.random() < 0.1) {
       return ['\u25e1\u25e0\u25e1', '\u25e0\u25e1\u25e0', '\u2500\u25e1\u2500'][Math.floor(Math.random() * 3)];
     }
     return gridMouths[this.state] || '\u25e1\u25e1\u25e1';
+  }
+
+  getThought() {
+    const thoughts = SUBAGENT_THOUGHTS[this.state];
+    if (!thoughts) return null;
+    return thoughts[this.thoughtFrame];
   }
 
   render(startRow, startCol, globalTime, paletteThemes) {
@@ -186,34 +229,54 @@ class SubagentMiniFace {
     const dc = ansi.fg(...dimColor(theme.label, 0.55));
     const r = ansi.reset;
 
+    let buf = '';
+
+    const stoppedDim = this.stopped ? ansi.dim : '';
+    const stoppedFg = this.stopped ? (s => ansi.fg(...dimColor([s[0], s[1], s[2]], 0.5)))(theme.border) : fc;
+
     const eyeStr = this.getEyes();
     const mouthStr = this.getMouth();
     const mPad = Math.floor((BOX_INNER - mouthStr.length) / 2);
     const mRight = BOX_INNER - mPad - mouthStr.length;
 
-    let buf = '';
-
     buf += ansi.to(startRow, startCol);
-    buf += `${fc}\u256d${'\u2500'.repeat(BOX_INNER)}\u256e${r}`;
+    buf += `${stoppedFg}\u256d${'\u2500'.repeat(BOX_INNER)}\u256e${r}`;
 
     buf += ansi.to(startRow + 1, startCol);
-    buf += `${fc}\u2502${ec}${eyeStr}${fc}\u2502${r}`;
+    buf += `${stoppedFg}\u2502${stoppedDim}${ec}${eyeStr}${stoppedFg}\u2502${r}`;
 
     buf += ansi.to(startRow + 2, startCol);
-    buf += `${fc}\u2502${' '.repeat(mPad)}${mc}${mouthStr}${r}${' '.repeat(Math.max(0, mRight))}${fc}\u2502${r}`;
+    buf += `${stoppedFg}\u2502${stoppedDim}${' '.repeat(mPad)}${mc}${mouthStr}${r}${' '.repeat(Math.max(0, mRight))}${stoppedFg}\u2502${r}`;
 
     buf += ansi.to(startRow + 3, startCol);
-    buf += `${fc}\u2570${'\u2500'.repeat(BOX_INNER)}\u256f${r}`;
+    buf += `${stoppedFg}\u2570${'\u2500'.repeat(BOX_INNER)}\u256f${r}`;
 
     const lbl = (this.label || '?').slice(0, BOX_W);
     const lPad = Math.max(0, Math.floor((BOX_W - lbl.length) / 2));
     buf += ansi.to(startRow + 4, startCol);
-    buf += `${lc}${' '.repeat(lPad)}${lbl}${r}`;
+    buf += `${stoppedDim}${lc}${' '.repeat(lPad)}${lbl}${r}`;
 
-    const st = (theme.status || '').slice(0, BOX_W);
+    let st;
+    if (this.stopped) {
+      st = '[stopped]';
+    } else if (this.detail) {
+      st = this.detail.slice(0, BOX_W);
+    } else {
+      st = (theme.status || '').slice(0, BOX_W);
+    }
     const sPad = Math.max(0, Math.floor((BOX_W - st.length) / 2));
     buf += ansi.to(startRow + 5, startCol);
     buf += `${ansi.dim}${dc}${' '.repeat(sPad)}${st}${r}`;
+
+    const thought = this.getThought();
+    if (thought && !this.stopped) {
+      const tail = SUBAGENT_THOUGHT_TAILS[this.thoughtFrame % 3];
+      const bubbleRow = startRow - 1;
+      const bubbleCol = startCol + BOX_W - 1;
+      const bubbleText = `\u3008${thought}\u3009`;
+      buf += ansi.to(bubbleRow, bubbleCol);
+      buf += `${ansi.fg(120, 120, 120)}${bubbleText}${tail}${r}`;
+    }
 
     return buf;
   }
@@ -525,14 +588,12 @@ class ClaudeFace {
 
   loadSubagentSessions() {
     // Get main session info to exclude it from subagent faces
-    let mainModelName = null;
-    let mainCwd = null;
+    let mainSessionId = null;
     try {
       const raw = fs.readFileSync(STATE_FILE, 'utf8').trim();
       if (raw) {
         const data = JSON.parse(raw);
-        mainModelName = data.modelName || null;
-        mainCwd = data.cwd || null;
+        mainSessionId = data.session_id || null;
       }
     } catch {}
 
@@ -552,12 +613,19 @@ class ClaudeFace {
         const data = JSON.parse(raw);
         const id = data.session_id || path.basename(file, '.json');
 
-        // Skip the main session - match by modelName and cwd
-        if (mainModelName && data.modelName === mainModelName) {
-          // If cwd matches too, skip it
-          if (!mainCwd || !data.cwd || path.basename(data.cwd) === path.basename(mainCwd)) {
-            continue;
-          }
+        // Skip stale sessions (older than 5 minutes)
+        if (data.timestamp && (Date.now() - data.timestamp > SUBAGENT_MAX_AGE_MS)) {
+          continue;
+        }
+
+        // Skip the main session - match by session_id
+        if (mainSessionId && id === mainSessionId) {
+          continue;
+        }
+
+        // Skip stopped sessions that are too old
+        if (data.stopped && data.timestamp && (Date.now() - data.timestamp > SUBAGENT_STOPPED_LINGER_MS)) {
+          continue;
         }
 
         seenIds.add(id);
@@ -596,16 +664,12 @@ class ClaudeFace {
       const base = face.cwd ? path.basename(face.cwd) : '';
 
       if (sorted.length === 1) {
-        face.label = base ? base.slice(0, 8) : (face.modelName || 'claude').slice(0, 8);
+        face.label = base ? base.slice(0, 8) : (face.modelName || 'sub').slice(0, 8);
       } else if (base && cwdCounts[base] === 1) {
         face.label = base.slice(0, 8);
       } else {
         cwdIndex[base] = (cwdIndex[base] || 0) + 1;
-        if (cwdIndex[base] === 1) {
-          face.label = i === 0 ? 'main' : (base || 'sub').slice(0, 6) + '-' + cwdIndex[base];
-        } else {
-          face.label = 'sub-' + (cwdIndex[base] - 1);
-        }
+        face.label = 'sub-' + cwdIndex[base];
       }
     }
   }
@@ -621,11 +685,11 @@ class ClaudeFace {
     const columnCapacity = Math.max(1, maxPerColumn);
 
     // Symmetrical columns: equal distance from face edges
-    // Left: SUBAGENT_CELL_W + 2 chars left of face left edge
-    // Right: SUBAGENT_CELL_W + 2 chars right of face right edge
-    const gap = 2;
+    // Left: SUBAGENT_CELL_W + gap chars left of face left edge
+    // Right: SUBAGENT_CELL_W + gap chars right of face right edge
+    const gap = 1;
     const leftCol = Math.max(1, startCol - SUBAGENT_CELL_W - gap);
-    const rightCol = Math.min(cols - SUBAGENT_CELL_W, startCol + faceW + gap);
+    const rightCol = Math.min(cols - SUBAGENT_CELL_W, startCol + faceW + SUBAGENT_CELL_W + gap);
     const leftCol2 = Math.max(1, leftCol - SUBAGENT_CELL_W - gap);
     const rightCol2 = Math.min(cols - SUBAGENT_CELL_W, rightCol + SUBAGENT_CELL_W + gap);
 

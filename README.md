@@ -52,20 +52,23 @@ A thin color-coded bar underneath the face shows a visual history of the session
 
 Each color maps to a state — purple for thinking, green for coding, red for errors, gold for happy, teal for satisfied, green-gold for proud, amber for relieved. At a glance you can see how the session went: lots of red? rough session. smooth green? clean run. It's a tiny EKG for your AI.
 
-## Grid Mode
+## Subagent Mode
 
-When you're running multiple Claude Code sessions or using subagents, the **grid renderer** shows one mini-face per session, auto-laid out based on terminal size:
+When you're running multiple sessions or subagents, press `g` to toggle **subagent mode** — mini faces appear on the sides of the main face:
 
 ```
-  ╭──────╮  ╭──────╮  ╭──────╮  ╭──────╮
-  │ ██ ██│  │ ▀▀ ▀▀│  │ ╲╱╲╱│  │ ── ──│
-  │ ◡◡◡  │  │ ═══  │  │ ◠◠◠ │  │ ───  │
-  ╰──────╯  ╰──────╯  ╰──────╯  ╰──────╯
-    main      sub-1     sub-2    api-server
-    idle      coding    error!    reading
+         ╭────────────────────╮
+         │                    │     ╭──────╮
+         │      ██      ██    │     │ ██ ██│
+         │      ██      ██    │     │ ◡◡◡  │
+         │                    │     ╰──────╯
+         │         ◡◡◡        │       main
+         │                    │     coding
+         ╰────────────────────╯
+           ·  claude is idle  ·
 ```
 
-Each face has its own blink timer, color theme, and state. Sessions appear when they start using tools and fade away when they stop. Labels are derived from the working directory — sessions in the same directory get `main`/`sub-N` labels, sessions in different directories show the folder name.
+Each mini face has its own blink timer, shows what the subagent is working on (detail), and displays "[stopped]" when done. Sessions appear when they start using tools and fade away when they stop. Labels are derived from the working directory.
 
 ## Expressions
 
@@ -125,16 +128,8 @@ claude plugin install --plugin-dir ./code-crumb
 
 ### 3. Run
 
-**Single face** (the classic big animated face):
-
 ```bash
 node code-crumb/renderer.js
-```
-
-**Grid mode** (one mini-face per session/subagent):
-
-```bash
-node code-crumb/renderer.js --grid
 ```
 
 **Via the launcher** (auto-opens the face in a new terminal tab):
@@ -142,7 +137,6 @@ node code-crumb/renderer.js --grid
 ```bash
 # Claude Code (default)
 node code-crumb/launch.js
-node code-crumb/launch.js --grid
 
 # Codex CLI (uses wrapper for rich tool-level events)
 node code-crumb/launch.js --editor codex "fix the auth bug"
@@ -152,24 +146,21 @@ node code-crumb/launch.js --editor opencode
 
 # With any editor arguments
 node code-crumb/launch.js --dangerously-skip-permissions
-node code-crumb/launch.js --grid -p "fix the auth bug"
+node code-crumb/launch.js -p "fix the auth bug"
 node code-crumb/launch.js --resume
 ```
 
 On Windows you can also use the batch wrapper:
 
 ```powershell
-code-crumb\code-crumb.cmd --grid --dangerously-skip-permissions
+code-crumb\code-crumb.cmd --dangerously-skip-permissions
 ```
 
 ### 4. Preview
 
 ```bash
-# Single face demo (run renderer.js in another pane first)
+# Demo (run renderer.js in another pane first)
 node code-crumb/demo.js
-
-# Grid demo with simulated sessions (run renderer.js --grid first)
-node code-crumb/grid-demo.js
 ```
 
 ### 5. (Optional) Add to PATH
@@ -216,24 +207,25 @@ The model name can also be passed in event JSON via the `model_name` field.
 │  OpenCode      │    JSON per         │  sessions/*.json  │
 │  (any editor)  │    session          │                   │
 └───────────────┘                      └────────┬──────────┘
-                                                │
-                                           fs.watch
-                                                │
-                                    ┌───────────▼──────────┐
-                                    │     renderer.js       │
-                                    │     @ 15fps           │
-                                    │                       │
-                                    │  (default) single face│
-                                    │  (--grid)  multi-grid │
-                                    └───────────────────────┘
+                                                 │
+                                            fs.watch
+                                                 │
+                                     ┌───────────▼──────────┐
+                                     │     renderer.js       │
+                                     │     @ 15fps           │
+                                     │                       │
+                                     │  single face +        │
+                                     │  optional subagent    │
+                                     │  mini faces (press g) │
+                                     └───────────────────────┘
 ```
 
 1. **Hooks/adapters fire** on tool use events (PreToolUse, PostToolUse, Stop, Notification)
 2. **`update-state.js`** (or an adapter) maps tool names to face states and writes:
-   - A single `~/.code-crumb-state` file (for the classic renderer)
-   - A per-session file in `~/.code-crumb-sessions/` (for the grid)
+   - A single `~/.code-crumb-state` file (for the main face)
+   - A per-session file in `~/.code-crumb-sessions/` (for subagent faces)
 3. **Session ID** is extracted from the event data (`session_id`), falling back to the parent process ID — each instance and subagent gets its own face
-4. **`renderer.js`** watches for file changes and animates transitions (single face by default, `--grid` for multi-face)
+4. **`renderer.js`** watches for file changes and animates transitions; press `g` to show subagent mini faces
 
 ## Editor-Specific Integration
 
@@ -297,7 +289,7 @@ The adapter also accepts a generic format (`{"event":"tool_start",...}`) for bac
 
 | File | What it does |
 |---|---|
-| `renderer.js` | Unified renderer — single face (default) or grid (`--grid`) |
+| `renderer.js` | Main renderer — shows face with optional subagent mini faces |
 | `update-state.js` | Hook script — maps tool events to face states |
 | `launch.js` | Auto-starts renderer and launches the editor with args |
 | `setup.js` | Installs hooks (`setup.js [claude|codex|opencode|openclaw]`) |
@@ -307,8 +299,7 @@ The adapter also accepts a generic format (`{"event":"tool_start",...}`) for bac
 | `adapters/openclaw-adapter.js` | Adapter for OpenClaw/Pi agent events |
 | `.claude-plugin/plugin.json` | Claude Code plugin manifest for marketplace |
 | `hooks/hooks.json` | Hook config for Claude Code plugin system |
-| `demo.js` | Cycles through all expressions (single face) |
-| `grid-demo.js` | Simulates multiple sessions (grid mode) |
+| `demo.js` | Cycles through all expressions |
 | `code-crumb.cmd` | Windows batch wrapper |
 | `code-crumb.sh` | Unix shell wrapper |
 
@@ -363,22 +354,20 @@ Add to `~/.codex/config.toml`:
 notify = ["node", "/path/to/adapters/codex-notify.js"]
 ```
 
-## Grid Mode Details
+## Subagent Mode Details
 
 - Each session writes to `~/.code-crumb-sessions/{session_id}.json`
-- The grid auto-layouts based on terminal size (up to ~8 faces across in an 80-col terminal)
 - Sessions are labeled by working directory name — different projects get different labels
-- Sessions sharing a directory get `main` / `sub-1` / `sub-2` labels
-- Faces linger after a session stops (happy 8s, proud 5s, relieved 4s, satisfied 3.5s)
+- Sessions sharing a directory get `sub-1`, `sub-2`, etc. labels
+- Faces linger after a session stops then fade away
 - Stale sessions (no update for 2 minutes) are cleaned up automatically
-- Each face blinks independently and has its own color-breathing phase offset
-- Session count is shown in the top-right corner
+- Each mini face blinks independently and shows what the subagent is working on
+- Press `g` to toggle subagent mode
 
 ## Performance
 
 - Zero dependencies — just Node.js
-- Single mode: ~0.5% CPU at 15fps
-- Grid mode: ~0.5% CPU at 15fps (even with many faces)
+- ~0.5% CPU at 15fps
 - Hook script runs in <50ms per invocation
 - State files are <200 bytes each
 - No network, no IPC, no sockets
@@ -407,7 +396,6 @@ Clean up state files:
 rm ~/.code-crumb-state
 rm ~/.code-crumb-stats.json
 rm ~/.code-crumb.pid
-rm ~/.code-crumb-grid.pid
 rm -rf ~/.code-crumb-sessions
 ```
 

@@ -4,10 +4,7 @@
 // +================================================================+
 // |  Code Crumb -- A terminal tamagotchi for AI coding assistants   |
 // |  Shows what your AI coding assistant is doing                   |
-// |                                                                 |
-// |  Modes:                                                         |
-// |    node renderer.js            Single face (default)            |
-// |    node renderer.js --grid     Multi-face grid                  |
+// |  Press g to toggle subagent mode (mini faces on sides)           |
 // +================================================================+
 
 const fs = require('fs');
@@ -25,13 +22,9 @@ const {
 const { mouths, eyes, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { ClaudeFace } = require('./face');
-const { MiniFace, FaceGrid } = require('./grid');
-
-// -- Mode ----------------------------------------------------------
-const GRID_MODE = process.argv.includes('--grid');
 
 // -- Config --------------------------------------------------------
-const PID_FILE = path.join(HOME, GRID_MODE ? '.code-crumb-grid.pid' : '.code-crumb.pid');
+const PID_FILE = path.join(HOME, '.code-crumb.pid');
 const FPS = 15;
 const FRAME_MS = Math.floor(1000 / FPS);
 const IDLE_TIMEOUT = 8000;
@@ -199,60 +192,10 @@ function runSingleMode() {
   loop();
 }
 
-// -- Grid mode -----------------------------------------------------
-function runGridMode() {
-  try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
-
-  const grid = new FaceGrid();
-
-  // Load persisted preferences
-  const prefs = loadPrefs();
-  if (typeof prefs.paletteIndex === 'number') grid.paletteIndex = prefs.paletteIndex % PALETTES.length;
-
-  try {
-    fs.watch(SESSIONS_DIR, () => { grid.loadSessions(); });
-  } catch {}
-
-  grid.loadSessions();
-
-  // Raw stdin keypress handling
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (key) => {
-      if (grid.showHelp && key !== '\x03') { grid.showHelp = false; return; }
-      if (key === 't') { grid.cycleTheme(); savePrefs({ paletteIndex: grid.paletteIndex }); }
-      else if (key === 'h' || key === '?') grid.toggleHelp();
-      else if (key === 'q' || key === '\x03') cleanup();
-    });
-  }
-
-  process.stdout.on('resize', () => {
-    grid.prevFaceCount = -1;
-    process.stdout.write(ansi.clear);
-  });
-
-  let lastTime = Date.now();
-  function loop() {
-    const now = Date.now();
-    const dt = now - lastTime;
-    lastTime = now;
-
-    grid.update(dt);
-    if (grid.frame % (FPS * 2) === 0) grid.loadSessions();
-
-    process.stdout.write(ansi.home + grid.render());
-    setTimeout(loop, FRAME_MS);
-  }
-
-  loop();
-}
-
 // -- Entry ---------------------------------------------------------
 function main() {
   if (isAlreadyRunning()) {
-    console.log(`Code Crumb${GRID_MODE ? ' Grid' : ''} is already running in another window.`);
+    console.log('Code Crumb is already running in another window.');
     process.exit(0);
   }
   writePid();
@@ -269,22 +212,17 @@ function main() {
   process.on('exit', removePid);
 
   process.stdout.write(ansi.hide + ansi.clear);
-  const title = GRID_MODE ? 'Code Crumb Grid' : 'Code Crumb';
-  process.stdout.write(`\x1b]0;${title}\x07`);
+  process.stdout.write('\x1b]0;Code Crumb\x07');
 
-  if (GRID_MODE) {
-    runGridMode();
-  } else {
-    runSingleMode();
-  }
+  runSingleMode();
 }
 
 // -- Module exports (for testing) / Entry ----------------------------
 if (require.main === module) {
   main();
 } else {
-  module.exports = {
-    ClaudeFace, MiniFace, FaceGrid, ParticleSystem,
+module.exports = {
+    ClaudeFace, ParticleSystem,
     lerpColor, dimColor, breathe,
     themes, mouths, eyes, gridMouths,
     COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,
