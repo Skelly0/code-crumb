@@ -75,7 +75,7 @@ State is communicated between the hook handler and renderer via JSON files:
 
 ### State Machine
 
-16 face states: `idle`, `thinking`, `reading`, `searching`, `coding`, `executing`, `happy`, `satisfied`, `proud`, `relieved`, `error`, `sleeping`, `waiting`, `testing`, `installing`, `caffeinated`, `subagent`.
+17 face states: `idle`, `thinking`, `responding`, `reading`, `searching`, `coding`, `executing`, `happy`, `satisfied`, `proud`, `relieved`, `error`, `sleeping`, `waiting`, `testing`, `installing`, `caffeinated`, `subagent`.
 
 States have minimum display durations (1–8 seconds) enforced via a `pendingState` queue to prevent visual flashing.
 
@@ -144,7 +144,7 @@ Run `npm test` (or `node test.js`). The test suite covers:
 
 - **shared.js**: `safeFilename` edge cases
 - **state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
-- **themes.js**: `lerpColor`/`dimColor`/`breathe` color math, theme completeness (all 17 states), `COMPLETION_LINGER` ordering, thought bubble pools
+- **themes.js**: `lerpColor`/`dimColor`/`breathe` color math, theme completeness (all 18 states), `COMPLETION_LINGER` ordering, thought bubble pools
 - **animations.js**: mouth/eye functions (shape and randomness)
 - **particles.js**: `ParticleSystem` (all 10 styles, lifecycle, fadeAll)
 - **face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline)
@@ -156,7 +156,7 @@ For visual testing, use the demo scripts:
 
 1. Run `npm start` in one terminal
 2. Run `npm run demo` in another terminal
-3. Observe the face cycling through all 17 states
+3. Observe the face cycling through all 18 states
 
 For grid mode: `npm run grid` + `npm run demo:grid`.
 

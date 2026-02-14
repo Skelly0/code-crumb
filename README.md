@@ -72,7 +72,8 @@ Each face has its own blink timer, color theme, and state. Sessions appear when 
 | State | Eyes | Mouth | Trigger | Vibe |
 |---|---|---|---|---|
 | **Idle** | `██ ██` + blinking | `◡◡◡` | No activity | Calm, breathing, floating particles |
-| **Thinking** | `● ●` (rotating) | `───` | Between tool calls | Orbiting particles, contemplative |
+| **Thinking** | `● ●` (rotating) | `───` | Between tool calls (before first tool) | Orbiting particles, contemplative |
+| **Responding** | `▄▄ ██` (gentle) | `◡◡` | After tools complete, generating final response | Soft teal glow, subtle smile, 3s linger |
 | **Reading** | `── ──` (narrowed) | `───` | `Read`, `View` | Focused, studying |
 | **Searching** | `██ ██` (darting) | `○` | `Grep`, `Glob`, `WebFetch` | Eyes look left and right |
 | **Coding** | `▀▀ ▀▀` (focused) | `═══` | `Edit`, `Write` | Determined, in the zone |
