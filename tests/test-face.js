@@ -920,7 +920,7 @@ describe('face.js -- subagent mode', () => {
     assert.ok(positions[0].col < 80);
   });
 
-  test('calculateSubagentPositions uses multiple columns when needed', () => {
+  test('calculateSubagentPositions distributes faces vertically when needed', () => {
     const face = new ClaudeFace();
     const now = Date.now();
     for (let i = 0; i < 8; i++) {
@@ -934,10 +934,10 @@ describe('face.js -- subagent mode', () => {
     }
     const positions = face.calculateSubagentPositions(80, 30, 30, 10, 8, 25);
     assert.strictEqual(positions.length, 8);
-    // Check that faces are distributed across columns
-    const cols = positions.map(p => p.col);
-    const uniqueCols = [...new Set(cols)];
-    assert.ok(uniqueCols.length > 1, 'Should use multiple columns');
+    // Check that faces are distributed across rows (top and bottom)
+    const rows = positions.map(p => p.row);
+    const uniqueRows = [...new Set(rows)];
+    assert.ok(uniqueRows.length > 1, 'Should use multiple rows');
   });
 
   test('calculateSubagentPositions does not overflow into key hints area', () => {

@@ -613,6 +613,10 @@ class ClaudeFace {
     this.selectedSubagentIndex = (this.selectedSubagentIndex - 1 + this.subagentFaces.size) % this.subagentFaces.size;
   }
 
+  deselectSubagent() {
+    this.selectedSubagentIndex = -1;
+  }
+
   getSelectedSubagent() {
     if (this.selectedSubagentIndex < 0) return null;
     const faces = [...this.subagentFaces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
@@ -716,63 +720,44 @@ class ClaudeFace {
     const n = faces.length;
     if (n === 0) return [];
 
-    const faceCenterX = startCol + Math.floor(faceW / 2);
     const faceCenterY = startRow + Math.floor(faceH / 2);
-
-    const rowSpacing = faceH + 3;
-    const colSpacing = faceW + 6;
 
     const positions = [];
 
-    if (n <= 4) {
-      const offsets = [
-        { row: -1, col: -1 },
-        { row: -1, col: 1 },
-        { row: 1, col: -1 },
-        { row: 1, col: 1 },
-      ];
+    if (n <= 2) {
       for (let i = 0; i < n; i++) {
         positions.push({
           face: faces[i],
-          row: Math.max(1, faceCenterY + offsets[i].row * rowSpacing - Math.floor(SUBAGENT_CELL_H / 2)),
-          col: Math.max(1, faceCenterX + offsets[i].row * 0 + offsets[i].col * colSpacing - Math.floor(SUBAGENT_CELL_W / 2)),
-        });
-      }
-    } else if (n <= 8) {
-      const offsets = [
-        { row: -2, col: 0 },
-        { row: -1, col: -1 },
-        { row: -1, col: 1 },
-        { row: 0, col: -1 },
-        { row: 0, col: 1 },
-        { row: 1, col: -1 },
-        { row: 1, col: 1 },
-        { row: 2, col: 0 },
-      ];
-      for (let i = 0; i < n; i++) {
-        positions.push({
-          face: faces[i],
-          row: Math.max(1, faceCenterY + offsets[i].row * rowSpacing - Math.floor(SUBAGENT_CELL_H / 2)),
-          col: Math.max(1, faceCenterX + offsets[i].col * colSpacing - Math.floor(SUBAGENT_CELL_W / 2)),
+          row: faceCenterY - Math.floor(SUBAGENT_CELL_H / 2),
+          col: i === 0 ? startCol - SUBAGENT_CELL_W - 3 : startCol + faceW + 3,
         });
       }
     } else {
-      const rings = [
-        { r: 1.5, count: 6 },
-        { r: 2.5, count: 12 },
-      ];
-      let placed = 0;
-      for (const ring of rings) {
-        if (placed >= n) break;
-        const angleStep = (2 * Math.PI) / ring.count;
-        const startAngle = -Math.PI / 2;
-        for (let i = 0; i < ring.count && placed < n; i++) {
-          const angle = startAngle + i * angleStep;
-          const row = Math.max(1, Math.floor(faceCenterY + Math.sin(angle) * ring.r * rowSpacing - SUBAGENT_CELL_H / 2));
-          const col = Math.max(1, Math.min(cols - SUBAGENT_CELL_W, Math.floor(faceCenterX + Math.cos(angle) * ring.r * colSpacing - SUBAGENT_CELL_W / 2)));
-          positions.push({ face: faces[placed], row, col });
-          placed++;
-        }
+      const perSide = Math.ceil(n / 2);
+      const topRows = Math.min(perSide, Math.floor((startRow - 2) / SUBAGENT_CELL_H));
+      const bottomRows = Math.min(perSide, Math.floor((rows - faceCenterY - 8) / SUBAGENT_CELL_H));
+
+      let idx = 0;
+      for (let i = 0; i < topRows && idx < n; i++) {
+        positions.push({
+          face: faces[idx++],
+          row: startRow - 2 - (topRows - 1 - i) * SUBAGENT_CELL_H,
+          col: startCol + faceW + 3,
+        });
+      }
+      for (let i = 0; i < bottomRows && idx < n; i++) {
+        positions.push({
+          face: faces[idx++],
+          row: startRow + faceH + 2 + i * SUBAGENT_CELL_H,
+          col: startCol + faceW + 3,
+        });
+      }
+      while (idx < n) {
+        positions.push({
+          face: faces[idx++],
+          row: Math.floor((rows - SUBAGENT_CELL_H) / 2),
+          col: startCol + faceW + 3,
+        });
       }
     }
 

@@ -167,6 +167,7 @@ function runSingleMode() {
       else if (key === 'g') { face.toggleSubagentMode(); persistPrefs(); }
       else if (key === 'a') { face.toggleAccessories(); persistPrefs(); }
       else if (key === 'h' || key === '?') face.toggleHelp();
+      else if (key === '\x1b') face.deselectSubagent();
       else if (key === '\x1b[C' || key === '\x1b[D') face.selectNextSubagent();
       else if (key === '\x1b[A' || key === '\x1b[B') face.selectPrevSubagent();
       else if (key === 'q' || key === '\x03') cleanup(); // q or Ctrl+C
