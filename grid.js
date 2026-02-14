@@ -108,6 +108,10 @@ class MiniFace {
         const p = Math.floor(this.frame / 4) % 4;
         return [' \u25cf\u00b7 \u00b7\u25cf', ' \u00b7\u25cf \u25cf\u00b7', ' \u25cf\u00b7 \u25cf\u00b7', ' \u00b7\u25cf \u00b7\u25cf'][p];
       }
+      case 'responding': {
+        const r = Math.floor(this.frame / 30) % 2;
+        return r ? ' \u2584\u2584 \u2588 ' : ' \u2584\u2584 \u2588\u2588';
+      }
       case 'reading':     return ' \u2500\u2500 \u2500\u2500';
       case 'searching':
         if (this.lookDir < 0) return ' \u2588\u2588 \u2588\u00b7';

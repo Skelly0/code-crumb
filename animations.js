@@ -27,6 +27,7 @@ const mouths = {
   calm:       () => ' \u25e1\u25e1',
   exhale:     () => ' \u25e1 ',
   content:    () => '\u25e1\u25e1 ',
+  responding: () => ' \u25e1\u25e1',
 };
 
 // -- Grid mouths (compact for BOX_INNER=6) -------------------------
@@ -48,6 +49,7 @@ const gridMouths = {
   satisfied:   '\u25e1\u25e1\u25e1',
   proud:       '  \u25e1\u25e1',
   relieved:    ' \u25e1 ',
+  responding:  ' \u25e1\u25e1',
 };
 
 // -- Eyes (2-row, full-size face) ----------------------------------
@@ -126,6 +128,11 @@ const eyes = {
   },
 
   content() { return { left: ['\u2580\u2580', '  '], right: ['\u2580\u2580', '  '] }; },
+
+  responding(theme, frame) {
+    if (frame % 60 < 2) return { left: ['\u2584\u2584', '\u2588\u2588'], right: ['\u2584\u2584', '\u2588\u2588'] };
+    return { left: ['\u2584\u2584', '\u2588 '], right: ['\u2584\u2584', ' \u2588'] };
+  },
 };
 
 module.exports = { mouths, gridMouths, eyes };

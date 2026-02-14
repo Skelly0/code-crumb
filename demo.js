@@ -25,6 +25,7 @@ const sessionStart = Date.now();
 const states = [
   { state: 'idle',      detail: '',                     duration: 3000, label: 'Idle -- resting, thought bubbles drift in' },
   { state: 'thinking',  detail: '',                     duration: 3500, label: 'Thinking -- eyes spinning, orbiting particles' },
+  { state: 'responding', detail: 'generating response',    duration: 3500, label: 'Responding -- after tools, final output' },
   { state: 'reading',   detail: 'reading index.ts',     duration: 3000, label: 'Reading -- narrowed eyes, tool call count shows' },
   { state: 'searching', detail: 'looking for "TODO"',   duration: 3500, label: 'Searching -- eyes darting left and right' },
   { state: 'coding',    detail: 'editing App.tsx',      duration: 3500, label: 'Coding -- file count in thought bubble', files: true },
