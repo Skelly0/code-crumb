@@ -618,12 +618,13 @@ class ClaudeFace {
     const startCol = Math.max(1, Math.floor((cols - faceW) / 2) + 1);
     const startRow = Math.max(7, Math.floor((rows - totalH) / 2) + 4);
 
-    // Store position for orbital system
+    // Store position for orbital system (bubble bounds added during thought bubble render)
     this.lastPos = {
       row: startRow, col: startCol,
       w: faceW, h: faceH,
       centerX: startCol + Math.floor(faceW / 2),
       centerY: startRow + Math.floor(faceH / 2),
+      bubble: null,
     };
 
     const fc = ansi.fg(...borderColor);
@@ -748,6 +749,7 @@ class ClaudeFace {
           buf += `${bc}\u2502 ${tc}${txt}${r} ${bc}\u2502${r}`;
           buf += ansi.to(startRow + 4, bubbleCol);
           buf += `${bc}\u2570${'\u2500'.repeat(bubbleInner)}\u256f${r}`;
+          this.lastPos.bubble = { row: startRow + 2, col: bubbleCol, w: bubbleInner + 2, h: 3 };
         }
       } else if (startRow >= 5) {
         // Above-face bubble (original position, no accessory conflict)
@@ -764,6 +766,7 @@ class ClaudeFace {
           buf += `${bc}\u2570${'\u2500'.repeat(bubbleInner)}\u256f${r}`;
           buf += ansi.to(startRow - 1, bubbleLeft + 2);
           buf += `${bc}\u25cb${r}`;
+          this.lastPos.bubble = { row: startRow - 4, col: bubbleLeft, w: bubbleInner + 2, h: 4 };
         }
       }
     }

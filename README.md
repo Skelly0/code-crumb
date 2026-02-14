@@ -2,17 +2,7 @@
 
 A terminal tamagotchi that shows what your AI coding assistant is doing.
 
-```
-         ╭────────────────────╮
-         │                    │
-         │      ██      ██    │
-         │      ██      ██    │
-         │                    │
-         │         ◡◡◡        │
-         │                    │
-         ╰────────────────────╯
-           ·  claude is idle  ·
-```
+![Code Crumb coding state — cat ears, 25 streak, neon theme](images/claudecoding.png)
 
 Code Crumb hooks into AI coding tool lifecycle events and displays an animated face that reacts in real time — blinking, searching, coding, celebrating, and occasionally glitching when things go wrong.
 
@@ -38,9 +28,13 @@ The face shows a tiny thought bubble with contextual content:
 
 Content adapts to what's happening: file count when editing multiple files, tool call number, session duration, or idle flavor text ("thinking about types", "contemplating recursion").
 
+![Idle state with "imagining clean code" thought bubble](images/idle-thought-bubble.png)
+
 ## Streaks & Achievements
 
 A persistent counter tracks consecutive successful tool calls. The face gets increasingly confident during long streaks, and when a build finally fails, the reaction is proportional to how long the streak was — first error after 50 successes? *DEVASTATION.* Milestones at 10, 25, 50, 100, 200, and 500 trigger sparkle celebrations. Stats persist across sessions in `~/.code-crumb-stats.json`.
+
+![OpenCode proud with 21-streak and crown accessory](images/opencode-proud-streak.png)
 
 ## Session Timeline
 
@@ -86,6 +80,8 @@ When your session spawns subagents (e.g. Claude Code's `Task` tool), mini-faces 
 - Sessions appear when subagents start, linger briefly after they stop, then fade away
 - Labels derived from working directory — sessions in different directories show folder names, same-directory sessions get `sub-N` labels
 
+![Orbital subagents — three mini-faces orbiting the main face](images/orbital-subagents.png)
+
 ## Expressions
 
 | State | Eyes | Mouth | Trigger | Vibe |
@@ -108,6 +104,29 @@ When your session spawns subagents (e.g. Claude Code's `Task` tool), mini-faces 
 | **Installing** | `▄▄` (looking down) | `···` | `npm install`, `pip install`, etc. | Falling dot particles like packages raining down |
 | **Caffeinated** | `██` (vibrating) | `▪◡▪` | 5+ tool calls in 10 seconds | Speed line particles, fast breathing, face jitter |
 | **Subagent** | scanning (conducting) | `═══` | `Task` / subagent spawn | Stream particles radiate outward, eyes scan between orbitals |
+
+![Sleeping state with Zzz particles and thought bubble](images/sleeping.png)
+
+## Color Palettes
+
+Five palettes — press `t` to cycle through them. All preferences persist between sessions.
+
+| Palette | Vibe |
+|---|---|
+| **default** | Original soft purples and blues |
+| **neon** | High saturation cyans, magentas, limes |
+| **pastel** | Soft pinks, lavenders, mints |
+| **mono** | Greyscale |
+| **sunset** | Warm oranges, reds, golds, purples |
+
+<p>
+  <img src="images/neon-theme.png" width="49%" alt="Neon theme — cyan glow" />
+  <img src="images/opencode-neon-pink.png" width="49%" alt="Neon pink with party hat accessory" />
+</p>
+<p>
+  <img src="images/opencode-searching-sunset.png" width="49%" alt="Sunset/yellow palette searching state" />
+  <img src="images/opencode-proud-streak.png" width="49%" alt="Green neon proud state with crown" />
+</p>
 
 ## Quick Start
 
@@ -188,10 +207,10 @@ code-crumb\code-crumb.cmd --dangerously-skip-permissions
 ### 4. Preview
 
 ```bash
-# Single face demo (run renderer.js in another pane first)
+# Full demo — all states + orbital subagents (run renderer.js in another pane first)
 node code-crumb/demo.js
 
-# Orbital subagent demo (simulates subagents orbiting the main face)
+# Orbital-only demo (just the subagent constellation)
 node code-crumb/grid-demo.js
 ```
 
@@ -224,6 +243,8 @@ cd code-crumb && npm link
 | `o` | Toggle orbital subagents on/off |
 | `h` / `?` | Toggle help overlay |
 | `q` / Ctrl+C | Quit |
+
+![Help overlay showing keybindings](images/help-overlay.png)
 
 ## Model Name Display
 
@@ -354,7 +375,7 @@ OpenClaw uses Pi's extension system. The adapter supports both Pi-native event n
 | `adapters/openclaw-adapter.js` | Adapter for OpenClaw/Pi agent events |
 | `.claude-plugin/plugin.json` | Claude Code plugin manifest for marketplace |
 | `hooks/hooks.json` | Hook config for Claude Code plugin system |
-| `demo.js` | Cycles through all expressions |
+| `demo.js` | Cycles through all expressions + orbital subagents |
 | `grid-demo.js` | Simulates orbital subagents around the main face |
 | `code-crumb.cmd` | Windows batch wrapper |
 | `code-crumb.sh` | Unix shell wrapper |

@@ -8,13 +8,38 @@
 // +================================================================+
 
 const fs = require('fs');
-const { STATE_FILE } = require('./shared');
+const path = require('path');
+const { STATE_FILE, SESSIONS_DIR } = require('./shared');
+
+// Ensure sessions dir exists for orbital demo
+try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+
+const mainId = 'demo-main';
 
 function writeState(state, detail = '', extra = {}) {
   fs.writeFileSync(STATE_FILE, JSON.stringify({
-    state, detail, timestamp: Date.now(), ...extra,
+    state, detail, timestamp: Date.now(), sessionId: mainId, modelName: 'claude', ...extra,
   }), 'utf8');
 }
+
+function writeSession(id, state, detail, cwd, stopped = false) {
+  const filename = id.replace(/[^a-zA-Z0-9_-]/g, '_') + '.json';
+  fs.writeFileSync(path.join(SESSIONS_DIR, filename), JSON.stringify({
+    session_id: id, state, detail, timestamp: Date.now(),
+    cwd: cwd || process.cwd(), stopped, modelName: 'claude',
+  }), 'utf8');
+}
+
+function removeSession(id) {
+  const filename = id.replace(/[^a-zA-Z0-9_-]/g, '_') + '.json';
+  try { fs.unlinkSync(path.join(SESSIONS_DIR, filename)); } catch {}
+}
+
+const subagents = [
+  { id: 'demo-sub-1', cwd: '/home/user/my-app/src' },
+  { id: 'demo-sub-2', cwd: '/home/user/my-app/tests' },
+  { id: 'demo-sub-3', cwd: '/home/user/api-server' },
+];
 
 // Simulate a session with incrementing tool calls and streak
 let toolCalls = 0;
@@ -43,7 +68,34 @@ const states = [
   { state: 'waiting',     detail: 'needs input',           duration: 3000, label: 'Waiting -- needs user attention' },
   { state: 'installing',  detail: 'npm install',           duration: 3000, label: 'Installing -- packages raining down' },
   { state: 'caffeinated', detail: 'hyperdrive mode!',      duration: 3000, label: 'Caffeinated -- wired, vibrating' },
-  { state: 'subagent',    detail: 'spawning subagent',     duration: 3000, label: 'Subagent -- mitosis energy' },
+  // -- Orbital subagent sequence --
+  { state: 'subagent', detail: 'spawning subagent', duration: 3000, label: 'Subagent -- first orbital spawns!',
+    orbital: () => {
+      writeSession(subagents[0].id, 'reading', 'reading index.ts', subagents[0].cwd);
+    }},
+  { state: 'subagent', detail: 'conducting', duration: 3000, label: 'Second orbital -- two subagents now',
+    orbital: () => {
+      writeSession(subagents[0].id, 'coding', 'editing App.tsx', subagents[0].cwd);
+      writeSession(subagents[1].id, 'testing', 'npm test', subagents[1].cwd);
+    }},
+  { state: 'subagent', detail: 'conducting', duration: 4000, label: 'Third orbital -- full constellation!',
+    orbital: () => {
+      writeSession(subagents[2].id, 'searching', 'looking for TODO', subagents[2].cwd);
+      writeSession(subagents[0].id, 'caffeinated', 'hyperdrive!', subagents[0].cwd);
+      writeSession(subagents[1].id, 'coding', 'editing fix.ts', subagents[1].cwd);
+    }},
+  { state: 'subagent', detail: 'conducting', duration: 5000, label: 'Orbitals working -- good time for a screenshot!',
+    orbital: () => {
+      writeSession(subagents[0].id, 'executing', 'npm run build', subagents[0].cwd);
+      writeSession(subagents[1].id, 'proud', 'code written', subagents[1].cwd);
+      writeSession(subagents[2].id, 'coding', 'editing handler.ts', subagents[2].cwd);
+    }},
+  { state: 'subagent', detail: 'wrapping up', duration: 3000, label: 'Subagents finishing up',
+    orbital: () => {
+      writeSession(subagents[0].id, 'happy', 'all done!', subagents[0].cwd, true);
+      writeSession(subagents[1].id, 'happy', 'all done!', subagents[1].cwd, true);
+      writeSession(subagents[2].id, 'happy', 'all done!', subagents[2].cwd, true);
+    }},
   { state: 'happy',      detail: 'all done!',             duration: 3000, label: 'Done! -- check out that timeline bar', success: true },
   { state: 'idle',      detail: '',                     duration: 2000, label: 'Back to idle -- the cycle of life' },
 ];
@@ -52,8 +104,8 @@ console.log('\n  Code Crumb Demo');
 console.log('  ' + '='.repeat(40));
 console.log('  Make sure the renderer is running in another terminal!');
 console.log('  (node renderer.js)\n');
-console.log('  NEW: Watch for thought bubbles, streak counter,');
-console.log('  and the timeline bar at the bottom!\n');
+console.log('  Watch for thought bubbles, streak counter,');
+console.log('  timeline bar, and orbital subagents!\n');
 
 async function runDemo() {
   for (const s of states) {
@@ -62,7 +114,6 @@ async function runDemo() {
     if (s.files) filesEdited++;
     if (s.success) streak++;
     if (s.error) {
-      // Break the streak
       const broken = streak;
       streak = 0;
       writeState(s.state, s.detail, {
@@ -79,8 +130,13 @@ async function runDemo() {
         milestone: streak === 10 ? { type: 'streak', value: 10, at: Date.now() } : null,
       });
     }
+    // Spawn/update orbital subagent sessions
+    if (s.orbital) s.orbital();
     await new Promise(r => setTimeout(r, s.duration));
   }
+
+  // Clean up orbital session files
+  for (const s of subagents) removeSession(s.id);
   console.log('\n  Demo complete! The face should now be idle.\n');
 }
 
