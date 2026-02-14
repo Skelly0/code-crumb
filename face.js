@@ -664,6 +664,13 @@ class ClaudeFace {
           continue;
         }
 
+        // Fallback: skip if same cwd and modelName (handles case where session_id not yet in main state)
+        if (mainCwd && mainModelName && data.cwd && data.modelName) {
+          if (path.basename(data.cwd) === path.basename(mainCwd) && data.modelName === mainModelName) {
+            continue;
+          }
+        }
+
         // Skip stopped sessions that are too old
         if (data.stopped && data.timestamp && (Date.now() - data.timestamp > SUBAGENT_STOPPED_LINGER_MS)) {
           continue;

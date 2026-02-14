@@ -26,7 +26,7 @@ const hookEvent = process.argv[2] || '';
 // Write to the single state file (backward compat with renderer.js)
 function writeState(state, detail = '', extra = {}) {
   const sessionId = process.env.CLAUDE_SESSION_ID || String(process.ppid);
-  const data = JSON.stringify({ session_id: sessionId, state, detail, timestamp: Date.now(), ...extra });
+  const data = JSON.stringify({ session_id: sessionId, state, detail, timestamp: Date.now(), cwd: process.cwd(), ...extra });
   try {
     fs.writeFileSync(STATE_FILE, data, 'utf8');
   } catch {
