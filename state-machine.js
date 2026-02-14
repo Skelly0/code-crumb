@@ -46,7 +46,9 @@ function toolToState(toolName, toolInput) {
     if (/\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|\.spec\.)\b/i.test(cmd) ||
         /\b(npm|yarn|pnpm|bun|go|cargo|dotnet)\s+(run\s+)?(test|tests)\b/i.test(cmd) ||
         /\b(rake|npx|composer)\s+test\b/i.test(cmd) ||
-        /\b(pytest|nosetests)\b/i.test(cmd)) {
+        /\b(pytest|nosetests)\b/i.test(cmd) ||
+        /\bnode\s+(--test|test)\b/i.test(cmd) ||
+        /\b(make|gradle|mvn|php\s+artisan)\s+test\b/i.test(cmd)) {
       return { state: 'testing', detail: shortCmd || 'running tests' };
     }
 
@@ -250,7 +252,9 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
     state = 'relieved';
     const cmd = toolInput?.command || toolInput?.cmd || toolInput?.input || '';
     const isTest = /\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|spec)\b/i.test(cmd) ||
-                   /\bnpm\s+(run\s+)?test\b/i.test(cmd);
+                   /\bnpm\s+(run\s+)?test\b/i.test(cmd) ||
+                   /\bnode\s+(--test|test)\b/i.test(cmd) ||
+                   /\b(make|gradle|mvn|php\s+artisan)\s+test\b/i.test(cmd);
     const isBuild = /\b(build|compile|tsc|webpack|vite|esbuild|rollup|make)\b/i.test(cmd);
     const isGit = /\bgit\s/i.test(cmd);
     const isInstall = /\b(npm\s+install|yarn|pip\s+install|cargo\s+build|pnpm|bun\s+(add|install))\b/i.test(cmd);

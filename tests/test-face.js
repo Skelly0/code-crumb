@@ -691,7 +691,7 @@ describe('face.js -- pet afterglow', () => {
     assert.deepStrictEqual(eyeResult, contentEyes);
   });
 
-  test('afterglow overrides mouth to smile', () => {
+  test('afterglow overrides mouth to catMouth', () => {
     const face = new ClaudeFace();
     face.state = 'error';
     for (let i = 0; i < 8; i++) face.pet();
@@ -699,7 +699,7 @@ describe('face.js -- pet afterglow', () => {
     assert.ok(face.petAfterglowTimer > 0);
     const theme = face.getTheme();
     const mouthResult = face.getMouth(theme, 0);
-    assert.strictEqual(mouthResult, mouths.smile());
+    assert.strictEqual(mouthResult, mouths.catMouth());
   });
 
   test('afterglow shows calm thought text', () => {

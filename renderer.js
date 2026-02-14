@@ -119,7 +119,7 @@ function runSingleMode() {
     const completionLinger = COMPLETION_LINGER[face.state];
 
     if (completionLinger && now - face.lastStateChange > completionLinger) {
-      face.setState('idle');
+      face.setState('thinking');
     } else if (!completionStates.includes(face.state) &&
                face.state !== 'idle' && face.state !== 'sleeping' &&
                face.state !== 'waiting' &&

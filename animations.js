@@ -25,6 +25,7 @@ const mouths = {
   dots:       () => '\u00b7\u00b7\u00b7',
   grin:       () => '\u25aa\u25e1\u25aa',
   calm:       () => ' \u25e1\u25e1',
+  catMouth:   () => ' \u03c9 ',
   exhale:     () => ' \u25e1 ',
   content:    () => '\u25e1\u25e1 ',
   responding: () => ' \u25e1\u25e1',

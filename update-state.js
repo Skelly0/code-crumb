@@ -207,7 +207,15 @@ process.stdin.on('end', () => {
     writeSessionState(sessionId, state, detail, stopped, extra);
     writeStats(stats);
   } catch {
-    writeState('thinking');
+    // JSON parse may fail for Stop/Notification events with empty or
+    // non-JSON stdin -- still write the correct state for the hook event.
+    if (hookEvent === 'Stop') {
+      writeState('happy', 'all done!');
+    } else if (hookEvent === 'Notification') {
+      writeState('waiting', 'needs attention');
+    } else {
+      writeState('thinking');
+    }
   }
 
   process.exit(0);

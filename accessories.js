@@ -36,12 +36,10 @@ const ACCESSORIES = {
       '  \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580  ',
     ],
   },
-  headphones: {
+  catears: {
     lines: [
-      '  \u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e  ',
-      ' \u256d\u256f          \u2570\u256e ',
-      ' \u2503            \u2503 ',
-      ' \u25c9            \u25c9 ',
+      '  \u2571\u2572        \u2571\u2572  ',
+      ' \u2571  \u2572      \u2571  \u2572 ',
     ],
   },
   partyhat: {
@@ -114,9 +112,8 @@ const ACCESSORIES = {
 
 const STATE_ACCESSORIES = {
   installing:  'hardhat',
-  reading:     'glasses',
   thinking:    'wizardhat',
-  coding:      'headphones',
+  coding:      'catears',
   happy:       'partyhat',
   sleeping:    'nightcap',
   searching:   'detective',

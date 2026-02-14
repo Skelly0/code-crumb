@@ -115,6 +115,18 @@ describe('state-machine.js -- toolToState', () => {
     assert.strictEqual(toolToState('Bash', { command: 'node foo.test.js' }).state, 'testing');
   });
 
+  test('Bash with node test.js → testing', () => {
+    assert.strictEqual(toolToState('Bash', { command: 'node test.js' }).state, 'testing');
+  });
+
+  test('Bash with node --test → testing', () => {
+    assert.strictEqual(toolToState('Bash', { command: 'node --test src/' }).state, 'testing');
+  });
+
+  test('Bash with make test → testing', () => {
+    assert.strictEqual(toolToState('Bash', { command: 'make test' }).state, 'testing');
+  });
+
   test('Bash with npm install → installing', () => {
     assert.strictEqual(toolToState('Bash', { command: 'npm install express' }).state, 'installing');
   });
