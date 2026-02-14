@@ -694,28 +694,48 @@ class ClaudeFace {
       buf += `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.6))}${' '.repeat(Math.max(0, detailPad))}${detailText}${r}`;
     }
 
-    // Thought bubble (above face, right of center)
-    // Offset upward when accessories are present to avoid overlap
-    let bubbleOffset = 0;
-    if (this.accessoriesEnabled && getAccessory(this.state)) {
-      bubbleOffset = getAccessory(this.state).lines.length;
-    }
-    if (this.thoughtText && startRow >= 5 + bubbleOffset) {
-      const txt = this.thoughtText;
-      const bubbleInner = txt.length + 2;
-      const bubbleLeft = startCol + Math.floor(faceW / 2);
+    // Thought bubble
+    if (this.thoughtText) {
       const bc = ansi.fg(...dimColor(theme.accent, 0.5));
       const tc = `${ansi.italic}${ansi.fg(...dimColor(theme.label, 0.7))}`;
+      const hasAccessory = this.accessoriesEnabled && getAccessory(this.state);
 
-      if (bubbleLeft + bubbleInner + 2 < cols) {
-        buf += ansi.to(startRow - 4 - bubbleOffset, bubbleLeft);
-        buf += `${bc}\u256d${'\u2500'.repeat(bubbleInner)}\u256e${r}`;
-        buf += ansi.to(startRow - 3 - bubbleOffset, bubbleLeft);
-        buf += `${bc}\u2502 ${tc}${txt}${r} ${bc}\u2502${r}`;
-        buf += ansi.to(startRow - 2 - bubbleOffset, bubbleLeft);
-        buf += `${bc}\u2570${'\u2500'.repeat(bubbleInner)}\u256f${r}`;
-        buf += ansi.to(startRow - 1 - bubbleOffset, bubbleLeft + 2);
-        buf += `${bc}\u25cb${r}`;
+      if (hasAccessory) {
+        // Right-side bubble to avoid overlapping accessories above the face
+        const boxRight = startCol + 5 + inner;
+        const bubbleCol = boxRight + 4;
+        const maxTextW = cols - bubbleCol - 4;
+
+        if (maxTextW >= 6) {
+          let txt = this.thoughtText;
+          if (txt.length > maxTextW) txt = txt.slice(0, maxTextW - 3) + '...';
+          const bubbleInner = txt.length + 2;
+
+          buf += ansi.to(startRow + 2, bubbleCol);
+          buf += `${bc}\u256d${'\u2500'.repeat(bubbleInner)}\u256e${r}`;
+          buf += ansi.to(startRow + 3, boxRight + 2);
+          buf += `${bc}\u25cb${r}`;
+          buf += ansi.to(startRow + 3, bubbleCol);
+          buf += `${bc}\u2502 ${tc}${txt}${r} ${bc}\u2502${r}`;
+          buf += ansi.to(startRow + 4, bubbleCol);
+          buf += `${bc}\u2570${'\u2500'.repeat(bubbleInner)}\u256f${r}`;
+        }
+      } else if (startRow >= 5) {
+        // Above-face bubble (original position, no accessory conflict)
+        const txt = this.thoughtText;
+        const bubbleInner = txt.length + 2;
+        const bubbleLeft = startCol + Math.floor(faceW / 2);
+
+        if (bubbleLeft + bubbleInner + 2 < cols) {
+          buf += ansi.to(startRow - 4, bubbleLeft);
+          buf += `${bc}\u256d${'\u2500'.repeat(bubbleInner)}\u256e${r}`;
+          buf += ansi.to(startRow - 3, bubbleLeft);
+          buf += `${bc}\u2502 ${tc}${txt}${r} ${bc}\u2502${r}`;
+          buf += ansi.to(startRow - 2, bubbleLeft);
+          buf += `${bc}\u2570${'\u2500'.repeat(bubbleInner)}\u256f${r}`;
+          buf += ansi.to(startRow - 1, bubbleLeft + 2);
+          buf += `${bc}\u25cb${r}`;
+        }
       }
     }
 
