@@ -16,7 +16,7 @@ A terminal tamagotchi that shows what your AI coding assistant is doing.
 
 Code Crumb hooks into AI coding tool lifecycle events and displays an animated face that reacts in real time — blinking, searching, coding, celebrating, and occasionally glitching when things go wrong.
 
-**Supported editors:** Claude Code, OpenAI Codex CLI, OpenCode — and any tool that can pipe JSON events.
+**Supported editors:** Claude Code, OpenAI Codex CLI, OpenCode, OpenClaw/Pi — and any tool that can pipe JSON events.
 
 Zero dependencies. Just Node.js and vibes.
 
@@ -52,20 +52,39 @@ A thin color-coded bar underneath the face shows a visual history of the session
 
 Each color maps to a state — purple for thinking, green for coding, red for errors, gold for happy, teal for satisfied, green-gold for proud, amber for relieved. At a glance you can see how the session went: lots of red? rough session. smooth green? clean run. It's a tiny EKG for your AI.
 
-## Grid Mode
+## Orbital Subagents
 
-When you're running multiple Claude Code sessions or using subagents, the **grid renderer** shows one mini-face per session, auto-laid out based on terminal size:
+When your session spawns subagents (e.g. Claude Code's `Task` tool), mini-faces orbit the main face like satellites — each with its own state, expression, and label:
 
 ```
-  ╭──────╮  ╭──────╮  ╭──────╮  ╭──────╮
-  │ ██ ██│  │ ▀▀ ▀▀│  │ ╲╱╲╱│  │ ── ──│
-  │ ◡◡◡  │  │ ═══  │  │ ◠◠◠ │  │ ───  │
-  ╰──────╯  ╰──────╯  ╰──────╯  ╰──────╯
-    main      sub-1     sub-2    api-server
-    idle      coding    error!    reading
+              ╭──────╮
+              │ ▀▀ ▀▀│  ← orbiting subagent
+              │ ═══  │
+         ·  · ╰──────╯
+       ·
+   ╭────────────────────╮     ╭──────╮
+   │                     │  · · │ ── ──│
+   │   ●          ●      │ ·   │ ───  │
+   │      ═══            │     ╰──────╯
+   │                     │      sub-2
+   ╰────────────────────╯
+     claude is conducting
+              ·
+            ·   ·
+         ╭──────╮
+         │ ██ ██│
+         │ ◡◡◡  │
+         ╰──────╯
+          sub-3
 ```
 
-Each face has its own blink timer, color theme, and state. Sessions appear when they start using tools and fade away when they stop. Labels are derived from the working directory — sessions in the same directory get `main`/`sub-N` labels, sessions in different directories show the folder name.
+- Mini-faces orbit on an elliptical path, slowly rotating as a constellation
+- Faint dotted connection lines pulse outward from the main face to each orbital
+- The main face adopts a **conducting** expression — eyes scanning between subagents, stream particles radiating outward
+- Dynamic slot count based on terminal size (up to 8 orbitals; graceful degradation on small terminals)
+- Toggle orbital visibility with `o` key
+- Sessions appear when subagents start, linger briefly after they stop, then fade away
+- Labels derived from working directory — sessions in different directories show folder names, same-directory sessions get `sub-N` labels
 
 ## Expressions
 
@@ -88,7 +107,7 @@ Each face has its own blink timer, color theme, and state. Sessions appear when 
 | **Testing** | `██ ██` (intense) | `═══` | `jest`, `pytest`, `vitest`, etc. | Nervous twitches, sweat drop particles |
 | **Installing** | `▄▄` (looking down) | `···` | `npm install`, `pip install`, etc. | Falling dot particles like packages raining down |
 | **Caffeinated** | `██` (vibrating) | `▪◡▪` | 5+ tool calls in 10 seconds | Speed line particles, fast breathing, face jitter |
-| **Subagent** | `██ ██` | `◡◡` | `Task` / subagent spawn | Ghost echo particles (╭╮╰╯│─), mitosis energy |
+| **Subagent** | scanning (conducting) | `═══` | `Task` / subagent spawn | Stream particles radiate outward, eyes scan between orbitals |
 
 ## Quick Start
 
@@ -119,6 +138,11 @@ node code-crumb/setup.js codex
 node code-crumb/setup.js opencode
 ```
 
+**OpenClaw/Pi:**
+```bash
+node code-crumb/setup.js openclaw
+```
+
 **As a Claude Code plugin** (alternative to manual hook setup):
 ```bash
 claude plugin install --plugin-dir ./code-crumb
@@ -126,24 +150,19 @@ claude plugin install --plugin-dir ./code-crumb
 
 ### 3. Run
 
-**Single face** (the classic big animated face):
+Start the renderer in a separate terminal:
 
 ```bash
 node code-crumb/renderer.js
 ```
 
-**Grid mode** (one mini-face per session/subagent):
-
-```bash
-node code-crumb/renderer.js --grid
-```
+Subagent orbitals appear automatically when sessions spawn — no flags needed.
 
 **Via the launcher** (auto-opens the face in a new terminal tab):
 
 ```bash
 # Claude Code (default)
 node code-crumb/launch.js
-node code-crumb/launch.js --grid
 
 # Codex CLI (uses wrapper for rich tool-level events)
 node code-crumb/launch.js --editor codex "fix the auth bug"
@@ -151,16 +170,19 @@ node code-crumb/launch.js --editor codex "fix the auth bug"
 # OpenCode
 node code-crumb/launch.js --editor opencode
 
+# OpenClaw/Pi
+node code-crumb/launch.js --editor openclaw
+
 # With any editor arguments
 node code-crumb/launch.js --dangerously-skip-permissions
-node code-crumb/launch.js --grid -p "fix the auth bug"
+node code-crumb/launch.js -p "fix the auth bug"
 node code-crumb/launch.js --resume
 ```
 
 On Windows you can also use the batch wrapper:
 
 ```powershell
-code-crumb\code-crumb.cmd --grid --dangerously-skip-permissions
+code-crumb\code-crumb.cmd --dangerously-skip-permissions
 ```
 
 ### 4. Preview
@@ -169,7 +191,7 @@ code-crumb\code-crumb.cmd --grid --dangerously-skip-permissions
 # Single face demo (run renderer.js in another pane first)
 node code-crumb/demo.js
 
-# Grid demo with simulated sessions (run renderer.js --grid first)
+# Orbital subagent demo (simulates subagents orbiting the main face)
 node code-crumb/grid-demo.js
 ```
 
@@ -191,6 +213,18 @@ Or use npm link:
 cd code-crumb && npm link
 ```
 
+## Interactive Keybindings
+
+| Key | Action |
+|-----|--------|
+| `space` | Pet the face (sparkle particles + wiggle) |
+| `t` | Cycle color palette (default/neon/pastel/mono/sunset) |
+| `s` | Toggle stats (streak, timeline, sparkline) |
+| `a` | Toggle accessories (cat ears, thought bubbles) |
+| `o` | Toggle orbital subagents on/off |
+| `h` / `?` | Toggle help overlay |
+| `q` / Ctrl+C | Quit |
+
 ## Model Name Display
 
 The status line shows the model/tool name: `claude is thinking`, `codex is coding`, etc. This is configurable:
@@ -205,6 +239,7 @@ Each adapter sets a sensible default:
 - **Claude Code**: `claude`
 - **Codex CLI**: `codex`
 - **OpenCode**: `opencode`
+- **OpenClaw/Pi**: `openclaw`
 
 The model name can also be passed in event JSON via the `model_name` field.
 
@@ -215,7 +250,7 @@ The model name can also be passed in event JSON via the `model_name` field.
 │  Claude Code   │                     │  ~/.code-crumb-  │
 │  Codex CLI     │ ──── writes ────▶  │  state            │
 │  OpenCode      │    JSON per         │  sessions/*.json  │
-│  (any editor)  │    session          │                   │
+│  OpenClaw/Pi   │    session          │                   │
 └───────────────┘                      └────────┬──────────┘
                                                 │
                                            fs.watch
@@ -224,23 +259,23 @@ The model name can also be passed in event JSON via the `model_name` field.
                                     │     renderer.js       │
                                     │     @ 15fps           │
                                     │                       │
-                                    │  (default) single face│
-                                    │  (--grid)  multi-grid │
+                                    │  Main face + orbital  │
+                                    │  subagent mini-faces  │
                                     └───────────────────────┘
 ```
 
 1. **Hooks/adapters fire** on tool use events (PreToolUse, PostToolUse, Stop, Notification)
 2. **`update-state.js`** (or an adapter) maps tool names to face states and writes:
-   - A single `~/.code-crumb-state` file (for the classic renderer)
-   - A per-session file in `~/.code-crumb-sessions/` (for the grid)
-3. **Session ID** is extracted from the event data (`session_id`), falling back to the parent process ID — each instance and subagent gets its own face
-4. **`renderer.js`** watches for file changes and animates transitions (single face by default, `--grid` for multi-face)
+   - A single `~/.code-crumb-state` file (main session state)
+   - A per-session file in `~/.code-crumb-sessions/` (for orbital subagents)
+3. **Session ID** is extracted from the event data (`session_id`), falling back to the parent process ID — the renderer uses this to identify the main session and show other sessions as orbiting mini-faces
+4. **`renderer.js`** watches for file changes and animates the main face with orbiting subagent mini-faces
 
 ## Editor-Specific Integration
 
 ### Claude Code
 
-Hooks are installed via `setup.js` or by installing as a plugin. Events fire automatically via Claude Code's hook system (`PreToolUse`, `PostToolUse`, `Stop`, `Notification`).
+Hooks are installed via `setup.js` or by installing as a plugin. Events fire automatically via Claude Code's hook system (`PreToolUse`, `PostToolUse`, `Stop`, `Notification`). Subagent sessions (from the `Task` tool) automatically appear as orbital mini-faces.
 
 ### Codex CLI
 
@@ -251,7 +286,7 @@ Codex doesn't have a hook system, so two adapter modes are provided:
 | **Notify** (`setup.js codex`) | Configures `notify` in `~/.codex/config.toml` | Turn-level (completion only) |
 | **Wrapper** (`launch.js --editor codex`) | Wraps `codex exec --json` and parses JSONL | Tool-level (full reactions) |
 
-The wrapper mode gives rich real-time reactions but only works with `codex exec` (non-interactive). The notify mode works with all Codex modes but only fires on turn completion.
+The wrapper mode gives rich real-time reactions but only works with `codex exec` (non-interactive). The notify mode works with all Codex modes but only fires on turn completion. Both modes write `sessionId` for proper orbital isolation.
 
 ### OpenCode
 
@@ -294,22 +329,33 @@ export const CodeCrumbPlugin = async (ctx) => {
 
 The adapter also accepts a generic format (`{"event":"tool_start",...}`) for backward compatibility.
 
+### OpenClaw/Pi
+
+OpenClaw uses Pi's extension system. The adapter supports both Pi-native event names (`tool_call`, `tool_execution_start`, `tool_execution_end`, `tool_result`) and the generic Code Crumb format. See `setup.js openclaw` for integration instructions.
+
 ## Files
 
 | File | What it does |
 |---|---|
-| `renderer.js` | Unified renderer — single face (default) or grid (`--grid`) |
+| `renderer.js` | Unified renderer — main face with orbital subagent mini-faces |
 | `update-state.js` | Hook script — maps tool events to face states |
 | `launch.js` | Auto-starts renderer and launches the editor with args |
-| `setup.js` | Installs hooks (`setup.js [claude|codex|opencode|openclaw]`) |
+| `setup.js` | Installs hooks (`setup.js [claude\|codex\|opencode\|openclaw]`) |
+| `face.js` | Main face class — state machine, rendering, orbital toggle |
+| `grid.js` | MiniFace + OrbitalSystem — subagent orbital rendering |
+| `animations.js` | Eye/mouth animations (full-size and mini, incl. conducting) |
+| `particles.js` | ParticleSystem — 12 visual effect styles |
+| `themes.js` | ANSI codes, palettes, color math, thought bubbles |
+| `state-machine.js` | Pure logic — multi-editor tool mapping, error detection, streaks |
+| `shared.js` | Shared constants — paths, config, utilities |
 | `adapters/codex-wrapper.js` | Wraps `codex exec --json` for rich tool-level events |
 | `adapters/codex-notify.js` | Handles Codex `notify` config events |
 | `adapters/opencode-adapter.js` | Adapter for OpenCode plugin events |
 | `adapters/openclaw-adapter.js` | Adapter for OpenClaw/Pi agent events |
 | `.claude-plugin/plugin.json` | Claude Code plugin manifest for marketplace |
 | `hooks/hooks.json` | Hook config for Claude Code plugin system |
-| `demo.js` | Cycles through all expressions (single face) |
-| `grid-demo.js` | Simulates multiple sessions (grid mode) |
+| `demo.js` | Cycles through all expressions |
+| `grid-demo.js` | Simulates orbital subagents around the main face |
 | `code-crumb.cmd` | Windows batch wrapper |
 | `code-crumb.sh` | Unix shell wrapper |
 
@@ -364,22 +410,10 @@ Add to `~/.codex/config.toml`:
 notify = ["node", "/path/to/adapters/codex-notify.js"]
 ```
 
-## Grid Mode Details
-
-- Each session writes to `~/.code-crumb-sessions/{session_id}.json`
-- The grid auto-layouts based on terminal size (up to ~8 faces across in an 80-col terminal)
-- Sessions are labeled by working directory name — different projects get different labels
-- Sessions sharing a directory get `main` / `sub-1` / `sub-2` labels
-- Faces linger after a session stops (happy 8s, proud 5s, relieved 4s, satisfied 3.5s)
-- Stale sessions (no update for 2 minutes) are cleaned up automatically
-- Each face blinks independently and has its own color-breathing phase offset
-- Session count is shown in the top-right corner
-
 ## Performance
 
 - Zero dependencies — just Node.js
-- Single mode: ~0.5% CPU at 15fps
-- Grid mode: ~0.5% CPU at 15fps (even with many faces)
+- ~0.5% CPU at 15fps (even with orbital subagents)
 - Hook script runs in <50ms per invocation
 - State files are <200 bytes each
 - No network, no IPC, no sockets
@@ -408,7 +442,6 @@ Clean up state files:
 rm ~/.code-crumb-state
 rm ~/.code-crumb-stats.json
 rm ~/.code-crumb.pid
-rm ~/.code-crumb-grid.pid
 rm -rf ~/.code-crumb-sessions
 ```
 
