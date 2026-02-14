@@ -52,6 +52,17 @@ function writeStats(stats) {
   try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats), 'utf8'); } catch {}
 }
 
+function guardedWriteState(state, detail, extra) {
+  try {
+    const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if (existing.sessionId && existing.sessionId !== sessionId &&
+        !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
+      return; // Another session owns the state file
+    }
+  } catch {}
+  writeState(state, detail, extra);
+}
+
 // -- JSONL Event Processor -------------------------------------------
 
 const sessionId = process.env.CLAUDE_SESSION_ID || `codex-${process.pid}`;
@@ -73,6 +84,7 @@ const modelName = process.env.CODE_CRUMB_MODEL || 'codex';
 
 // Track active tool calls by item ID
 const activeTools = new Map();
+const activeSubagents = [];
 
 function buildExtra() {
   const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
@@ -126,11 +138,38 @@ function handleEvent(event) {
       }
       if (SUBAGENT_TOOLS.test(toolName)) {
         stats.session.subagentCount++;
-      }
 
-      writeState(state, detail, buildExtra());
-      writeSessionState(sessionId, state, detail, false, buildExtra());
-      writeStats(stats);
+        // Create synthetic session for subagent
+        const subId = `${sessionId}-sub-${Date.now()}`;
+        const desc = toolInput?.description || toolInput?.prompt || '';
+        const shortDesc = desc.length > 30 ? desc.slice(0, 27) + '...' : desc;
+        writeSessionState(subId, 'thinking', shortDesc || detail, false, {
+          sessionId: subId, modelName, cwd: '', parentSession: sessionId,
+        });
+        activeSubagents.push({ subId, toolName, itemId: item.id });
+
+        // Override main state to 'subagent'
+        const subDetail = `conducting ${activeSubagents.length}`;
+        guardedWriteState('subagent', subDetail, buildExtra());
+        writeSessionState(sessionId, 'subagent', subDetail, false, buildExtra());
+        writeStats(stats);
+      } else if (activeSubagents.length > 0) {
+        // Redirect non-subagent tool state to latest synthetic session
+        const latest = activeSubagents[activeSubagents.length - 1];
+        writeSessionState(latest.subId, state, detail, false, {
+          sessionId: latest.subId, modelName, cwd: '', parentSession: sessionId,
+        });
+
+        // Keep main state as 'subagent'
+        const subDetail = `conducting ${activeSubagents.length}`;
+        guardedWriteState('subagent', subDetail, buildExtra());
+        writeSessionState(sessionId, 'subagent', subDetail, false, buildExtra());
+        writeStats(stats);
+      } else {
+        guardedWriteState(state, detail, buildExtra());
+        writeSessionState(sessionId, state, detail, false, buildExtra());
+        writeStats(stats);
+      }
     }
 
     // Tool call completed (item.completed with tool_use type)
@@ -147,15 +186,51 @@ function handleEvent(event) {
 
       const extra = buildExtra();
       extra.diffInfo = result.diffInfo;
-      writeState(result.state, result.detail, extra);
-      writeSessionState(sessionId, result.state, result.detail, false, extra);
+
+      if (SUBAGENT_TOOLS.test(toolName) && activeSubagents.length > 0) {
+        // Remove oldest subagent (FIFO)
+        const removed = activeSubagents.shift();
+        writeSessionState(removed.subId, result.state, result.detail, true, {
+          sessionId: removed.subId, modelName, cwd: '', parentSession: sessionId,
+        });
+
+        if (activeSubagents.length > 0) {
+          const subDetail = `conducting ${activeSubagents.length}`;
+          guardedWriteState('subagent', subDetail, extra);
+          writeSessionState(sessionId, 'subagent', subDetail, false, extra);
+        } else {
+          guardedWriteState(result.state, result.detail, extra);
+          writeSessionState(sessionId, result.state, result.detail, false, extra);
+        }
+      } else if (activeSubagents.length > 0) {
+        // Redirect completed tool state to latest synthetic session
+        const latest = activeSubagents[activeSubagents.length - 1];
+        writeSessionState(latest.subId, result.state, result.detail, false, {
+          sessionId: latest.subId, modelName, cwd: '', parentSession: sessionId,
+        });
+
+        // Keep main state as 'subagent'
+        const subDetail = `conducting ${activeSubagents.length}`;
+        guardedWriteState('subagent', subDetail, extra);
+        writeSessionState(sessionId, 'subagent', subDetail, false, extra);
+      } else {
+        guardedWriteState(result.state, result.detail, extra);
+        writeSessionState(sessionId, result.state, result.detail, false, extra);
+      }
       writeStats(stats);
       activeTools.delete(item.id);
     }
 
     // Turn completed
     else if (type === 'turn.completed') {
-      writeState('happy', 'all done!', buildExtra());
+      // Clean up all remaining synthetic subagent sessions
+      while (activeSubagents.length > 0) {
+        const removed = activeSubagents.shift();
+        writeSessionState(removed.subId, 'happy', 'all done!', true, {
+          sessionId: removed.subId, modelName, cwd: '', parentSession: sessionId,
+        });
+      }
+      guardedWriteState('happy', 'all done!', buildExtra());
       writeSessionState(sessionId, 'happy', 'all done!', true, buildExtra());
       writeStats(stats);
     }
@@ -163,14 +238,14 @@ function handleEvent(event) {
     // Turn failed
     else if (type === 'turn.failed' || type === 'error') {
       updateStreak(stats, true);
-      writeState('error', event.message || 'something went wrong', buildExtra());
+      guardedWriteState('error', event.message || 'something went wrong', buildExtra());
       writeSessionState(sessionId, 'error', event.message || 'something went wrong', false, buildExtra());
       writeStats(stats);
     }
 
     // Thread/turn started → thinking
     else if (type === 'turn.started' || type === 'thread.started') {
-      writeState('thinking', 'warming up...', buildExtra());
+      guardedWriteState('thinking', 'warming up...', buildExtra());
       writeSessionState(sessionId, 'thinking', 'warming up...', false, buildExtra());
     }
   } catch {
@@ -188,7 +263,7 @@ if (args.length === 0) {
 }
 
 // Set initial state
-writeState('thinking', 'starting codex...', buildExtra());
+guardedWriteState('thinking', 'starting codex...', buildExtra());
 
 const codex = spawn('codex', ['exec', '--json', ...args], {
   stdio: ['inherit', 'pipe', 'inherit'],
@@ -221,7 +296,14 @@ codex.on('error', (err) => {
 });
 
 codex.on('exit', (code) => {
-  writeState('happy', 'codex finished', buildExtra());
+  // Clean up any remaining synthetic subagent sessions
+  while (activeSubagents.length > 0) {
+    const removed = activeSubagents.shift();
+    writeSessionState(removed.subId, 'happy', 'codex finished', true, {
+      sessionId: removed.subId, modelName, cwd: '', parentSession: sessionId,
+    });
+  }
+  guardedWriteState('happy', 'codex finished', buildExtra());
   writeSessionState(sessionId, 'happy', 'codex finished', true, buildExtra());
   writeStats(stats);
   process.exit(code || 0);

@@ -50,19 +50,29 @@ try {
   const sessionId = event['thread-id'] || `codex-${process.ppid}`;
   const modelName = process.env.CODE_CRUMB_MODEL || 'codex';
 
+  // Guard global state file — don't overwrite another active session
+  let shouldWriteGlobal = true;
+  try {
+    const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if (existing.sessionId && existing.sessionId !== sessionId &&
+        !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
+      shouldWriteGlobal = false;
+    }
+  } catch {}
+
   if (eventType === 'agent-turn-complete') {
     // Extract info from the turn data
     const lastMsg = event['last-assistant-message'] || '';
     const detail = lastMsg.length > 40 ? lastMsg.slice(0, 37) + '...' : lastMsg;
 
-    writeState('happy', detail || 'turn complete', { sessionId, modelName });
+    if (shouldWriteGlobal) writeState('happy', detail || 'turn complete', { sessionId, modelName });
     writeSessionState(sessionId, 'happy', detail || 'turn complete', false, { sessionId, modelName });
   } else if (eventType === 'approval-requested') {
-    writeState('waiting', 'needs approval', { sessionId, modelName });
+    if (shouldWriteGlobal) writeState('waiting', 'needs approval', { sessionId, modelName });
     writeSessionState(sessionId, 'waiting', 'needs approval', false, { sessionId, modelName });
   } else {
     // Unknown event -- show as thinking
-    writeState('thinking', eventType || 'codex event', { sessionId, modelName });
+    if (shouldWriteGlobal) writeState('thinking', eventType || 'codex event', { sessionId, modelName });
     writeSessionState(sessionId, 'thinking', eventType || 'codex event', false, { sessionId, modelName });
   }
 } catch {
