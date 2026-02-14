@@ -686,6 +686,9 @@ class ClaudeFace {
     const faceCenterX = startCol + Math.floor(faceW / 2);
     const faceCenterY = startRow + Math.floor(faceH / 2);
 
+    const rowSpacing = faceH + 3;
+    const colSpacing = faceW + 6;
+
     const positions = [];
 
     if (n <= 4) {
@@ -698,8 +701,8 @@ class ClaudeFace {
       for (let i = 0; i < n; i++) {
         positions.push({
           face: faces[i],
-          row: Math.max(1, faceCenterY + offsets[i].row * (SUBAGENT_CELL_H + 1) - Math.floor(SUBAGENT_CELL_H / 2)),
-          col: Math.max(1, faceCenterX + offsets[i].col * (SUBAGENT_CELL_W + 3) - Math.floor(SUBAGENT_CELL_W / 2)),
+          row: Math.max(1, faceCenterY + offsets[i].row * rowSpacing - Math.floor(SUBAGENT_CELL_H / 2)),
+          col: Math.max(1, faceCenterX + offsets[i].row * 0 + offsets[i].col * colSpacing - Math.floor(SUBAGENT_CELL_W / 2)),
         });
       }
     } else if (n <= 8) {
@@ -716,14 +719,14 @@ class ClaudeFace {
       for (let i = 0; i < n; i++) {
         positions.push({
           face: faces[i],
-          row: Math.max(1, faceCenterY + offsets[i].row * (SUBAGENT_CELL_H + 1) - Math.floor(SUBAGENT_CELL_H / 2)),
-          col: Math.max(1, faceCenterX + offsets[i].col * (SUBAGENT_CELL_W + 3) - Math.floor(SUBAGENT_CELL_W / 2)),
+          row: Math.max(1, faceCenterY + offsets[i].row * rowSpacing - Math.floor(SUBAGENT_CELL_H / 2)),
+          col: Math.max(1, faceCenterX + offsets[i].col * colSpacing - Math.floor(SUBAGENT_CELL_W / 2)),
         });
       }
     } else {
       const rings = [
-        { r: 1, count: 4 },
-        { r: 2, count: 8 },
+        { r: 1.5, count: 6 },
+        { r: 2.5, count: 12 },
       ];
       let placed = 0;
       for (const ring of rings) {
@@ -732,8 +735,8 @@ class ClaudeFace {
         const startAngle = -Math.PI / 2;
         for (let i = 0; i < ring.count && placed < n; i++) {
           const angle = startAngle + i * angleStep;
-          const row = Math.max(1, Math.floor(faceCenterY + Math.sin(angle) * ring.r * (SUBAGENT_CELL_H + 1) - SUBAGENT_CELL_H / 2));
-          const col = Math.max(1, Math.min(cols - SUBAGENT_CELL_W, Math.floor(faceCenterX + Math.cos(angle) * ring.r * (SUBAGENT_CELL_W + 3) - SUBAGENT_CELL_W / 2)));
+          const row = Math.max(1, Math.floor(faceCenterY + Math.sin(angle) * ring.r * rowSpacing - SUBAGENT_CELL_H / 2));
+          const col = Math.max(1, Math.min(cols - SUBAGENT_CELL_W, Math.floor(faceCenterX + Math.cos(angle) * ring.r * colSpacing - SUBAGENT_CELL_W / 2)));
           positions.push({ face: faces[placed], row, col });
           placed++;
         }
