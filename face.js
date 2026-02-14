@@ -683,45 +683,66 @@ class ClaudeFace {
     const n = faces.length;
     if (n === 0) return [];
 
-    // Reserve space at bottom for key hints (last 2 rows)
-    const availableRows = rows - 3;
-    const maxPerColumn = Math.floor((availableRows - startRow) / SUBAGENT_CELL_H);
-    const columnCapacity = Math.max(1, maxPerColumn);
+    const faceCenterX = startCol + Math.floor(faceW / 2);
+    const faceCenterY = startRow + Math.floor(faceH / 2);
 
-    // Symmetrical columns: equal distance from face edges
-    // Left: SUBAGENT_CELL_W + gap chars left of face left edge
-    // Right: SUBAGENT_CELL_W + gap chars right of face right edge
-    const gap = 1;
-    const leftCol = Math.max(1, startCol - SUBAGENT_CELL_W - gap);
-    const rightCol = Math.min(cols - SUBAGENT_CELL_W, startCol + faceW + SUBAGENT_CELL_W + gap);
-    const leftCol2 = Math.max(1, leftCol - SUBAGENT_CELL_W - gap);
-    const rightCol2 = Math.min(cols - SUBAGENT_CELL_W, rightCol + SUBAGENT_CELL_W + gap);
-
-    // Place faces in columns starting from center outward
     const positions = [];
-    for (let i = 0; i < n; i++) {
-      const colIndex = Math.floor(i / columnCapacity);
-      const rowIndex = i % columnCapacity;
 
-      let col;
-      if (colIndex === 0) {
-        col = i < columnCapacity ? leftCol : rightCol;
-      } else if (colIndex === 1) {
-        col = i < columnCapacity * 2 ? rightCol : leftCol;
-      } else if (colIndex === 2) {
-        col = leftCol2;
-      } else if (colIndex === 3) {
-        col = rightCol2;
-      } else {
-        // Fallback - just use right side for overflow
-        col = rightCol2;
+    if (n <= 4) {
+      const offsets = [
+        { row: -1, col: -1 },
+        { row: -1, col: 1 },
+        { row: 1, col: -1 },
+        { row: 1, col: 1 },
+      ];
+      for (let i = 0; i < n; i++) {
+        positions.push({
+          face: faces[i],
+          row: Math.max(1, faceCenterY + offsets[i].row * (SUBAGENT_CELL_H + 1) - Math.floor(SUBAGENT_CELL_H / 2)),
+          col: Math.max(1, faceCenterX + offsets[i].col * (SUBAGENT_CELL_W + 3) - Math.floor(SUBAGENT_CELL_W / 2)),
+        });
       }
+    } else if (n <= 8) {
+      const offsets = [
+        { row: -2, col: 0 },
+        { row: -1, col: -1 },
+        { row: -1, col: 1 },
+        { row: 0, col: -1 },
+        { row: 0, col: 1 },
+        { row: 1, col: -1 },
+        { row: 1, col: 1 },
+        { row: 2, col: 0 },
+      ];
+      for (let i = 0; i < n; i++) {
+        positions.push({
+          face: faces[i],
+          row: Math.max(1, faceCenterY + offsets[i].row * (SUBAGENT_CELL_H + 1) - Math.floor(SUBAGENT_CELL_H / 2)),
+          col: Math.max(1, faceCenterX + offsets[i].col * (SUBAGENT_CELL_W + 3) - Math.floor(SUBAGENT_CELL_W / 2)),
+        });
+      }
+    } else {
+      const rings = [
+        { r: 1, count: 4 },
+        { r: 2, count: 8 },
+      ];
+      let placed = 0;
+      for (const ring of rings) {
+        if (placed >= n) break;
+        const angleStep = (2 * Math.PI) / ring.count;
+        const startAngle = -Math.PI / 2;
+        for (let i = 0; i < ring.count && placed < n; i++) {
+          const angle = startAngle + i * angleStep;
+          const row = Math.max(1, Math.floor(faceCenterY + Math.sin(angle) * ring.r * (SUBAGENT_CELL_H + 1) - SUBAGENT_CELL_H / 2));
+          const col = Math.max(1, Math.min(cols - SUBAGENT_CELL_W, Math.floor(faceCenterX + Math.cos(angle) * ring.r * (SUBAGENT_CELL_W + 3) - SUBAGENT_CELL_W / 2)));
+          positions.push({ face: faces[placed], row, col });
+          placed++;
+        }
+      }
+    }
 
-      positions.push({
-        face: faces[i],
-        row: startRow + rowIndex * SUBAGENT_CELL_H,
-        col: col,
-      });
+    for (const pos of positions) {
+      pos.row = Math.max(1, Math.min(rows - SUBAGENT_CELL_H - 1, pos.row));
+      pos.col = Math.max(1, Math.min(cols - SUBAGENT_CELL_W, pos.col));
     }
 
     return positions;
