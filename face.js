@@ -39,16 +39,16 @@ const PET_SPAM_THOUGHTS = [
 ];
 const PET_AFTERGLOW_THOUGHTS = ['...', 'mmmm', 'purrrr', 'so warm', '\u25e1\u25e1\u25e1'];
 
-// -- Surround mode config --------------------------------------------
-const SURROUND_CELL_W = 12;
-const SURROUND_CELL_H = 7;
-const SURROUND_STALE_MS = 120000;
-const SURROUND_STOPPED_LINGER_MS = 5000;
+// -- Subagent mode config --------------------------------------------
+const SUBAGENT_CELL_W = 12;
+const SUBAGENT_CELL_H = 7;
+const SUBAGENT_STALE_MS = 120000;
+const SUBAGENT_STOPPED_LINGER_MS = 5000;
 const BOX_W = 8;
 const BOX_INNER = 6;
 
-// -- SurroundMiniFace (mini face for surround mode) -----------------
-class SurroundMiniFace {
+// -- SubagentMiniFace (mini face for subagent mode) -----------------
+class SubagentMiniFace {
   constructor(sessionId) {
     this.sessionId = sessionId;
     this.state = 'idle';
@@ -82,8 +82,8 @@ class SurroundMiniFace {
   }
 
   isStale() {
-    if (this.stopped) return Date.now() - this.stoppedAt > SURROUND_STOPPED_LINGER_MS;
-    return Date.now() - this.lastUpdate > SURROUND_STALE_MS;
+    if (this.stopped) return Date.now() - this.stoppedAt > SUBAGENT_STOPPED_LINGER_MS;
+    return Date.now() - this.lastUpdate > SUBAGENT_STALE_MS;
   }
 
   tick(dt) {
@@ -288,8 +288,8 @@ class ClaudeFace {
     this.modelName = process.env.CODE_CRUMB_MODEL || 'claude';
 
     // Surround mode (mini faces on sides)
-    this.surroundMode = false;
-    this.surroundFaces = new Map();
+    this.subagentMode = false;
+    this.subagentFaces = new Map();
   }
 
   _nextBlink() {
@@ -516,15 +516,15 @@ class ClaudeFace {
     this.accessoriesEnabled = !this.accessoriesEnabled;
   }
 
-  toggleSurroundMode() {
-    this.surroundMode = !this.surroundMode;
-    if (this.surroundMode) {
-      this.loadSurroundSessions();
+  toggleSubagentMode() {
+    this.subagentMode = !this.subagentMode;
+    if (this.subagentMode) {
+      this.loadSubagentSessions();
     }
   }
 
-  loadSurroundSessions() {
-    // Get main session info to exclude it from surround faces
+  loadSubagentSessions() {
+    // Get main session info to exclude it from subagent faces
     let mainModelName = null;
     let mainCwd = null;
     try {
@@ -562,26 +562,26 @@ class ClaudeFace {
 
         seenIds.add(id);
 
-        if (!this.surroundFaces.has(id)) {
-          this.surroundFaces.set(id, new SurroundMiniFace(id));
+        if (!this.subagentFaces.has(id)) {
+          this.subagentFaces.set(id, new SubagentMiniFace(id));
         }
-        this.surroundFaces.get(id).updateFromFile(data);
+        this.subagentFaces.get(id).updateFromFile(data);
       } catch {
         continue;
       }
     }
 
-    for (const [id, face] of this.surroundFaces) {
+    for (const [id, face] of this.subagentFaces) {
       if (!seenIds.has(id) || face.isStale()) {
-        this.surroundFaces.delete(id);
+        this.subagentFaces.delete(id);
       }
     }
 
-    this.assignSurroundLabels();
+    this.assignSubagentLabels();
   }
 
-  assignSurroundLabels() {
-    const sorted = [...this.surroundFaces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+  assignSubagentLabels() {
+    const sorted = [...this.subagentFaces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
     if (sorted.length === 0) return;
 
     const cwdCounts = {};
@@ -610,24 +610,24 @@ class ClaudeFace {
     }
   }
 
-  calculateSurroundPositions(cols, rows, faceW, faceH, startRow, startCol) {
-    const faces = [...this.surroundFaces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+  calculateSubagentPositions(cols, rows, faceW, faceH, startRow, startCol) {
+    const faces = [...this.subagentFaces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
     const n = faces.length;
     if (n === 0) return [];
 
     // Reserve space at bottom for key hints (last 2 rows)
     const availableRows = rows - 3;
-    const maxPerColumn = Math.floor((availableRows - startRow) / SURROUND_CELL_H);
+    const maxPerColumn = Math.floor((availableRows - startRow) / SUBAGENT_CELL_H);
     const columnCapacity = Math.max(1, maxPerColumn);
 
     // Symmetrical columns: equal distance from face edges
-    // Left: SURROUND_CELL_W + 2 chars left of face left edge
-    // Right: SURROUND_CELL_W + 2 chars right of face right edge
+    // Left: SUBAGENT_CELL_W + 2 chars left of face left edge
+    // Right: SUBAGENT_CELL_W + 2 chars right of face right edge
     const gap = 2;
-    const leftCol = Math.max(1, startCol - SURROUND_CELL_W - gap);
-    const rightCol = Math.min(cols - SURROUND_CELL_W, startCol + faceW + gap);
-    const leftCol2 = Math.max(1, leftCol - SURROUND_CELL_W - gap);
-    const rightCol2 = Math.min(cols - SURROUND_CELL_W, rightCol + SURROUND_CELL_W + gap);
+    const leftCol = Math.max(1, startCol - SUBAGENT_CELL_W - gap);
+    const rightCol = Math.min(cols - SUBAGENT_CELL_W, startCol + faceW + gap);
+    const leftCol2 = Math.max(1, leftCol - SUBAGENT_CELL_W - gap);
+    const rightCol2 = Math.min(cols - SUBAGENT_CELL_W, rightCol + SUBAGENT_CELL_W + gap);
 
     // Place faces in columns starting from center outward
     const positions = [];
@@ -651,7 +651,7 @@ class ClaudeFace {
 
       positions.push({
         face: faces[i],
-        row: startRow + rowIndex * SURROUND_CELL_H,
+        row: startRow + rowIndex * SUBAGENT_CELL_H,
         col: col,
       });
     }
@@ -872,7 +872,7 @@ class ClaudeFace {
       ' space  pet the face',
       ' t      cycle palette',
       ' s      toggle stats',
-      ' g      toggle surround',
+      ' g      toggle subagent',
       ' a      toggle accessories',
       ' h/?    this help',
       ' q      quit',
@@ -1144,7 +1144,7 @@ class ClaudeFace {
       const dc = `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.3))}`;
       const kc = ansi.fg(...dimColor(theme.accent, 0.4));
       const sep = `${dc}\u00b7${r}`;
-      const hint = `${kc}space${dc} pet ${sep} ${kc}t${dc} theme ${sep} ${kc}s${dc} stats ${sep} ${kc}g${dc} surround ${sep} ${kc}a${dc} accs ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
+      const hint = `${kc}space${dc} pet ${sep} ${kc}t${dc} theme ${sep} ${kc}s${dc} stats ${sep} ${kc}g${dc} subagent ${sep} ${kc}a${dc} accs ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
       // Strip ANSI to measure visible length
       const visible = hint.replace(/\x1b\[[^m]*m/g, '');
       const hintCol = Math.max(1, Math.floor((cols - visible.length) / 2) + 1);
@@ -1157,8 +1157,8 @@ class ClaudeFace {
     }
 
     // Surround mode mini faces
-    if (this.surroundMode) {
-      const positions = this.calculateSurroundPositions(cols, rows, faceW, faceH, startRow, startCol);
+    if (this.subagentMode) {
+      const positions = this.calculateSubagentPositions(cols, rows, faceW, faceH, startRow, startCol);
       const paletteThemes = (PALETTES[this.paletteIndex] || PALETTES[0]).themes;
       for (const pos of positions) {
         pos.face.tick(16);
@@ -1174,4 +1174,4 @@ class ClaudeFace {
   }
 }
 
-module.exports = { ClaudeFace, SurroundMiniFace };
+module.exports = { ClaudeFace, SubagentMiniFace };
