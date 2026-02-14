@@ -85,16 +85,16 @@ describe('accessories.js -- STATE_ACCESSORIES', () => {
     assert.strictEqual(STATE_ACCESSORIES.installing, 'hardhat');
   });
 
-  test('reading maps to glasses', () => {
-    assert.strictEqual(STATE_ACCESSORIES.reading, 'glasses');
+  test('reading has no accessory', () => {
+    assert.strictEqual(STATE_ACCESSORIES.reading, undefined);
   });
 
   test('thinking maps to wizardhat', () => {
     assert.strictEqual(STATE_ACCESSORIES.thinking, 'wizardhat');
   });
 
-  test('coding maps to headphones', () => {
-    assert.strictEqual(STATE_ACCESSORIES.coding, 'headphones');
+  test('coding maps to catears', () => {
+    assert.strictEqual(STATE_ACCESSORIES.coding, 'catears');
   });
 
   test('happy maps to partyhat', () => {
