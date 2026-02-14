@@ -266,13 +266,16 @@ function setupOpenCode() {
           const role = input.part?.role || '';
           if (content !== lastMessageContent) {
             lastMessageContent = content;
-            const isThinking = content.length > 0 && content.length < 200;
+            const isThinking = role === 'assistant' && content.length > 0;
+            const thinkingText = isThinking 
+              ? (content.split(' ').slice(0, 3).join(' ') || 'analyzing')
+              : '';
             send({ 
               type: 'message.part.updated', 
               content: content.substring(0, 500),
               role,
               is_thinking: isThinking,
-              thinking: isThinking ? 'analyzing' : ''
+              thinking: thinkingText
             });
           }
         },
