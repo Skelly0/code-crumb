@@ -4,10 +4,7 @@
 // +================================================================+
 // |  Code Crumb -- A terminal tamagotchi for AI coding assistants   |
 // |  Shows what your AI coding assistant is doing                   |
-// |                                                                 |
-// |  Modes:                                                         |
-// |    node renderer.js            Single face (default)            |
-// |    node renderer.js --grid     Multi-face grid                  |
+// |  Subagent mini-faces orbit the main face as satellites          |
 // +================================================================+
 
 const fs = require('fs');
@@ -25,13 +22,10 @@ const {
 const { mouths, eyes, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { ClaudeFace } = require('./face');
-const { MiniFace, FaceGrid } = require('./grid');
-
-// -- Mode ----------------------------------------------------------
-const GRID_MODE = process.argv.includes('--grid');
+const { MiniFace, OrbitalSystem } = require('./grid');
 
 // -- Config --------------------------------------------------------
-const PID_FILE = path.join(HOME, GRID_MODE ? '.code-crumb-grid.pid' : '.code-crumb.pid');
+const PID_FILE = path.join(HOME, '.code-crumb.pid');
 const FPS = 15;
 const FRAME_MS = Math.floor(1000 / FPS);
 const IDLE_TIMEOUT = 8000;
@@ -51,6 +45,7 @@ function readState() {
       state: data.state || 'idle',
       detail: data.detail || '',
       timestamp: data.timestamp || 0,
+      sessionId: data.sessionId || '',
       modelName: data.modelName || '',
       toolCalls: data.toolCalls || 0,
       filesEdited: data.filesEdited || 0,
@@ -90,15 +85,24 @@ function removePid() {
   try { fs.unlinkSync(PID_FILE); } catch {}
 }
 
-// -- Single face mode ----------------------------------------------
-function runSingleMode() {
+// -- Unified mode (main face + orbital subagents) ------------------
+function runUnifiedMode() {
   const face = new ClaudeFace();
+  const orbital = new OrbitalSystem();
+
+  // Ensure sessions directory exists
+  try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
 
   // Load persisted preferences
   const prefs = loadPrefs();
   if (typeof prefs.paletteIndex === 'number') face.paletteIndex = prefs.paletteIndex % PALETTES.length;
   if (typeof prefs.accessoriesEnabled === 'boolean') face.accessoriesEnabled = prefs.accessoriesEnabled;
   if (typeof prefs.showStats === 'boolean') face.showStats = prefs.showStats;
+  if (typeof prefs.showOrbitals === 'boolean') face.showOrbitals = prefs.showOrbitals;
+
+  // Main session isolation
+  let mainSessionId = null;
+  let lastMainUpdate = 0;
 
   let lastMtime = 0;
   let lastFileState = 'idle'; // Track the last state written to the file by hooks
@@ -108,6 +112,23 @@ function runSingleMode() {
       if (stat.mtimeMs > lastMtime) {
         lastMtime = stat.mtimeMs;
         const stateData = readState();
+
+        // First session we see becomes "main"
+        if (!mainSessionId && stateData.sessionId) {
+          mainSessionId = stateData.sessionId;
+        }
+
+        // If a different session is writing to the state file:
+        if (stateData.sessionId && mainSessionId && stateData.sessionId !== mainSessionId) {
+          // Adopt as new main only if old main session ended or is very stale
+          if (lastFileState === 'happy' || Date.now() - lastMainUpdate > 120000) {
+            mainSessionId = stateData.sessionId;
+          } else {
+            return; // Ignore — this is a subagent writing to the state file
+          }
+        }
+
+        lastMainUpdate = Date.now();
         lastFileState = stateData.state;
         face.setState(stateData.state, stateData.detail);
         face.setStats(stateData);
@@ -142,6 +163,7 @@ function runSingleMode() {
 
   checkState();
 
+  // Watch state file for changes
   try {
     const dir = path.dirname(STATE_FILE);
     const basename = path.basename(STATE_FILE);
@@ -150,6 +172,14 @@ function runSingleMode() {
       if (!filename || filename === basename) checkState();
     });
   } catch {}
+
+  // Watch sessions directory for subagent changes
+  try {
+    fs.watch(SESSIONS_DIR, () => { orbital.loadSessions(mainSessionId); });
+  } catch {}
+
+  // Initial session load
+  orbital.loadSessions(mainSessionId);
 
   // Raw stdin keypress handling
   if (process.stdin.isTTY) {
@@ -161,6 +191,7 @@ function runSingleMode() {
         paletteIndex: face.paletteIndex,
         accessoriesEnabled: face.accessoriesEnabled,
         showStats: face.showStats,
+        showOrbitals: face.showOrbitals,
       });
     }
 
@@ -168,9 +199,10 @@ function runSingleMode() {
       // Help dismiss: any key while help is showing closes it
       if (face.showHelp && key !== '\x03') { face.showHelp = false; return; }
       if (key === ' ') face.pet();
-      else if (key === 't') { face.cycleTheme(); persistPrefs(); }
+      else if (key === 't') { face.cycleTheme(); orbital.paletteIndex = face.paletteIndex; persistPrefs(); }
       else if (key === 's') { face.toggleStats(); persistPrefs(); }
       else if (key === 'a') { face.toggleAccessories(); persistPrefs(); }
+      else if (key === 'o') { face.toggleOrbitals(); persistPrefs(); }
       else if (key === 'h' || key === '?') face.toggleHelp();
       else if (key === 'q' || key === '\x03') cleanup(); // q or Ctrl+C
     });
@@ -188,59 +220,28 @@ function runSingleMode() {
     lastTime = now;
 
     face.update(dt);
+    orbital.update(dt);
+
+    // Periodically reload sessions
+    if (orbital.frame % (FPS * 2) === 0) orbital.loadSessions(mainSessionId);
+
     if (face.frame % Math.floor(FPS / 2) === 0) checkState();
 
-    process.stdout.write(ansi.home + face.render());
-    setTimeout(loop, FRAME_MS);
-  }
+    // Tell face how many subagents are active (for status line)
+    face.subagentCount = orbital.faces.size;
 
-  loop();
-}
+    // Sync palette
+    orbital.paletteIndex = face.paletteIndex;
 
-// -- Grid mode -----------------------------------------------------
-function runGridMode() {
-  try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const cols = process.stdout.columns || 80;
+    const rows = process.stdout.rows || 24;
 
-  const grid = new FaceGrid();
-
-  // Load persisted preferences
-  const prefs = loadPrefs();
-  if (typeof prefs.paletteIndex === 'number') grid.paletteIndex = prefs.paletteIndex % PALETTES.length;
-
-  try {
-    fs.watch(SESSIONS_DIR, () => { grid.loadSessions(); });
-  } catch {}
-
-  grid.loadSessions();
-
-  // Raw stdin keypress handling
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (key) => {
-      if (grid.showHelp && key !== '\x03') { grid.showHelp = false; return; }
-      if (key === 't') { grid.cycleTheme(); savePrefs({ paletteIndex: grid.paletteIndex }); }
-      else if (key === 'h' || key === '?') grid.toggleHelp();
-      else if (key === 'q' || key === '\x03') cleanup();
-    });
-  }
-
-  process.stdout.on('resize', () => {
-    grid.prevFaceCount = -1;
-    process.stdout.write(ansi.clear);
-  });
-
-  let lastTime = Date.now();
-  function loop() {
-    const now = Date.now();
-    const dt = now - lastTime;
-    lastTime = now;
-
-    grid.update(dt);
-    if (grid.frame % (FPS * 2) === 0) grid.loadSessions();
-
-    process.stdout.write(ansi.home + grid.render());
+    let out = face.render();
+    if (face.showOrbitals && face.lastPos && orbital.faces.size > 0) {
+      const paletteThemes = (PALETTES[face.paletteIndex] || PALETTES[0]).themes;
+      out += orbital.render(cols, rows, face.lastPos, paletteThemes);
+    }
+    process.stdout.write(ansi.home + out);
     setTimeout(loop, FRAME_MS);
   }
 
@@ -250,7 +251,7 @@ function runGridMode() {
 // -- Entry ---------------------------------------------------------
 function main() {
   if (isAlreadyRunning()) {
-    console.log(`Code Crumb${GRID_MODE ? ' Grid' : ''} is already running in another window.`);
+    console.log('Code Crumb is already running in another window.');
     process.exit(0);
   }
   writePid();
@@ -267,14 +268,9 @@ function main() {
   process.on('exit', removePid);
 
   process.stdout.write(ansi.hide + ansi.clear);
-  const title = GRID_MODE ? 'Code Crumb Grid' : 'Code Crumb';
-  process.stdout.write(`\x1b]0;${title}\x07`);
+  process.stdout.write(`\x1b]0;Code Crumb\x07`);
 
-  if (GRID_MODE) {
-    runGridMode();
-  } else {
-    runSingleMode();
-  }
+  runUnifiedMode();
 }
 
 // -- Module exports (for testing) / Entry ----------------------------
@@ -282,7 +278,7 @@ if (require.main === module) {
   main();
 } else {
   module.exports = {
-    ClaudeFace, MiniFace, FaceGrid, ParticleSystem,
+    ClaudeFace, MiniFace, OrbitalSystem, ParticleSystem,
     lerpColor, dimColor, breathe,
     themes, mouths, eyes, gridMouths,
     COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,

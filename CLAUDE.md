@@ -6,17 +6,19 @@ Code Crumb is a zero-dependency terminal tamagotchi that visualizes what AI codi
 
 ### Interactive Keybindings
 
-| Key | Action | Mode |
-|-----|--------|------|
-| `space` | Pet the face (sparkle particles + wiggle) | single |
-| `t` | Cycle color palette (default/neon/pastel/mono/sunset) | both |
-| `s` | Toggle stats (streak, timeline, sparkline) | single |
-| `h` / `?` | Toggle help overlay | both |
-| `q` / Ctrl+C | Quit | both |
+| Key | Action |
+|-----|--------|
+| `space` | Pet the face (sparkle particles + wiggle) |
+| `t` | Cycle color palette (default/neon/pastel/mono/sunset) |
+| `s` | Toggle stats (streak, timeline, sparkline) |
+| `a` | Toggle accessories (hats, ears, etc.) |
+| `o` | Toggle orbital subagents |
+| `h` / `?` | Toggle help overlay |
+| `q` / Ctrl+C | Quit |
 
 ### Color Palettes
 
-5 palettes: **default** (original colors), **neon** (high saturation cyans/magentas/limes), **pastel** (soft pinks/lavenders/mints), **mono** (greyscale), **sunset** (warm oranges/reds/golds/purples). Press `t` to cycle. Grid mode supports theme cycling and help but not pet or stats toggle. All togglable preferences (theme, accessories, stats) persist between sessions via `~/.code-crumb-prefs.json`. Accessories state is shown as `● accs` (on) or `○ accs` (off) below the face box.
+5 palettes: **default** (original colors), **neon** (high saturation cyans/magentas/limes), **pastel** (soft pinks/lavenders/mints), **mono** (greyscale), **sunset** (warm oranges/reds/golds/purples). Press `t` to cycle. All togglable preferences (theme, accessories, stats, orbitals) persist between sessions via `~/.code-crumb-prefs.json`. Indicators below the face box show `● accs` / `○ accs` and `● subs` / `○ subs`.
 
 ## Tech Stack
 
@@ -31,17 +33,17 @@ Code Crumb is a zero-dependency terminal tamagotchi that visualizes what AI codi
 renderer.js      Entry point — runtime loops, PID guard, state polling, re-exports for tests
 themes.js        ANSI codes, color math, theme definitions, thought bubble data
 animations.js    Eye and mouth animation functions (full-size and grid)
-particles.js     ParticleSystem class — 10 visual effect styles
-face.js          CodeCrumb class — single face mode state machine and rendering
-grid.js          MiniFace + FaceGrid classes — multi-session grid mode
+particles.js     ParticleSystem class — 12 visual effect styles (incl. stream)
+face.js          ClaudeFace class — main face state machine, rendering, orbital toggle
+grid.js          MiniFace + OrbitalSystem classes — subagent orbital rendering
 update-state.js  Hook handler — receives editor events via stdin, writes state files
 state-machine.js Pure logic — tool→state mapping (multi-editor), error detection, streaks
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
 setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode|openclaw])
-test.js          Test suite — ~369 tests covering all critical paths (node test.js)
+test.js          Test suite — ~385 tests covering all critical paths (node test.js)
 demo.js          Demo script — cycles through all face states in single-face mode
-grid-demo.js     Demo script — simulates 4 concurrent sessions in grid mode
+grid-demo.js     Orbital demo — simulates subagent sessions orbiting the main face
 code-crumb.sh   Unix shell wrapper for launch.js
 code-crumb.cmd  Windows batch wrapper for launch.js
 adapters/
@@ -68,10 +70,10 @@ Editor Event (Claude Code / Codex / OpenCode / OpenClaw) → update-state.js or 
 State is communicated between the hook handler and renderer via JSON files:
 
 - `~/.code-crumb-state` — single-mode state (written by update-state.js, watched by renderer.js)
-- `~/.code-crumb-sessions/{session_id}.json` — per-session state for grid mode
+- `~/.code-crumb-sessions/{session_id}.json` — per-session state for orbital subagents
 - `~/.code-crumb-stats.json` — persistent stats (streaks, records, session counters)
-- `~/.code-crumb-prefs.json` — persisted user preferences (theme, accessories, stats toggle)
-- `~/.code-crumb.pid` / `~/.code-crumb-grid.pid` — renderer process liveness tracking
+- `~/.code-crumb-prefs.json` — persisted user preferences (theme, accessories, stats, orbitals toggle)
+- `~/.code-crumb.pid` — renderer process liveness tracking
 
 ### State Machine
 
@@ -90,24 +92,22 @@ Tool name patterns are defined as shared constants (`EDIT_TOOLS`, `BASH_TOOLS`, 
 ## Development Commands
 
 ```sh
-npm start              # Run the renderer (single-face mode)
-npm run grid           # Run the renderer (grid mode)
+npm start              # Run the renderer (unified mode with orbital subagents)
 npm test               # Run the test suite
 npm run demo           # Run the single-face demo
-npm run demo:grid      # Run the grid demo
+npm run demo:orbital   # Run the orbital subagent demo
 npm run setup          # Install Claude Code hooks (default)
 npm run setup:claude   # Install Claude Code hooks (explicit)
 npm run setup:codex    # Install Codex CLI integration
 npm run setup:opencode # Show OpenCode integration instructions
 npm run setup:openclaw # Show OpenClaw/Pi integration instructions
 npm run launch         # Open renderer + start Claude Code
-npm run launch:grid    # Same as above, grid mode
 npm run launch:codex   # Open renderer + start Codex wrapper
 npm run launch:opencode # Open renderer + start OpenCode
 npm run launch:openclaw # Open renderer + start OpenClaw
 ```
 
-To develop: run `npm run demo` in one terminal and `npm start` in another.
+To develop: run `npm run demo` in one terminal and `npm start` in another. For orbital testing: `npm start` + `npm run demo:orbital`.
 
 ## Code Conventions
 
@@ -127,8 +127,9 @@ To develop: run `npm run demo` in one terminal and `npm start` in another.
 | `IDLE_TIMEOUT` | 8000ms | renderer.js |
 | `SLEEP_TIMEOUT` | 60000ms | renderer.js |
 | `CAFFEINE_THRESHOLD` | 5 calls in 10s | face.js |
-| `STALE_MS` | 120000ms | grid.js (grid session timeout) |
-| `CELL_W` / `CELL_H` | 12 / 7 | grid.js (grid cell dimensions) |
+| `STALE_MS` | 120000ms | grid.js (orbital session timeout) |
+| `MAX_ORBITALS` | 8 | grid.js (max visible orbital faces) |
+| `ROTATION_SPEED` | 0.007 rad/frame | grid.js (~1 revolution per 60s) |
 
 ## Environment Variables
 
@@ -146,9 +147,9 @@ Run `npm test` (or `node test.js`). The test suite covers:
 - **state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
 - **themes.js**: `lerpColor`/`dimColor`/`breathe` color math, theme completeness (all 18 states), `COMPLETION_LINGER` ordering, thought bubble pools
 - **animations.js**: mouth/eye functions (shape and randomness)
-- **particles.js**: `ParticleSystem` (all 10 styles, lifecycle, fadeAll)
-- **face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline)
-- **grid.js**: `MiniFace` grid mode, `FaceGrid` lifecycle
+- **particles.js**: `ParticleSystem` (all 12 styles incl. stream, lifecycle, fadeAll)
+- **face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline, orbital toggle)
+- **grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles)
 
 ### Visual Verification
 
@@ -158,12 +159,12 @@ For visual testing, use the demo scripts:
 2. Run `npm run demo` in another terminal
 3. Observe the face cycling through all 18 states
 
-For grid mode: `npm run grid` + `npm run demo:grid`.
+For orbital subagents: `npm start` + `npm run demo:orbital`.
 
 ## Important Constraints
 
 - **Hook performance**: update-state.js must complete in ~50ms — it runs synchronously in the editor hook pipeline
 - **State file size**: Keep state JSON under 200 bytes
-- **Terminal minimum size**: Single mode requires 38x20 chars; grid mode requires 14x9 per cell
+- **Terminal minimum size**: Main face requires 38x20 chars; orbitals require 80x30 (graceful degradation below)
 - **No network**: All IPC is file-based, no sockets or HTTP
 - **Graceful degradation**: Renderer handles terminal resize, missing state files, and stale sessions without crashing

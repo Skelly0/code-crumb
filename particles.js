@@ -138,6 +138,19 @@ class ParticleSystem {
           char: ['\u256d', '\u256e', '\u2570', '\u256f', '\u2502', '\u2500'][Math.floor(Math.random() * 6)],
           style,
         });
+      } else if (style === 'stream') {
+        // Particles radiate outward from face center — energy flowing to subagents
+        const angle = Math.random() * Math.PI * 2;
+        this.particles.push({
+          x: this.width / 2,
+          y: this.height / 2,
+          vx: Math.cos(angle) * (0.2 + Math.random() * 0.15),
+          vy: Math.sin(angle) * (0.1 + Math.random() * 0.08),
+          life: 30 + Math.random() * 30,
+          maxLife: 60,
+          char: ['\u00b7', '\u2022', '\u2218', '\u00b7'][Math.floor(Math.random() * 4)],
+          style,
+        });
       } else if (style === 'heart') {
         const angle = Math.random() * Math.PI * 2;
         const dist = 5 + Math.random() * 9;

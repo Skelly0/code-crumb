@@ -7,16 +7,14 @@
 // |  the specified editor, passing through all arguments.             |
 // |                                                                 |
 // |  Usage:                                                         |
-// |    node launch.js                        (single face + claude) |
-// |    node launch.js --grid                 (multi-face grid)       |
+// |    node launch.js                        (face + claude)        |
 // |    node launch.js --editor codex "fix bug" (use codex wrapper)   |
 // |    node launch.js --editor claude -p "fix the bug"               |
 // |    node launch.js --dangerously-skip-permissions                 |
-// |    node launch.js --grid -p "fix the bug"                        |
 // |                                                                 |
 // |  Or via the batch/shell wrappers:                               |
 // |    code-crumb                                                   |
-// |    code-crumb --grid --dangerously-skip-permissions              |
+// |    code-crumb --dangerously-skip-permissions                    |
 // +================================================================+
 
 const { spawn, execSync } = require('child_process');
@@ -24,12 +22,10 @@ const fs = require('fs');
 const path = require('path');
 
 const HOME = process.env.USERPROFILE || process.env.HOME || '/tmp';
-const SINGLE_PID = path.join(HOME, '.code-crumb.pid');
-const GRID_PID = path.join(HOME, '.code-crumb-grid.pid');
+const PID_FILE = path.join(HOME, '.code-crumb.pid');
 
 // Parse our own flags (consumed here, not passed to the editor)
 const rawArgs = process.argv.slice(2);
-const gridMode = rawArgs.includes('--grid');
 
 // Parse --editor flag
 let editorName = 'claude';
@@ -40,17 +36,16 @@ if (editorIdx !== -1 && rawArgs[editorIdx + 1]) {
 
 // Remove our consumed flags, pass the rest to the editor
 const editorArgs = rawArgs.filter((a, i) =>
-  a !== '--grid' && a !== '--editor' && (editorIdx === -1 || i !== editorIdx + 1)
+  a !== '--editor' && (editorIdx === -1 || i !== editorIdx + 1)
 );
 
-const pidFile = gridMode ? GRID_PID : SINGLE_PID;
 const rendererPath = path.resolve(__dirname, 'renderer.js');
-const rendererArgs = gridMode ? [rendererPath, '--grid'] : [rendererPath];
-const windowTitle = gridMode ? 'Code Crumb Grid' : 'Code Crumb';
+const rendererArgs = [rendererPath];
+const windowTitle = 'Code Crumb';
 
 function isRendererRunning() {
   try {
-    const pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+    const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
     if (isNaN(pid)) return false;
     process.kill(pid, 0);
     return true;

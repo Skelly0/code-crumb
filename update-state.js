@@ -33,7 +33,7 @@ function writeState(state, detail = '', extra = {}) {
   }
 }
 
-// Write per-session state file for the grid renderer
+// Write per-session state file for orbital subagent rendering
 function writeSessionState(sessionId, state, detail = '', stopped = false, extra = {}) {
   try {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true });
@@ -187,6 +187,7 @@ process.stdin.on('end', () => {
     // Build extra data for state files
     const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
     const extra = {
+      sessionId,
       modelName,
       toolCalls: stats.session.toolCalls,
       filesEdited: stats.session.filesEdited.length,
@@ -202,7 +203,7 @@ process.stdin.on('end', () => {
       frequentFiles: stats.frequentFiles,
     };
 
-    // Write both: single file (backward compat) + session file (grid mode)
+    // Write both: single state file + per-session file (orbital subagents)
     writeState(state, detail, extra);
     writeSessionState(sessionId, state, detail, stopped, extra);
     writeStats(stats);
