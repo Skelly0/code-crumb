@@ -128,10 +128,14 @@ class ClaudeFace {
     if (newState !== this.state) {
       const now = Date.now();
 
-      // Minimum display time: buffer incoming state if current hasn't shown long enough
-      if (now < this.minDisplayUntil) {
-        this.pendingState = newState;
-        this.pendingDetail = detail;
+      // Minimum display time: buffer incoming state if current hasn't shown long enough.
+      // Errors always bypass -- they're important visual feedback, not flickering noise.
+      if (now < this.minDisplayUntil && newState !== 'error') {
+        // Don't overwrite a pending error with a non-error state
+        if (this.pendingState !== 'error') {
+          this.pendingState = newState;
+          this.pendingDetail = detail;
+        }
         return;
       }
 
