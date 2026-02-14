@@ -93,8 +93,8 @@ describe('accessories.js -- STATE_ACCESSORIES', () => {
     assert.strictEqual(STATE_ACCESSORIES.thinking, 'wizardhat');
   });
 
-  test('coding maps to headphones', () => {
-    assert.strictEqual(STATE_ACCESSORIES.coding, 'headphones');
+  test('coding maps to cat_ears', () => {
+    assert.strictEqual(STATE_ACCESSORIES.coding, 'cat_ears');
   });
 
   test('happy maps to partyhat', () => {

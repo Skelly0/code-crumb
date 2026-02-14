@@ -44,6 +44,13 @@ const ACCESSORIES = {
       ' \u25c9            \u25c9 ',
     ],
   },
+  cat_ears: {
+    lines: [
+      '    /\    /\    ',
+      '   /  \  /  \   ',
+      '  |    ||    |  ',
+    ],
+  },
   partyhat: {
     lines: [
       '      \u25c6      ',
@@ -116,7 +123,7 @@ const STATE_ACCESSORIES = {
   installing:  'hardhat',
   reading:     'glasses',
   thinking:    'wizardhat',
-  coding:      'headphones',
+  coding:      'cat_ears',
   happy:       'partyhat',
   sleeping:    'nightcap',
   searching:   'detective',

@@ -667,7 +667,8 @@ class ClaudeFace {
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
           const lineRow = startRow - lines.length + i;
-          const lineCol = Math.max(1, startCol + Math.floor((faceW - line.length) / 2) + gx);
+          const faceContentW = 22;
+        const lineCol = Math.max(1, startCol + 4 + Math.floor((faceContentW - line.length) / 2) + gx);
           if (lineRow >= 1) {
             buf += ansi.to(lineRow, lineCol) + `${ac}${line}${r}`;
           }
