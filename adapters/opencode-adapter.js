@@ -138,15 +138,10 @@ process.stdin.on('end', () => {
       detail = 'session started';
     }
     else if (mappedEvent === 'message_update') {
-      // Debug: log what's happening
-      const isThinking = data.is_thinking;
-      const toolsCalled = data.tools_called;
-      console.error(`[DEBUG] message_update: is_thinking=${isThinking}, tools_called=${toolsCalled}, content="${(data.content || '').slice(0, 50)}..."`);
-      
-      if (isThinking) {
+      if (data.is_thinking) {
         state = 'thinking';
         detail = data.thinking || 'analyzing';
-      } else if (toolsCalled) {
+      } else if (data.tools_called) {
         state = 'responding';
         detail = 'generating response';
       } else {
