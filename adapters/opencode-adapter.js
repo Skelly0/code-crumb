@@ -125,13 +125,28 @@ process.stdin.on('end', () => {
 
     // Map OpenCode event types to internal event names
     const mappedEvent = 
+      event === 'session.created' ? 'session_start' :
+      event === 'message.part.updated' ? 'message_update' :
       event === 'tool.execute.before' ? 'tool_start' :
       event === 'tool.execute.after' ? 'tool_end' :
       event === 'session.idle' ? 'turn_end' :
       event === 'session.error' ? 'error' :
       event;
 
-    if (mappedEvent === 'tool_start' || mappedEvent === 'PreToolUse') {
+    if (mappedEvent === 'session_start') {
+      state = 'waiting';
+      detail = 'session started';
+    }
+    else if (mappedEvent === 'message_update') {
+      if (data.is_thinking) {
+        state = 'thinking';
+        detail = data.thinking || 'analyzing';
+      } else {
+        state = 'waiting';
+        detail = 'receiving message';
+      }
+    }
+    else if (mappedEvent === 'tool_start' || mappedEvent === 'PreToolUse') {
       ({ state, detail } = toolToState(toolName, toolInput));
       stats.session.toolCalls++;
       stats.totalToolCalls = (stats.totalToolCalls || 0) + 1;
