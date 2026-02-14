@@ -216,7 +216,7 @@ class SubagentMiniFace {
     return thoughts[this.thoughtFrame];
   }
 
-  render(startRow, startCol, globalTime, paletteThemes) {
+  render(startRow, startCol, globalTime, paletteThemes, isSelected = false) {
     const themeMap = paletteThemes || themes;
     const theme = themeMap[this.state] || themeMap.idle;
     const breathSpeed = this.state === 'sleeping' ? 0.5
@@ -231,42 +231,48 @@ class SubagentMiniFace {
 
     let buf = '';
 
+    const selectColor = isSelected ? ansi.fg(255, 215, 0) : '';
+
     const stoppedDim = this.stopped ? ansi.dim : '';
     const stoppedFg = this.stopped ? (s => ansi.fg(...dimColor([s[0], s[1], s[2]], 0.5)))(theme.border) : fc;
+    const borderColor = isSelected ? selectColor : stoppedFg;
 
     const eyeStr = this.getEyes();
     const mouthStr = this.getMouth();
     const mPad = Math.floor((BOX_INNER - mouthStr.length) / 2);
     const mRight = BOX_INNER - mPad - mouthStr.length;
 
+    const selLeft = isSelected ? selectColor + '[' : borderColor;
+    const selRight = isSelected ? ']' + r : '';
+
     buf += ansi.to(startRow, startCol);
-    buf += `${stoppedFg}\u256d${'\u2500'.repeat(BOX_INNER)}\u256e${r}`;
+    buf += `${selLeft}\u256d${'\u2500'.repeat(BOX_INNER)}\u256e${selRight}${r}`;
 
     buf += ansi.to(startRow + 1, startCol);
-    buf += `${stoppedFg}\u2502${stoppedDim}${ec}${eyeStr}${stoppedFg}\u2502${r}`;
+    buf += `${selLeft}\u2502${stoppedDim}${ec}${eyeStr}${borderColor}\u2502${selRight}${r}`;
 
     buf += ansi.to(startRow + 2, startCol);
-    buf += `${stoppedFg}\u2502${stoppedDim}${' '.repeat(mPad)}${mc}${mouthStr}${r}${' '.repeat(Math.max(0, mRight))}${stoppedFg}\u2502${r}`;
+    buf += `${selLeft}\u2502${stoppedDim}${' '.repeat(mPad)}${mc}${mouthStr}${r}${' '.repeat(Math.max(0, mRight))}${borderColor}\u2502${selRight}${r}`;
 
     buf += ansi.to(startRow + 3, startCol);
-    buf += `${stoppedFg}\u2570${'\u2500'.repeat(BOX_INNER)}\u256f${r}`;
+    buf += `${selLeft}\u2570${'\u2500'.repeat(BOX_INNER)}\u256f${selRight}${r}`;
 
     const lbl = (this.label || '?').slice(0, BOX_W);
     const lPad = Math.max(0, Math.floor((BOX_W - lbl.length) / 2));
+    const labelColor = isSelected ? selectColor : lc;
     buf += ansi.to(startRow + 4, startCol);
-    buf += `${stoppedDim}${lc}${' '.repeat(lPad)}${lbl}${r}`;
+    buf += `${stoppedDim}${labelColor}${' '.repeat(lPad)}${lbl}${r}`;
 
     let st;
     if (this.stopped) {
       st = '[stopped]';
-    } else if (this.detail) {
-      st = this.detail.slice(0, BOX_W);
     } else {
-      st = (theme.status || '').slice(0, BOX_W);
+      st = this.state.slice(0, BOX_W);
     }
     const sPad = Math.max(0, Math.floor((BOX_W - st.length) / 2));
+    const statusColor = isSelected ? selectColor : dc;
     buf += ansi.to(startRow + 5, startCol);
-    buf += `${ansi.dim}${dc}${' '.repeat(sPad)}${st}${r}`;
+    buf += `${ansi.dim}${statusColor}${' '.repeat(sPad)}${st}${r}`;
 
     const thought = this.getThought();
     if (thought && !this.stopped) {
@@ -353,6 +359,7 @@ class ClaudeFace {
     // Surround mode (mini faces on sides)
     this.subagentMode = false;
     this.subagentFaces = new Map();
+    this.selectedSubagentIndex = -1;
   }
 
   _nextBlink() {
@@ -459,6 +466,13 @@ class ClaudeFace {
   }
 
   _updateThought() {
+    if (this.subagentMode && this.selectedSubagentIndex >= 0) {
+      const subagent = this.getSelectedSubagent();
+      if (subagent && subagent.detail) {
+        this.thoughtText = subagent.detail.slice(0, 30);
+        return;
+      }
+    }
     if (this.petSpamActive) {
       const lvl = Math.min(this.petSpamLevel, PET_SPAM_THOUGHTS.length) - 1;
       const pool = PET_SPAM_THOUGHTS[Math.max(0, lvl)];
@@ -583,7 +597,26 @@ class ClaudeFace {
     this.subagentMode = !this.subagentMode;
     if (this.subagentMode) {
       this.loadSubagentSessions();
+      this.selectedSubagentIndex = this.subagentFaces.size > 0 ? 0 : -1;
+    } else {
+      this.selectedSubagentIndex = -1;
     }
+  }
+
+  selectNextSubagent() {
+    if (this.subagentFaces.size === 0) return;
+    this.selectedSubagentIndex = (this.selectedSubagentIndex + 1) % this.subagentFaces.size;
+  }
+
+  selectPrevSubagent() {
+    if (this.subagentFaces.size === 0) return;
+    this.selectedSubagentIndex = (this.selectedSubagentIndex - 1 + this.subagentFaces.size) % this.subagentFaces.size;
+  }
+
+  getSelectedSubagent() {
+    if (this.selectedSubagentIndex < 0) return null;
+    const faces = [...this.subagentFaces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+    return faces[this.selectedSubagentIndex] || null;
   }
 
   loadSubagentSessions() {
@@ -1252,9 +1285,12 @@ class ClaudeFace {
     if (this.subagentMode) {
       const positions = this.calculateSubagentPositions(cols, rows, faceW, faceH, startRow, startCol);
       const paletteThemes = (PALETTES[this.paletteIndex] || PALETTES[0]).themes;
-      for (const pos of positions) {
+      const sortedFaces = [...this.subagentFaces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+      for (let i = 0; i < positions.length; i++) {
+        const pos = positions[i];
         pos.face.tick(16);
-        buf += pos.face.render(pos.row, pos.col, this.time, paletteThemes);
+        const isSelected = (i === this.selectedSubagentIndex);
+        buf += pos.face.render(pos.row, pos.col, this.time, paletteThemes, isSelected);
       }
     }
 
