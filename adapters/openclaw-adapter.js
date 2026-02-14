@@ -40,7 +40,7 @@ const path = require('path');
 const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename } = require('../shared');
 const {
   toolToState, classifyToolResult, updateStreak, defaultStats,
-  EDIT_TOOLS, SUBAGENT_TOOLS,
+  EDIT_TOOLS,
 } = require('../state-machine');
 
 // -- State writing (mirrors update-state.js) -------------------------
@@ -122,11 +122,6 @@ process.stdin.on('end', () => {
       stats.daily.sessionCount++;
       stats.session = { id: sessionId, start: Date.now(), toolCalls: 0, filesEdited: [], subagentCount: 0 };
     }
-    if (!stats.session.activeSubagents) stats.session.activeSubagents = [];
-    stats.session.activeSubagents = stats.session.activeSubagents.filter(
-      sub => Date.now() - sub.startedAt < 600000
-    );
-
     if (stats.recentMilestone && Date.now() - stats.recentMilestone.at > 8000) {
       stats.recentMilestone = null;
     }
@@ -166,7 +161,6 @@ process.stdin.on('end', () => {
         }
         if (base) stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
       }
-      if (SUBAGENT_TOOLS.test(toolName)) stats.session.subagentCount++;
     }
     else if (event === 'tool_end' || event === 'PostToolUse') {
       const toolResponse = { stdout: toolOutput, stderr: data.stderr || '', isError };
@@ -177,13 +171,6 @@ process.stdin.on('end', () => {
       updateStreak(stats, state === 'error');
     }
     else if (event === 'turn_end') {
-      // Clean up synthetic subagent sessions
-      for (const sub of stats.session.activeSubagents) {
-        writeSessionState(sub.id, 'happy', 'done', true, {
-          sessionId: sub.id, stopped: true, cwd: '', parentSession: sessionId,
-        });
-      }
-      stats.session.activeSubagents = [];
       state = 'happy';
       detail = 'all done!';
       stopped = true;
@@ -196,36 +183,6 @@ process.stdin.on('end', () => {
     else if (event === 'waiting') {
       state = 'waiting';
       detail = 'needs attention';
-    }
-
-    const isSubagentTool = SUBAGENT_TOOLS.test(toolName);
-
-    if ((event === 'tool_start' || event === 'PreToolUse') && isSubagentTool) {
-      const subId = `${sessionId}-sub-${Date.now()}`;
-      const desc = (toolInput.description || toolInput.prompt || 'subagent').slice(0, 40);
-      stats.session.activeSubagents.push({ id: subId, description: desc, startedAt: Date.now() });
-      writeSessionState(subId, 'thinking', desc, false, {
-        sessionId: subId, modelName: toolInput.model || 'openclaw', cwd: '', parentSession: sessionId,
-      });
-      state = 'subagent';
-      detail = `conducting ${stats.session.activeSubagents.length}`;
-    } else if ((event === 'tool_end' || event === 'PostToolUse') && isSubagentTool && stats.session.activeSubagents.length > 0) {
-      const finished = stats.session.activeSubagents.shift();
-      writeSessionState(finished.id, 'happy', 'done', true, {
-        sessionId: finished.id, stopped: true, cwd: '', parentSession: sessionId,
-      });
-      if (stats.session.activeSubagents.length > 0) {
-        state = 'subagent';
-        detail = `conducting ${stats.session.activeSubagents.length}`;
-      }
-    } else if (stats.session.activeSubagents.length > 0 && !isSubagentTool &&
-               event !== 'turn_end' && event !== 'waiting') {
-      const latestSub = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
-      writeSessionState(latestSub.id, state, detail, false, {
-        sessionId: latestSub.id, cwd: '', parentSession: sessionId,
-      });
-      state = 'subagent';
-      detail = `conducting ${stats.session.activeSubagents.length}`;
     }
 
     extra.toolCalls = stats.session.toolCalls;
