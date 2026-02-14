@@ -256,7 +256,29 @@ function setupOpenCode() {
     }
 
     export const CodeCrumbPlugin = async ({ project, client, $, directory, worktree }) => {
+      let lastMessageContent = '';
       return {
+        'session.created': async (input, output) => {
+          send({ type: 'session.created', session_id: input.sessionId });
+        },
+        'message.part.updated': async (input, output) => {
+          const content = input.part?.content || '';
+          const role = input.part?.role || '';
+          if (content !== lastMessageContent) {
+            lastMessageContent = content;
+            const isThinking = role === 'assistant' && content.length > 0;
+            const thinkingText = isThinking 
+              ? (content.split(' ').slice(0, 3).join(' ') || 'analyzing')
+              : '';
+            send({ 
+              type: 'message.part.updated', 
+              content: content.substring(0, 500),
+              role,
+              is_thinking: isThinking,
+              thinking: thinkingText
+            });
+          }
+        },
         'tool.execute.before': async (input, output) => {
           send({ type: 'tool.execute.before', input: { tool: input.tool, args: input.args } });
         },
@@ -290,10 +312,12 @@ function setupOpenCode() {
   Then use OpenCode normally -- the face will react to tools!
 
   OpenCode events handled:
-    tool.execute.before → shows tool activity (reading/editing/running)
-    tool.execute.after  → shows outcome (happy/error/relieved)
-    session.idle        → shows happy face (all done)
-    session.error       → shows error face
+    session.created       → shows waiting face (session started)
+    message.part.updated  → shows thinking face when AI is analyzing
+    tool.execute.before   → shows tool activity (reading/editing/running)
+    tool.execute.after    → shows outcome (happy/error/relieved)
+    session.idle          → shows happy face (all done)
+    session.error         → shows error face
 
   ${'─'.repeat(42)}
 `);
