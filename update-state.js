@@ -156,8 +156,8 @@ process.stdin.on('end', () => {
       updateStreak(stats, state === 'error');
     }
     else if (hookEvent === 'Stop') {
-      state = 'happy';
-      detail = 'all done!';
+      state = 'responding';
+      detail = 'wrapping up';
       stopped = true;
 
       // Update session records
@@ -203,6 +203,8 @@ process.stdin.on('end', () => {
       frequentFiles: stats.frequentFiles,
     };
 
+    if (stopped) extra.stopped = true;
+
     // Write both: single state file + per-session file (orbital subagents)
     writeState(state, detail, extra);
     writeSessionState(sessionId, state, detail, stopped, extra);
@@ -211,7 +213,7 @@ process.stdin.on('end', () => {
     // JSON parse may fail for Stop/Notification events with empty or
     // non-JSON stdin -- still write the correct state for the hook event.
     if (hookEvent === 'Stop') {
-      writeState('happy', 'all done!');
+      writeState('responding', 'wrapping up');
     } else if (hookEvent === 'Notification') {
       writeState('waiting', 'needs attention');
     } else {

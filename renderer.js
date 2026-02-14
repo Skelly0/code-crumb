@@ -59,6 +59,7 @@ function readState() {
       dailySessions: data.dailySessions || 0,
       dailyCumulativeMs: data.dailyCumulativeMs || 0,
       frequentFiles: data.frequentFiles || {},
+      stopped: data.stopped || false,
     };
   } catch {
     return { state: 'idle', detail: '' };
@@ -106,6 +107,7 @@ function runUnifiedMode() {
 
   let lastMtime = 0;
   let lastFileState = 'idle'; // Track the last state written to the file by hooks
+  let lastStopped = false;    // Track if Stop hook has fired (session ended)
   function checkState() {
     try {
       const stat = fs.statSync(STATE_FILE);
@@ -121,8 +123,9 @@ function runUnifiedMode() {
         // If a different session is writing to the state file:
         if (stateData.sessionId && mainSessionId && stateData.sessionId !== mainSessionId) {
           // Adopt as new main only if old main session ended or is very stale
-          if (lastFileState === 'happy' || Date.now() - lastMainUpdate > 120000) {
+          if (lastStopped || Date.now() - lastMainUpdate > 120000) {
             mainSessionId = stateData.sessionId;
+            lastStopped = false;
           } else {
             return; // Ignore — this is a subagent writing to the state file
           }
@@ -130,6 +133,7 @@ function runUnifiedMode() {
 
         lastMainUpdate = Date.now();
         lastFileState = stateData.state;
+        lastStopped = stateData.stopped || false;
         face.setState(stateData.state, stateData.detail);
         face.setStats(stateData);
       }
@@ -141,10 +145,13 @@ function runUnifiedMode() {
 
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     const completionLinger = COMPLETION_LINGER[face.state];
-    // Session is active until Stop hook writes 'happy'
-    const sessionActive = lastFileState !== 'happy';
+    // Session is active until Stop hook fires (writes stopped: true)
+    const sessionActive = !lastStopped;
 
-    if (completionLinger && now - face.lastStateChange > completionLinger) {
+    // Auto-transition: responding → happy after min display (Stop already fired)
+    if (face.state === 'responding' && lastStopped && now >= face.minDisplayUntil) {
+      face.setState('happy');
+    } else if (completionLinger && now - face.lastStateChange > completionLinger) {
       face.setState('thinking');
     } else if (face.state === 'thinking' &&
                now - face.lastStateChange > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT)) {

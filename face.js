@@ -167,6 +167,8 @@ class ClaudeFace {
         this.glitchIntensity = 1.0;
       } else if (newState === 'thinking') {
         this.particles.spawn(6, 'orbit');
+      } else if (newState === 'responding') {
+        this.particles.spawn(4, 'float');
       } else if (newState === 'subagent') {
         this.particles.spawn(8, 'stream');
       } else if (newState === 'caffeinated') {
@@ -471,6 +473,7 @@ class ClaudeFace {
     if (this.state === 'installing' && this.frame % 8 === 0) this.particles.spawn(1, 'falling');
     if (this.state === 'caffeinated' && this.frame % 4 === 0) this.particles.spawn(1, 'speedline');
     if (this.state === 'subagent' && this.frame % 8 === 0) this.particles.spawn(1, 'stream');
+    if (this.state === 'responding' && this.frame % 18 === 0) this.particles.spawn(1, 'float');
 
     // Caffeinated detection
     const now = Date.now();
