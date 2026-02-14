@@ -116,6 +116,13 @@ process.stdin.on('end', () => {
       };
     }
 
+    // Initialize subagent tracking for synthetic orbital sessions
+    if (!stats.session.activeSubagents) stats.session.activeSubagents = [];
+    // Clean up stale synthetic subagents (older than 10 minutes)
+    stats.session.activeSubagents = stats.session.activeSubagents.filter(
+      sub => Date.now() - sub.startedAt < 600000
+    );
+
     // Clear old milestones (older than 8 seconds)
     if (stats.recentMilestone && Date.now() - stats.recentMilestone.at > 8000) {
       stats.recentMilestone = null;
@@ -170,6 +177,14 @@ process.stdin.on('end', () => {
       if ((stats.session.filesEdited?.length || 0) > (stats.records.mostFilesEdited || 0)) {
         stats.records.mostFilesEdited = stats.session.filesEdited.length;
       }
+
+      // Clean up synthetic subagent sessions — main turn ended
+      for (const sub of stats.session.activeSubagents) {
+        writeSessionState(sub.id, 'happy', 'done', true, {
+          sessionId: sub.id, stopped: true, cwd: '', parentSession: sessionId,
+        });
+      }
+      stats.session.activeSubagents = [];
     }
     else if (hookEvent === 'Notification') {
       state = 'waiting';
@@ -179,6 +194,45 @@ process.stdin.on('end', () => {
       if (toolName) {
         ({ state, detail } = toolToState(toolName, toolInput));
       }
+    }
+
+    // -- Synthetic subagent tracking for orbital mini-faces --
+    // Claude Code subagents share the parent session ID, so they don't
+    // create their own session files. We create synthetic sessions for
+    // Task/subagent tool spawns so they appear as orbital mini-faces.
+    const isSubagentTool = SUBAGENT_TOOLS.test(toolName);
+
+    if (hookEvent === 'PreToolUse' && isSubagentTool) {
+      // New subagent spawned — create synthetic orbital session
+      const subId = `${sessionId}-sub-${Date.now()}`;
+      const desc = (toolInput.description || toolInput.prompt || 'subagent').slice(0, 40);
+      stats.session.activeSubagents.push({ id: subId, description: desc, startedAt: Date.now() });
+      writeSessionState(subId, 'thinking', desc, false, {
+        sessionId: subId, modelName: toolInput.model || 'haiku', cwd: '', parentSession: sessionId,
+      });
+      state = 'subagent';
+      detail = `conducting ${stats.session.activeSubagents.length}`;
+    } else if (hookEvent === 'PostToolUse' && isSubagentTool && stats.session.activeSubagents.length > 0) {
+      // Subagent finished — mark oldest synthetic session as stopped
+      const finished = stats.session.activeSubagents.shift();
+      writeSessionState(finished.id, 'happy', 'done', true, {
+        sessionId: finished.id, stopped: true, cwd: '', parentSession: sessionId,
+      });
+      if (stats.session.activeSubagents.length > 0) {
+        state = 'subagent';
+        detail = `conducting ${stats.session.activeSubagents.length}`;
+      }
+    } else if (stats.session.activeSubagents.length > 0 && !isSubagentTool &&
+               hookEvent !== 'Stop' && hookEvent !== 'Notification') {
+      // Tool call from within a subagent — update latest synthetic session
+      const latestSub = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
+      writeSessionState(latestSub.id, state, detail, false, {
+        sessionId: latestSub.id, cwd: '', parentSession: sessionId,
+        modelName: toolInput.model || data.model_name || process.env.CODE_CRUMB_MODEL || 'claude',
+      });
+      // Main face stays in conducting mode
+      state = 'subagent';
+      detail = `conducting ${stats.session.activeSubagents.length}`;
     }
 
     // Model name: from event data, env var, or default to 'claude'
@@ -205,23 +259,51 @@ process.stdin.on('end', () => {
 
     if (stopped) extra.stopped = true;
 
-    // Write both: single state file + per-session file (orbital subagents)
-    writeState(state, detail, extra);
+    // Only write to global state file if this session "owns" it.
+    // Subagents should only write to their per-session file so they
+    // don't overwrite the main session's state in the renderer.
+    let shouldWriteGlobal = true;
+    try {
+      const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      if (existing.sessionId && existing.sessionId !== sessionId &&
+          !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
+        shouldWriteGlobal = false;
+      }
+    } catch {}
+
+    if (shouldWriteGlobal) writeState(state, detail, extra);
     writeSessionState(sessionId, state, detail, stopped, extra);
     writeStats(stats);
   } catch {
     // JSON parse may fail for Stop/Notification events with empty or
     // non-JSON stdin -- still write the correct state for the hook event.
-    // Include sessionId so the renderer can identify the session even on parse failure.
     const fallbackSessionId = process.env.CLAUDE_SESSION_ID || String(process.ppid);
     const fallbackExtra = { sessionId: fallbackSessionId };
+
+    // Guard global state file — don't let subagents overwrite the main session
+    let shouldWriteGlobal = true;
+    try {
+      const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      if (existing.sessionId && existing.sessionId !== fallbackSessionId &&
+          !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
+        shouldWriteGlobal = false;
+      }
+    } catch {}
+
+    let fallbackState = 'thinking';
+    let fallbackDetail = '';
     if (hookEvent === 'Stop') {
-      writeState('responding', 'wrapping up', fallbackExtra);
+      fallbackState = 'responding';
+      fallbackDetail = 'wrapping up';
+      fallbackExtra.stopped = true;
     } else if (hookEvent === 'Notification') {
-      writeState('waiting', 'needs attention', fallbackExtra);
-    } else {
-      writeState('thinking', '', fallbackExtra);
+      fallbackState = 'waiting';
+      fallbackDetail = 'needs attention';
     }
+
+    if (shouldWriteGlobal) writeState(fallbackState, fallbackDetail, fallbackExtra);
+    writeSessionState(fallbackSessionId, fallbackState, fallbackDetail,
+      hookEvent === 'Stop', fallbackExtra);
   }
 
   process.exit(0);

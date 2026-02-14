@@ -175,7 +175,8 @@ describe('grid.js -- OrbitalSystem calculateOrbit', () => {
     const result = orbital.calculateOrbit(120, 50, mainPos);
     // a should be at least mainPos.w/2 + MINI_W/2 + 3
     assert.ok(result.a >= Math.floor(mainPos.w / 2) + 4 + 3);
-    assert.ok(result.b >= Math.floor(mainPos.h / 2) + 3 + 2);
+    // b should be at least mainPos.h/2 + MINI_H/2 + 6 (extra for decorations)
+    assert.ok(result.b >= Math.floor(mainPos.h / 2) + 3 + 6);
   });
 });
 

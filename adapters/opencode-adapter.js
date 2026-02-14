@@ -97,6 +97,10 @@ process.stdin.on('end', () => {
       stats.daily.sessionCount++;
       stats.session = { id: sessionId, start: Date.now(), toolCalls: 0, filesEdited: [], subagentCount: 0 };
     }
+    if (!stats.session.activeSubagents) stats.session.activeSubagents = [];
+    stats.session.activeSubagents = stats.session.activeSubagents.filter(
+      sub => Date.now() - sub.startedAt < 600000
+    );
 
     if (stats.recentMilestone && Date.now() - stats.recentMilestone.at > 8000) {
       stats.recentMilestone = null;
@@ -177,6 +181,13 @@ process.stdin.on('end', () => {
       state = 'happy';
       detail = 'all done!';
       stopped = true;
+      // Clean up synthetic subagent sessions
+      for (const sub of stats.session.activeSubagents) {
+        writeSessionState(sub.id, 'happy', 'done', true, {
+          sessionId: sub.id, stopped: true, cwd: '', parentSession: sessionId,
+        });
+      }
+      stats.session.activeSubagents = [];
     }
     else if (mappedEvent === 'error') {
       state = 'error';
@@ -188,14 +199,64 @@ process.stdin.on('end', () => {
       detail = 'needs attention';
     }
 
+    const isSubagentTool = SUBAGENT_TOOLS.test(toolName);
+
+    if ((mappedEvent === 'tool_start' || mappedEvent === 'PreToolUse') && isSubagentTool) {
+      const subId = `${sessionId}-sub-${Date.now()}`;
+      const desc = (toolInput.description || toolInput.prompt || 'subagent').slice(0, 40);
+      stats.session.activeSubagents.push({ id: subId, description: desc, startedAt: Date.now() });
+      writeSessionState(subId, 'thinking', desc, false, {
+        sessionId: subId, modelName: toolInput.model || 'opencode', cwd: '', parentSession: sessionId,
+      });
+      state = 'subagent';
+      detail = `conducting ${stats.session.activeSubagents.length}`;
+    } else if ((mappedEvent === 'tool_end' || mappedEvent === 'PostToolUse') && isSubagentTool && stats.session.activeSubagents.length > 0) {
+      const finished = stats.session.activeSubagents.shift();
+      writeSessionState(finished.id, 'happy', 'done', true, {
+        sessionId: finished.id, stopped: true, cwd: '', parentSession: sessionId,
+      });
+      if (stats.session.activeSubagents.length > 0) {
+        state = 'subagent';
+        detail = `conducting ${stats.session.activeSubagents.length}`;
+      }
+    } else if (stats.session.activeSubagents.length > 0 && !isSubagentTool &&
+               mappedEvent !== 'turn_end' && mappedEvent !== 'Stop' && mappedEvent !== 'session_end' &&
+               mappedEvent !== 'waiting' && mappedEvent !== 'Notification') {
+      const latestSub = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
+      writeSessionState(latestSub.id, state, detail, false, {
+        sessionId: latestSub.id, cwd: '', parentSession: sessionId,
+      });
+      state = 'subagent';
+      detail = `conducting ${stats.session.activeSubagents.length}`;
+    }
+
     extra.toolCalls = stats.session.toolCalls;
     extra.filesEdited = stats.session.filesEdited.length;
 
-    writeState(state, detail, extra);
+    // Guard global state file — don't let other sessions overwrite the owner
+    let shouldWriteGlobal = true;
+    try {
+      const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      if (existing.sessionId && existing.sessionId !== sessionId &&
+          !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
+        shouldWriteGlobal = false;
+      }
+    } catch {}
+
+    if (shouldWriteGlobal) writeState(state, detail, extra);
     writeSessionState(sessionId, state, detail, stopped, extra);
     writeStats(stats);
   } catch {
-    writeState('thinking');
+    // Guard global state file even in error fallback
+    let shouldWriteGlobal = true;
+    try {
+      const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      if (existing.sessionId && existing.sessionId !== sessionId &&
+          !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
+        shouldWriteGlobal = false;
+      }
+    } catch {}
+    if (shouldWriteGlobal) writeState('thinking');
   }
 
   process.exit(0);

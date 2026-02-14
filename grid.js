@@ -43,6 +43,7 @@ class MiniFace {
     this.blinkFrame = -1;
     this.lookDir = 0;
     this.lookTimer = 0;
+    this.parentSession = null; // set if this is a synthetic subagent
   }
 
   updateFromFile(data) {
@@ -52,6 +53,7 @@ class MiniFace {
     this.lastUpdate = data.timestamp || Date.now();
     if (data.cwd) this.cwd = data.cwd;
     if (data.modelName) this.modelName = data.modelName;
+    if (data.parentSession) this.parentSession = data.parentSession;
     if (data.stopped && !this.stopped) {
       this.stopped = true;
       this.stoppedAt = Date.now();
@@ -304,9 +306,10 @@ class OrbitalSystem {
   }
 
   calculateOrbit(cols, rows, mainPos) {
-    // Minimum ellipse semi-axes: must clear the main face box + padding
+    // Minimum ellipse semi-axes: must clear the main face box + decorations
+    // Vertical: face box + accessories/thought bubble above (~5 rows) + stats below (~4 rows)
     const minA = Math.floor(mainPos.w / 2) + Math.floor(MINI_W / 2) + 3;
-    const minB = Math.floor(mainPos.h / 2) + Math.floor(MINI_H / 2) + 2;
+    const minB = Math.floor(mainPos.h / 2) + Math.floor(MINI_H / 2) + 6;
 
     // Maximum: constrained by terminal edges from main face center
     const maxA = Math.min(
@@ -340,6 +343,9 @@ class OrbitalSystem {
     const r = ansi.reset;
 
     for (const pos of positions) {
+      // Only draw connection lines to actual subagents, not independent sessions
+      if (pos.face && !pos.face.parentSession) continue;
+
       const dx = pos.col - mainPos.centerX;
       const dy = pos.row - mainPos.centerY;
       const steps = Math.max(Math.abs(dx), Math.abs(dy));
@@ -356,9 +362,10 @@ class OrbitalSystem {
         const col = Math.round(mainPos.centerX + dx * t);
         const row = Math.round(mainPos.centerY + dy * t);
 
-        // Skip if inside main face box (with 1 char padding)
-        if (col >= mainLeft - 1 && col <= mainRight + 1 &&
-            row >= mainTop - 1 && row <= mainBot + 1) continue;
+        // Skip if inside main face area (extended for thought bubbles,
+        // accessories above, and status/indicators below)
+        if (col >= mainLeft - 2 && col <= mainRight + 16 &&
+            row >= mainTop - 5 && row <= mainBot + 4) continue;
 
         // Skip if inside orbital box
         if (col >= pos.col - 1 && col <= pos.col + MINI_W + 1 &&
@@ -396,8 +403,9 @@ class OrbitalSystem {
     if (sorted.length === 0) return '';
 
     const SIDE_PAD = 2;
+    const SIDE_PAD_RIGHT = 16; // Extra clearance for thought bubbles extending right
     const leftCol = mainPos.col - MINI_W - SIDE_PAD;
-    const rightCol = mainPos.col + mainPos.w + SIDE_PAD;
+    const rightCol = mainPos.col + mainPos.w + SIDE_PAD_RIGHT;
     const canLeft = leftCol >= 1;
     const canRight = rightCol + MINI_W <= cols;
 
@@ -479,13 +487,14 @@ class OrbitalSystem {
     for (let i = 0; i < n; i++) {
       const angle = (Math.PI * 2 * i / n) + this.rotationAngle;
       const col = Math.round(mainPos.centerX + Math.cos(angle) * a - MINI_W / 2);
-      const row = Math.round(mainPos.centerY + Math.sin(angle) * b - MINI_H / 2);
+      // Shift orbit center down by 2 rows to account for thought bubbles/accessories above
+      const row = Math.round((mainPos.centerY + 2) + Math.sin(angle) * b - MINI_H / 2);
 
       // Clamp to terminal bounds
       const clampedCol = Math.max(1, Math.min(cols - MINI_W, col));
       const clampedRow = Math.max(1, Math.min(rows - MINI_H, row));
 
-      positions.push({ col: clampedCol, row: clampedRow });
+      positions.push({ col: clampedCol, row: clampedRow, face: visible[i] });
     }
 
     let buf = '';
