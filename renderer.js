@@ -35,6 +35,7 @@ const PID_FILE = path.join(HOME, GRID_MODE ? '.code-crumb-grid.pid' : '.code-cru
 const FPS = 15;
 const FRAME_MS = Math.floor(1000 / FPS);
 const IDLE_TIMEOUT = 8000;
+const THINKING_TIMEOUT = 300000; // 5min -- stay thinking while Claude processes between tools
 const SLEEP_TIMEOUT = 60000;
 
 // ===================================================================
@@ -100,12 +101,14 @@ function runSingleMode() {
   if (typeof prefs.showStats === 'boolean') face.showStats = prefs.showStats;
 
   let lastMtime = 0;
+  let lastFileState = 'idle'; // Track the last state written to the file by hooks
   function checkState() {
     try {
       const stat = fs.statSync(STATE_FILE);
       if (stat.mtimeMs > lastMtime) {
         lastMtime = stat.mtimeMs;
         const stateData = readState();
+        lastFileState = stateData.state;
         face.setState(stateData.state, stateData.detail);
         face.setStats(stateData);
       }
@@ -117,14 +120,20 @@ function runSingleMode() {
 
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     const completionLinger = COMPLETION_LINGER[face.state];
+    // Session is active until Stop hook writes 'happy'
+    const sessionActive = lastFileState !== 'happy';
 
     if (completionLinger && now - face.lastStateChange > completionLinger) {
       face.setState('thinking');
+    } else if (face.state === 'thinking' &&
+               now - face.lastStateChange > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT)) {
+      face.setState('idle');
     } else if (!completionStates.includes(face.state) &&
                face.state !== 'idle' && face.state !== 'sleeping' &&
-               face.state !== 'waiting' &&
+               face.state !== 'waiting' && face.state !== 'thinking' &&
                now - face.lastStateChange > IDLE_TIMEOUT) {
-      face.setState('idle');
+      // Active tool states degrade to thinking (not idle) if session is still running
+      face.setState(sessionActive ? 'thinking' : 'idle');
     }
     if (face.state === 'idle' && now - face.lastStateChange > SLEEP_TIMEOUT) {
       face.setState('sleeping');
