@@ -212,12 +212,15 @@ process.stdin.on('end', () => {
   } catch {
     // JSON parse may fail for Stop/Notification events with empty or
     // non-JSON stdin -- still write the correct state for the hook event.
+    // Include sessionId so the renderer can identify the session even on parse failure.
+    const fallbackSessionId = process.env.CLAUDE_SESSION_ID || String(process.ppid);
+    const fallbackExtra = { sessionId: fallbackSessionId };
     if (hookEvent === 'Stop') {
-      writeState('responding', 'wrapping up');
+      writeState('responding', 'wrapping up', fallbackExtra);
     } else if (hookEvent === 'Notification') {
-      writeState('waiting', 'needs attention');
+      writeState('waiting', 'needs attention', fallbackExtra);
     } else {
-      writeState('thinking');
+      writeState('thinking', '', fallbackExtra);
     }
   }
 

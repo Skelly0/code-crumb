@@ -18,7 +18,7 @@ const CELL_H = 7;
 const BOX_W = 8;
 const BOX_INNER = 6;
 const STALE_MS = 120000;
-const STOPPED_LINGER_MS = 5000;
+const STOPPED_LINGER_MS = 15000;
 const MIN_COLS_GRID = 14;
 const MIN_ROWS_GRID = 9;
 const IDLE_TIMEOUT = 8000;
@@ -318,8 +318,8 @@ class OrbitalSystem {
       rows - mainPos.centerY - Math.floor(MINI_H / 2) - 1
     );
 
-    // Terminal too small for orbitals
-    if (maxA < minA || maxB < minB || cols < MIN_ORBITAL_COLS || rows < MIN_ORBITAL_ROWS) {
+    // Terminal too small for orbitals (math-based check only)
+    if (maxA < minA || maxB < minB) {
       return { a: 0, b: 0, maxSlots: 0 };
     }
 
@@ -391,19 +391,82 @@ class OrbitalSystem {
     }
   }
 
+  _renderSidePanel(cols, rows, mainPos, paletteThemes) {
+    const sorted = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+    if (sorted.length === 0) return '';
+
+    const SIDE_PAD = 2;
+    const leftCol = mainPos.col - MINI_W - SIDE_PAD;
+    const rightCol = mainPos.col + mainPos.w + SIDE_PAD;
+    const canLeft = leftCol >= 1;
+    const canRight = rightCol + MINI_W <= cols;
+
+    if (!canLeft && !canRight) {
+      // Truly no space — show text indicator
+      const n = sorted.length;
+      const text = `+${n} subagent${n === 1 ? '' : 's'}`;
+      const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
+      const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 3);
+      const dc = `${ansi.dim}${ansi.fg(...dimColor([140, 170, 200], 0.5))}`;
+      return `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
+    }
+
+    // How many fit vertically per side?
+    const maxPerSide = Math.max(1, Math.floor((rows - 1) / MINI_H));
+
+    // Distribute faces: alternate left/right for visual balance
+    const leftFaces = [];
+    const rightFaces = [];
+    for (const face of sorted) {
+      if (canLeft && leftFaces.length < maxPerSide &&
+          (!canRight || leftFaces.length <= rightFaces.length)) {
+        leftFaces.push(face);
+      } else if (canRight && rightFaces.length < maxPerSide) {
+        rightFaces.push(face);
+      } else if (canLeft && leftFaces.length < maxPerSide) {
+        leftFaces.push(face);
+      } else {
+        break; // No more room
+      }
+    }
+
+    const visibleCount = leftFaces.length + rightFaces.length;
+    const overflow = sorted.length - visibleCount;
+    let buf = '';
+
+    // Render a vertical stack of faces centered on the main face
+    const renderStack = (faces, col) => {
+      if (faces.length === 0) return;
+      const totalH = faces.length * MINI_H;
+      let startRow = Math.max(1, Math.round(mainPos.centerY - totalH / 2));
+      startRow = Math.min(startRow, Math.max(1, rows - totalH));
+      for (let i = 0; i < faces.length; i++) {
+        buf += faces[i].render(startRow + i * MINI_H, col, this.time, paletteThemes);
+      }
+    };
+
+    renderStack(leftFaces, leftCol);
+    renderStack(rightFaces, rightCol);
+
+    if (overflow > 0) {
+      const text = `+${overflow} more`;
+      const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
+      const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 3);
+      const dc = `${ansi.dim}${ansi.fg(...dimColor([140, 170, 200], 0.5))}`;
+      buf += `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
+    }
+
+    return buf;
+  }
+
   render(cols, rows, mainPos, paletteThemes) {
     if (this.faces.size === 0) return '';
 
     const { a, b, maxSlots } = this.calculateOrbit(cols, rows, mainPos);
 
-    // Terminal too small — show overflow count only
+    // Terminal too small for orbits — use side panel layout
     if (maxSlots === 0) {
-      const n = this.faces.size;
-      const text = `+${n} subagent${n === 1 ? '' : 's'}`;
-      const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
-      const textRow = Math.min(rows - 2, mainPos.row + mainPos.h + 3);
-      const dc = `${ansi.dim}${ansi.fg(...dimColor([140, 170, 200], 0.5))}`;
-      return `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
+      return this._renderSidePanel(cols, rows, mainPos, paletteThemes);
     }
 
     const sorted = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);

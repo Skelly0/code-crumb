@@ -81,7 +81,7 @@ describe('grid.js -- MiniFace', () => {
   test('isStale returns true for old stopped face', () => {
     const face = new MiniFace('test');
     face.stopped = true;
-    face.stoppedAt = Date.now() - 10000;
+    face.stoppedAt = Date.now() - 20000; // Past STOPPED_LINGER_MS (15s)
     assert.ok(face.isStale());
   });
 
@@ -198,13 +198,70 @@ describe('grid.js -- OrbitalSystem stale cleanup', () => {
   test('stale stopped faces are detected', () => {
     const face = new MiniFace('stale');
     face.stopped = true;
-    face.stoppedAt = Date.now() - 10000;
+    face.stoppedAt = Date.now() - 20000; // Past STOPPED_LINGER_MS (15s)
     assert.ok(face.isStale());
+  });
+
+  test('recently stopped faces are not stale', () => {
+    const face = new MiniFace('recent');
+    face.stopped = true;
+    face.stoppedAt = Date.now() - 5000; // Within STOPPED_LINGER_MS (15s)
+    assert.ok(!face.isStale());
   });
 
   test('fresh faces are not stale', () => {
     const face = new MiniFace('fresh');
     assert.ok(!face.isStale());
+  });
+});
+
+describe('grid.js -- OrbitalSystem side panel', () => {
+  test('_renderSidePanel returns string with faces on sides', () => {
+    const orbital = new OrbitalSystem();
+    const face1 = new MiniFace('sub-1');
+    face1.state = 'coding';
+    face1.label = 'sub-1';
+    orbital.faces.set('sub-1', face1);
+    const mainPos = { row: 7, col: 26, w: 30, h: 10, centerX: 41, centerY: 12 };
+    const result = orbital._renderSidePanel(80, 24, mainPos);
+    assert.ok(typeof result === 'string');
+    assert.ok(result.length > 0);
+  });
+
+  test('_renderSidePanel returns text fallback when no side space', () => {
+    const orbital = new OrbitalSystem();
+    orbital.faces.set('sub-1', new MiniFace('sub-1'));
+    // Main face fills the entire terminal width
+    const mainPos = { row: 2, col: 1, w: 38, h: 10, centerX: 20, centerY: 7 };
+    const result = orbital._renderSidePanel(40, 15, mainPos);
+    assert.ok(result.includes('subagent'));
+  });
+
+  test('_renderSidePanel distributes faces to both sides', () => {
+    const orbital = new OrbitalSystem();
+    for (let i = 0; i < 4; i++) {
+      const f = new MiniFace(`sub-${i}`);
+      f.label = `sub-${i}`;
+      f.state = 'coding';
+      orbital.faces.set(`sub-${i}`, f);
+    }
+    const mainPos = { row: 7, col: 26, w: 30, h: 10, centerX: 41, centerY: 12 };
+    const result = orbital._renderSidePanel(80, 24, mainPos);
+    assert.ok(typeof result === 'string');
+    assert.ok(result.length > 0);
+  });
+
+  test('render falls back to side panel at 80x24', () => {
+    const orbital = new OrbitalSystem();
+    const f = new MiniFace('sub-1');
+    f.label = 'sub-1';
+    f.state = 'reading';
+    orbital.faces.set('sub-1', f);
+    // At 80x24, orbital ellipse can't fit (maxB < minB), so side panel kicks in
+    const mainPos = { row: 7, col: 26, w: 30, h: 10, centerX: 41, centerY: 12 };
+    const result = orbital.render(80, 24, mainPos);
+    assert.ok(typeof result === 'string');
+    assert.ok(result.length > 0);
   });
 });
 

@@ -120,11 +120,15 @@ function runUnifiedMode() {
           mainSessionId = stateData.sessionId;
         }
 
+        // If sessionId is missing, treat as belonging to current main session
+        // (fallback for older hooks or parse failures)
+        const incomingId = stateData.sessionId || mainSessionId;
+
         // If a different session is writing to the state file:
-        if (stateData.sessionId && mainSessionId && stateData.sessionId !== mainSessionId) {
+        if (incomingId && mainSessionId && incomingId !== mainSessionId) {
           // Adopt as new main only if old main session ended or is very stale
           if (lastStopped || Date.now() - lastMainUpdate > 120000) {
-            mainSessionId = stateData.sessionId;
+            mainSessionId = incomingId;
             lastStopped = false;
           } else {
             return; // Ignore — this is a subagent writing to the state file
