@@ -23,7 +23,7 @@ const path = require('path');
 
 // Tool name patterns per category — covers Claude Code, Codex CLI, OpenCode, and OpenClaw/Pi
 const EDIT_TOOLS = /^(edit|multiedit|write|str_replace|create_file|file_edit|write_file|create_file_with_contents|apply_diff|apply_patch|code_edit|insert_text|replace_text|patch)$/i;
-const BASH_TOOLS = /^(bash|shell|terminal|execute|run_command|run|exec|process)$/i;
+const BASH_TOOLS = /^(bash|shell|terminal|execute|run_command|run|exec|process|sh|cmd|powershell|command|cli)$/i;
 const READ_TOOLS = /^(read|view|cat|file_read|read_file|get_file_contents|open_file)$/i;
 const SEARCH_TOOLS = /^(grep|glob|search|ripgrep|find|list|search_files|list_files|list_dir|find_files|file_search|codebase_search)$/i;
 const WEB_TOOLS = /^(web_search|web_fetch|fetch|webfetch|browser|browse|http_request|curl|canvas)$/i;
@@ -43,13 +43,22 @@ function toolToState(toolName, toolInput) {
     const shortCmd = cmd.length > 40 ? cmd.slice(0, 37) + '...' : cmd;
 
     // Detect test commands
-    if (/\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|spec)\b/i.test(cmd) ||
-        /\bnpm\s+(run\s+)?test\b/i.test(cmd)) {
+    if (/\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|\.spec\.)\b/i.test(cmd) ||
+        /\b(npm|yarn|pnpm|bun|go|cargo|dotnet)\s+(run\s+)?(test|tests)\b/i.test(cmd) ||
+        /\b(rake|npx|composer)\s+test\b/i.test(cmd) ||
+        /\b(pytest|nosetests)\b/i.test(cmd)) {
       return { state: 'testing', detail: shortCmd || 'running tests' };
     }
 
     // Detect install commands
-    if (/\b(npm\s+install|yarn\s+(add|install)|pip\s+install|cargo\s+build|apt(-get)?\s+install|brew\s+install|pnpm\s+(add|install)|bun\s+(add|install))\b/i.test(cmd)) {
+    if (/\b(npm|yarn|pnpm|bun)\s+(install|i|add)\b/i.test(cmd) ||
+        /\b(pip|pip3)\s+(install|-r)\b/i.test(cmd) ||
+        /\b(cargo\s+build|cargo\s+add)\b/i.test(cmd) ||
+        /\b(apt|apt-get|apk)\s+(install|add)\b/i.test(cmd) ||
+        /\b(brew\s+install|homebrew)\b/i.test(cmd) ||
+        /\b(go\s+get|go\s+install)\b/i.test(cmd) ||
+        /\b(composer\s+require|composer\s+install)\b/i.test(cmd) ||
+        /\b(dotnet\s+add|dotnet\s+restore)\b/i.test(cmd)) {
       return { state: 'installing', detail: shortCmd || 'installing' };
     }
 
