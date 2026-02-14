@@ -589,11 +589,15 @@ class ClaudeFace {
   loadSubagentSessions() {
     // Get main session info to exclude it from subagent faces
     let mainSessionId = null;
+    let mainCwd = null;
+    let mainModelName = null;
     try {
       const raw = fs.readFileSync(STATE_FILE, 'utf8').trim();
       if (raw) {
         const data = JSON.parse(raw);
         mainSessionId = data.session_id || null;
+        mainCwd = data.cwd || null;
+        mainModelName = data.modelName || null;
       }
     } catch {}
 
@@ -618,7 +622,7 @@ class ClaudeFace {
           continue;
         }
 
-        // Skip the main session - match by session_id
+        // Skip the main session - match by session_id if available
         if (mainSessionId && id === mainSessionId) {
           continue;
         }
