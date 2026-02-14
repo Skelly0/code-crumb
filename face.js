@@ -680,15 +680,15 @@ class ClaudeFace {
     buf += ansi.to(startRow + 9, startCol);
     buf += `${ansi.fg(...theme.label)}${' '.repeat(Math.max(0, statusPad))}${statusText}${r}`;
 
-    // Detail line
+    // Detail line (task info - more prominent display)
     if (this.stateDetail) {
       const maxDetailWidth = Math.max(10, cols - startCol - 8);
       const detailText = this.stateDetail.length > maxDetailWidth
         ? this.stateDetail.slice(0, maxDetailWidth - 3) + '...'
         : this.stateDetail;
-      const detailPad = Math.floor((faceW - detailText.length) / 2);
+      const detailPad = Math.floor((faceW - detailText.length - 6) / 2);
       buf += ansi.to(startRow + 10, startCol);
-      buf += `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.6))}${' '.repeat(Math.max(0, detailPad))}${detailText}${r}`;
+      buf += `${ansi.fg(...dimColor(theme.label, 0.8))}${' '.repeat(Math.max(0, detailPad))}Task: ${detailText}${r}`;
     }
 
     // Thought bubble (above face, right of center)
