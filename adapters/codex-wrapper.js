@@ -77,6 +77,7 @@ const activeTools = new Map();
 function buildExtra() {
   const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
   return {
+    sessionId,
     modelName,
     toolCalls: stats.session.toolCalls,
     filesEdited: stats.session.filesEdited.length,

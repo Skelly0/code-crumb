@@ -101,6 +101,11 @@ class ClaudeFace {
     // Accessories
     this.accessoriesEnabled = true;
 
+    // Orbital subagents
+    this.showOrbitals = true;
+    this.subagentCount = 0;
+    this.lastPos = null;
+
     // Model name (shown in status line: "{name} is thinking")
     this.modelName = process.env.CODE_CRUMB_MODEL || 'claude';
   }
@@ -162,8 +167,10 @@ class ClaudeFace {
         this.glitchIntensity = 1.0;
       } else if (newState === 'thinking') {
         this.particles.spawn(6, 'orbit');
+      } else if (newState === 'responding') {
+        this.particles.spawn(4, 'float');
       } else if (newState === 'subagent') {
-        this.particles.spawn(8, 'echo');
+        this.particles.spawn(8, 'stream');
       } else if (newState === 'caffeinated') {
         this.particles.spawn(6, 'speedline');
       }
@@ -329,6 +336,10 @@ class ClaudeFace {
     this.accessoriesEnabled = !this.accessoriesEnabled;
   }
 
+  toggleOrbitals() {
+    this.showOrbitals = !this.showOrbitals;
+  }
+
   getTheme() {
     const palette = PALETTES[this.paletteIndex] || PALETTES[0];
     return palette.themes[this.state] || palette.themes.idle;
@@ -377,7 +388,7 @@ class ClaudeFace {
       case 'testing':     return eyes.intense(theme, frame);
       case 'installing':  return eyes.down(theme, frame);
       case 'caffeinated': return eyes.vibrate(theme, frame);
-      case 'subagent':    return eyes.echo(theme, frame);
+      case 'subagent':    return eyes.conducting(theme, frame);
       default:            return eyes.open(theme, frame);
     }
   }
@@ -408,7 +419,7 @@ class ClaudeFace {
       case 'testing':     return mouths.tight();
       case 'installing':  return mouths.dots();
       case 'caffeinated': return mouths.grin();
-      case 'subagent':    return mouths.calm();
+      case 'subagent':    return mouths.conducting();
       default:          return mouths.smile();
     }
   }
@@ -461,7 +472,8 @@ class ClaudeFace {
     if (this.state === 'testing' && this.frame % 12 === 0) this.particles.spawn(1, 'sweat');
     if (this.state === 'installing' && this.frame % 8 === 0) this.particles.spawn(1, 'falling');
     if (this.state === 'caffeinated' && this.frame % 4 === 0) this.particles.spawn(1, 'speedline');
-    if (this.state === 'subagent' && this.frame % 10 === 0) this.particles.spawn(1, 'echo');
+    if (this.state === 'subagent' && this.frame % 8 === 0) this.particles.spawn(1, 'stream');
+    if (this.state === 'responding' && this.frame % 18 === 0) this.particles.spawn(1, 'float');
 
     // Caffeinated detection
     const now = Date.now();
@@ -546,6 +558,7 @@ class ClaudeFace {
       ' t      cycle palette',
       ' s      toggle stats',
       ' a      toggle accessories',
+      ' o      toggle subagents',
       ' h/?    this help',
       ' q      quit',
     ];
@@ -600,6 +613,14 @@ class ClaudeFace {
 
     const startCol = Math.max(1, Math.floor((cols - faceW) / 2) + 1);
     const startRow = Math.max(7, Math.floor((rows - totalH) / 2) + 4);
+
+    // Store position for orbital system
+    this.lastPos = {
+      row: startRow, col: startCol,
+      w: faceW, h: faceH,
+      centerX: startCol + Math.floor(faceW / 2),
+      centerY: startRow + Math.floor(faceH / 2),
+    };
 
     const fc = ansi.fg(...borderColor);
     const ec = ansi.fg(...eyeColor);
@@ -678,7 +699,11 @@ class ClaudeFace {
 
     // Status line
     const emoji = theme.emoji;
-    const statusText = `${emoji}  ${this.modelName} is ${theme.status}  ${emoji}`;
+    let statusSuffix = '';
+    if (this.state === 'subagent' && this.subagentCount > 0) {
+      statusSuffix = ` ${this.subagentCount} subagent${this.subagentCount === 1 ? '' : 's'}`;
+    }
+    const statusText = `${emoji}  ${this.modelName} is ${theme.status}${statusSuffix}  ${emoji}`;
     const statusPad = Math.floor((faceW - statusText.length) / 2);
     buf += ansi.to(startRow + 9, startCol);
     buf += `${ansi.fg(...theme.label)}${' '.repeat(Math.max(0, statusPad))}${statusText}${r}`;
@@ -819,11 +844,12 @@ class ClaudeFace {
       }
     }
 
-    // Indicators row: accessories state (left) + palette name (right)
+    // Indicators row: accessories state (left) + subs state + palette name (right)
     {
       const dc = `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.4))}`;
       const accText = this.accessoriesEnabled ? '\u25cf accs' : '\u25cb accs';
-      buf += ansi.to(startRow + 8, startCol) + `${dc}${accText}${r}`;
+      const subText = this.showOrbitals ? '\u25cf subs' : '\u25cb subs';
+      buf += ansi.to(startRow + 8, startCol) + `${dc}${accText}  ${subText}${r}`;
       if (this.paletteIndex > 0) {
         const pName = PALETTE_NAMES[this.paletteIndex] || '';
         buf += ansi.to(startRow + 8, startCol + faceW - pName.length);
@@ -836,7 +862,7 @@ class ClaudeFace {
       const dc = `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.3))}`;
       const kc = ansi.fg(...dimColor(theme.accent, 0.4));
       const sep = `${dc}\u00b7${r}`;
-      const hint = `${kc}space${dc} pet ${sep} ${kc}t${dc} theme ${sep} ${kc}s${dc} stats ${sep} ${kc}a${dc} accs ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
+      const hint = `${kc}space${dc} pet ${sep} ${kc}t${dc} theme ${sep} ${kc}s${dc} stats ${sep} ${kc}a${dc} accs ${sep} ${kc}o${dc} subs ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
       // Strip ANSI to measure visible length
       const visible = hint.replace(/\x1b\[[^m]*m/g, '');
       const hintCol = Math.max(1, Math.floor((cols - visible.length) / 2) + 1);

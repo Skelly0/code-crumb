@@ -25,6 +25,7 @@ const mouths = {
   dots:       () => '\u00b7\u00b7\u00b7',
   grin:       () => '\u25aa\u25e1\u25aa',
   calm:       () => ' \u25e1\u25e1',
+  conducting: () => mouths.determined(),
   catMouth:   () => ' \u03c9 ',
   exhale:     () => ' \u25e1 ',
   content:    () => '\u25e1\u25e1 ',
@@ -122,6 +123,15 @@ const eyes = {
   },
 
   echo() { return { left: ['\u2588\u2588', '\u2588\u2588'], right: ['\u2588\u2588', '\u2588\u2588'] }; },
+
+  conducting(theme, frame) {
+    // Orchestrator scanning: open → lookLeft → open → lookRight → open → focused
+    const phase = Math.floor(frame / 30) % 6;
+    if (phase === 1) return eyes.lookLeft();
+    if (phase === 3) return eyes.lookRight();
+    if (phase === 5) return eyes.focused();
+    return eyes.open();
+  },
 
   pleased(theme, frame) {
     if (frame % 50 < 3) return { left: ['\u2580\u2580', '\u2500\u2500'], right: ['\u2580\u2580', '\u2500\u2500'] };

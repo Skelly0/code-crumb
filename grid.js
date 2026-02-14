@@ -1,8 +1,9 @@
 'use strict';
 
 // +================================================================+
-// |  Grid mode -- MiniFace and FaceGrid classes                     |
-// |  Renders multiple concurrent Claude sessions in a grid layout   |
+// |  Orbital mode -- MiniFace and OrbitalSystem classes              |
+// |  MiniFace renders compact subagent faces                        |
+// |  OrbitalSystem orbits them around the main ClaudeFace           |
 // +================================================================+
 
 const fs = require('fs');
@@ -17,7 +18,7 @@ const CELL_H = 7;
 const BOX_W = 8;
 const BOX_INNER = 6;
 const STALE_MS = 120000;
-const STOPPED_LINGER_MS = 5000;
+const STOPPED_LINGER_MS = 15000;
 const MIN_COLS_GRID = 14;
 const MIN_ROWS_GRID = 9;
 const IDLE_TIMEOUT = 8000;
@@ -213,28 +214,26 @@ class MiniFace {
   }
 }
 
-// -- FaceGrid ------------------------------------------------------
-class FaceGrid {
+// -- OrbitalSystem -------------------------------------------------
+// Orbits subagent MiniFaces around the main ClaudeFace
+const MINI_W = BOX_W;       // 8 cols visible width of mini face
+const MINI_H = CELL_H;      // 7 rows (box + label + status)
+const MAX_ORBITALS = 8;      // Beyond this, labels become unreadable
+const MIN_ORBITAL_COLS = 80;
+const MIN_ORBITAL_ROWS = 30;
+
+class OrbitalSystem {
   constructor() {
-    this.faces = new Map();
+    this.faces = new Map();        // sessionId → MiniFace
+    this.rotationAngle = 0;        // Current global rotation (radians)
+    this.rotationSpeed = 0.007;    // ~1 full rotation per 60s at 15fps
     this.frame = 0;
     this.time = 0;
-    this.prevFaceCount = 0;
-
-    // Interactive keypresses
-    this.paletteIndex = 0;
-    this.showHelp = false;
+    this.prevCount = 0;            // Track face count changes for clear
+    this.paletteIndex = 0;         // Synced from main face
   }
 
-  cycleTheme() {
-    this.paletteIndex = (this.paletteIndex + 1) % PALETTES.length;
-  }
-
-  toggleHelp() {
-    this.showHelp = !this.showHelp;
-  }
-
-  loadSessions() {
+  loadSessions(excludeId) {
     let files;
     try {
       files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'));
@@ -250,6 +249,10 @@ class FaceGrid {
         if (!raw) continue;
         const data = JSON.parse(raw);
         const id = data.session_id || path.basename(file, '.json');
+
+        // Skip the main session — it's the big face, not an orbital
+        if (excludeId && id === excludeId) continue;
+
         seenIds.add(id);
 
         if (!this.faces.has(id)) {
@@ -271,10 +274,10 @@ class FaceGrid {
       }
     }
 
-    this.assignLabels();
+    this._assignLabels();
   }
 
-  assignLabels() {
+  _assignLabels() {
     const sorted = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
     if (sorted.length === 0) return;
 
@@ -290,158 +293,234 @@ class FaceGrid {
       const base = face.cwd ? path.basename(face.cwd) : '';
 
       if (sorted.length === 1) {
-        face.label = base ? base.slice(0, 8) : (face.modelName || 'claude').slice(0, 8);
+        face.label = base ? base.slice(0, 8) : (face.modelName || 'sub').slice(0, 8);
       } else if (base && cwdCounts[base] === 1) {
         face.label = base.slice(0, 8);
       } else {
         cwdIndex[base] = (cwdIndex[base] || 0) + 1;
-        if (cwdIndex[base] === 1) {
-          face.label = i === 0 ? 'main' : (base || 'sub').slice(0, 6) + '-' + cwdIndex[base];
-        } else {
-          face.label = 'sub-' + (cwdIndex[base] - 1);
-        }
+        face.label = 'sub-' + (i + 1);
       }
     }
+  }
+
+  calculateOrbit(cols, rows, mainPos) {
+    // Minimum ellipse semi-axes: must clear the main face box + padding
+    const minA = Math.floor(mainPos.w / 2) + Math.floor(MINI_W / 2) + 3;
+    const minB = Math.floor(mainPos.h / 2) + Math.floor(MINI_H / 2) + 2;
+
+    // Maximum: constrained by terminal edges from main face center
+    const maxA = Math.min(
+      mainPos.centerX - Math.floor(MINI_W / 2) - 1,
+      cols - mainPos.centerX - Math.floor(MINI_W / 2)
+    );
+    const maxB = Math.min(
+      mainPos.centerY - Math.floor(MINI_H / 2) - 1,
+      rows - mainPos.centerY - Math.floor(MINI_H / 2) - 1
+    );
+
+    // Terminal too small for orbitals (math-based check only)
+    if (maxA < minA || maxB < minB) {
+      return { a: 0, b: 0, maxSlots: 0 };
+    }
+
+    // Use the larger available space, clamped to minimums
+    const a = Math.min(maxA, Math.max(minA, Math.floor(cols * 0.35)));
+    const b = Math.min(maxB, Math.max(minB, Math.floor(rows * 0.3)));
+
+    // Max faces that fit without overlapping: approximate by angular spacing
+    // Each face needs ~MINI_W cols of clearance at the widest point of the ellipse
+    const circumference = Math.PI * (3 * (a + b) - Math.sqrt((3 * a + b) * (a + 3 * b)));
+    const maxSlots = Math.min(MAX_ORBITALS, Math.max(1, Math.floor(circumference / (MINI_W + 2))));
+
+    return { a, b, maxSlots };
+  }
+
+  _renderConnections(mainPos, positions, accentColor) {
+    let out = '';
+    const r = ansi.reset;
+
+    for (const pos of positions) {
+      const dx = pos.col - mainPos.centerX;
+      const dy = pos.row - mainPos.centerY;
+      const steps = Math.max(Math.abs(dx), Math.abs(dy));
+      if (steps < 4) continue;
+
+      // Skip points inside main face box or inside orbital box
+      const mainLeft = mainPos.col;
+      const mainRight = mainPos.col + mainPos.w;
+      const mainTop = mainPos.row;
+      const mainBot = mainPos.row + mainPos.h;
+
+      for (let s = 1; s < steps - 1; s++) {
+        const t = s / steps;
+        const col = Math.round(mainPos.centerX + dx * t);
+        const row = Math.round(mainPos.centerY + dy * t);
+
+        // Skip if inside main face box (with 1 char padding)
+        if (col >= mainLeft - 1 && col <= mainRight + 1 &&
+            row >= mainTop - 1 && row <= mainBot + 1) continue;
+
+        // Skip if inside orbital box
+        if (col >= pos.col - 1 && col <= pos.col + MINI_W + 1 &&
+            row >= pos.row - 1 && row <= pos.row + MINI_H) continue;
+
+        // Skip if out of bounds
+        if (row < 1 || row >= (process.stdout.rows || 24) || col < 1 || col >= (process.stdout.columns || 80)) continue;
+
+        // Pulse: brighter dots traveling outward (~3s cycle)
+        const pulsePos = (this.time * 0.0004) % 1;
+        const dist = Math.abs(t - pulsePos);
+        const bright = dist < 0.08 || Math.abs(t - ((pulsePos + 0.5) % 1)) < 0.08;
+
+        const color = bright
+          ? ansi.fg(...dimColor(accentColor, 0.7))
+          : ansi.fg(...dimColor(accentColor, 0.2));
+        out += `\x1b[${row};${col}H${color}\u00b7${r}`;
+      }
+    }
+    return out;
   }
 
   update(dt) {
     this.time += dt;
     this.frame++;
+    this.rotationAngle += this.rotationSpeed;
+    if (this.rotationAngle > Math.PI * 2) this.rotationAngle -= Math.PI * 2;
     for (const face of this.faces.values()) {
       face.tick(dt);
     }
   }
 
-  render() {
-    const cols = process.stdout.columns || 80;
-    const rows = process.stdout.rows || 24;
+  _renderSidePanel(cols, rows, mainPos, paletteThemes) {
+    const sorted = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+    if (sorted.length === 0) return '';
 
-    // Terminal too small -- show compact fallback
-    if (cols < MIN_COLS_GRID || rows < MIN_ROWS_GRID) {
-      let buf = '';
-      for (let row = 1; row <= rows; row++) {
-        buf += ansi.to(row, 1) + ansi.clearLine;
-      }
-      const msg = '\u00b7_\u00b7';
-      const msgCol = Math.max(1, Math.floor((cols - msg.length) / 2));
-      const msgRow = Math.max(1, Math.floor(rows / 2));
-      buf += ansi.to(msgRow, msgCol);
-      buf += `${ansi.dim}${ansi.fg(80, 120, 160)}${msg}${ansi.reset}`;
-      return buf;
+    const SIDE_PAD = 2;
+    const leftCol = mainPos.col - MINI_W - SIDE_PAD;
+    const rightCol = mainPos.col + mainPos.w + SIDE_PAD;
+    const canLeft = leftCol >= 1;
+    const canRight = rightCol + MINI_W <= cols;
+
+    if (!canLeft && !canRight) {
+      // Truly no space — show text indicator
+      const n = sorted.length;
+      const text = `+${n} subagent${n === 1 ? '' : 's'}`;
+      const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
+      const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 3);
+      const dc = `${ansi.dim}${ansi.fg(...dimColor([140, 170, 200], 0.5))}`;
+      return `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
     }
 
-    const faces = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
-    const n = faces.length;
+    // How many fit vertically per side?
+    const maxPerSide = Math.max(1, Math.floor((rows - 1) / MINI_H));
+
+    // Distribute faces: alternate left/right for visual balance
+    const leftFaces = [];
+    const rightFaces = [];
+    for (const face of sorted) {
+      if (canLeft && leftFaces.length < maxPerSide &&
+          (!canRight || leftFaces.length <= rightFaces.length)) {
+        leftFaces.push(face);
+      } else if (canRight && rightFaces.length < maxPerSide) {
+        rightFaces.push(face);
+      } else if (canLeft && leftFaces.length < maxPerSide) {
+        leftFaces.push(face);
+      } else {
+        break; // No more room
+      }
+    }
+
+    const visibleCount = leftFaces.length + rightFaces.length;
+    const overflow = sorted.length - visibleCount;
+    let buf = '';
+
+    // Render a vertical stack of faces centered on the main face
+    const renderStack = (faces, col) => {
+      if (faces.length === 0) return;
+      const totalH = faces.length * MINI_H;
+      let startRow = Math.max(1, Math.round(mainPos.centerY - totalH / 2));
+      startRow = Math.min(startRow, Math.max(1, rows - totalH));
+      for (let i = 0; i < faces.length; i++) {
+        buf += faces[i].render(startRow + i * MINI_H, col, this.time, paletteThemes);
+      }
+    };
+
+    renderStack(leftFaces, leftCol);
+    renderStack(rightFaces, rightCol);
+
+    if (overflow > 0) {
+      const text = `+${overflow} more`;
+      const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
+      const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 3);
+      const dc = `${ansi.dim}${ansi.fg(...dimColor([140, 170, 200], 0.5))}`;
+      buf += `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
+    }
+
+    return buf;
+  }
+
+  render(cols, rows, mainPos, paletteThemes) {
+    if (this.faces.size === 0) return '';
+
+    const { a, b, maxSlots } = this.calculateOrbit(cols, rows, mainPos);
+
+    // Terminal too small for orbits — use side panel layout
+    if (maxSlots === 0) {
+      return this._renderSidePanel(cols, rows, mainPos, paletteThemes);
+    }
+
+    const sorted = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+    const visible = sorted.slice(0, maxSlots);
+    const overflow = sorted.length - visible.length;
+    const n = visible.length;
+
+    // Calculate orbital positions
+    const positions = [];
+    for (let i = 0; i < n; i++) {
+      const angle = (Math.PI * 2 * i / n) + this.rotationAngle;
+      const col = Math.round(mainPos.centerX + Math.cos(angle) * a - MINI_W / 2);
+      const row = Math.round(mainPos.centerY + Math.sin(angle) * b - MINI_H / 2);
+
+      // Clamp to terminal bounds
+      const clampedCol = Math.max(1, Math.min(cols - MINI_W, col));
+      const clampedRow = Math.max(1, Math.min(rows - MINI_H, row));
+
+      positions.push({ col: clampedCol, row: clampedRow });
+    }
 
     let buf = '';
 
-    // Full clear when face count changes (handles removed faces cleanly)
-    if (n !== this.prevFaceCount) {
-      buf += ansi.clear;
-      this.prevFaceCount = n;
+    // Full clear when face count changes
+    if (n !== this.prevCount) {
+      this.prevCount = n;
     }
 
-    // Empty state
-    if (n === 0) {
-      const lines = [
-        '\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u256e',
-        '\u2502 \u00b7\u00b7 \u00b7\u00b7\u2502',
-        '\u2502 \u25e1\u25e1\u25e1  \u2502',
-        '\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u256f',
-        '',
-        `waiting for ${process.env.CODE_CRUMB_MODEL || 'claude'}...`,
-      ];
-      const maxLen = Math.max(...lines.map(l => l.length));
-      const baseRow = Math.max(1, Math.floor((rows - lines.length) / 2));
-      const baseCol = Math.max(1, Math.floor((cols - maxLen) / 2));
-      const c = ansi.fg(80, 120, 160);
-      for (let i = 0; i < lines.length; i++) {
-        const pad = Math.max(0, Math.floor((maxLen - lines[i].length) / 2));
-        buf += ansi.to(baseRow + i, baseCol + pad);
-        buf += `${ansi.dim}${c}${lines[i]}${ansi.reset}`;
-      }
-      return buf;
-    }
+    // Get accent color for connections from the theme
+    const themeMap = paletteThemes || themes;
+    const accentColor = (themeMap.subagent || themeMap.idle).accent || [100, 160, 210];
 
-    // Grid layout
-    const maxPerRow = Math.max(1, Math.floor(cols / CELL_W));
-    const gridCols = Math.min(n, maxPerRow);
-    const gridRows = Math.ceil(n / gridCols);
-    const gridW = gridCols * CELL_W;
-    const gridH = gridRows * CELL_H;
-    const baseCol = Math.max(1, Math.floor((cols - gridW) / 2));
-    const baseRow = Math.max(1, Math.floor((rows - gridH) / 2));
+    // Render connection lines
+    buf += this._renderConnections(mainPos, positions, accentColor);
 
-    // Clear the grid area + margins to prevent ghost labels/status
-    const clearTop = Math.max(1, baseRow - 1);
-    const clearBot = Math.min(rows, baseRow + gridH + 1);
-    for (let row = clearTop; row <= clearBot; row++) {
-      buf += ansi.to(row, 1) + ansi.clearLine;
-    }
-    // Also clear the counter row
-    buf += ansi.to(1, 1) + ansi.clearLine;
-
+    // Render each mini-face at its orbital position
     for (let i = 0; i < n; i++) {
-      const gridRow = Math.floor(i / gridCols);
-      const gridCol = i % gridCols;
-
-      const facesInRow = (gridRow < gridRows - 1)
-        ? gridCols
-        : (n % gridCols || gridCols);
-      const rowOffset = Math.floor((gridCols - facesInRow) * CELL_W / 2);
-
-      const faceRow = baseRow + gridRow * CELL_H;
-      const faceCol = baseCol + rowOffset + gridCol * CELL_W;
-
-      const paletteThemes = (PALETTES[this.paletteIndex] || PALETTES[0]).themes;
-      buf += faces[i].render(faceRow, faceCol, this.time, paletteThemes);
+      buf += visible[i].render(
+        positions[i].row, positions[i].col,
+        this.time, paletteThemes
+      );
     }
 
-    // Session count + palette name
-    const pName = this.paletteIndex > 0 ? ` [${PALETTE_NAMES[this.paletteIndex]}]` : '';
-    const countText = `${n} session${n === 1 ? '' : 's'}${pName}`;
-    buf += ansi.to(1, cols - countText.length - 1);
-    buf += `${ansi.dim}${ansi.fg(80, 110, 140)}${countText}${ansi.reset}`;
-
-    // Key hints bar (bottom of terminal)
-    {
-      const dc = `${ansi.dim}${ansi.fg(80, 110, 140)}`;
-      const kc = ansi.fg(100, 140, 180);
-      const sep = `${dc}\u00b7${ansi.reset}`;
-      const r = ansi.reset;
-      const hint = `${kc}t${dc} theme ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
-      const visible = hint.replace(/\x1b\[[^m]*m/g, '');
-      const hintCol = Math.max(1, Math.floor((cols - visible.length) / 2) + 1);
-      buf += ansi.to(rows, hintCol) + hint;
-    }
-
-    // Help overlay
-    if (this.showHelp) {
-      const lines = [
-        ' Keybindings ',
-        '',
-        ' t      cycle palette',
-        ' h/?    this help',
-        ' q      quit',
-      ];
-      const boxW = 24;
-      const boxH = lines.length + 2;
-      const bx = Math.max(1, Math.floor((cols - boxW) / 2));
-      const by = Math.max(1, Math.floor((rows - boxH) / 2));
-      const bc = ansi.fg(80, 110, 140);
-      const tc = ansi.fg(140, 170, 200);
-      const r = ansi.reset;
-      buf += ansi.to(by, bx) + `${bc}\u256d${'\u2500'.repeat(boxW)}\u256e${r}`;
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const pad = boxW - line.length;
-        buf += ansi.to(by + 1 + i, bx) + `${bc}\u2502${tc}${line}${' '.repeat(Math.max(0, pad))}${bc}\u2502${r}`;
-      }
-      buf += ansi.to(by + 1 + lines.length, bx) + `${bc}\u2570${'\u2500'.repeat(boxW)}\u256f${r}`;
+    // Overflow indicator
+    if (overflow > 0) {
+      const text = `+${overflow} more`;
+      const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
+      const textRow = Math.min(rows - 2, mainPos.row + mainPos.h + 3);
+      const dc = `${ansi.dim}${ansi.fg(...dimColor([140, 170, 200], 0.5))}`;
+      buf += `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
     }
 
     return buf;
   }
 }
 
-module.exports = { MiniFace, FaceGrid };
+module.exports = { MiniFace, OrbitalSystem };

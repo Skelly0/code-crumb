@@ -132,6 +132,7 @@ process.stdin.on('end', () => {
 
     const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
     const extra = {
+      sessionId,
       modelName,
       toolCalls: stats.session.toolCalls,
       filesEdited: stats.session.filesEdited.length,

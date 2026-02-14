@@ -55,15 +55,15 @@ try {
     const lastMsg = event['last-assistant-message'] || '';
     const detail = lastMsg.length > 40 ? lastMsg.slice(0, 37) + '...' : lastMsg;
 
-    writeState('happy', detail || 'turn complete', { modelName });
-    writeSessionState(sessionId, 'happy', detail || 'turn complete', false, { modelName });
+    writeState('happy', detail || 'turn complete', { sessionId, modelName });
+    writeSessionState(sessionId, 'happy', detail || 'turn complete', false, { sessionId, modelName });
   } else if (eventType === 'approval-requested') {
-    writeState('waiting', 'needs approval', { modelName });
-    writeSessionState(sessionId, 'waiting', 'needs approval', false, { modelName });
+    writeState('waiting', 'needs approval', { sessionId, modelName });
+    writeSessionState(sessionId, 'waiting', 'needs approval', false, { sessionId, modelName });
   } else {
     // Unknown event -- show as thinking
-    writeState('thinking', eventType || 'codex event', { modelName });
-    writeSessionState(sessionId, 'thinking', eventType || 'codex event', false, { modelName });
+    writeState('thinking', eventType || 'codex event', { sessionId, modelName });
+    writeSessionState(sessionId, 'thinking', eventType || 'codex event', false, { sessionId, modelName });
   }
 } catch {
   // Silent failure

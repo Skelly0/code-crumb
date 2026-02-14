@@ -33,7 +33,7 @@ function writeState(state, detail = '', extra = {}) {
   }
 }
 
-// Write per-session state file for the grid renderer
+// Write per-session state file for orbital subagent rendering
 function writeSessionState(sessionId, state, detail = '', stopped = false, extra = {}) {
   try {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true });
@@ -156,8 +156,8 @@ process.stdin.on('end', () => {
       updateStreak(stats, state === 'error');
     }
     else if (hookEvent === 'Stop') {
-      state = 'happy';
-      detail = 'all done!';
+      state = 'responding';
+      detail = 'wrapping up';
       stopped = true;
 
       // Update session records
@@ -187,6 +187,7 @@ process.stdin.on('end', () => {
     // Build extra data for state files
     const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
     const extra = {
+      sessionId,
       modelName,
       toolCalls: stats.session.toolCalls,
       filesEdited: stats.session.filesEdited.length,
@@ -202,19 +203,24 @@ process.stdin.on('end', () => {
       frequentFiles: stats.frequentFiles,
     };
 
-    // Write both: single file (backward compat) + session file (grid mode)
+    if (stopped) extra.stopped = true;
+
+    // Write both: single state file + per-session file (orbital subagents)
     writeState(state, detail, extra);
     writeSessionState(sessionId, state, detail, stopped, extra);
     writeStats(stats);
   } catch {
     // JSON parse may fail for Stop/Notification events with empty or
     // non-JSON stdin -- still write the correct state for the hook event.
+    // Include sessionId so the renderer can identify the session even on parse failure.
+    const fallbackSessionId = process.env.CLAUDE_SESSION_ID || String(process.ppid);
+    const fallbackExtra = { sessionId: fallbackSessionId };
     if (hookEvent === 'Stop') {
-      writeState('happy', 'all done!');
+      writeState('responding', 'wrapping up', fallbackExtra);
     } else if (hookEvent === 'Notification') {
-      writeState('waiting', 'needs attention');
+      writeState('waiting', 'needs attention', fallbackExtra);
     } else {
-      writeState('thinking');
+      writeState('thinking', '', fallbackExtra);
     }
   }
 
