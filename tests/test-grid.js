@@ -111,6 +111,52 @@ describe('grid.js -- MiniFace', () => {
   });
 });
 
+describe('grid.js -- MiniFace tick() timeout logic', () => {
+  test('completion state lingers then transitions to thinking (not idle)', () => {
+    const face = new MiniFace('test');
+    face.state = 'happy';
+    face.lastUpdate = Date.now() - 9000; // Past happy linger (8000ms)
+    face.tick(16);
+    assert.strictEqual(face.state, 'thinking');
+  });
+
+  test('thinking persists for active session past IDLE_TIMEOUT', () => {
+    const face = new MiniFace('test');
+    face.state = 'thinking';
+    face.stopped = false;
+    face.lastUpdate = Date.now() - 10000; // Past IDLE_TIMEOUT (8s) but not THINKING_TIMEOUT (300s)
+    face.tick(16);
+    assert.strictEqual(face.state, 'thinking');
+  });
+
+  test('thinking degrades to idle quickly when stopped', () => {
+    const face = new MiniFace('test');
+    face.state = 'thinking';
+    face.stopped = true;
+    face.lastUpdate = Date.now() - 9000; // Past IDLE_TIMEOUT (8s)
+    face.tick(16);
+    assert.strictEqual(face.state, 'idle');
+  });
+
+  test('active tool state transitions to thinking when session active', () => {
+    const face = new MiniFace('test');
+    face.state = 'coding';
+    face.stopped = false;
+    face.lastUpdate = Date.now() - 9000; // Past IDLE_TIMEOUT (8s)
+    face.tick(16);
+    assert.strictEqual(face.state, 'thinking');
+  });
+
+  test('active tool state transitions to idle when stopped', () => {
+    const face = new MiniFace('test');
+    face.state = 'coding';
+    face.stopped = true;
+    face.lastUpdate = Date.now() - 9000; // Past IDLE_TIMEOUT (8s)
+    face.tick(16);
+    assert.strictEqual(face.state, 'idle');
+  });
+});
+
 describe('grid.js -- OrbitalSystem', () => {
   test('initializes with empty map', () => {
     const orbital = new OrbitalSystem();

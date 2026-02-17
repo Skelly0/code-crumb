@@ -45,6 +45,7 @@ const MIN_COLS_GRID = 14;
 const MIN_ROWS_GRID = 9;
 const IDLE_TIMEOUT = 8000;
 const SLEEP_TIMEOUT = 60000;
+const THINKING_TIMEOUT = 300000;
 
 // -- MiniFace (compact, for grid) ----------------------------------
 class MiniFace {
@@ -122,12 +123,18 @@ class MiniFace {
     const elapsed = Date.now() - this.lastUpdate;
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     const completionLinger = COMPLETION_LINGER[this.state];
+    const sessionActive = !this.stopped;
+
     if (completionLinger && elapsed > completionLinger) {
+      this.state = 'thinking';
+    } else if (this.state === 'thinking' &&
+               elapsed > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT)) {
       this.state = 'idle';
     } else if (!completionStates.includes(this.state) &&
                this.state !== 'idle' && this.state !== 'sleeping' &&
-               this.state !== 'waiting' && elapsed > IDLE_TIMEOUT) {
-      this.state = 'idle';
+               this.state !== 'waiting' && this.state !== 'thinking' &&
+               elapsed > IDLE_TIMEOUT) {
+      this.state = sessionActive ? 'thinking' : 'idle';
     }
     if (this.state === 'idle' && elapsed > SLEEP_TIMEOUT) {
       this.state = 'sleeping';
