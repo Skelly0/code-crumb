@@ -69,6 +69,24 @@ function setupClaude() {
         }],
       },
     ],
+    TeammateIdle: [
+      {
+        matcher: '',
+        hooks: [{
+          type: 'command',
+          command: `node "${hookPath}" TeammateIdle`,
+        }],
+      },
+    ],
+    TaskCompleted: [
+      {
+        matcher: '',
+        hooks: [{
+          type: 'command',
+          command: `node "${hookPath}" TaskCompleted`,
+        }],
+      },
+    ],
   };
 
   console.log('\n  Code Crumb Setup (Claude Code)');

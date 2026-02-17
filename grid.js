@@ -13,6 +13,28 @@ const { ansi, breathe, dimColor, themes, COMPLETION_LINGER, PALETTES, PALETTE_NA
 const { gridMouths } = require('./animations');
 
 // -- Config --------------------------------------------------------
+
+// Predefined team accent colors — assigned consistently by hashing the team name
+const TEAM_COLORS = [
+  [255, 120, 120],  // red
+  [100, 200, 255],  // cyan
+  [140, 255, 120],  // green
+  [255, 210,  60],  // yellow
+  [200, 120, 255],  // purple
+  [255, 160,  60],  // orange
+  [100, 255, 210],  // teal
+  [255, 120, 210],  // pink
+];
+
+function hashTeamColor(teamName) {
+  if (!teamName) return TEAM_COLORS[0];
+  let h = 0;
+  for (let i = 0; i < teamName.length; i++) {
+    h = (h * 31 + teamName.charCodeAt(i)) >>> 0;
+  }
+  return TEAM_COLORS[h % TEAM_COLORS.length];
+}
+
 const CELL_W = 12;
 const CELL_H = 7;
 const BOX_W = 8;
@@ -44,6 +66,10 @@ class MiniFace {
     this.lookDir = 0;
     this.lookTimer = 0;
     this.parentSession = null; // set if this is a synthetic subagent
+    this.teamName = '';        // agent teams: team name
+    this.teammateName = '';    // agent teams: teammate role/name
+    this.isTeammate = false;   // true if part of an agent team
+    this.teamColor = null;     // RGB color derived from teamName
   }
 
   updateFromFile(data) {
@@ -54,6 +80,12 @@ class MiniFace {
     if (data.cwd) this.cwd = data.cwd;
     if (data.modelName) this.modelName = data.modelName;
     if (data.parentSession) this.parentSession = data.parentSession;
+    if (data.teamName) {
+      this.teamName = data.teamName;
+      this.teamColor = hashTeamColor(data.teamName);
+    }
+    if (data.teammateName) this.teammateName = data.teammateName;
+    if (data.isTeammate) this.isTeammate = true;
     if (data.stopped && !this.stopped) {
       this.stopped = true;
       this.stoppedAt = Date.now();
@@ -292,6 +324,13 @@ class OrbitalSystem {
     const cwdIndex = {};
     for (let i = 0; i < sorted.length; i++) {
       const face = sorted[i];
+
+      // Team members use their designated teammate name
+      if (face.teammateName) {
+        face.label = face.teammateName.slice(0, 8);
+        continue;
+      }
+
       const base = face.cwd ? path.basename(face.cwd) : '';
 
       if (sorted.length === 1) {
@@ -343,8 +382,13 @@ class OrbitalSystem {
     const r = ansi.reset;
 
     for (const pos of positions) {
-      // Only draw connection lines to actual subagents, not independent sessions
-      if (pos.face && !pos.face.parentSession) continue;
+      // Draw connection lines to synthetic subagents and team members only
+      if (pos.face && !pos.face.parentSession && !pos.face.isTeammate) continue;
+
+      // Team members use their team color; synthetic subagents use the default accent
+      const lineColor = (pos.face && pos.face.isTeammate && pos.face.teamColor)
+        ? pos.face.teamColor
+        : accentColor;
 
       const dx = pos.col - mainPos.centerX;
       const dy = pos.row - mainPos.centerY;
@@ -380,8 +424,8 @@ class OrbitalSystem {
         const bright = dist < 0.08 || Math.abs(t - ((pulsePos + 0.5) % 1)) < 0.08;
 
         const color = bright
-          ? ansi.fg(...dimColor(accentColor, 0.7))
-          : ansi.fg(...dimColor(accentColor, 0.2));
+          ? ansi.fg(...dimColor(lineColor, 0.7))
+          : ansi.fg(...dimColor(lineColor, 0.2));
         out += `\x1b[${row};${col}H${color}\u00b7${r}`;
       }
     }
@@ -545,4 +589,4 @@ class OrbitalSystem {
   }
 }
 
-module.exports = { MiniFace, OrbitalSystem };
+module.exports = { MiniFace, OrbitalSystem, hashTeamColor };

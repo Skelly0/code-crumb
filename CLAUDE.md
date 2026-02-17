@@ -41,7 +41,7 @@ state-machine.js Pure logic — tool→state mapping (multi-editor), error detec
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
 setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode|openclaw])
-test.js          Test suite — ~385 tests covering all critical paths (node test.js)
+test.js          Test suite — ~411 tests covering all critical paths (node test.js)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Orbital demo — simulates subagent sessions orbiting the main face
 code-crumb.sh   Unix shell wrapper for launch.js
@@ -83,7 +83,9 @@ States have minimum display durations (1–8 seconds) enforced via a `pendingSta
 
 ### Hook Events
 
-Four hook event types are handled: `PreToolUse`, `PostToolUse`, `Stop`, `Notification`. Tool names from all supported editors are mapped to face states via shared regex patterns (e.g., Edit/apply_diff/file_edit → coding, Grep/search_files/codebase_search → searching, Bash/shell/terminal → executing). PostToolUse includes forensic error detection with 50+ regex patterns.
+Six hook event types are handled: `PreToolUse`, `PostToolUse`, `Stop`, `Notification`, `TeammateIdle`, `TaskCompleted`. Tool names from all supported editors are mapped to face states via shared regex patterns (e.g., Edit/apply_diff/file_edit → coding, Grep/search_files/codebase_search → searching, Bash/shell/terminal → executing). PostToolUse includes forensic error detection with 50+ regex patterns.
+
+`TeammateIdle` and `TaskCompleted` are agent-teams-specific events (requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`). They write session files with `teamName`, `teammateName`, and `isTeammate: true` fields so team members appear in the orbital display with their designated name and a team-specific accent color.
 
 ### Multi-Editor Tool Mapping
 
@@ -136,6 +138,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 - `CODE_CRUMB_STATE` — override the single-mode state file path (default: `~/.code-crumb-state`)
 - `CLAUDE_SESSION_ID` — set the session identifier (default: parent PID)
 - `CODE_CRUMB_MODEL` — override the display name in the status line (default: `claude`; adapters default to `codex`/`opencode`/`openclaw`)
+- `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` — set to `1` to enable Claude Code agent teams; Code Crumb will automatically detect teammate sessions via `TeammateIdle`/`TaskCompleted` hooks and show them in the orbital display with role labels and team-specific colors
 
 ## Testing
 
@@ -150,6 +153,7 @@ Run `npm test` (or `node test.js`). The test suite covers:
 - **particles.js**: `ParticleSystem` (all 12 styles incl. stream, lifecycle, fadeAll)
 - **face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline, orbital toggle)
 - **grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles)
+- **test-teams.js**: `hashTeamColor` consistency and RGB output, `MiniFace` team fields, `_assignLabels` with `teammateName`, session schema for `TeammateIdle`/`TaskCompleted`
 
 ### Visual Verification
 

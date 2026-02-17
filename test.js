@@ -17,6 +17,7 @@ const testModules = [
   './tests/test-face.js',
   './tests/test-grid.js',
   './tests/test-accessories.js',
+  './tests/test-teams.js',
 ];
 
 let totalPassed = 0;

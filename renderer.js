@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, STATE_FILE, SESSIONS_DIR, loadPrefs, savePrefs } = require('./shared');
+const { HOME, STATE_FILE, SESSIONS_DIR, TEAMS_DIR, loadPrefs, savePrefs } = require('./shared');
 
 // -- Modules -------------------------------------------------------
 const {
@@ -84,6 +84,32 @@ function writePid() {
 
 function removePid() {
   try { fs.unlinkSync(PID_FILE); } catch {}
+}
+
+// -- Team discovery ------------------------------------------------
+// Scans ~/.claude/teams/*/config.json and returns a map of
+// team name → { teammates: string[] } for display purposes.
+function scanTeams() {
+  const teams = {};
+  try {
+    const entries = fs.readdirSync(TEAMS_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      try {
+        const cfg = JSON.parse(
+          fs.readFileSync(path.join(TEAMS_DIR, entry.name, 'config.json'), 'utf8')
+        );
+        teams[entry.name] = {
+          teammates: Array.isArray(cfg.teammates) ? cfg.teammates : [],
+        };
+      } catch {
+        // Config missing or malformed — skip
+      }
+    }
+  } catch {
+    // Teams dir doesn't exist — agent teams not in use
+  }
+  return teams;
 }
 
 // -- Unified mode (main face + orbital subagents) ------------------
@@ -192,6 +218,9 @@ function runUnifiedMode() {
   // Initial session load
   orbital.loadSessions(mainSessionId);
 
+  // Initial team discovery
+  let activeTeams = scanTeams();
+
   // Raw stdin keypress handling
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
@@ -235,6 +264,9 @@ function runUnifiedMode() {
 
     // Periodically reload sessions
     if (orbital.frame % (FPS * 2) === 0) orbital.loadSessions(mainSessionId);
+
+    // Periodically rescan team configs (~every 10s)
+    if (orbital.frame % (FPS * 10) === 0) activeTeams = scanTeams();
 
     if (face.frame % Math.floor(FPS / 2) === 0) checkState();
 

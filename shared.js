@@ -15,6 +15,7 @@ const STATE_FILE = process.env.CODE_CRUMB_STATE || path.join(HOME, '.code-crumb-
 const SESSIONS_DIR = path.join(HOME, '.code-crumb-sessions');
 const STATS_FILE = path.join(HOME, '.code-crumb-stats.json');
 const PREFS_FILE = path.join(HOME, '.code-crumb-prefs.json');
+const TEAMS_DIR = path.join(HOME, '.claude', 'teams');
 
 // -- Utilities -------------------------------------------------------
 
@@ -44,4 +45,4 @@ function savePrefs(updates) {
   } catch {}
 }
 
-module.exports = { HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, safeFilename, loadPrefs, savePrefs };
+module.exports = { HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, TEAMS_DIR, safeFilename, loadPrefs, savePrefs };

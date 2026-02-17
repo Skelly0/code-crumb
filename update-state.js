@@ -5,7 +5,8 @@
 // |  Code Crumb Hook -- writes state for the face renderer              |
 // |  Called by editor hooks via stdin JSON                           |
 // |  Usage: node update-state.js <event>                            |
-// |  Events: PreToolUse, PostToolUse, Stop, Notification            |
+// |  Events: PreToolUse, PostToolUse, Stop, Notification,           |
+// |          TeammateIdle, TaskCompleted                            |
 // |                                                                  |
 // |  Works with Claude Code, Codex CLI, and OpenCode                |
 // +================================================================+
@@ -189,6 +190,32 @@ process.stdin.on('end', () => {
     else if (hookEvent === 'Notification') {
       state = 'waiting';
       detail = 'needs attention';
+    }
+    else if (hookEvent === 'TeammateIdle') {
+      state = 'waiting';
+      detail = data.teammate_name ? `${data.teammate_name} idle` : 'idle';
+      const teamExtra = {
+        teamName: data.team_name || '',
+        teammateName: data.teammate_name || '',
+        isTeammate: true,
+      };
+      writeSessionState(sessionId, state, detail, false, { ...teamExtra, sessionId });
+      writeStats(stats);
+      process.exit(0);
+    }
+    else if (hookEvent === 'TaskCompleted') {
+      const taskSubject = data.task_subject || '';
+      state = stats.streak >= 10 ? 'proud' : stats.streak >= 3 ? 'satisfied' : 'happy';
+      detail = taskSubject ? taskSubject.slice(0, 40) : 'task done';
+      const teamExtra = {
+        teamName: data.team_name || '',
+        teammateName: data.teammate_name || '',
+        taskSubject,
+        isTeammate: true,
+      };
+      writeSessionState(sessionId, state, detail, false, { ...teamExtra, sessionId });
+      writeStats(stats);
+      process.exit(0);
     }
     else {
       if (toolName) {
