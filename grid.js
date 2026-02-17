@@ -549,12 +549,18 @@ class OrbitalSystem {
       if (mainPos.bubble) {
         const bub = mainPos.bubble;
         const pad = 1;
-        if (clampedCol < bub.col + bub.w + pad && clampedCol + MINI_W > bub.col - pad &&
-            clampedRow < bub.row + bub.h + pad && clampedRow + MINI_H > bub.row - pad) {
+        const bubHit = () =>
+          clampedCol < bub.col + bub.w + pad && clampedCol + MINI_W > bub.col - pad &&
+          clampedRow < bub.row + bub.h + pad && clampedRow + MINI_H > bub.row - pad;
+        if (bubHit()) {
           const nCol = Math.round(mainPos.centerX + Math.cos(angle) * (a + 6) - MINI_W / 2);
           const nRow = Math.round((mainPos.centerY + 2) + Math.sin(angle) * (b + 4) - MINI_H / 2);
           clampedCol = Math.max(1, Math.min(cols - MINI_W, nCol));
           clampedRow = Math.max(1, Math.min(rows - MINI_H, nRow));
+          // If still overlapping (wide bubble + narrow terminal), push below the bubble
+          if (bubHit()) {
+            clampedRow = Math.min(rows - MINI_H, bub.row + bub.h + pad + 1);
+          }
         }
       }
 
