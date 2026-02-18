@@ -462,12 +462,9 @@ class OrbitalSystem {
 
     const SIDE_PAD = 2;
     const leftCol = mainPos.col - MINI_W - SIDE_PAD;
-    let rightCol;
-    if (mainPos.bubble && mainPos.bubble.col > mainPos.col + mainPos.w) {
-      rightCol = mainPos.bubble.col + mainPos.bubble.w + SIDE_PAD;
-    } else {
-      rightCol = mainPos.col + mainPos.w + SIDE_PAD;
-    }
+    const faceRight = mainPos.col + mainPos.w;
+    const bubbleRight = mainPos.bubble ? mainPos.bubble.col + mainPos.bubble.w : faceRight;
+    const rightCol = Math.max(faceRight, bubbleRight) + SIDE_PAD;
     const canLeft = leftCol >= 1;
     const canRight = rightCol + MINI_W <= cols;
 
