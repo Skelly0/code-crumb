@@ -415,7 +415,10 @@ class OrbitalSystem {
 
         // Skip if inside main face area (extended for thought bubbles,
         // accessories above, and status/indicators below)
-        if (col >= mainLeft - 2 && col <= mainRight + 16 &&
+        const rightExclude = mainPos.bubble
+            ? mainPos.bubble.col + mainPos.bubble.w + 2
+            : mainRight + 2;
+        if (col >= mainLeft - 2 && col <= rightExclude &&
             row >= mainTop - 5 && row <= mainBot + 4) continue;
 
         // Skip if inside orbital box
@@ -454,9 +457,13 @@ class OrbitalSystem {
     if (sorted.length === 0) return '';
 
     const SIDE_PAD = 2;
-    const SIDE_PAD_RIGHT = 16; // Extra clearance for thought bubbles extending right
     const leftCol = mainPos.col - MINI_W - SIDE_PAD;
-    const rightCol = mainPos.col + mainPos.w + SIDE_PAD_RIGHT;
+    let rightCol;
+    if (mainPos.bubble && mainPos.bubble.col > mainPos.col + mainPos.w) {
+      rightCol = mainPos.bubble.col + mainPos.bubble.w + SIDE_PAD;
+    } else {
+      rightCol = mainPos.col + mainPos.w + SIDE_PAD;
+    }
     const canLeft = leftCol >= 1;
     const canRight = rightCol + MINI_W <= cols;
 
