@@ -749,7 +749,7 @@ class ClaudeFace {
           buf += `${bc}\u2502 ${tc}${txt}${r} ${bc}\u2502${r}`;
           buf += ansi.to(startRow + 4, bubbleCol);
           buf += `${bc}\u2570${'\u2500'.repeat(bubbleInner)}\u256f${r}`;
-          this.lastPos.bubble = { row: startRow + 2, col: bubbleCol, w: bubbleInner + 2, h: 3 };
+          this.lastPos.bubble = { row: startRow + 2, col: boxRight + 2, w: (bubbleCol - boxRight - 2) + bubbleInner + 2, h: 3 };
         }
       } else if (startRow >= 5) {
         // Above-face bubble (original position, no accessory conflict)

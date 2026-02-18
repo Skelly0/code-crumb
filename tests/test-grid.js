@@ -399,4 +399,70 @@ describe('face.js -- orbital toggle', () => {
   });
 });
 
+describe('OrbitalSystem._renderSidePanel', () => {
+  test('right-col is placed past bubble when active bubble is on right side', () => {
+    const sys = new OrbitalSystem();
+    const mf = new MiniFace('test-session');
+    sys.faces.set('test-session', mf);
+
+    // mainPos.col=5 forces canLeft=false (leftCol = 5-8-2 = -5 < 1)
+    // bubble at col=27 (= 5+20+2), width=15
+    const mainPos = {
+      col: 5, w: 20, row: 5, h: 12,
+      centerX: 15, centerY: 11,
+      bubble: { col: 27, w: 15, row: 8, h: 3 }
+    };
+    const expectedMinCol = mainPos.bubble.col + mainPos.bubble.w + 2; // 27+15+2=44
+
+    const out = sys._renderSidePanel(100, 40, mainPos, null);
+    assert.ok(typeof out === 'string', 'output should be a string');
+
+    // Extract all cursor positions \x1b[row;colH from ANSI output
+    const re = /\x1b\[(\d+);(\d+)H/g;
+    let m;
+    const rightCols = [];
+    while ((m = re.exec(out)) !== null) {
+      const col = parseInt(m[2], 10);
+      if (col > mainPos.col + mainPos.w) rightCols.push(col);
+    }
+
+    assert.ok(rightCols.length > 0, 'should render some content to the right of main face');
+    const minRightCol = Math.min(...rightCols);
+    assert.ok(
+      minRightCol >= expectedMinCol,
+      `right-side mini-face col ${minRightCol} should be >= bubble right edge ${expectedMinCol}`
+    );
+  });
+
+  test('right-col falls back to mainPos.w + SIDE_PAD when no bubble', () => {
+    const sys = new OrbitalSystem();
+    const mf = new MiniFace('test-session-2');
+    sys.faces.set('test-session-2', mf);
+
+    const mainPos = {
+      col: 5, w: 20, row: 5, h: 12,
+      centerX: 15, centerY: 11
+      // no bubble
+    };
+    const SIDE_PAD = 2;
+    const expectedCol = mainPos.col + mainPos.w + SIDE_PAD; // 5+20+2=27
+
+    const out = sys._renderSidePanel(100, 40, mainPos, null);
+    const re = /\x1b\[(\d+);(\d+)H/g;
+    let m;
+    const rightCols = [];
+    while ((m = re.exec(out)) !== null) {
+      const col = parseInt(m[2], 10);
+      if (col > mainPos.col + mainPos.w) rightCols.push(col);
+    }
+
+    assert.ok(rightCols.length > 0, 'should render some content to the right of main face');
+    const minRightCol = Math.min(...rightCols);
+    assert.ok(
+      minRightCol >= expectedCol,
+      `right-side mini-face col ${minRightCol} should be >= ${expectedCol}`
+    );
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
