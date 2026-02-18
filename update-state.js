@@ -13,7 +13,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename } = require('./shared');
+const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename, getGitBranch } = require('./shared');
 const {
   toolToState, classifyToolResult, updateStreak, defaultStats,
   EDIT_TOOLS, SUBAGENT_TOOLS,
@@ -113,7 +113,7 @@ process.stdin.on('end', () => {
       stats.daily.sessionCount++;
       stats.session = {
         id: sessionId, start: Date.now(),
-        toolCalls: 0, filesEdited: [], subagentCount: 0,
+        toolCalls: 0, filesEdited: [], subagentCount: 0, commitCount: 0,
       };
     }
 
@@ -160,6 +160,11 @@ process.stdin.on('end', () => {
       state = result.state;
       detail = result.detail;
       diffInfo = result.diffInfo;
+
+      // Track git commits
+      if (result.state === 'proud' && result.detail === 'committed') {
+        stats.session.commitCount = (stats.session.commitCount || 0) + 1;
+      }
 
       updateStreak(stats, state === 'error');
     }
@@ -274,6 +279,8 @@ process.stdin.on('end', () => {
       filesEdited: stats.session.filesEdited.length,
       sessionStart: stats.session.start,
       streak: stats.streak,
+      gitBranch: getGitBranch(process.cwd()),
+      commitCount: stats.session.commitCount || 0,
       bestStreak: stats.bestStreak,
       brokenStreak: stats.brokenStreak,
       brokenStreakAt: stats.brokenStreakAt,

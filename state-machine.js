@@ -134,6 +134,9 @@ const stdoutErrorPatterns = [
   /\bnpm ERR!/,
   /\bcargo error\b/i,
   /\frustc.*error\[E\d+\]/,                       // Rust compiler errors
+  /\bCONFLICT\b/,                                 // git merge conflicts
+  /\bAutomatic merge failed\b/i,
+  /\bfix conflicts and then commit\b/i,
 ];
 
 // Patterns in stderr that actually mean trouble (not just warnings)
@@ -160,6 +163,7 @@ const falsePositives = [
   /\.error\s*[=(]/,                                 // Property/method named error
   /error_count.*0/i,
   /warning/i,                                       // warnings aren't errors
+  /no conflicts?\b/i,                               // "no conflicts" isn't a conflict
 ];
 
 function looksLikeError(text, patterns) {
@@ -181,6 +185,7 @@ function extractExitCode(stdout) {
 // Friendly error detail based on what we found
 function errorDetail(stdout, stderr) {
   const combined = (stdout || '') + (stderr || '');
+  if (isMergeConflict(stdout, stderr)) return 'merge conflict!';
   if (/command not found/i.test(combined)) return 'command not found';
   if (/permission denied/i.test(combined)) return 'permission denied';
   if (/no such file or directory/i.test(combined)) return 'file not found';
@@ -196,6 +201,14 @@ function errorDetail(stdout, stderr) {
 }
 
 // -- Post-Tool Classification ----------------------------------------
+
+// Detect git merge conflicts in command output
+function isMergeConflict(stdout, stderr) {
+  const combined = (stdout || '') + (stderr || '');
+  return /\bCONFLICT\s+\(.*\):/.test(combined) ||
+         /\bAutomatic merge failed\b/i.test(combined) ||
+         /\bfix conflicts and then commit\b/i.test(combined);
+}
 
 // Encapsulates the full PostToolUse decision tree.
 // Returns { state, detail, diffInfo }
@@ -267,7 +280,21 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
     } else if (isBuild) {
       detail = 'build succeeded';
     } else if (isGit) {
-      detail = 'git done';
+      if (isMergeConflict(stdout, stderr)) {
+        state = 'error';
+        detail = 'merge conflict!';
+      } else if (/\bgit\s+push\b/i.test(cmd)) {
+        state = 'proud';
+        detail = 'pushed!';
+      } else if (/\bgit\s+commit\b/i.test(cmd)) {
+        state = 'proud';
+        detail = 'committed';
+      } else if (/\bgit\s+(merge|pull|rebase)\b/i.test(cmd)) {
+        state = 'satisfied';
+        detail = 'merged clean';
+      } else {
+        detail = 'git done';
+      }
     } else if (isInstall) {
       detail = 'installed';
     } else {
@@ -312,7 +339,7 @@ function defaultStats() {
     brokenStreak: 0, brokenStreakAt: 0,
     totalToolCalls: 0, totalErrors: 0,
     records: { longestSession: 0, mostSubagents: 0, mostFilesEdited: 0 },
-    session: { id: '', start: 0, toolCalls: 0, filesEdited: [], subagentCount: 0 },
+    session: { id: '', start: 0, toolCalls: 0, filesEdited: [], subagentCount: 0, commitCount: 0 },
     recentMilestone: null,
     daily: { date: '', sessionCount: 0, cumulativeMs: 0 },
     frequentFiles: {},
@@ -330,6 +357,7 @@ module.exports = {
   stdoutErrorPatterns,
   stderrErrorPatterns,
   falsePositives,
+  isMergeConflict,
   looksLikeError,
   errorDetail,
   extractExitCode,

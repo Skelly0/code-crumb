@@ -20,6 +20,7 @@ const {
   looksLikeError,
   errorDetail,
   extractExitCode,
+  isMergeConflict,
   classifyToolResult,
   MILESTONES,
   updateStreak,
@@ -1009,6 +1010,117 @@ describe('state-machine.js -- constants and defaults', () => {
     const b = defaultStats();
     a.streak = 99;
     assert.strictEqual(b.streak, 0);
+  });
+
+  test('defaultStats session has commitCount field', () => {
+    const s = defaultStats();
+    assert.strictEqual(s.session.commitCount, 0);
+  });
+});
+
+describe('state-machine.js -- isMergeConflict', () => {
+  test('detects CONFLICT (content): in stdout', () => {
+    assert.ok(isMergeConflict('CONFLICT (content): Merge conflict in src/app.js', ''));
+  });
+
+  test('detects CONFLICT (modify/delete): in stdout', () => {
+    assert.ok(isMergeConflict('CONFLICT (modify/delete): file.txt deleted', ''));
+  });
+
+  test('detects "Automatic merge failed"', () => {
+    assert.ok(isMergeConflict('', 'Automatic merge failed; fix conflicts and then commit the result.'));
+  });
+
+  test('detects "fix conflicts and then commit" in stdout', () => {
+    assert.ok(isMergeConflict('fix conflicts and then commit the result.', ''));
+  });
+
+  test('clean merge does not trigger', () => {
+    assert.ok(!isMergeConflict('Merge made by the recursive strategy.', ''));
+  });
+
+  test('empty strings do not trigger', () => {
+    assert.ok(!isMergeConflict('', ''));
+  });
+
+  test('CONFLICT word alone in stdout triggers', () => {
+    // The pattern requires \bCONFLICT\s+\(.*\): so bare CONFLICT alone does NOT match this pattern
+    // but it does match the /\bCONFLICT\b/ pattern in stdoutErrorPatterns via looksLikeError
+    assert.ok(!isMergeConflict('CONFLICT without parens', ''));
+  });
+});
+
+describe('state-machine.js -- classifyToolResult (git operations)', () => {
+  test('git push → proud with "pushed!"', () => {
+    const r = classifyToolResult('Bash', { command: 'git push origin main' }, {}, false);
+    assert.strictEqual(r.state, 'proud');
+    assert.strictEqual(r.detail, 'pushed!');
+  });
+
+  test('git commit → proud with "committed"', () => {
+    const r = classifyToolResult('Bash', { command: 'git commit -m "fix bug"' }, {}, false);
+    assert.strictEqual(r.state, 'proud');
+    assert.strictEqual(r.detail, 'committed');
+  });
+
+  test('git merge → satisfied with "merged clean"', () => {
+    const r = classifyToolResult('Bash', { command: 'git merge feature-branch' }, {}, false);
+    assert.strictEqual(r.state, 'satisfied');
+    assert.strictEqual(r.detail, 'merged clean');
+  });
+
+  test('git pull → satisfied with "merged clean"', () => {
+    const r = classifyToolResult('Bash', { command: 'git pull origin main' }, {}, false);
+    assert.strictEqual(r.state, 'satisfied');
+    assert.strictEqual(r.detail, 'merged clean');
+  });
+
+  test('git rebase → satisfied with "merged clean"', () => {
+    const r = classifyToolResult('Bash', { command: 'git rebase main' }, {}, false);
+    assert.strictEqual(r.state, 'satisfied');
+    assert.strictEqual(r.detail, 'merged clean');
+  });
+
+  test('git status (generic) → relieved with "git done"', () => {
+    const r = classifyToolResult('Bash', { command: 'git status' }, {}, false);
+    assert.strictEqual(r.state, 'relieved');
+    assert.strictEqual(r.detail, 'git done');
+  });
+
+  test('git merge with conflict stdout → error', () => {
+    const r = classifyToolResult('Bash',
+      { command: 'git merge feature' },
+      { stdout: 'CONFLICT (content): Merge conflict in src/app.js\nAutomatic merge failed; fix conflicts and then commit the result.' },
+      false);
+    assert.strictEqual(r.state, 'error');
+    assert.strictEqual(r.detail, 'merge conflict!');
+  });
+
+  test('git push with conflict in stderr → error', () => {
+    const r = classifyToolResult('Bash',
+      { command: 'git merge other' },
+      { stderr: 'Automatic merge failed; fix conflicts and then commit the result.' },
+      false);
+    assert.strictEqual(r.state, 'error');
+    assert.strictEqual(r.detail, 'merge conflict!');
+  });
+});
+
+describe('state-machine.js -- looksLikeError (git merge conflicts)', () => {
+  test('CONFLICT (content) in stdout triggers error', () => {
+    assert.ok(looksLikeError('CONFLICT (content): Merge conflict in foo.js', stdoutErrorPatterns));
+  });
+
+  test('Automatic merge failed in stdout triggers error', () => {
+    assert.ok(looksLikeError('Automatic merge failed; fix conflicts and then commit the result.', stdoutErrorPatterns));
+  });
+
+  test('"fix conflicts and then commit" triggers error', () => {
+    assert.ok(looksLikeError('fix conflicts and then commit the result.', stdoutErrorPatterns));
+  });
+
+  test('"no conflicts" is a false positive', () => {
+    assert.ok(!looksLikeError('Merge succeeded with no conflicts.', stdoutErrorPatterns));
   });
 });
 

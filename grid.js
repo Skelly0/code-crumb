@@ -71,6 +71,7 @@ class MiniFace {
     this.teammateName = '';    // agent teams: teammate role/name
     this.isTeammate = false;   // true if part of an agent team
     this.teamColor = null;     // RGB color derived from teamName
+    this.gitBranch = null;     // current git branch (if known)
   }
 
   updateFromFile(data) {
@@ -87,6 +88,7 @@ class MiniFace {
     }
     if (data.teammateName) this.teammateName = data.teammateName;
     if (data.isTeammate) this.isTeammate = true;
+    if (data.gitBranch) this.gitBranch = data.gitBranch;
     if (data.stopped && !this.stopped) {
       this.stopped = true;
       this.stoppedAt = Date.now();
@@ -246,10 +248,12 @@ class MiniFace {
     buf += ansi.to(startRow + 4, startCol);
     buf += `${lc}${' '.repeat(lPad)}${lbl}${r}`;
 
-    const st = (theme.status || '').slice(0, BOX_W);
-    const sPad = Math.max(0, Math.floor((BOX_W - st.length) / 2));
+    const statusStr = this.gitBranch
+      ? ('\u2387 ' + this.gitBranch).slice(0, BOX_W)   // ⎇ branchname
+      : (theme.status || '').slice(0, BOX_W);
+    const sPad = Math.max(0, Math.floor((BOX_W - statusStr.length) / 2));
     buf += ansi.to(startRow + 5, startCol);
-    buf += `${ansi.dim}${dc}${' '.repeat(sPad)}${st}${r}`;
+    buf += `${ansi.dim}${dc}${' '.repeat(sPad)}${statusStr}${r}`;
 
     return buf;
   }

@@ -7,7 +7,9 @@
 
 const assert = require('assert');
 const fs = require('fs');
-const { safeFilename, PREFS_FILE, loadPrefs, savePrefs } = require('../shared');
+const os = require('os');
+const path = require('path');
+const { safeFilename, PREFS_FILE, loadPrefs, savePrefs, getGitBranch } = require('../shared');
 
 let passed = 0;
 let failed = 0;
@@ -111,6 +113,49 @@ describe('shared.js -- preferences persistence', () => {
     if (savedPrefs !== null) fs.writeFileSync(PREFS_FILE, savedPrefs, 'utf8');
     else fs.unlinkSync(PREFS_FILE);
   } catch {}
+});
+
+describe('shared.js -- getGitBranch', () => {
+  test('reads branch name from a fake .git/HEAD', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'code-crumb-git-'));
+    try {
+      fs.mkdirSync(path.join(tmpDir, '.git'));
+      fs.writeFileSync(path.join(tmpDir, '.git', 'HEAD'), 'ref: refs/heads/my-feature\n', 'utf8');
+      assert.strictEqual(getGitBranch(tmpDir), 'my-feature');
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    }
+  });
+
+  test('returns short SHA for detached HEAD', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'code-crumb-git-'));
+    try {
+      fs.mkdirSync(path.join(tmpDir, '.git'));
+      fs.writeFileSync(path.join(tmpDir, '.git', 'HEAD'), 'abc1234def5678\n', 'utf8');
+      assert.strictEqual(getGitBranch(tmpDir), 'abc1234');
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    }
+  });
+
+  test('returns a string for the project repo', () => {
+    // __dirname is inside the project, which is a git repo
+    const branch = getGitBranch(path.join(__dirname, '..'));
+    assert.ok(typeof branch === 'string', 'expected a branch name string');
+    assert.ok(branch.length > 0, 'branch name should be non-empty');
+  });
+
+  test('handles undefined cwd gracefully', () => {
+    // Falls back to process.cwd() — should not throw
+    const result = getGitBranch(undefined);
+    assert.ok(result === null || typeof result === 'string');
+  });
+
+  test('returns null or string for filesystem root (never throws)', () => {
+    const root = path.parse(os.homedir()).root;
+    const result = getGitBranch(root);
+    assert.ok(result === null || typeof result === 'string');
+  });
 });
 
 module.exports = { passed: () => passed, failed: () => failed };

@@ -108,6 +108,10 @@ class ClaudeFace {
 
     // Model name (shown in status line: "{name} is thinking")
     this.modelName = process.env.CODE_CRUMB_MODEL || 'claude';
+
+    // Git context
+    this.gitBranch = null;
+    this.commitCount = 0;
   }
 
   _nextBlink() {
@@ -211,6 +215,10 @@ class ClaudeFace {
     this.dailyCumulativeMs = data.dailyCumulativeMs || 0;
     if (data.frequentFiles) this.frequentFiles = data.frequentFiles;
 
+    // Git context
+    if (data.gitBranch) this.gitBranch = data.gitBranch;
+    this.commitCount = data.commitCount || 0;
+
     // Detect milestone
     if (data.milestone && (!this.milestone || data.milestone.at !== this.milestone.at)) {
       this.milestone = data.milestone;
@@ -260,8 +268,14 @@ class ClaudeFace {
       this.thoughtText = thoughts[this.thoughtIndex % thoughts.length];
     } else if (this.state === 'happy' && this.milestone && this.milestoneShowTime > 0) {
       this.thoughtText = '';
+    } else if (this.state === 'error' && this.stateDetail === 'merge conflict!') {
+      this.thoughtText = '<<<<<<< HEAD';
     } else if (this.state === 'error' && this.lastBrokenStreak > 10) {
       this.thoughtText = `...${this.lastBrokenStreak} streak gone`;
+    } else if (this.state === 'proud' && this.stateDetail === 'pushed!') {
+      this.thoughtText = 'shipped!';
+    } else if (this.state === 'proud' && this.stateDetail === 'committed') {
+      this.thoughtText = 'committed!';
     } else if (this.state === 'proud' && this.diffInfo) {
       const { added, removed } = this.diffInfo;
       if (added > 0 && removed > 0) {
@@ -851,12 +865,21 @@ class ClaudeFace {
       }
     }
 
-    // Indicators row: accessories state (left) + subs state + palette name (right)
+    // Indicators row: accessories state (left) + subs state + branch + commits + palette name (right)
     {
       const dc = `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.4))}`;
       const accText = this.accessoriesEnabled ? '\u25cf accs' : '\u25cb accs';
       const subText = this.showOrbitals ? '\u25cf subs' : '\u25cb subs';
-      buf += ansi.to(startRow + 8, startCol) + `${dc}${accText}  ${subText}${r}`;
+      let leftText = `${accText}  ${subText}`;
+      if (this.gitBranch) {
+        const maxBranch = 20;
+        const branch = this.gitBranch.length > maxBranch
+          ? this.gitBranch.slice(0, maxBranch - 1) + '\u2026'
+          : this.gitBranch;
+        leftText += `  \u2387 ${branch}`;
+        if (this.commitCount > 0) leftText += `  \u2191${this.commitCount}`;
+      }
+      buf += ansi.to(startRow + 8, startCol) + `${dc}${leftText}${r}`;
       if (this.paletteIndex > 0) {
         const pName = PALETTE_NAMES[this.paletteIndex] || '';
         buf += ansi.to(startRow + 8, startCol + faceW - pName.length);
