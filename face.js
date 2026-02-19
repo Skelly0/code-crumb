@@ -740,7 +740,7 @@ class ClaudeFace {
         : this.stateDetail;
       const detailPad = Math.floor((faceW - detailText.length) / 2);
       buf += ansi.to(startRow + 10, startCol);
-      buf += `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.6))}${' '.repeat(Math.max(0, detailPad))}${detailText}${r}`;
+      buf += `${ansi.fg(...dimColor(theme.label, 0.65))}${' '.repeat(Math.max(0, detailPad))}${detailText}${r}`;
     }
 
     // Thought bubble
@@ -803,7 +803,7 @@ class ClaudeFace {
           sc = ansi.fg(...dimColor(theme.label, 0.7));
         } else if (this.streak > 1) {
           streakText = `${this.streak} successful in a row`;
-          sc = ansi.fg(...dimColor(theme.label, 0.4));
+          sc = ansi.fg(...dimColor(theme.label, 0.55));
         } else {
           streakText = '';
           sc = '';
@@ -861,7 +861,7 @@ class ClaudeFace {
           for (let i = 0; i < sparkBuckets.length; i++) {
             const ratio = sparkBuckets[i] / maxCount;
             const blockIdx = Math.round(ratio * (SPARKLINE_BLOCKS.length - 1));
-            const brightness = sparkBuckets[i] === 0 ? 0.15 : 0.3 + ratio * 0.7;
+            const brightness = sparkBuckets[i] === 0 ? 0.28 : 0.45 + ratio * 0.55;
             sparkline += ansi.fg(...dimColor(theme.accent, brightness)) + SPARKLINE_BLOCKS[blockIdx];
           }
           const barPad = Math.floor((faceW - spkWidth) / 2);
@@ -872,7 +872,7 @@ class ClaudeFace {
 
     // Indicators row: accessories state (left) + subs state + branch + commits + palette name (right)
     {
-      const dc = `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.4))}`;
+      const dc = ansi.fg(...dimColor(theme.label, 0.55));
       const accText = this.accessoriesEnabled ? '\u25cf accs' : '\u25cb accs';
       const subText = this.showOrbitals ? '\u25cf subs' : '\u25cb subs';
       let leftText = `${accText}  ${subText}`;
@@ -894,8 +894,8 @@ class ClaudeFace {
 
     // Key hints bar (bottom of terminal)
     {
-      const dc = `${ansi.dim}${ansi.fg(...dimColor(theme.label, 0.3))}`;
-      const kc = ansi.fg(...dimColor(theme.accent, 0.4));
+      const dc = ansi.fg(...dimColor(theme.label, 0.55));
+      const kc = ansi.fg(...dimColor(theme.accent, 0.6));
       const sep = `${dc}\u00b7${r}`;
       const hint = `${kc}space${dc} pet ${sep} ${kc}t${dc} theme ${sep} ${kc}s${dc} stats ${sep} ${kc}a${dc} accs ${sep} ${kc}o${dc} subs ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
       // Strip ANSI to measure visible length

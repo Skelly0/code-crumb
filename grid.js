@@ -253,7 +253,7 @@ class MiniFace {
       : (theme.status || '').slice(0, BOX_W);
     const sPad = Math.max(0, Math.floor((BOX_W - statusStr.length) / 2));
     buf += ansi.to(startRow + 5, startCol);
-    buf += `${ansi.dim}${dc}${' '.repeat(sPad)}${statusStr}${r}`;
+    buf += `${dc}${' '.repeat(sPad)}${statusStr}${r}`;
 
     return buf;
   }
@@ -474,7 +474,7 @@ class OrbitalSystem {
       const text = `+${n} subagent${n === 1 ? '' : 's'}`;
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
       const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 3);
-      const dc = `${ansi.dim}${ansi.fg(...dimColor([140, 170, 200], 0.5))}`;
+      const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
       return `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
     }
 
@@ -519,7 +519,7 @@ class OrbitalSystem {
       const text = `+${overflow} more`;
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
       const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 3);
-      const dc = `${ansi.dim}${ansi.fg(...dimColor([140, 170, 200], 0.5))}`;
+      const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
       buf += `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
     }
 
@@ -602,7 +602,7 @@ class OrbitalSystem {
       const text = `+${overflow} more`;
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
       const textRow = Math.min(rows - 2, mainPos.row + mainPos.h + 3);
-      const dc = `${ansi.dim}${ansi.fg(...dimColor([140, 170, 200], 0.5))}`;
+      const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
       buf += `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
     }
 
