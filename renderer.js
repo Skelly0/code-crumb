@@ -115,6 +115,8 @@ function scanTeams() {
 // -- Unified mode (main face + orbital subagents) ------------------
 function runUnifiedMode() {
   const face = new ClaudeFace();
+  const rendererStartTime = Date.now();
+  face.setState('starting');
   const orbital = new OrbitalSystem();
 
   // Ensure sessions directory exists
@@ -137,7 +139,9 @@ function runUnifiedMode() {
   function checkState() {
     try {
       const stat = fs.statSync(STATE_FILE);
-      if (stat.mtimeMs > lastMtime) {
+      if (stat.mtimeMs < rendererStartTime) {
+        // File predates this renderer session — ignore stale state, fall through to timeouts
+      } else if (stat.mtimeMs > lastMtime) {
         lastMtime = stat.mtimeMs;
         const stateData = readState();
 
@@ -178,8 +182,11 @@ function runUnifiedMode() {
     // Session is active until Stop hook fires (writes stopped: true)
     const sessionActive = !lastStopped;
 
+    // Auto-transition: starting → idle after min display
+    if (face.state === 'starting' && now - face.lastStateChange > 2500) {
+      face.setState('idle');
     // Auto-transition: responding → happy after min display (Stop already fired)
-    if (face.state === 'responding' && lastStopped && now >= face.minDisplayUntil) {
+    } else if (face.state === 'responding' && lastStopped && now >= face.minDisplayUntil) {
       face.setState('happy');
     } else if (completionLinger && now - face.lastStateChange > completionLinger) {
       face.setState('thinking');
@@ -189,6 +196,7 @@ function runUnifiedMode() {
     } else if (!completionStates.includes(face.state) &&
                face.state !== 'idle' && face.state !== 'sleeping' &&
                face.state !== 'waiting' && face.state !== 'thinking' &&
+               face.state !== 'starting' &&
                now - face.lastStateChange > IDLE_TIMEOUT) {
       // Active tool states degrade to thinking (not idle) if session is still running
       face.setState(sessionActive ? 'thinking' : 'idle');

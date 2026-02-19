@@ -52,6 +52,7 @@ const gridMouths = {
   proud:       '  \u25e1\u25e1',
   relieved:    ' \u25e1 ',
   responding:  ' \u25e1\u25e1',
+  starting:    '\u00b7\u00b7\u00b7',
 };
 
 // -- Eyes (2-row, full-size face) ----------------------------------

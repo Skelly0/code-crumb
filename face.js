@@ -124,6 +124,7 @@ class ClaudeFace {
       error: 3500, coding: 2500, thinking: 2500, responding: 3000, reading: 2000,
       searching: 2000, executing: 2500, testing: 2500, installing: 2500,
       caffeinated: 2500, subagent: 2500, waiting: 1500, sleeping: 1000,
+      starting: 2500,
     };
     return times[state] || 1000;
   }
@@ -293,6 +294,8 @@ class ClaudeFace {
       this.thoughtText = thoughts[this.thoughtIndex % thoughts.length];
     } else if (this.state === 'thinking') {
       this.thoughtText = THINKING_THOUGHTS[this.thoughtIndex % THINKING_THOUGHTS.length];
+    } else if (this.state === 'starting') {
+      this.thoughtText = '';
     } else {
       this.thoughtText = '';
     }
@@ -407,6 +410,7 @@ class ClaudeFace {
       case 'installing':  return eyes.down(theme, frame);
       case 'caffeinated': return eyes.vibrate(theme, frame);
       case 'subagent':    return eyes.conducting(theme, frame);
+      case 'starting':    return eyes.spin(theme, Math.floor(frame / 4));
       default:            return eyes.open(theme, frame);
     }
   }
@@ -438,6 +442,7 @@ class ClaudeFace {
       case 'installing':  return mouths.dots();
       case 'caffeinated': return mouths.grin();
       case 'subagent':    return mouths.conducting();
+      case 'starting':    return mouths.dots();
       default:          return mouths.smile();
     }
   }
