@@ -638,12 +638,14 @@ class ClaudeFace {
     const startRow = Math.max(7, Math.floor((rows - totalH) / 2) + 4);
 
     // Store position for orbital system (bubble bounds added during thought bubble render)
+    const hasActiveAccessory = this.accessoriesEnabled && !!getAccessory(this.state);
     this.lastPos = {
       row: startRow, col: startCol,
       w: faceW, h: faceH,
       centerX: startCol + Math.floor(faceW / 2),
       centerY: startRow + Math.floor(faceH / 2),
       bubble: null,
+      accessoriesActive: hasActiveAccessory,
     };
 
     const fc = ansi.fg(...borderColor);

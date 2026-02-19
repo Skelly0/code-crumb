@@ -60,6 +60,8 @@ function readState() {
       dailyCumulativeMs: data.dailyCumulativeMs || 0,
       frequentFiles: data.frequentFiles || {},
       stopped: data.stopped || false,
+      gitBranch: data.gitBranch || null,
+      commitCount: data.commitCount || 0,
     };
   } catch {
     return { state: 'idle', detail: '' };
@@ -168,6 +170,11 @@ function runUnifiedMode() {
         lastMainUpdate = Date.now();
         lastFileState = stateData.state;
         lastStopped = stateData.stopped || false;
+        // Force-apply stopped state (session ended) — bypass minimum display time
+        // so the face doesn't get stuck on "thinking" when Claude is interrupted
+        if (stateData.stopped && Date.now() < face.minDisplayUntil) {
+          face.minDisplayUntil = Date.now();
+        }
         face.setState(stateData.state, stateData.detail);
         face.setStats(stateData);
       }
@@ -195,7 +202,7 @@ function runUnifiedMode() {
       face.setState('idle');
     } else if (!completionStates.includes(face.state) &&
                face.state !== 'idle' && face.state !== 'sleeping' &&
-               face.state !== 'waiting' && face.state !== 'thinking' &&
+               face.state !== 'thinking' &&
                face.state !== 'starting' &&
                now - face.lastStateChange > IDLE_TIMEOUT) {
       // Active tool states degrade to thinking (not idle) if session is still running

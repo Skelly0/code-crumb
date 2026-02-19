@@ -72,11 +72,23 @@ class MiniFace {
     this.isTeammate = false;   // true if part of an agent team
     this.teamColor = null;     // RGB color derived from teamName
     this.gitBranch = null;     // current git branch (if known)
+    this.minDisplayUntil = 0;  // Minimum display time to prevent flashing
   }
 
   updateFromFile(data) {
     const newState = data.state || 'idle';
-    if (newState !== this.state) this.state = newState;
+    const now = Date.now();
+    if (newState !== this.state) {
+      // Minimum display time: don't flicker between states too rapidly
+      // Errors always bypass (important feedback), stopped sessions always bypass
+      if (now >= this.minDisplayUntil || newState === 'error' || data.stopped) {
+        this.state = newState;
+        this.minDisplayUntil = now + 1500;
+      }
+    } else {
+      // Same state — refresh the timer
+      this.minDisplayUntil = now + 1500;
+    }
     this.detail = data.detail || '';
     this.lastUpdate = data.timestamp || Date.now();
     if (data.cwd) this.cwd = data.cwd;
@@ -357,9 +369,10 @@ class OrbitalSystem {
 
   calculateOrbit(cols, rows, mainPos) {
     // Minimum ellipse semi-axes: must clear the main face box + decorations
-    // Vertical: face box + accessories/thought bubble above (~5 rows) + stats below (~4 rows)
+    // Vertical padding: accessories/thought bubble above need more clearance than bare face
+    const verticalPad = mainPos.accessoriesActive ? 6 : (mainPos.bubble ? 4 : 2);
     const minA = Math.floor(mainPos.w / 2) + Math.floor(MINI_W / 2) + 3;
-    const minB = Math.floor(mainPos.h / 2) + Math.floor(MINI_H / 2) + 6;
+    const minB = Math.floor(mainPos.h / 2) + Math.floor(MINI_H / 2) + verticalPad;
 
     // Maximum: constrained by terminal edges from main face center
     const maxA = Math.min(
@@ -546,8 +559,9 @@ class OrbitalSystem {
     for (let i = 0; i < n; i++) {
       const angle = (Math.PI * 2 * i / n) + this.rotationAngle;
       const col = Math.round(mainPos.centerX + Math.cos(angle) * a - MINI_W / 2);
-      // Shift orbit center down by 2 rows to account for thought bubbles/accessories above
-      const row = Math.round((mainPos.centerY + 2) + Math.sin(angle) * b - MINI_H / 2);
+      // Shift orbit center down only when accessories are active above the face
+      const verticalShift = mainPos.accessoriesActive ? 2 : 0;
+      const row = Math.round((mainPos.centerY + verticalShift) + Math.sin(angle) * b - MINI_H / 2);
 
       // Clamp to terminal bounds
       let clampedCol = Math.max(1, Math.min(cols - MINI_W, col));
@@ -562,7 +576,7 @@ class OrbitalSystem {
           clampedRow < bub.row + bub.h + pad && clampedRow + MINI_H > bub.row - pad;
         if (bubHit()) {
           const nCol = Math.round(mainPos.centerX + Math.cos(angle) * (a + 6) - MINI_W / 2);
-          const nRow = Math.round((mainPos.centerY + 2) + Math.sin(angle) * (b + 4) - MINI_H / 2);
+          const nRow = Math.round((mainPos.centerY + verticalShift) + Math.sin(angle) * (b + 4) - MINI_H / 2);
           clampedCol = Math.max(1, Math.min(cols - MINI_W, nCol));
           clampedRow = Math.max(1, Math.min(rows - MINI_H, nRow));
           // If still overlapping (wide bubble + narrow terminal), push below the bubble

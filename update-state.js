@@ -119,9 +119,9 @@ process.stdin.on('end', () => {
 
     // Initialize subagent tracking for synthetic orbital sessions
     if (!stats.session.activeSubagents) stats.session.activeSubagents = [];
-    // Clean up stale synthetic subagents (older than 10 minutes)
+    // Clean up stale synthetic subagents (older than 3 minutes)
     stats.session.activeSubagents = stats.session.activeSubagents.filter(
-      sub => Date.now() - sub.startedAt < 600000
+      sub => Date.now() - sub.startedAt < 180000
     );
 
     // Clear old milestones (older than 8 seconds)
@@ -262,9 +262,13 @@ process.stdin.on('end', () => {
         sessionId: latestSub.id, cwd: '', parentSession: sessionId,
         modelName: toolInput.model || data.model_name || process.env.CODE_CRUMB_MODEL || 'claude',
       });
-      // Main face stays in conducting mode
-      state = 'subagent';
-      detail = `conducting ${stats.session.activeSubagents.length}`;
+      // Main face stays in conducting mode — but don't override errors or
+      // completion states, those are important visual feedback
+      const noOverride = ['error', 'happy', 'satisfied', 'proud', 'relieved'];
+      if (!noOverride.includes(state)) {
+        state = 'subagent';
+        detail = `conducting ${stats.session.activeSubagents.length}`;
+      }
     }
 
     // Model name: from event data, env var, or default to 'claude'
