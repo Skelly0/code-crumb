@@ -299,7 +299,11 @@ function runUnifiedMode() {
       const paletteThemes = (PALETTES[face.paletteIndex] || PALETTES[0]).themes;
       out += orbital.render(cols, rows, face.lastPos, paletteThemes);
     }
-    process.stdout.write(ansi.home + out);
+    // Update terminal title bar to reflect current state
+    const _pal = PALETTES[face.paletteIndex] || PALETTES[0];
+    const _status = (_pal.themes[face.state] || _pal.themes.idle).status;
+    const _title = `\x1b]0;Code Crumb \u00b7 ${face.modelName} is ${_status}\x07`;
+    process.stdout.write(_title + ansi.home + out);
     setTimeout(loop, FRAME_MS);
   }
 

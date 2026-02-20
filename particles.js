@@ -2,8 +2,8 @@
 
 // +================================================================+
 // |  Particle system -- visual effects for the face renderer        |
-// |  11 particle styles: float, sparkle, glitch, orbit, zzz,       |
-// |  question, sweat, falling, speedline, echo, heart               |
+// |  12 particle styles: float, sparkle, glitch, orbit, zzz,       |
+// |  question, sweat, falling, speedline, echo, heart, push         |
 // +================================================================+
 
 const { ansi, dimColor } = require('./themes');
@@ -162,6 +162,21 @@ class ParticleSystem {
           life: 30 + Math.random() * 50,
           maxLife: 80,
           char: ['\u2665', '\u2661', '\u2665', '\u2661', '\u2764'][Math.floor(Math.random() * 5)],
+          style,
+        });
+      } else if (style === 'push') {
+        // Burst radially outward from face center — commit/push energy radiating out
+        const angle = Math.random() * Math.PI * 2;
+        const startR = 3 + Math.random() * 4;
+        const speed  = 0.38 + Math.random() * 0.28;
+        this.particles.push({
+          x: this.width / 2 + Math.cos(angle) * startR,
+          y: this.height / 2 + Math.sin(angle) * startR * 0.5,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed * 0.45,
+          life: 16 + Math.random() * 22,
+          maxLife: 38,
+          char: ['\u2191', '\u25c7', '\u25c6', '\u00b7', '\u25b7', '\u2197'][Math.floor(Math.random() * 6)],
           style,
         });
       }

@@ -105,6 +105,14 @@ const ACCESSORIES = {
       '   \u2571\u2500\u2500\u2500\u2500\u2500\u2500\u2572   ',
     ],
   },
+  gitpush: {
+    lines: [
+      '  \u2191  \u2191  \u2191  ',
+      '\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557',
+      '\u2551 commit! \u2551',
+      '\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d',
+    ],
+  },
 };
 
 // -- State-to-accessory mapping ------------------------------------
@@ -122,6 +130,7 @@ const STATE_ACCESSORIES = {
   subagent:    'antenna',
   testing:     'goggles',
   error:       'caution',
+  committing:  'gitpush',
 };
 
 // -- Lookup --------------------------------------------------------
