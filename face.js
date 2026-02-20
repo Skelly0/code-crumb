@@ -11,6 +11,7 @@ const {
   themes, TIMELINE_COLORS, SPARKLINE_BLOCKS,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
   PALETTES, PALETTE_NAMES,
+  isNoColor,
 } = require('./themes');
 const { eyes, mouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
@@ -347,6 +348,7 @@ class ClaudeFace {
   }
 
   cycleTheme() {
+    if (isNoColor()) return;
     this.paletteIndex = (this.paletteIndex + 1) % PALETTES.length;
   }
 
@@ -505,6 +507,7 @@ class ClaudeFace {
     if (this.state === 'subagent' && this.frame % 8 === 0) this.particles.spawn(1, 'stream');
     if (this.state === 'responding' && this.frame % 18 === 0) this.particles.spawn(1, 'float');
     if (this.state === 'committing' && this.frame % 5 === 0) this.particles.spawn(2, 'push');
+    if (this.state === 'coding' && this.frame % 6 === 0) this.particles.spawn(1, 'rain');
 
     // Caffeinated detection
     const now = Date.now();

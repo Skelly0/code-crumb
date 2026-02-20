@@ -43,7 +43,7 @@ describe('particles.js -- ParticleSystem', () => {
   });
 
   test('all particle styles can be spawned', () => {
-    const styles = ['float', 'sparkle', 'glitch', 'orbit', 'zzz', 'question', 'sweat', 'falling', 'speedline', 'echo', 'heart', 'push'];
+    const styles = ['float', 'sparkle', 'glitch', 'orbit', 'zzz', 'question', 'sweat', 'falling', 'speedline', 'echo', 'stream', 'heart', 'push', 'rain'];
     for (const style of styles) {
       const ps = new ParticleSystem();
       ps.spawn(3, style);

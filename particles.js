@@ -2,8 +2,9 @@
 
 // +================================================================+
 // |  Particle system -- visual effects for the face renderer        |
-// |  12 particle styles: float, sparkle, glitch, orbit, zzz,       |
-// |  question, sweat, falling, speedline, echo, heart, push         |
+// |  14 particle styles: float, sparkle, glitch, orbit, zzz,       |
+// |  question, sweat, falling, speedline, echo, stream, heart,     |
+// |  push, rain                                                     |
 // +================================================================+
 
 const { ansi, dimColor } = require('./themes');
@@ -177,6 +178,17 @@ class ParticleSystem {
           life: 16 + Math.random() * 22,
           maxLife: 38,
           char: ['\u2191', '\u25c7', '\u25c6', '\u00b7', '\u25b7', '\u2197'][Math.floor(Math.random() * 6)],
+          style,
+        });
+      } else if (style === 'rain') {
+        this.particles.push({
+          x: Math.random() * this.width,
+          y: -1 - Math.random() * 3,
+          vx: (Math.random() - 0.5) * 0.02,
+          vy: 0.25 + Math.random() * 0.15,
+          life: 40 + Math.random() * 30,
+          maxLife: 70,
+          char: ['|', '\u2502', '\u2503', ':', '.', '\uff8a', '\uff9a', '\uff76'][Math.floor(Math.random() * 8)],
           style,
         });
       }
