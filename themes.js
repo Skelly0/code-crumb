@@ -7,18 +7,23 @@
 
 // -- ANSI ----------------------------------------------------------
 const CSI = '\x1b[';
+
+let noColorMode = false;
+function setNoColor(v) { noColorMode = !!v; }
+function isNoColor() { return noColorMode; }
+
 const ansi = {
-  reset:      `${CSI}0m`,
-  bold:       `${CSI}1m`,
-  dim:        `${CSI}2m`,
-  italic:     `${CSI}3m`,
+  get reset()     { return noColorMode ? '' : `${CSI}0m`; },
+  get bold()      { return noColorMode ? '' : `${CSI}1m`; },
+  get dim()       { return noColorMode ? '' : `${CSI}2m`; },
+  get italic()    { return noColorMode ? '' : `${CSI}3m`; },
   hide:       `${CSI}?25l`,
   show:       `${CSI}?25h`,
   clear:      `${CSI}2J${CSI}H`,
   home:       `${CSI}H`,
   to:         (r, c) => `${CSI}${r};${c}H`,
-  fg:         (r, g, b) => `${CSI}38;2;${r};${g};${b}m`,
-  bg:         (r, g, b) => `${CSI}48;2;${r};${g};${b}m`,
+  fg:         (r, g, b) => noColorMode ? '' : `${CSI}38;2;${r};${g};${b}m`,
+  bg:         (r, g, b) => noColorMode ? '' : `${CSI}48;2;${r};${g};${b}m`,
   clearLine:  `${CSI}2K`,
   clearBelow: `${CSI}J`,
 };
@@ -431,4 +436,6 @@ module.exports = {
   STATE_THOUGHTS,
   PALETTES,
   PALETTE_NAMES,
+  setNoColor,
+  isNoColor,
 };

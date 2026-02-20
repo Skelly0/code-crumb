@@ -18,6 +18,7 @@ const {
   COMPLETION_LINGER,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
   PALETTES, PALETTE_NAMES,
+  setNoColor, isNoColor,
 } = require('./themes');
 const { mouths, eyes, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
@@ -254,7 +255,7 @@ function runUnifiedMode() {
       // Help dismiss: any key while help is showing closes it
       if (face.showHelp && key !== '\x03') { face.showHelp = false; return; }
       if (key === ' ') face.pet();
-      else if (key === 't') { face.cycleTheme(); orbital.paletteIndex = face.paletteIndex; persistPrefs(); }
+      else if (key === 't' && !isNoColor()) { face.cycleTheme(); orbital.paletteIndex = face.paletteIndex; persistPrefs(); }
       else if (key === 's') { face.toggleStats(); persistPrefs(); }
       else if (key === 'a') { face.toggleAccessories(); persistPrefs(); }
       else if (key === 'o') { face.toggleOrbitals(); persistPrefs(); }
@@ -317,6 +318,11 @@ function main() {
     process.exit(0);
   }
   writePid();
+
+  // NO_COLOR compliance (https://no-color.org)
+  if (process.env.NO_COLOR !== undefined || process.argv.includes('--no-color')) {
+    setNoColor(true);
+  }
 
   function cleanup() {
     removePid();
