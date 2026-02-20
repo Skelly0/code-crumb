@@ -304,6 +304,18 @@ class OrbitalSystem {
       return;
     }
 
+    // Purge orphaned session files older than STALE_MS
+    const now = Date.now();
+    for (const f of files) {
+      try {
+        const fp = path.join(SESSIONS_DIR, f);
+        if (now - fs.statSync(fp).mtimeMs > STALE_MS) fs.unlinkSync(fp);
+      } catch {}
+    }
+    files = files.filter(f => {
+      try { return fs.existsSync(path.join(SESSIONS_DIR, f)); } catch { return false; }
+    });
+
     const seenIds = new Set();
 
     for (const file of files) {
