@@ -27,6 +27,12 @@ const PID_FILE = path.join(HOME, '.code-crumb.pid');
 // Parse our own flags (consumed here, not passed to the editor)
 const rawArgs = process.argv.slice(2);
 
+// --version / -v
+if (rawArgs.includes('--version') || rawArgs.includes('-v')) {
+  console.log(require('./package.json').version);
+  process.exit(0);
+}
+
 // Parse --editor flag
 let editorName = 'claude';
 const editorIdx = rawArgs.indexOf('--editor');
