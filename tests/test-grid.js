@@ -90,6 +90,7 @@ describe('grid.js -- MiniFace', () => {
       'idle', 'thinking', 'reading', 'searching', 'coding', 'executing',
       'happy', 'error', 'sleeping', 'waiting', 'testing', 'installing',
       'caffeinated', 'subagent', 'satisfied', 'proud', 'relieved',
+      'committing',
     ];
     for (const state of states) {
       const face = new MiniFace('test');
