@@ -160,6 +160,27 @@ describe('state-machine.js -- toolToState', () => {
     assert.strictEqual(toolToState('Bash', { command: 'apt-get install curl' }).state, 'installing');
   });
 
+  test('Bash with git commit → committing', () => {
+    const r = toolToState('Bash', { command: 'git commit -m "feat: add thing"' });
+    assert.strictEqual(r.state, 'committing');
+  });
+
+  test('Bash with git push → committing (pushing to remote)', () => {
+    const r = toolToState('Bash', { command: 'git push -u origin main' });
+    assert.strictEqual(r.state, 'committing');
+    assert.ok(r.detail.includes('push') || r.detail.includes('origin'), `detail should describe push, got: ${r.detail}`);
+  });
+
+  test('Bash with git tag → committing (tagging release)', () => {
+    const r = toolToState('Bash', { command: 'git tag v1.2.0' });
+    assert.strictEqual(r.state, 'committing');
+  });
+
+  test('git commit does not match git status', () => {
+    const r = toolToState('Bash', { command: 'git status' });
+    assert.notStrictEqual(r.state, 'committing');
+  });
+
   test('Read → reading with filename', () => {
     const r = toolToState('Read', { file_path: '/src/index.ts' });
     assert.strictEqual(r.state, 'reading');

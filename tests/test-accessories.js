@@ -97,6 +97,10 @@ describe('accessories.js -- STATE_ACCESSORIES', () => {
     assert.strictEqual(STATE_ACCESSORIES.coding, 'catears');
   });
 
+  test('committing maps to gitpush', () => {
+    assert.strictEqual(STATE_ACCESSORIES.committing, 'gitpush');
+  });
+
   test('happy maps to partyhat', () => {
     assert.strictEqual(STATE_ACCESSORIES.happy, 'partyhat');
   });

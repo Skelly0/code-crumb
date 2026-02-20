@@ -85,6 +85,7 @@ describe('animations.js -- gridMouths', () => {
     'idle', 'thinking', 'coding', 'reading', 'searching', 'executing',
     'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
     'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
+    'committing',
   ];
 
   test('every state has a grid mouth', () => {

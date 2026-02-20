@@ -124,7 +124,7 @@ class ClaudeFace {
       error: 3500, coding: 2500, thinking: 2500, responding: 3000, reading: 2000,
       searching: 2000, executing: 2500, testing: 2500, installing: 2500,
       caffeinated: 2500, subagent: 2500, waiting: 1500, sleeping: 1000,
-      starting: 2500,
+      starting: 2500, committing: 3000,
     };
     return times[state] || 1000;
   }
@@ -182,6 +182,8 @@ class ClaudeFace {
         this.particles.spawn(8, 'stream');
       } else if (newState === 'caffeinated') {
         this.particles.spawn(6, 'speedline');
+      } else if (newState === 'committing') {
+        this.particles.spawn(14, 'push');
       }
     } else {
       this.lastStateChange = Date.now();
@@ -273,6 +275,9 @@ class ClaudeFace {
       this.thoughtText = '<<<<<<< HEAD';
     } else if (this.state === 'error' && this.lastBrokenStreak > 10) {
       this.thoughtText = `...${this.lastBrokenStreak} streak gone`;
+    } else if (this.state === 'committing') {
+      const thoughts = STATE_THOUGHTS.committing;
+      this.thoughtText = thoughts[this.thoughtIndex % thoughts.length];
     } else if (this.state === 'proud' && this.stateDetail === 'pushed!') {
       this.thoughtText = 'shipped!';
     } else if (this.state === 'proud' && this.stateDetail === 'committed') {
@@ -411,6 +416,7 @@ class ClaudeFace {
       case 'caffeinated': return eyes.vibrate(theme, frame);
       case 'subagent':    return eyes.conducting(theme, frame);
       case 'starting':    return eyes.spin(theme, Math.floor(frame / 4));
+      case 'committing':  return eyes.focused(theme, frame);
       default:            return eyes.open(theme, frame);
     }
   }
@@ -443,6 +449,7 @@ class ClaudeFace {
       case 'caffeinated': return mouths.grin();
       case 'subagent':    return mouths.conducting();
       case 'starting':    return mouths.dots();
+      case 'committing':  return mouths.determined();
       default:          return mouths.smile();
     }
   }
@@ -497,6 +504,7 @@ class ClaudeFace {
     if (this.state === 'caffeinated' && this.frame % 4 === 0) this.particles.spawn(1, 'speedline');
     if (this.state === 'subagent' && this.frame % 8 === 0) this.particles.spawn(1, 'stream');
     if (this.state === 'responding' && this.frame % 18 === 0) this.particles.spawn(1, 'float');
+    if (this.state === 'committing' && this.frame % 5 === 0) this.particles.spawn(2, 'push');
 
     // Caffeinated detection
     const now = Date.now();
@@ -505,7 +513,8 @@ class ClaudeFace {
         this.state !== 'idle' && this.state !== 'sleeping' &&
         this.state !== 'happy' && this.state !== 'satisfied' &&
         this.state !== 'proud' && this.state !== 'relieved' &&
-        this.state !== 'error' && this.state !== 'caffeinated') {
+        this.state !== 'error' && this.state !== 'caffeinated' &&
+        this.state !== 'committing') {
       this.isCaffeinated = true;
       this.prevState = this.state;
       this.state = 'caffeinated';

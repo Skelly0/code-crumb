@@ -64,6 +64,14 @@ function toolToState(toolName, toolInput) {
       return { state: 'installing', detail: shortCmd || 'installing' };
     }
 
+    // Detect git commit / push / tag operations
+    if (/\bgit\s+(commit|push|tag)\b/i.test(cmd)) {
+      const isPush = /\bgit\s+push\b/i.test(cmd);
+      const isTag  = /\bgit\s+tag\b/i.test(cmd);
+      const detail = isPush ? 'pushing to remote' : isTag ? 'tagging release' : 'committing changes';
+      return { state: 'committing', detail: shortCmd || detail };
+    }
+
     return { state: 'executing', detail: shortCmd || 'running command' };
   }
 

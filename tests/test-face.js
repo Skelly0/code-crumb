@@ -76,6 +76,10 @@ describe('face.js -- ClaudeFace._getMinDisplayMs', () => {
     assert.strictEqual(face._getMinDisplayMs('sleeping'), 1000);
   });
 
+  test('committing → 3000ms', () => {
+    assert.strictEqual(face._getMinDisplayMs('committing'), 3000);
+  });
+
   test('unknown state → 1000ms default', () => {
     assert.strictEqual(face._getMinDisplayMs('nonexistent'), 1000);
   });
@@ -129,6 +133,13 @@ describe('face.js -- ClaudeFace.setState', () => {
     face.setState('error');
     assert.ok(face.particles.particles.length > 0);
     assert.strictEqual(face.glitchIntensity, 1.0);
+  });
+
+  test('spawns push particles on committing', () => {
+    const face = new ClaudeFace();
+    face.setState('committing', 'committing changes');
+    assert.ok(face.particles.particles.length > 0);
+    assert.ok(face.particles.particles.every(p => p.style === 'push'));
   });
 
   test('fades old particles on state change', () => {

@@ -93,6 +93,7 @@ describe('themes.js -- themes', () => {
     'idle', 'thinking', 'coding', 'reading', 'searching', 'executing',
     'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
     'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
+    'committing',
   ];
 
   test('every state has a theme', () => {
@@ -189,6 +190,7 @@ describe('themes.js -- PALETTES', () => {
     'idle', 'thinking', 'coding', 'reading', 'searching', 'executing',
     'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
     'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
+    'committing',
   ];
 
   test('PALETTES has 5 entries', () => {

@@ -212,6 +212,11 @@ class MiniFace {
       case 'satisfied':   return ' \u2580\u2580 \u2580\u2580';
       case 'proud':       return ' \u2584\u2584 \u2584\u2584';
       case 'relieved':    return ' \u2588\u2588 \u2588\u2588';
+      case 'committing': {
+        // Focused eyes that pulse — data streaming out
+        const cp = Math.floor(this.frame / 8) % 2;
+        return cp ? ' \u2580\u2580 \u2580\u2580' : ' \u2588\u2588 \u2588\u2588';
+      }
       default:            return ' \u2588\u2588 \u2588\u2588';
     }
   }
@@ -227,7 +232,8 @@ class MiniFace {
     const themeMap = paletteThemes || themes;
     const theme = themeMap[this.state] || themeMap.idle;
     const breathSpeed = this.state === 'sleeping' ? 0.5
-      : this.state === 'caffeinated' ? 2.5 : 1;
+      : this.state === 'caffeinated' ? 2.5
+      : this.state === 'committing' ? 1.8 : 1;
     const bc = breathe(theme.border, (globalTime + this.firstSeen % 2000) * breathSpeed);
     const fc = ansi.fg(...bc);
     const ec = ansi.fg(...theme.eye);
