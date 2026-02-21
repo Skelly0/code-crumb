@@ -28,6 +28,7 @@ const READ_TOOLS = /^(read|view|cat|file_read|read_file|get_file_contents|open_f
 const SEARCH_TOOLS = /^(grep|glob|search|ripgrep|find|list|search_files|list_files|list_dir|find_files|file_search|codebase_search)$/i;
 const WEB_TOOLS = /^(web_search|web_fetch|fetch|webfetch|browser|browse|http_request|curl|canvas)$/i;
 const SUBAGENT_TOOLS = /^(task|subagent|spawn_agent|delegate|codex_agent|sessions)$/i;
+const REVIEW_TOOLS = /diff|review|compare|patch/i;
 
 function toolToState(toolName, toolInput) {
   // Writing/editing code
@@ -73,6 +74,11 @@ function toolToState(toolName, toolInput) {
     }
 
     return { state: 'executing', detail: shortCmd || 'running command' };
+  }
+
+  // Reviewing / diffing code
+  if (REVIEW_TOOLS.test(toolName)) {
+    return { state: 'reviewing', detail: toolName || 'reviewing' };
   }
 
   // Reading files
@@ -362,6 +368,7 @@ module.exports = {
   SEARCH_TOOLS,
   WEB_TOOLS,
   SUBAGENT_TOOLS,
+  REVIEW_TOOLS,
   stdoutErrorPatterns,
   stderrErrorPatterns,
   falsePositives,
