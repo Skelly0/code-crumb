@@ -125,7 +125,7 @@ class ClaudeFace {
       error: 3500, coding: 2500, thinking: 2500, responding: 3000, reading: 2000,
       searching: 2000, executing: 2500, testing: 2500, installing: 2500,
       caffeinated: 2500, subagent: 2500, waiting: 1500, sleeping: 1000,
-      starting: 2500, committing: 3000,
+      starting: 2500, committing: 3000, reviewing: 3000,
     };
     return times[state] || 1000;
   }
@@ -419,6 +419,7 @@ class ClaudeFace {
       case 'subagent':    return eyes.conducting(theme, frame);
       case 'starting':    return eyes.spin(theme, Math.floor(frame / 4));
       case 'committing':  return eyes.focused(theme, frame);
+      case 'reviewing':   return eyes.narrowed(theme, frame);
       default:            return eyes.open(theme, frame);
     }
   }
@@ -452,6 +453,7 @@ class ClaudeFace {
       case 'subagent':    return mouths.conducting();
       case 'starting':    return mouths.dots();
       case 'committing':  return mouths.determined();
+      case 'reviewing':   return mouths.neutral();
       default:          return mouths.smile();
     }
   }
