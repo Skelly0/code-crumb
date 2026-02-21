@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, STATE_FILE, SESSIONS_DIR, TEAMS_DIR, loadPrefs, savePrefs } = require('./shared');
+const { HOME, STATE_FILE, SESSIONS_DIR, TEAMS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch } = require('./shared');
 
 // -- Modules -------------------------------------------------------
 const {
@@ -362,17 +362,79 @@ function runUnifiedMode() {
   loop();
 }
 
-// -- Entry ---------------------------------------------------------
-function main() {
-  if (isAlreadyRunning()) {
-    console.log('Code Crumb is already running in another window.');
+// -- tmux status line mode -----------------------------------------
+// Lightweight poll loop that writes a compact one-line status to a file
+// readable via #(cat ~/.code-crumb-tmux) in tmux status-line config.
+//
+// Usage in .tmux.conf:
+//   set -g status-right "#(cat ~/.code-crumb-tmux)"
+//
+// Start with: node renderer.js --tmux  (or: npm run tmux)
+// No PID guard — can run alongside the full-face renderer.
+
+const TMUX_POLL_MS = 2000;
+
+function runTmuxMode() {
+  const defaultThemes = PALETTES[0].themes;
+
+  function writeTmuxStatus() {
+    try {
+      const data = readState();
+      const state = data.state || 'idle';
+      const theme = defaultThemes[state] || defaultThemes.idle;
+      const emoji = theme.emoji || '';
+      const status = theme.status || state;
+      const model = data.modelName || process.env.CODE_CRUMB_MODEL || 'claude';
+      const branch = data.gitBranch || getGitBranch() || '';
+      const streak = data.streak || 0;
+
+      let line = `${emoji} ${status} [${model}]`;
+      if (branch) line += ` [${branch}]`;
+      if (streak > 0) line += ` \uD83D\uDD25${streak}`;
+
+      fs.writeFileSync(TMUX_FILE, line, 'utf8');
+    } catch {}
+  }
+
+  // Write initial status immediately
+  writeTmuxStatus();
+
+  // Poll on interval
+  const timer = setInterval(writeTmuxStatus, TMUX_POLL_MS);
+
+  function cleanup() {
+    clearInterval(timer);
+    try { fs.unlinkSync(TMUX_FILE); } catch {}
     process.exit(0);
   }
-  writePid();
+
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
+  try { process.on('SIGHUP', cleanup); } catch {}
+  process.on('exit', () => { try { fs.unlinkSync(TMUX_FILE); } catch {} });
+}
+
+// -- Entry ---------------------------------------------------------
+function main() {
+  const tmuxMode = process.argv.includes('--tmux');
+
+  // Skip PID guard for tmux mode — can run alongside full renderer
+  if (!tmuxMode) {
+    if (isAlreadyRunning()) {
+      console.log('Code Crumb is already running in another window.');
+      process.exit(0);
+    }
+    writePid();
+  }
 
   // NO_COLOR compliance (https://no-color.org)
   if (process.env.NO_COLOR !== undefined || process.argv.includes('--no-color')) {
     setNoColor(true);
+  }
+
+  if (tmuxMode) {
+    runTmuxMode();
+    return;
   }
 
   function cleanup() {

@@ -19,6 +19,7 @@
     "setup:codex": "node setup.js codex",
     "setup:opencode": "node setup.js opencode",
     "setup:openclaw": "node setup.js openclaw",
+    "tmux": "node renderer.js --tmux",
     "test": "node test.js"
   },
   "keywords": [
