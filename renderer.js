@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, STATE_FILE, SESSIONS_DIR, TEAMS_DIR, TMUX_FILE, loadPrefs, savePrefs, safeFilename, getGitBranch } = require('./shared');
+const { HOME, STATE_FILE, SESSIONS_DIR, TEAMS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch } = require('./shared');
 
 // -- Modules -------------------------------------------------------
 const {
@@ -297,41 +297,6 @@ function runUnifiedMode() {
 
   // Initial session load (skipped in minimal mode)
   if (!minimal) orbital.loadSessions(mainSessionId);
-
-  // -- Startup subagent animation (skipped in minimal mode) ----------------
-  if (!minimal) {
-    const startupSessionId = `startup-${Date.now()}`;
-    const startupFile = path.join(SESSIONS_DIR, safeFilename(startupSessionId) + '.json');
-    try {
-      fs.writeFileSync(startupFile, JSON.stringify({
-        state: 'spawning',
-        detail: 'booting',
-        timestamp: Date.now(),
-        sessionId: startupSessionId,
-        parentSession: process.pid.toString(),
-        modelName: 'crumb',
-      }), 'utf8');
-      orbital.loadSessions(mainSessionId);
-    } catch {}
-
-    setTimeout(() => {
-      try {
-        fs.writeFileSync(startupFile, JSON.stringify({
-          state: 'happy',
-          detail: 'ready',
-          timestamp: Date.now(),
-          sessionId: startupSessionId,
-          parentSession: process.pid.toString(),
-          modelName: 'crumb',
-          stopped: true,
-        }), 'utf8');
-      } catch {}
-
-      setTimeout(() => {
-        try { fs.unlinkSync(startupFile); } catch {}
-      }, 5000);
-    }, 3000);
-  }
 
   // Initial team discovery (skipped in minimal mode)
   let activeTeams = minimal ? {} : scanTeams();
