@@ -45,6 +45,27 @@ function savePrefs(updates) {
   } catch {}
 }
 
+// Returns true if the nearest .git entry in the dir tree is a file (worktree),
+// false if it is a directory (regular clone), or false if not a git repo.
+function getIsWorktree(cwd) {
+  try {
+    let dir = cwd || process.cwd();
+    for (let i = 0; i < 20; i++) {
+      const gitPath = path.join(dir, '.git');
+      try {
+        const stat = fs.statSync(gitPath);
+        return !stat.isDirectory();
+      } catch {
+        // .git not here, walk up
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch {}
+  return false;
+}
+
 // Read .git/HEAD directly (no subprocess -- fast and safe for hook use)
 // Walks up from cwd to find a .git dir/file (max 20 levels).
 // Returns branch name, short SHA for detached HEAD, or null if not a git repo.
@@ -80,4 +101,4 @@ function getGitBranch(cwd) {
   return null;
 }
 
-module.exports = { HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, TEAMS_DIR, safeFilename, loadPrefs, savePrefs, getGitBranch };
+module.exports = { HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, TEAMS_DIR, safeFilename, loadPrefs, savePrefs, getGitBranch, getIsWorktree };

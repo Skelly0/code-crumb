@@ -61,6 +61,8 @@ function readState() {
       dailyCumulativeMs: data.dailyCumulativeMs || 0,
       frequentFiles: data.frequentFiles || {},
       stopped: data.stopped || false,
+      cwd: data.cwd || null,
+      isWorktree: data.isWorktree || false,
       gitBranch: data.gitBranch || null,
       commitCount: data.commitCount || 0,
     };
