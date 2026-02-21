@@ -93,7 +93,7 @@ describe('themes.js -- themes', () => {
     'idle', 'thinking', 'coding', 'reading', 'searching', 'executing',
     'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
     'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
-    'committing',
+    'spawning', 'committing',
   ];
 
   test('every state has a theme', () => {
@@ -190,7 +190,7 @@ describe('themes.js -- PALETTES', () => {
     'idle', 'thinking', 'coding', 'reading', 'searching', 'executing',
     'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
     'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
-    'committing',
+    'spawning', 'committing',
   ];
 
   test('PALETTES has 6 entries', () => {
@@ -206,7 +206,7 @@ describe('themes.js -- PALETTES', () => {
     assert.strictEqual(new Set(names).size, names.length);
   });
 
-  test('every palette has all 17 states in themes', () => {
+  test('every palette has all 19 states in themes', () => {
     for (const palette of PALETTES) {
       for (const state of ALL_STATES) {
         assert.ok(palette.themes[state], `${palette.name}: missing theme for state: ${state}`);
@@ -241,7 +241,7 @@ describe('themes.js -- PALETTES', () => {
     }
   });
 
-  test('every palette has all 17 timeline colors', () => {
+  test('every palette has all 19 timeline colors', () => {
     for (const palette of PALETTES) {
       for (const state of ALL_STATES) {
         assert.ok(palette.timelineColors[state],
