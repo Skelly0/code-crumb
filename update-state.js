@@ -13,7 +13,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename, getGitBranch } = require('./shared');
+const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename, getGitBranch, getIsWorktree } = require('./shared');
 const {
   toolToState, classifyToolResult, updateStreak, defaultStats,
   EDIT_TOOLS, SUBAGENT_TOOLS,
@@ -283,6 +283,8 @@ process.stdin.on('end', () => {
       filesEdited: stats.session.filesEdited.length,
       sessionStart: stats.session.start,
       streak: stats.streak,
+      cwd: process.cwd(),
+      isWorktree: getIsWorktree(process.cwd()),
       gitBranch: getGitBranch(process.cwd()),
       commitCount: stats.session.commitCount || 0,
       bestStreak: stats.bestStreak,

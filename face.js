@@ -13,6 +13,7 @@ const {
   PALETTES, PALETTE_NAMES,
   isNoColor,
 } = require('./themes');
+const path = require('path');
 const { eyes, mouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { getAccessory } = require('./accessories');
@@ -111,6 +112,8 @@ class ClaudeFace {
     this.modelName = process.env.CODE_CRUMB_MODEL || 'claude';
 
     // Git context
+    this.cwd = null;
+    this.isWorktree = false;
     this.gitBranch = null;
     this.commitCount = 0;
   }
@@ -220,6 +223,8 @@ class ClaudeFace {
     if (data.frequentFiles) this.frequentFiles = data.frequentFiles;
 
     // Git context
+    if (data.cwd) this.cwd = data.cwd;
+    this.isWorktree = !!data.isWorktree;
     if (data.gitBranch) this.gitBranch = data.gitBranch;
     this.commitCount = data.commitCount || 0;
 
@@ -884,29 +889,54 @@ class ClaudeFace {
       }
     }
 
-    // Indicators row: accessories state (left) + subs state + branch + commits + palette name (right)
+    // Indicators row: accs + subs (left), branch + folder (middle), palette name (right).
+    // Budget-aware: palette name is right-aligned and reserved first; branch has priority
+    // over folder; each element is capped so nothing overlaps.
     {
       const dc = ansi.fg(...dimColor(theme.label, 0.55));
       const accText = this.accessoriesEnabled ? '\u25cf accs' : '\u25cb accs';
       const subText = this.showOrbitals ? '\u25cf subs' : '\u25cb subs';
+
+      // Right side: palette name when non-default theme is active
+      const pName = this.paletteIndex > 0 ? (PALETTE_NAMES[this.paletteIndex] || '') : '';
+
+      // Budget for left side: faceW minus palette name and one gap char
+      const leftBudget = faceW - (pName ? pName.length + 1 : 0);
+
+      // Base is always shown: "● accs  ● subs" (14 chars)
       let leftText = `${accText}  ${subText}`;
+
+      // Branch (priority 1): icon differs for worktrees vs regular clones
       if (this.gitBranch) {
-        const maxBranch = 20;
-        const branch = this.gitBranch.length > maxBranch
-          ? this.gitBranch.slice(0, maxBranch - 1) + '\u2026'
-          : this.gitBranch;
-        leftText += `  \u2387 ${branch}`;
-        if (this.commitCount > 0) leftText += `  \u2191${this.commitCount}`;
+        const branchIcon = this.isWorktree ? '\u25c4' : '\u2387'; // ◄ or ⎇
+        const commitsStr = this.commitCount > 0 ? ` \u2191${this.commitCount}` : '';
+        const maxB = leftBudget - leftText.length - 3 - commitsStr.length; // 3 = "  X "
+        if (maxB > 1) {
+          const b = this.gitBranch.length > maxB
+            ? this.gitBranch.slice(0, maxB - 1) + '\u2026'
+            : this.gitBranch;
+          const candidate = `${leftText}  ${branchIcon} ${b}${commitsStr}`;
+          if (candidate.length <= leftBudget) leftText = candidate;
+        }
       }
-      if (this.paletteIndex > 0) {
-        const pName = PALETTE_NAMES[this.paletteIndex] || '';
-        const maxLeft = faceW - pName.length - 2;
-        if (leftText.length > maxLeft) leftText = leftText.slice(0, maxLeft);
-        buf += ansi.to(startRow + 8, startCol) + `${dc}${leftText}${r}`;
+
+      // Folder (priority 2): fill remaining space after branch
+      if (this.cwd) {
+        const maxF = leftBudget - leftText.length - 4; // 4 = "  ⌂ "
+        if (maxF > 1) {
+          const folder = path.basename(this.cwd);
+          const f = folder.length > maxF
+            ? folder.slice(0, maxF - 1) + '\u2026'
+            : folder;
+          const candidate = `${leftText}  \u2302 ${f}`;
+          if (candidate.length <= leftBudget) leftText = candidate;
+        }
+      }
+
+      buf += ansi.to(startRow + 8, startCol) + `${dc}${leftText}${r}`;
+      if (pName) {
         buf += ansi.to(startRow + 8, startCol + faceW - pName.length);
         buf += `${dc}${pName}${r}`;
-      } else {
-        buf += ansi.to(startRow + 8, startCol) + `${dc}${leftText}${r}`;
       }
     }
 
