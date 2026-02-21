@@ -24,198 +24,68 @@
 // |    { "event": "tool_start"|"tool_end"|"turn_end"|"error", ... } |
 // +================================================================+
 
-const fs = require('fs');
-const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename } = require('../shared');
-const {
-  toolToState, classifyToolResult, updateStreak, defaultStats,
-  EDIT_TOOLS,
-} = require('../state-machine');
+const { runStdinAdapter } = require('./base-adapter');
 
-// -- State writing (mirrors update-state.js) -------------------------
+// -- Event normalisation ------------------------------------------------
+// Map OpenCode event types to the generic internal names.
 
-function writeState(state, detail = '', extra = {}) {
-  const data = JSON.stringify({ state, detail, timestamp: Date.now(), ...extra });
-  try { fs.writeFileSync(STATE_FILE, data, 'utf8'); } catch {}
-}
-
-function writeSessionState(sessionId, state, detail = '', stopped = false, extra = {}) {
-  try {
-    fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-    const filename = safeFilename(sessionId) + '.json';
-    const data = JSON.stringify({
-      session_id: sessionId, state, detail,
-      timestamp: Date.now(), cwd: process.cwd(), stopped, ...extra,
-    });
-    fs.writeFileSync(path.join(SESSIONS_DIR, filename), data, 'utf8');
-  } catch {}
-}
-
-function readStats() {
-  try { return JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); }
-  catch { return defaultStats(); }
-}
-
-function writeStats(stats) {
-  try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats), 'utf8'); } catch {}
-}
-
-// -- Main handler ----------------------------------------------------
-
-let input = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', chunk => { input += chunk; });
-process.stdin.on('end', () => {
-  try {
-    const data = JSON.parse(input);
-    
-    // OpenCode uses "type" for event name, generic uses "event"
-    const event = data.type || data.event || '';
-    
-    // OpenCode: input.tool, input.args; Generic: tool, tool_input
-    const opencodeInput = data.input || {};
-    const toolName = opencodeInput.tool || data.tool || data.tool_name || '';
-    const toolArgs = opencodeInput.args || {};
-    const toolInput = data.input || data.tool_input || toolArgs;
-    const toolOutput = data.output?.content?.[0]?.text 
-      || data.output?.output 
-      || data.output 
-      || '';
-    const isError = data.output?.error || data.error || data.is_error || false;
-    
-    const sessionId = data.session_id
-      || process.env.CLAUDE_SESSION_ID
-      || String(process.ppid);
-
-    const stats = readStats();
-    const today = new Date().toISOString().slice(0, 10);
-    if (!stats.daily || stats.daily.date !== today) {
-      stats.daily = { date: today, sessionCount: 0, cumulativeMs: 0 };
-    }
-    if (!stats.frequentFiles) stats.frequentFiles = {};
-    if (stats.session.id !== sessionId) {
-      stats.daily.sessionCount++;
-      stats.session = { id: sessionId, start: Date.now(), toolCalls: 0, filesEdited: [], subagentCount: 0 };
-    }
-    if (stats.recentMilestone && Date.now() - stats.recentMilestone.at > 8000) {
-      stats.recentMilestone = null;
-    }
-
-    // Model name: from event data, env var, or default to 'opencode'
-    const modelName = data.model_name || process.env.CODE_CRUMB_MODEL || 'opencode';
-
-    const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
-    const extra = {
-      sessionId,
-      modelName,
-      toolCalls: stats.session.toolCalls,
-      filesEdited: stats.session.filesEdited.length,
-      sessionStart: stats.session.start,
-      streak: stats.streak, bestStreak: stats.bestStreak,
-      brokenStreak: stats.brokenStreak, brokenStreakAt: stats.brokenStreakAt,
-      milestone: stats.recentMilestone, diffInfo: null,
-      dailySessions: stats.daily.sessionCount,
-      dailyCumulativeMs: stats.daily.cumulativeMs + currentSessionMs,
-      frequentFiles: stats.frequentFiles,
-    };
-
-    let state = 'thinking';
-    let detail = '';
-    let stopped = false;
-
-    // Map OpenCode event types to internal event names
-    const mappedEvent = 
-      event === 'session.created' ? 'session_start' :
-      event === 'message.part.updated' ? 'message_update' :
-      event === 'tool.execute.before' ? 'tool_start' :
-      event === 'tool.execute.after' ? 'tool_end' :
-      event === 'session.idle' ? 'turn_end' :
-      event === 'session.error' ? 'error' :
-      event;
-
-    if (mappedEvent === 'session_start') {
-      state = 'waiting';
-      detail = 'session started';
-    }
-    else if (mappedEvent === 'message_update') {
-      if (data.is_thinking) {
-        state = 'thinking';
-        detail = data.thinking || 'analyzing';
-      } else if (data.tools_called) {
-        state = 'responding';
-        detail = 'generating response';
-      } else {
-        state = 'waiting';
-        detail = 'receiving message';
-      }
-    }
-    else if (mappedEvent === 'tool_start' || mappedEvent === 'PreToolUse') {
-      ({ state, detail } = toolToState(toolName, toolInput));
-      stats.session.toolCalls++;
-      stats.totalToolCalls = (stats.totalToolCalls || 0) + 1;
-
-      if (EDIT_TOOLS.test(toolName)) {
-        const fp = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
-        const base = fp ? path.basename(fp) : '';
-        if (base && !stats.session.filesEdited.includes(base)) {
-          stats.session.filesEdited.push(base);
-        }
-        if (base) stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
-      }
-    }
-    else if (mappedEvent === 'tool_end' || mappedEvent === 'PostToolUse') {
-      const toolResponse = { stdout: toolOutput, stderr: data.output?.error || '', isError };
-      const result = classifyToolResult(toolName, toolInput, toolResponse, isError);
-      state = result.state;
-      detail = result.detail;
-      extra.diffInfo = result.diffInfo;
-      updateStreak(stats, state === 'error');
-    }
-    else if (mappedEvent === 'turn_end' || mappedEvent === 'Stop' || mappedEvent === 'session_end') {
-      state = 'happy';
-      detail = 'all done!';
-      stopped = true;
-    }
-    else if (mappedEvent === 'error') {
-      state = 'error';
-      detail = data.output?.error || data.message || 'something went wrong';
-      updateStreak(stats, true);
-    }
-    else if (mappedEvent === 'waiting' || mappedEvent === 'Notification') {
-      state = 'waiting';
-      detail = 'needs attention';
-    }
-
-    extra.toolCalls = stats.session.toolCalls;
-    extra.filesEdited = stats.session.filesEdited.length;
-
-    // Guard global state file — don't let other sessions overwrite the owner
-    let shouldWriteGlobal = true;
-    try {
-      const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      if (existing.sessionId && existing.sessionId !== sessionId &&
-          !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
-        shouldWriteGlobal = false;
-      }
-    } catch {}
-
-    if (shouldWriteGlobal) writeState(state, detail, extra);
-    writeSessionState(sessionId, state, detail, stopped, extra);
-    writeStats(stats);
-  } catch {
-    // Guard global state file even in error fallback
-    let shouldWriteGlobal = true;
-    try {
-      const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      if (existing.sessionId && existing.sessionId !== sessionId &&
-          !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
-        shouldWriteGlobal = false;
-      }
-    } catch {}
-    if (shouldWriteGlobal) writeState('thinking');
+function mapOpenCodeEventType(raw) {
+  switch (raw) {
+    case 'session.created':        return 'session_start';
+    case 'message.part.updated':   return 'message_update';
+    case 'tool.execute.before':    return 'tool_start';
+    case 'tool.execute.after':     return 'tool_end';
+    case 'session.idle':           return 'turn_end';
+    case 'session.error':          return 'error';
+    default:                       return raw;
   }
+}
 
-  process.exit(0);
-});
+function normaliseEvent(data) {
+  const rawEvent = data.type || data.event || '';
+  const event = mapOpenCodeEventType(rawEvent);
 
-process.stdin.on('close', () => { process.exit(0); });
+  // OpenCode: input.tool, input.args; Generic: tool, tool_input
+  const opencodeInput = data.input || {};
+  const toolName = opencodeInput.tool || data.tool || data.tool_name || '';
+  const toolArgs = opencodeInput.args || {};
+  const toolInput = data.input || data.tool_input || toolArgs;
+  const toolOutput = data.output?.content?.[0]?.text
+    || data.output?.output
+    || data.output
+    || '';
+  const isError = data.output?.error || data.error || data.is_error || false;
+  const stderr = data.output?.error || '';
+
+  return { event, toolName, toolInput, toolOutput, isError, stderr };
+}
+
+// -- Custom event mapping -----------------------------------------------
+// OpenCode has a few event types that don't map to the generic set.
+
+function mapEvent(event, toolName, toolInput, toolOutput, isError, data) {
+  if (event === 'session_start') {
+    return { state: 'waiting', detail: 'session started' };
+  }
+  if (event === 'message_update') {
+    if (data.is_thinking) {
+      return { state: 'thinking', detail: data.thinking || 'analyzing' };
+    } else if (data.tools_called) {
+      return { state: 'responding', detail: 'generating response' };
+    }
+    return { state: 'waiting', detail: 'receiving message' };
+  }
+  return null; // Fall through to common handling
+}
+
+// -- Main ---------------------------------------------------------------
+
+if (require.main === module) {
+  runStdinAdapter({
+    defaultModel: 'opencode',
+    normaliseEvent,
+    mapEvent,
+  });
+}
+
+module.exports = { normaliseEvent, mapEvent, mapOpenCodeEventType };

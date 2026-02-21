@@ -16,95 +16,30 @@
 // +================================================================+
 
 const { spawn } = require('child_process');
-const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename } = require('../shared');
 const {
-  toolToState, classifyToolResult, updateStreak, defaultStats,
-  EDIT_TOOLS, SUBAGENT_TOOLS,
-} = require('../state-machine');
+  writeSessionState, readStats, writeStats, guardedWriteState,
+  initSession, buildExtra, handleToolStart, handleToolEnd,
+  processJsonlStream,
+} = require('./base-adapter');
+const { SUBAGENT_TOOLS } = require('../state-machine');
 
-// -- State writing (mirrors update-state.js) -------------------------
-
-function writeState(state, detail = '', extra = {}) {
-  const data = JSON.stringify({ state, detail, timestamp: Date.now(), ...extra });
-  try { fs.writeFileSync(STATE_FILE, data, 'utf8'); } catch {}
-}
-
-function writeSessionState(sessionId, state, detail = '', stopped = false, extra = {}) {
-  try {
-    fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-    const filename = safeFilename(sessionId) + '.json';
-    const data = JSON.stringify({
-      session_id: sessionId, state, detail,
-      timestamp: Date.now(), cwd: process.cwd(), stopped, ...extra,
-    });
-    fs.writeFileSync(path.join(SESSIONS_DIR, filename), data, 'utf8');
-  } catch {}
-}
-
-function readStats() {
-  try { return JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); }
-  catch { return defaultStats(); }
-}
-
-function writeStats(stats) {
-  try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats), 'utf8'); } catch {}
-}
-
-function guardedWriteState(state, detail, extra) {
-  try {
-    const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    if (existing.sessionId && existing.sessionId !== sessionId &&
-        !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
-      return; // Another session owns the state file
-    }
-  } catch {}
-  writeState(state, detail, extra);
-}
-
-// -- JSONL Event Processor -------------------------------------------
+// -- Session setup -----------------------------------------------------
 
 const sessionId = process.env.CLAUDE_SESSION_ID || `codex-${process.pid}`;
-const stats = readStats();
-
-// Initialize session
-const today = new Date().toISOString().slice(0, 10);
-if (!stats.daily || stats.daily.date !== today) {
-  stats.daily = { date: today, sessionCount: 0, cumulativeMs: 0 };
-}
-if (!stats.frequentFiles) stats.frequentFiles = {};
-if (stats.session.id !== sessionId) {
-  stats.daily.sessionCount++;
-  stats.session = { id: sessionId, start: Date.now(), toolCalls: 0, filesEdited: [], subagentCount: 0 };
-}
-
-// Model name: from env var or default to 'codex'
 const modelName = process.env.CODE_CRUMB_MODEL || 'codex';
+const stats = readStats();
+initSession(stats, sessionId);
 
 // Track active tool calls by item ID
 const activeTools = new Map();
 const activeSubagents = [];
 
-function buildExtra() {
-  const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
-  return {
-    sessionId,
-    modelName,
-    toolCalls: stats.session.toolCalls,
-    filesEdited: stats.session.filesEdited.length,
-    sessionStart: stats.session.start,
-    streak: stats.streak,
-    bestStreak: stats.bestStreak,
-    brokenStreak: stats.brokenStreak,
-    brokenStreakAt: stats.brokenStreakAt,
-    milestone: stats.recentMilestone,
-    diffInfo: null,
-    dailySessions: stats.daily.sessionCount,
-    dailyCumulativeMs: stats.daily.cumulativeMs + currentSessionMs,
-    frequentFiles: stats.frequentFiles,
-  };
+function extra() {
+  return buildExtra(stats, sessionId, modelName);
 }
+
+// -- JSONL Event Processor -------------------------------------------
 
 function handleEvent(event) {
   try {
@@ -123,19 +58,8 @@ function handleEvent(event) {
 
       activeTools.set(item.id, { toolName, toolInput });
 
-      const { state, detail } = toolToState(toolName, toolInput);
-      stats.session.toolCalls++;
-      stats.totalToolCalls = (stats.totalToolCalls || 0) + 1;
+      const { state, detail } = handleToolStart(stats, toolName, toolInput);
 
-      // Track files edited
-      if (EDIT_TOOLS.test(toolName)) {
-        const fp = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
-        const base = fp ? path.basename(fp) : '';
-        if (base && !stats.session.filesEdited.includes(base)) {
-          stats.session.filesEdited.push(base);
-        }
-        if (base) stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
-      }
       if (SUBAGENT_TOOLS.test(toolName)) {
         stats.session.subagentCount++;
 
@@ -150,8 +74,8 @@ function handleEvent(event) {
 
         // Override main state to 'subagent'
         const subDetail = `conducting ${activeSubagents.length}`;
-        guardedWriteState('subagent', subDetail, buildExtra());
-        writeSessionState(sessionId, 'subagent', subDetail, false, buildExtra());
+        guardedWriteState(sessionId, 'subagent', subDetail, extra());
+        writeSessionState(sessionId, 'subagent', subDetail, false, extra());
         writeStats(stats);
       } else if (activeSubagents.length > 0) {
         // Redirect non-subagent tool state to latest synthetic session
@@ -162,12 +86,12 @@ function handleEvent(event) {
 
         // Keep main state as 'subagent'
         const subDetail = `conducting ${activeSubagents.length}`;
-        guardedWriteState('subagent', subDetail, buildExtra());
-        writeSessionState(sessionId, 'subagent', subDetail, false, buildExtra());
+        guardedWriteState(sessionId, 'subagent', subDetail, extra());
+        writeSessionState(sessionId, 'subagent', subDetail, false, extra());
         writeStats(stats);
       } else {
-        guardedWriteState(state, detail, buildExtra());
-        writeSessionState(sessionId, state, detail, false, buildExtra());
+        guardedWriteState(sessionId, state, detail, extra());
+        writeSessionState(sessionId, state, detail, false, extra());
         writeStats(stats);
       }
     }
@@ -181,11 +105,10 @@ function handleEvent(event) {
       const isError = item.status === 'failed' || item.error != null;
 
       const toolResponse = { stdout: output, stderr: '', isError };
-      const result = classifyToolResult(toolName, toolInput, toolResponse, isError);
-      updateStreak(stats, result.state === 'error');
+      const result = handleToolEnd(stats, toolName, toolInput, toolResponse, isError);
 
-      const extra = buildExtra();
-      extra.diffInfo = result.diffInfo;
+      const ex = extra();
+      ex.diffInfo = result.diffInfo;
 
       if (SUBAGENT_TOOLS.test(toolName) && activeSubagents.length > 0) {
         // Remove oldest subagent (FIFO)
@@ -196,11 +119,11 @@ function handleEvent(event) {
 
         if (activeSubagents.length > 0) {
           const subDetail = `conducting ${activeSubagents.length}`;
-          guardedWriteState('subagent', subDetail, extra);
-          writeSessionState(sessionId, 'subagent', subDetail, false, extra);
+          guardedWriteState(sessionId, 'subagent', subDetail, ex);
+          writeSessionState(sessionId, 'subagent', subDetail, false, ex);
         } else {
-          guardedWriteState(result.state, result.detail, extra);
-          writeSessionState(sessionId, result.state, result.detail, false, extra);
+          guardedWriteState(sessionId, result.state, result.detail, ex);
+          writeSessionState(sessionId, result.state, result.detail, false, ex);
         }
       } else if (activeSubagents.length > 0) {
         // Redirect completed tool state to latest synthetic session
@@ -211,11 +134,11 @@ function handleEvent(event) {
 
         // Keep main state as 'subagent'
         const subDetail = `conducting ${activeSubagents.length}`;
-        guardedWriteState('subagent', subDetail, extra);
-        writeSessionState(sessionId, 'subagent', subDetail, false, extra);
+        guardedWriteState(sessionId, 'subagent', subDetail, ex);
+        writeSessionState(sessionId, 'subagent', subDetail, false, ex);
       } else {
-        guardedWriteState(result.state, result.detail, extra);
-        writeSessionState(sessionId, result.state, result.detail, false, extra);
+        guardedWriteState(sessionId, result.state, result.detail, ex);
+        writeSessionState(sessionId, result.state, result.detail, false, ex);
       }
       writeStats(stats);
       activeTools.delete(item.id);
@@ -230,23 +153,24 @@ function handleEvent(event) {
           sessionId: removed.subId, modelName, cwd: '', parentSession: sessionId,
         });
       }
-      guardedWriteState('happy', 'all done!', buildExtra());
-      writeSessionState(sessionId, 'happy', 'all done!', true, buildExtra());
+      guardedWriteState(sessionId, 'happy', 'all done!', extra());
+      writeSessionState(sessionId, 'happy', 'all done!', true, extra());
       writeStats(stats);
     }
 
     // Turn failed
     else if (type === 'turn.failed' || type === 'error') {
+      const { updateStreak } = require('../state-machine');
       updateStreak(stats, true);
-      guardedWriteState('error', event.message || 'something went wrong', buildExtra());
-      writeSessionState(sessionId, 'error', event.message || 'something went wrong', false, buildExtra());
+      guardedWriteState(sessionId, 'error', event.message || 'something went wrong', extra());
+      writeSessionState(sessionId, 'error', event.message || 'something went wrong', false, extra());
       writeStats(stats);
     }
 
-    // Thread/turn started → thinking
+    // Thread/turn started -> thinking
     else if (type === 'turn.started' || type === 'thread.started') {
-      guardedWriteState('thinking', 'warming up...', buildExtra());
-      writeSessionState(sessionId, 'thinking', 'warming up...', false, buildExtra());
+      guardedWriteState(sessionId, 'thinking', 'warming up...', extra());
+      writeSessionState(sessionId, 'thinking', 'warming up...', false, extra());
     }
   } catch {
     // Silent failure -- don't break the wrapper
@@ -263,29 +187,17 @@ if (args.length === 0) {
 }
 
 // Set initial state
-guardedWriteState('thinking', 'starting codex...', buildExtra());
+guardedWriteState(sessionId, 'thinking', 'starting codex...', extra());
 
 const codex = spawn('codex', ['exec', '--json', ...args], {
   stdio: ['inherit', 'pipe', 'inherit'],
   shell: true,
 });
 
-let buffer = '';
-codex.stdout.on('data', (chunk) => {
-  buffer += chunk.toString();
-  const lines = buffer.split(/\r?\n/);
-  buffer = lines.pop(); // Keep incomplete line in buffer
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    try {
-      const event = JSON.parse(line);
-      handleEvent(event);
-    } catch {
-      // Not valid JSON, skip
-    }
-  }
+processJsonlStream(codex.stdout, handleEvent);
 
-  // Also pass through to our stdout so user sees output
+// Also pass through to our stdout so user sees output
+codex.stdout.on('data', (chunk) => {
   process.stdout.write(chunk);
 });
 
@@ -303,8 +215,8 @@ codex.on('exit', (code) => {
       sessionId: removed.subId, modelName, cwd: '', parentSession: sessionId,
     });
   }
-  guardedWriteState('happy', 'codex finished', buildExtra());
-  writeSessionState(sessionId, 'happy', 'codex finished', true, buildExtra());
+  guardedWriteState(sessionId, 'happy', 'codex finished', extra());
+  writeSessionState(sessionId, 'happy', 'codex finished', true, extra());
   writeStats(stats);
   process.exit(code || 0);
 });

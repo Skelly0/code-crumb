@@ -16,27 +16,7 @@
 // |  individual tool calls. For richer output, use codex-wrapper.js |
 // +================================================================+
 
-const fs = require('fs');
-const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename } = require('../shared');
-const { defaultStats } = require('../state-machine');
-
-function writeState(state, detail = '', extra = {}) {
-  const data = JSON.stringify({ state, detail, timestamp: Date.now(), ...extra });
-  try { fs.writeFileSync(STATE_FILE, data, 'utf8'); } catch {}
-}
-
-function writeSessionState(sessionId, state, detail = '', stopped = false, extra = {}) {
-  try {
-    fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-    const filename = safeFilename(sessionId) + '.json';
-    const data = JSON.stringify({
-      session_id: sessionId, state, detail,
-      timestamp: Date.now(), cwd: process.cwd(), stopped, ...extra,
-    });
-    fs.writeFileSync(path.join(SESSIONS_DIR, filename), data, 'utf8');
-  } catch {}
-}
+const { writeState, writeSessionState, guardedWriteState } = require('./base-adapter');
 
 // -- Parse the notify JSON argument ----------------------------------
 
@@ -50,29 +30,18 @@ try {
   const sessionId = event['thread-id'] || `codex-${process.ppid}`;
   const modelName = process.env.CODE_CRUMB_MODEL || 'codex';
 
-  // Guard global state file — don't overwrite another active session
-  let shouldWriteGlobal = true;
-  try {
-    const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    if (existing.sessionId && existing.sessionId !== sessionId &&
-        !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
-      shouldWriteGlobal = false;
-    }
-  } catch {}
-
   if (eventType === 'agent-turn-complete') {
-    // Extract info from the turn data
     const lastMsg = event['last-assistant-message'] || '';
     const detail = lastMsg.length > 40 ? lastMsg.slice(0, 37) + '...' : lastMsg;
 
-    if (shouldWriteGlobal) writeState('happy', detail || 'turn complete', { sessionId, modelName });
+    guardedWriteState(sessionId, 'happy', detail || 'turn complete', { sessionId, modelName });
     writeSessionState(sessionId, 'happy', detail || 'turn complete', false, { sessionId, modelName });
   } else if (eventType === 'approval-requested') {
-    if (shouldWriteGlobal) writeState('waiting', 'needs approval', { sessionId, modelName });
+    guardedWriteState(sessionId, 'waiting', 'needs approval', { sessionId, modelName });
     writeSessionState(sessionId, 'waiting', 'needs approval', false, { sessionId, modelName });
   } else {
     // Unknown event -- show as thinking
-    if (shouldWriteGlobal) writeState('thinking', eventType || 'codex event', { sessionId, modelName });
+    guardedWriteState(sessionId, 'thinking', eventType || 'codex event', { sessionId, modelName });
     writeSessionState(sessionId, 'thinking', eventType || 'codex event', false, { sessionId, modelName });
   }
 } catch {
