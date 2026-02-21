@@ -19,6 +19,7 @@ const testModules = [
   './tests/test-accessories.js',
   './tests/test-teams.js',
   './tests/test-launch.js',
+  './tests/test-adapters.js',
 ];
 
 let totalPassed = 0;
