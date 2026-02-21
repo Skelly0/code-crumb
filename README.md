@@ -14,21 +14,9 @@ Zero dependencies. Just Node.js and vibes.
 
 The face shows a tiny thought bubble with contextual content:
 
-```
-                   ╭──────────────────╮
-                   │ tool call #23    │
-                   ╰──────────────────╯
-                  o
-         ╭────────────────────╮
-         │      ██      ██    │
-         │      ██      ██    │
-         │         ◡◡◡        │
-         ╰────────────────────╯
-```
+![Idle state with "imagining clean code" thought bubble](images/idle-thought-bubble.png)
 
 Content adapts to what's happening: file count when editing multiple files, tool call number, session duration, or idle flavor text ("thinking about types", "contemplating recursion").
-
-![Idle state with "imagining clean code" thought bubble](images/idle-thought-bubble.png)
 
 ## Streaks & Achievements
 
@@ -50,27 +38,7 @@ Each color maps to a state — purple for thinking, green for coding, red for er
 
 When your session spawns subagents (e.g. Claude Code's `Task` tool), mini-faces orbit the main face like satellites — each with its own state, expression, and label:
 
-```
-              ╭──────╮
-              │ ▀▀ ▀▀│  ← orbiting subagent
-              │ ═══  │
-         ·  · ╰──────╯
-       ·
-   ╭────────────────────╮     ╭──────╮
-   │                     │  · · │ ── ──│
-   │   ●          ●      │ ·   │ ───  │
-   │      ═══            │     ╰──────╯
-   │                     │      sub-2
-   ╰────────────────────╯
-     claude is conducting
-              ·
-            ·   ·
-         ╭──────╮
-         │ ██ ██│
-         │ ◡◡◡  │
-         ╰──────╯
-          sub-3
-```
+![Orbital subagents — three mini-faces orbiting the main face](images/orbital-subagents.png)
 
 - Mini-faces orbit on an elliptical path, slowly rotating as a constellation
 - Faint dotted connection lines pulse outward from the main face to each orbital
@@ -80,7 +48,6 @@ When your session spawns subagents (e.g. Claude Code's `Task` tool), mini-faces 
 - Sessions appear when subagents start, linger briefly after they stop, then fade away
 - Labels derived from working directory — sessions in different directories show folder names, same-directory sessions get `sub-N` labels
 
-![Orbital subagents — three mini-faces orbiting the main face](images/orbital-subagents.png)
 
 ## Expressions
 
