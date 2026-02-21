@@ -5,8 +5,9 @@
 // |  Code Crumb Hook -- writes state for the face renderer              |
 // |  Called by editor hooks via stdin JSON                           |
 // |  Usage: node update-state.js <event>                            |
-// |  Events: PreToolUse, PostToolUse, Stop, Notification,           |
-// |          TeammateIdle, TaskCompleted                            |
+// |  Events: PreToolUse, PostToolUse, PostToolUseFailure, Stop,     |
+// |          Notification, SubagentStart, SubagentStop,            |
+// |          TeammateIdle, TaskCompleted, SessionStart, SessionEnd  |
 // |                                                                  |
 // |  Works with Claude Code, Codex CLI, and OpenCode                |
 // +================================================================+
@@ -154,8 +155,11 @@ process.stdin.on('end', () => {
         }
       }
     }
-    else if (hookEvent === 'PostToolUse') {
-      const isErrorFlag = toolResponse?.isError || data?.isError || false;
+    else if (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure') {
+      // PostToolUseFailure is the same as PostToolUse but the tool execution
+      // itself failed -- force the error flag so we always show error state.
+      const isErrorFlag = hookEvent === 'PostToolUseFailure'
+        || toolResponse?.isError || data?.isError || false;
       const result = classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag);
       state = result.state;
       detail = result.detail;
@@ -223,6 +227,88 @@ process.stdin.on('end', () => {
       writeSessionState(sessionId, state, detail, false, { ...teamExtra, sessionId });
       writeStats(stats);
       process.exit(0);
+    }
+    else if (hookEvent === 'SubagentStart') {
+      // Native subagent lifecycle event -- create a synthetic orbital session
+      state = 'subagent';
+      const desc = (data.description || data.prompt || data.agent_name || 'subagent').slice(0, 40);
+      detail = desc;
+      const subId = data.subagent_id || `${sessionId}-sub-${Date.now()}`;
+      stats.session.subagentCount = (stats.session.subagentCount || 0) + 1;
+      if (stats.session.subagentCount > (stats.records.mostSubagents || 0)) {
+        stats.records.mostSubagents = stats.session.subagentCount;
+      }
+      stats.session.activeSubagents.push({ id: subId, description: desc, startedAt: Date.now() });
+      writeSessionState(subId, 'spawning', desc, false, {
+        sessionId: subId, modelName: data.model || 'haiku', cwd: process.cwd(),
+        gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
+        parentSession: sessionId,
+      });
+      detail = `conducting ${stats.session.activeSubagents.length}`;
+    }
+    else if (hookEvent === 'SubagentStop') {
+      // Native subagent lifecycle event -- mark the subagent session as done
+      const subId = data.subagent_id || '';
+      if (subId && stats.session.activeSubagents.length > 0) {
+        const idx = stats.session.activeSubagents.findIndex(s => s.id === subId);
+        const finished = idx >= 0
+          ? stats.session.activeSubagents.splice(idx, 1)[0]
+          : stats.session.activeSubagents.shift();
+        writeSessionState(finished.id, 'happy', 'done', true, {
+          sessionId: finished.id, stopped: true, cwd: process.cwd(),
+          gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
+          parentSession: sessionId,
+        });
+      } else if (stats.session.activeSubagents.length > 0) {
+        const finished = stats.session.activeSubagents.shift();
+        writeSessionState(finished.id, 'happy', 'done', true, {
+          sessionId: finished.id, stopped: true, cwd: process.cwd(),
+          gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
+          parentSession: sessionId,
+        });
+      }
+      if (stats.session.activeSubagents.length > 0) {
+        state = 'subagent';
+        detail = `conducting ${stats.session.activeSubagents.length}`;
+      } else {
+        state = 'happy';
+        detail = 'subagent done';
+      }
+    }
+    else if (hookEvent === 'SessionStart') {
+      state = 'waiting';
+      detail = 'session starting';
+      // Force-initialize a fresh session
+      stats.daily.sessionCount++;
+      stats.session = {
+        id: sessionId, start: Date.now(),
+        toolCalls: 0, filesEdited: [], subagentCount: 0, commitCount: 0,
+        activeSubagents: [],
+      };
+    }
+    else if (hookEvent === 'SessionEnd') {
+      state = 'responding';
+      detail = 'session ending';
+      stopped = true;
+      // Finalize session records
+      if (stats.session.start) {
+        const dur = Date.now() - stats.session.start;
+        if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
+        stats.daily.cumulativeMs += dur;
+        stats.session.start = 0;
+      }
+      if ((stats.session.filesEdited?.length || 0) > (stats.records.mostFilesEdited || 0)) {
+        stats.records.mostFilesEdited = stats.session.filesEdited.length;
+      }
+      // Clean up any remaining synthetic subagent sessions
+      for (const sub of stats.session.activeSubagents) {
+        writeSessionState(sub.id, 'happy', 'done', true, {
+          sessionId: sub.id, stopped: true, cwd: process.cwd(),
+          gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
+          parentSession: sessionId,
+        });
+      }
+      stats.session.activeSubagents = [];
     }
     else {
       if (toolName) {
@@ -349,13 +435,25 @@ process.stdin.on('end', () => {
 
     let fallbackState = 'thinking';
     let fallbackDetail = '';
-    if (hookEvent === 'Stop') {
+    if (hookEvent === 'Stop' || hookEvent === 'SessionEnd') {
       fallbackState = 'responding';
-      fallbackDetail = 'wrapping up';
+      fallbackDetail = hookEvent === 'SessionEnd' ? 'session ending' : 'wrapping up';
       fallbackExtra.stopped = true;
     } else if (hookEvent === 'Notification') {
       fallbackState = 'waiting';
       fallbackDetail = 'needs attention';
+    } else if (hookEvent === 'SessionStart') {
+      fallbackState = 'waiting';
+      fallbackDetail = 'session starting';
+    } else if (hookEvent === 'SubagentStart') {
+      fallbackState = 'subagent';
+      fallbackDetail = 'spawning subagent';
+    } else if (hookEvent === 'SubagentStop') {
+      fallbackState = 'happy';
+      fallbackDetail = 'subagent done';
+    } else if (hookEvent === 'PostToolUseFailure') {
+      fallbackState = 'error';
+      fallbackDetail = 'tool failed';
     }
 
     if (shouldWriteGlobal) writeState(fallbackState, fallbackDetail, fallbackExtra);

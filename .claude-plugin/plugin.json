@@ -9,6 +9,6 @@
   "repository": "https://github.com/Skelly0/code-crumb",
   "homepage": "https://github.com/Skelly0/code-crumb",
   "license": "MIT",
-  "keywords": ["visualization", "terminal", "tamagotchi", "ascii-art", "hooks", "face"],
+  "keywords": ["visualization", "terminal", "tamagotchi", "ascii-art", "hooks", "face", "ai-assistant"],
   "hooks": "./hooks/hooks.json"
 }
