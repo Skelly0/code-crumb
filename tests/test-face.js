@@ -972,4 +972,97 @@ describe('face.js -- project context row in render', () => {
   });
 });
 
+describe('face.js -- minimalMode', () => {
+  const origCols = process.stdout.columns;
+  const origRows = process.stdout.rows;
+  function renderStrippedMinimal(face) {
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    const out = face.render().replace(/\x1b\[[^m]*m/g, '');
+    process.stdout.columns = origCols;
+    process.stdout.rows = origRows;
+    return out;
+  }
+
+  test('minimalMode defaults to false', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.minimalMode, false);
+  });
+
+  test('minimal mode skips indicator row (accs/subs)', () => {
+    const face = new ClaudeFace();
+    face.minimalMode = true;
+    const out = renderStrippedMinimal(face);
+    assert.ok(!out.includes('accs'), 'should not contain accs indicator');
+    assert.ok(!out.includes('subs'), 'should not contain subs indicator');
+  });
+
+  test('minimal mode skips thought bubble', () => {
+    const face = new ClaudeFace();
+    face.minimalMode = true;
+    face.thoughtText = 'hmm...';
+    const out = renderStrippedMinimal(face);
+    assert.ok(!out.includes('hmm...'), 'should not render thought bubble text');
+  });
+
+  test('minimal mode skips key hints bar', () => {
+    const face = new ClaudeFace();
+    face.minimalMode = true;
+    const out = renderStrippedMinimal(face);
+    assert.ok(!out.includes('theme'), 'should not contain key hint "theme"');
+    assert.ok(!out.includes('help'), 'should not contain key hint "help"');
+  });
+
+  test('minimal mode skips help overlay even when showHelp is true', () => {
+    const face = new ClaudeFace();
+    face.minimalMode = true;
+    face.showHelp = true;
+    const out = renderStrippedMinimal(face);
+    assert.ok(!out.includes('Keybindings'), 'should not render help overlay');
+  });
+
+  test('minimal mode skips stats rows', () => {
+    const face = new ClaudeFace();
+    face.minimalMode = true;
+    face.showStats = true;
+    face.streak = 15;
+    const out = renderStrippedMinimal(face);
+    assert.ok(!out.includes('successful in a row'), 'should not render streak');
+  });
+
+  test('minimal mode skips project context row', () => {
+    const face = new ClaudeFace();
+    face.minimalMode = true;
+    face.setStats({ cwd: '/home/user/my-project', gitBranch: 'main' });
+    const out = renderStrippedMinimal(face);
+    assert.ok(!out.includes('my-project'), 'should not render project folder');
+  });
+
+  test('minimal mode still renders face box and status line', () => {
+    const face = new ClaudeFace();
+    face.minimalMode = true;
+    const out = renderStrippedMinimal(face);
+    // Face box borders
+    assert.ok(out.includes('\u256d'), 'should contain top-left box corner');
+    assert.ok(out.includes('\u2570'), 'should contain bottom-left box corner');
+    // Status line
+    assert.ok(out.includes('is'), 'should contain status text');
+  });
+
+  test('minimal mode skips accessories', () => {
+    const face = new ClaudeFace();
+    face.minimalMode = true;
+    face.accessoriesEnabled = true;
+    face.setState('thinking'); // thinking has a hat accessory
+    const outMinimal = renderStrippedMinimal(face);
+    // Compare with non-minimal
+    const face2 = new ClaudeFace();
+    face2.setState('thinking');
+    face2.accessoriesEnabled = true;
+    const outNormal = renderStrippedMinimal(face2);
+    // Minimal output should be shorter (less chrome)
+    assert.ok(outMinimal.length <= outNormal.length, 'minimal output should not be longer than normal');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

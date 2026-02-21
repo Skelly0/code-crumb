@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node renderer.js",
+    "minimal": "node renderer.js --minimal",
     "launch": "node launch.js",
     "launch:codex": "node launch.js --editor codex",
     "launch:opencode": "node launch.js --editor opencode",
