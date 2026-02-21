@@ -248,7 +248,7 @@ function runUnifiedMode() {
     } else if (face.state === 'responding' && lastStopped && now >= face.minDisplayUntil) {
       face.setState('happy');
     } else if (completionLinger && now - face.lastStateChange > completionLinger) {
-      face.setState('thinking');
+      face.setState(sessionActive ? 'thinking' : 'idle');
     } else if (face.state === 'thinking' &&
                now - face.lastStateChange > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT)) {
       face.setState('idle');
