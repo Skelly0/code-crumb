@@ -511,7 +511,7 @@ class OrbitalSystem {
       const n = sorted.length;
       const text = `+${n} subagent${n === 1 ? '' : 's'}`;
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
-      const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 3);
+      const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 7);
       const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
       return `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
     }
@@ -556,7 +556,7 @@ class OrbitalSystem {
     if (overflow > 0) {
       const text = `+${overflow} more`;
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
-      const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 3);
+      const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 7);
       const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
       buf += `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
     }
@@ -640,7 +640,7 @@ class OrbitalSystem {
     if (overflow > 0) {
       const text = `+${overflow} more`;
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
-      const textRow = Math.min(rows - 2, mainPos.row + mainPos.h + 3);
+      const textRow = Math.min(rows - 2, mainPos.row + mainPos.h + 7);
       const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
       buf += `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
     }
