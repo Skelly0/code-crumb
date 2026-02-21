@@ -240,7 +240,7 @@ process.stdin.on('end', () => {
       // New subagent spawned — create synthetic orbital session
       const subId = `${sessionId}-sub-${Date.now()}`;
       const desc = (toolInput.description || toolInput.prompt || 'subagent').slice(0, 40);
-      stats.session.activeSubagents.push({ id: subId, description: desc, startedAt: Date.now() });
+      stats.session.activeSubagents.push({ id: subId, description: desc, startedAt: Date.now(), modelName: toolInput.model || 'haiku' });
       writeSessionState(subId, 'spawning', desc, false, {
         sessionId: subId, modelName: toolInput.model || 'haiku', cwd: process.cwd(),
         gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
@@ -248,19 +248,12 @@ process.stdin.on('end', () => {
       });
       state = 'subagent';
       detail = `conducting ${stats.session.activeSubagents.length}`;
-    } else if (hookEvent === 'PostToolUse' && isSubagentTool && stats.session.activeSubagents.length > 0) {
-      // Subagent finished — mark oldest synthetic session as stopped
-      const finished = stats.session.activeSubagents.shift();
-      writeSessionState(finished.id, 'happy', 'done', true, {
-        sessionId: finished.id, stopped: true, cwd: process.cwd(),
-        gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
-        parentSession: sessionId,
-      });
-      if (stats.session.activeSubagents.length > 0) {
-        state = 'subagent';
-        detail = `conducting ${stats.session.activeSubagents.length}`;
-      }
-    } else if (stats.session.activeSubagents.length > 0 && !isSubagentTool &&
+    } 
+    // PostToolUse handling removed: PostToolUse fires when the Task tool 
+    // invocation completes, not when the subagent finishes. Subagents run 
+    // asynchronously, so we can't know when they're done. Leave them 
+    // active until the parent session ends (Stop hook handles cleanup).
+    else if (stats.session.activeSubagents.length > 0 && !isSubagentTool &&
                hookEvent !== 'Stop' && hookEvent !== 'Notification') {
       // Tool call from within a subagent — update latest synthetic session
       const latestSub = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
@@ -277,6 +270,21 @@ process.stdin.on('end', () => {
         state = 'subagent';
         detail = `conducting ${stats.session.activeSubagents.length}`;
       }
+    }
+
+    // Cycle active subagent sessions through rotating states
+    const SUB_STATES = ['thinking','reading','coding','searching','executing','thinking'];
+    for (const sub of stats.session.activeSubagents) {
+      const age = Date.now() - sub.startedAt;
+      const stateIndex = Math.floor(age / 8000) % SUB_STATES.length;
+      writeSessionState(sub.id, SUB_STATES[stateIndex], sub.description, false, {
+        sessionId: sub.id,
+        modelName: sub.modelName || 'haiku',
+        cwd: process.cwd(),
+        gitBranch: getGitBranch(process.cwd()),
+        isWorktree: getIsWorktree(process.cwd()),
+        parentSession: sessionId,
+      });
     }
 
     // Model name: from event data, env var, or default to 'claude'
