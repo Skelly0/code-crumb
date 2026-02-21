@@ -193,12 +193,12 @@ describe('themes.js -- PALETTES', () => {
     'committing',
   ];
 
-  test('PALETTES has 5 entries', () => {
-    assert.strictEqual(PALETTES.length, 5);
+  test('PALETTES has 6 entries', () => {
+    assert.strictEqual(PALETTES.length, 6);
   });
 
   test('PALETTE_NAMES matches palette names', () => {
-    assert.deepStrictEqual(PALETTE_NAMES, ['default', 'neon', 'pastel', 'mono', 'sunset']);
+    assert.deepStrictEqual(PALETTE_NAMES, ['default', 'neon', 'pastel', 'mono', 'sunset', 'highcontrast']);
   });
 
   test('all palette names are unique', () => {

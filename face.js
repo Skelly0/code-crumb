@@ -402,7 +402,7 @@ class ClaudeFace {
         if (this.lookDir > 0) return eyes.lookRight(theme, frame);
         return eyes.wide(theme, frame);
       case 'executing':   return eyes.open(theme, frame);
-      case 'happy':       return eyes.sparkle(theme, frame);
+      case 'happy':       return this.petCount > 3 ? eyes.heart() : eyes.sparkle(theme, frame);
       case 'satisfied':   return eyes.content(theme, frame);
       case 'proud':       return eyes.pleased(theme, frame);
       case 'relieved':    return eyes.open(theme, frame);
@@ -411,11 +411,11 @@ class ClaudeFace {
           return eyes.glitch(theme, frame);
         }
         return eyes.cross(theme, frame);
-      case 'sleeping':    return eyes.sleeping(theme, frame);
+      case 'sleeping':    return frame % 200 < 20 ? eyes.tired() : eyes.sleeping(theme, frame);
       case 'waiting':     return eyes.waiting(theme, frame);
       case 'testing':     return eyes.intense(theme, frame);
       case 'installing':  return eyes.down(theme, frame);
-      case 'caffeinated': return eyes.vibrate(theme, frame);
+      case 'caffeinated': return frame % 30 < 5 ? eyes.star(theme, frame) : eyes.vibrate(theme, frame);
       case 'subagent':    return eyes.conducting(theme, frame);
       case 'starting':    return eyes.spin(theme, Math.floor(frame / 4));
       case 'committing':  return eyes.focused(theme, frame);
