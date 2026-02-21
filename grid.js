@@ -81,7 +81,8 @@ class MiniFace {
     if (newState !== this.state) {
       // Minimum display time: don't flicker between states too rapidly
       // Errors always bypass (important feedback), stopped sessions always bypass
-      if (now >= this.minDisplayUntil || newState === 'error' || data.stopped) {
+      // Spawning always bypasses so the initial state is applied immediately
+      if (now >= this.minDisplayUntil || newState === 'error' || newState === 'spawning' || data.stopped) {
         this.state = newState;
         this.minDisplayUntil = now + 1500;
       }
@@ -135,6 +136,12 @@ class MiniFace {
     }
 
     const elapsed = Date.now() - this.lastUpdate;
+
+    // Spawning is a transient boot state — auto-transition to thinking after 2s
+    if (this.state === 'spawning' && Date.now() - this.firstSeen > 2000) {
+      this.state = 'thinking';
+    }
+
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     const completionLinger = COMPLETION_LINGER[this.state];
     const sessionActive = !this.stopped;

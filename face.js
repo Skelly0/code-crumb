@@ -125,7 +125,7 @@ class ClaudeFace {
       error: 3500, coding: 2500, thinking: 2500, responding: 3000, reading: 2000,
       searching: 2000, executing: 2500, testing: 2500, installing: 2500,
       caffeinated: 2500, subagent: 2500, waiting: 1500, sleeping: 1000,
-      starting: 2500, committing: 3000,
+      starting: 2500, spawning: 2000, committing: 3000,
     };
     return times[state] || 1000;
   }

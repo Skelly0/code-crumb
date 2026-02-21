@@ -239,7 +239,7 @@ process.stdin.on('end', () => {
       const subId = `${sessionId}-sub-${Date.now()}`;
       const desc = (toolInput.description || toolInput.prompt || 'subagent').slice(0, 40);
       stats.session.activeSubagents.push({ id: subId, description: desc, startedAt: Date.now() });
-      writeSessionState(subId, 'thinking', desc, false, {
+      writeSessionState(subId, 'spawning', desc, false, {
         sessionId: subId, modelName: toolInput.model || 'haiku', cwd: '', parentSession: sessionId,
       });
       state = 'subagent';
