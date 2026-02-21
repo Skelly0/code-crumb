@@ -122,6 +122,18 @@ function runUnifiedMode() {
   const face = new ClaudeFace();
   const rendererStartTime = Date.now();
   face.setState('starting');
+  // Boot sequence demo: show quick capability states on startup unless minimal mode is enabled
+  const minimal = (process.argv.includes('--minimal') || process.env.MINIMAL_BOOT === '1');
+  if (!minimal) {
+    // After ~2s: reading
+    setTimeout(() => { face.setState('reading'); }, 2000);
+    // After ~2.2s: coding
+    setTimeout(() => { face.setState('coding'); }, 2200);
+    // After ~2.4s: searching
+    setTimeout(() => { face.setState('searching'); }, 2400);
+    // After ~2.6s: idle
+    setTimeout(() => { face.setState('idle'); }, 2600);
+  }
   const orbital = new OrbitalSystem();
 
   // Ensure sessions directory exists
