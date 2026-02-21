@@ -703,8 +703,14 @@ describe('adapters -- codex-wrapper (structural)', () => {
 
   test('adapter imports shared.js dependencies', () => {
     const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("require('../shared')"), 'should import shared');
-    assert.ok(src.includes("require('../state-machine')"), 'should import state-machine');
+    assert.ok(
+      src.includes("require('../shared')") || src.includes("require('./base-adapter')"),
+      'should import shared or base-adapter'
+    );
+    assert.ok(
+      src.includes("require('../state-machine')") || src.includes("require('./base-adapter')"),
+      'should import state-machine or base-adapter'
+    );
   });
 
   test('adapter has handleEvent function', () => {
@@ -771,7 +777,10 @@ describe('adapters -- codex-notify (structural)', () => {
 
   test('guards global state file against other sessions', () => {
     const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('shouldWriteGlobal'), 'should guard global writes');
+    assert.ok(
+      src.includes('shouldWriteGlobal') || src.includes('guardedWriteState'),
+      'should guard global writes'
+    );
   });
 });
 
