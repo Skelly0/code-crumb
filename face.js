@@ -157,8 +157,21 @@ class ClaudeFace {
       this.pendingState = null;
       this.pendingDetail = '';
 
-      // Track timeline
-      this.timeline.push({ state: newState, at: Date.now() });
+      // Track timeline (cap consecutive idle/sleeping to prevent bar domination)
+      const LOW_ACTIVITY = new Set(['idle', 'sleeping', 'waiting']);
+      const MAX_CONSECUTIVE_LOW = 3;
+      if (LOW_ACTIVITY.has(newState)) {
+        let consecutive = 0;
+        for (let i = this.timeline.length - 1; i >= 0; i--) {
+          if (this.timeline[i].state === newState) consecutive++;
+          else break;
+        }
+        if (consecutive < MAX_CONSECUTIVE_LOW) {
+          this.timeline.push({ state: newState, at: Date.now() });
+        }
+      } else {
+        this.timeline.push({ state: newState, at: Date.now() });
+      }
       if (this.timeline.length > 200) this.timeline.shift();
 
       // Fade out old particles quickly on state change
