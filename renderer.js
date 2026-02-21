@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, STATE_FILE, SESSIONS_DIR, TEAMS_DIR, loadPrefs, savePrefs } = require('./shared');
+const { HOME, STATE_FILE, SESSIONS_DIR, TEAMS_DIR, loadPrefs, savePrefs, safeFilename } = require('./shared');
 
 // -- Modules -------------------------------------------------------
 const {
@@ -284,6 +284,44 @@ function runUnifiedMode() {
 
   // Initial session load
   orbital.loadSessions(mainSessionId);
+
+  // -- Startup subagent animation ----------------------------------------
+  // Write a temporary synthetic orbital session that appears briefly on boot,
+  // then fades away. The existing MiniFace spawn animation + stopped-linger
+  // logic in grid.js handles the visual lifecycle automatically.
+  const startupSessionId = `startup-${Date.now()}`;
+  const startupFile = path.join(SESSIONS_DIR, safeFilename(startupSessionId) + '.json');
+  try {
+    fs.writeFileSync(startupFile, JSON.stringify({
+      state: 'spawning',
+      detail: 'booting',
+      timestamp: Date.now(),
+      sessionId: startupSessionId,
+      parentSession: process.pid.toString(),
+      modelName: 'crumb',
+    }), 'utf8');
+    orbital.loadSessions(mainSessionId);
+  } catch {}
+
+  // After ~3s, mark the startup face as stopped (triggers happy linger + fade)
+  setTimeout(() => {
+    try {
+      fs.writeFileSync(startupFile, JSON.stringify({
+        state: 'happy',
+        detail: 'ready',
+        timestamp: Date.now(),
+        sessionId: startupSessionId,
+        parentSession: process.pid.toString(),
+        modelName: 'crumb',
+        stopped: true,
+      }), 'utf8');
+    } catch {}
+
+    // Clean up the session file after another 5s (linger period)
+    setTimeout(() => {
+      try { fs.unlinkSync(startupFile); } catch {}
+    }, 5000);
+  }, 3000);
 
   // Initial team discovery
   let activeTeams = scanTeams();
