@@ -146,6 +146,21 @@ const eyes = {
     if (frame % 60 < 2) return { left: ['\u2584\u2584', '\u2588\u2588'], right: ['\u2584\u2584', '\u2588\u2588'] };
     return { left: ['\u2584\u2584', '\u2588 '], right: ['\u2584\u2584', ' \u2588'] };
   },
+
+  wink() { return { left: ['██', '██'], right: ['──', '▄▄'] }; },
+
+  heart() { return { left: ['♥ ', ' ♥'], right: [' ♥', '♥ '] }; },
+
+  star(theme, frame) {
+    const chars = ['★ ', ' ★', '✦ ', ' ✦'];
+    const i = frame % chars.length;
+    return {
+      left:  [chars[i], chars[(i + 2) % chars.length]],
+      right: [chars[(i + 1) % chars.length], chars[(i + 3) % chars.length]],
+    };
+  },
+
+  tired() { return { left: ['▀▀', '  '], right: ['  ', '▄▄'] }; },
 };
 
 module.exports = { mouths, gridMouths, eyes };
