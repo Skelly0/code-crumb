@@ -878,4 +878,98 @@ describe('face.js -- accessories indicator in render', () => {
   });
 });
 
+describe('face.js -- project context row in render', () => {
+  const origCols = process.stdout.columns;
+  const origRows = process.stdout.rows;
+  function renderStripped(face) {
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    const out = face.render().replace(/\x1b\[[^m]*m/g, '');
+    process.stdout.columns = origCols;
+    process.stdout.rows = origRows;
+    return out;
+  }
+
+  test('shows folder name from cwd', () => {
+    const face = new ClaudeFace();
+    face.setStats({ cwd: '/home/user/my-project' });
+    const out = renderStripped(face);
+    assert.ok(out.includes('\u2302 my-project'), 'should show folder name');
+  });
+
+  test('shows branch name alongside folder', () => {
+    const face = new ClaudeFace();
+    face.setStats({ cwd: '/home/user/proj', gitBranch: 'main' });
+    const out = renderStripped(face);
+    assert.ok(out.includes('\u2302 proj'), 'should show folder');
+    assert.ok(out.includes('\u2387 main'), 'should show branch');
+  });
+
+  test('does not show context row when cwd is null and no branch', () => {
+    const face = new ClaudeFace();
+    face.setStats({ cwd: null });
+    const out = renderStripped(face);
+    assert.ok(!out.includes('\u2302'), 'should not show house icon');
+  });
+
+  test('does not show folder for root path', () => {
+    const face = new ClaudeFace();
+    face.setStats({ cwd: '/' });
+    const out = renderStripped(face);
+    assert.ok(!out.includes('\u2302'), 'basename of / is empty, should skip');
+  });
+
+  test('shows branch even without cwd', () => {
+    const face = new ClaudeFace();
+    face.setStats({ gitBranch: 'develop' });
+    const out = renderStripped(face);
+    assert.ok(out.includes('\u2387 develop'), 'branch should show without folder');
+  });
+
+  test('folder appears before branch', () => {
+    const face = new ClaudeFace();
+    face.setStats({ cwd: '/home/user/proj', gitBranch: 'main' });
+    const out = renderStripped(face);
+    const folderPos = out.indexOf('\u2302');
+    const branchPos = out.indexOf('\u2387');
+    assert.ok(folderPos > -1, 'folder icon should appear');
+    assert.ok(branchPos > -1, 'branch icon should appear');
+    assert.ok(folderPos < branchPos, 'folder should come before branch');
+  });
+
+  test('context row is separate from indicator row', () => {
+    const face = new ClaudeFace();
+    face.paletteIndex = 1;
+    face.setStats({ cwd: '/home/user/my-project', gitBranch: 'feat' });
+    const out = renderStripped(face);
+    const { PALETTE_NAMES } = require('../themes');
+    assert.ok(out.includes(PALETTE_NAMES[1]), 'palette name should appear');
+    assert.ok(out.includes('\u2302 my-project'), 'folder should appear');
+    assert.ok(out.includes('\u2387 feat'), 'branch should appear');
+  });
+
+  test('truncates when folder + branch exceeds face width', () => {
+    const face = new ClaudeFace();
+    face.setStats({ cwd: '/home/user/this-is-a-really-really-long-folder-name', gitBranch: 'feature/also-very-long' });
+    const out = renderStripped(face);
+    assert.ok(out.includes('\u2302'), 'folder icon should appear');
+    assert.ok(out.includes('\u2026'), 'should have ellipsis for truncation');
+  });
+
+  test('shows worktree icon instead of branch icon', () => {
+    const face = new ClaudeFace();
+    face.setStats({ gitBranch: 'feat-x', isWorktree: true });
+    const out = renderStripped(face);
+    assert.ok(out.includes('\u25c4'), 'should show worktree icon \u25c4');
+    assert.ok(!out.includes('\u2387'), 'should not show regular branch icon');
+  });
+
+  test('shows commit count after branch', () => {
+    const face = new ClaudeFace();
+    face.setStats({ gitBranch: 'main', commitCount: 3 });
+    const out = renderStripped(face);
+    assert.ok(out.includes('\u21913'), 'should show ↑3 after branch');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

@@ -891,54 +891,60 @@ class ClaudeFace {
       }
     }
 
-    // Indicators row: accs + subs (left), branch + folder (middle), palette name (right).
-    // Budget-aware: palette name is right-aligned and reserved first; branch has priority
-    // over folder; each element is capped so nothing overlaps.
+    // Indicators row: accs + subs (left), palette name (right)
     {
       const dc = ansi.fg(...dimColor(theme.label, 0.55));
       const accText = this.accessoriesEnabled ? '\u25cf accs' : '\u25cb accs';
       const subText = this.showOrbitals ? '\u25cf subs' : '\u25cb subs';
-
-      // Right side: palette name when non-default theme is active
+      const leftText = `${accText}  ${subText}`;
       const pName = this.paletteIndex > 0 ? (PALETTE_NAMES[this.paletteIndex] || '') : '';
-
-      // Budget for left side: faceW minus palette name and one gap char
-      const leftBudget = faceW - (pName ? pName.length + 1 : 0);
-
-      // Base is always shown: "● accs  ● subs" (14 chars)
-      let leftText = `${accText}  ${subText}`;
-
-      // Branch (priority 1): icon differs for worktrees vs regular clones
-      if (this.gitBranch) {
-        const branchIcon = this.isWorktree ? '\u25c4' : '\u2387'; // ◄ or ⎇
-        const commitsStr = this.commitCount > 0 ? ` \u2191${this.commitCount}` : '';
-        const maxB = leftBudget - leftText.length - 3 - commitsStr.length; // 3 = "  X "
-        if (maxB > 1) {
-          const b = this.gitBranch.length > maxB
-            ? this.gitBranch.slice(0, maxB - 1) + '\u2026'
-            : this.gitBranch;
-          const candidate = `${leftText}  ${branchIcon} ${b}${commitsStr}`;
-          if (candidate.length <= leftBudget) leftText = candidate;
-        }
-      }
-
-      // Folder (priority 2): fill remaining space after branch
-      if (this.cwd) {
-        const maxF = leftBudget - leftText.length - 4; // 4 = "  ⌂ "
-        if (maxF > 1) {
-          const folder = path.basename(this.cwd);
-          const f = folder.length > maxF
-            ? folder.slice(0, maxF - 1) + '\u2026'
-            : folder;
-          const candidate = `${leftText}  \u2302 ${f}`;
-          if (candidate.length <= leftBudget) leftText = candidate;
-        }
-      }
 
       buf += ansi.to(startRow + 8, startCol) + `${dc}${leftText}${r}`;
       if (pName) {
         buf += ansi.to(startRow + 8, startCol + faceW - pName.length);
         buf += `${dc}${pName}${r}`;
+      }
+    }
+
+    // Project context row: folder + branch, centered below status/detail
+    {
+      const folder = this.cwd ? path.basename(this.cwd) : '';
+      if (folder || this.gitBranch) {
+        const dc = ansi.fg(...dimColor(theme.label, 0.45));
+        const branchIcon = this.isWorktree ? '\u25c4' : '\u2387';
+        const commitsStr = this.commitCount > 0 ? ` \u2191${this.commitCount}` : '';
+
+        // Build parts, truncating each to share the budget fairly
+        let folderPart = '';
+        let branchPart = '';
+        const sep = (folder && this.gitBranch) ? '  ' : '';
+
+        if (folder && this.gitBranch) {
+          // Both: split budget — folder gets up to half, branch gets the rest
+          const overhead = 2 + 2 + sep.length + commitsStr.length; // "⌂ " + "X " + sep + commits
+          const available = faceW - overhead;
+          const maxF = Math.max(3, Math.floor(available / 2));
+          const f = folder.length > maxF ? folder.slice(0, maxF - 1) + '\u2026' : folder;
+          const maxB = available - f.length;
+          const b = this.gitBranch.length > maxB
+            ? this.gitBranch.slice(0, Math.max(1, maxB - 1)) + '\u2026'
+            : this.gitBranch;
+          folderPart = `\u2302 ${f}`;
+          branchPart = `${branchIcon} ${b}${commitsStr}`;
+        } else if (folder) {
+          const maxF = faceW - 2; // "⌂ "
+          folderPart = `\u2302 ${folder.length > maxF ? folder.slice(0, maxF - 1) + '\u2026' : folder}`;
+        } else if (this.gitBranch) {
+          const maxB = faceW - 2 - commitsStr.length; // "X " + commits
+          const b = this.gitBranch.length > maxB
+            ? this.gitBranch.slice(0, maxB - 1) + '\u2026'
+            : this.gitBranch;
+          branchPart = `${branchIcon} ${b}${commitsStr}`;
+        }
+
+        const ctx = folderPart + sep + branchPart;
+        const ctxPad = Math.floor((faceW - ctx.length) / 2);
+        buf += ansi.to(startRow + 11, startCol + ctxPad) + `${dc}${ctx}${r}`;
       }
     }
 
