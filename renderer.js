@@ -184,6 +184,55 @@ function runUnifiedMode() {
     } catch {}
 
     const now = Date.now();
+
+    // -- Stopped-flag rescue: runs BEFORE the minDisplayUntil early return --
+    // If Stop hook fired (lastStopped=true) but the face is still showing
+    // 'thinking' (either because the file read was missed due to mtime
+    // granularity, or because setState buffered 'responding' as pendingState
+    // while minDisplayUntil was active), force-transition to 'responding' now.
+    // We bypass setState() here to avoid it re-buffering the state.
+    if (lastStopped && face.state === 'thinking') {
+      face.prevState = face.state;
+      face.state = 'responding';
+      face.transitionFrame = 0;
+      face.lastStateChange = now;
+      face.stateDetail = 'wrapping up';
+      face.minDisplayUntil = now; // expire immediately so happy fires next frame
+      face.pendingState = null;
+      face.pendingDetail = '';
+      face.particles.fadeAll();
+      face.timeline.push({ state: 'responding', at: now });
+      if (face.timeline.length > 200) face.timeline.shift();
+    }
+
+    // If we're past minDisplayUntil and still thinking with no stopped signal,
+    // do a fresh file read to catch any stop event missed by fs.watch mtime
+    // granularity (common on Windows FAT/NTFS with 1-second mtime resolution).
+    if (!lastStopped && face.state === 'thinking' && now >= face.minDisplayUntil) {
+      try {
+        const freshData = readState();
+        if (freshData.stopped) {
+          lastStopped = true;
+          lastFileState = freshData.state;
+          // If the file says responding, apply it; otherwise we just set
+          // lastStopped so the rescue block above fires on the next frame.
+          if (freshData.state === 'responding') {
+            face.prevState = face.state;
+            face.state = 'responding';
+            face.transitionFrame = 0;
+            face.lastStateChange = now;
+            face.stateDetail = freshData.detail || 'wrapping up';
+            face.minDisplayUntil = now;
+            face.pendingState = null;
+            face.pendingDetail = '';
+            face.particles.fadeAll();
+            face.timeline.push({ state: 'responding', at: now });
+            if (face.timeline.length > 200) face.timeline.shift();
+          }
+        }
+      } catch {}
+    }
+
     // Don't apply timeouts if minimum display time hasn't passed
     if (now < face.minDisplayUntil) return;
 
