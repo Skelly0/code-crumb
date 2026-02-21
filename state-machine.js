@@ -196,6 +196,25 @@ function extractExitCode(stdout) {
   return match ? parseInt(match[1], 10) : null;
 }
 
+// Detect rate limit / usage limit / quota errors in tool output
+const rateLimitPatterns = [
+  /\brate.?limit/i,
+  /\busage.?limit/i,
+  /\btoo many requests\b/i,
+  /\b429\b/,
+  /\bquota.?exceeded\b/i,
+  /\bcapacity\b/i,
+  /\boverloaded\b/i,
+  /\bretry.?after\b/i,
+  /\bthrottle/i,
+  /\bconcurrency.?limit/i,
+];
+
+function looksLikeRateLimit(stdout, stderr) {
+  const combined = (stdout || '') + (stderr || '');
+  return rateLimitPatterns.some(p => p.test(combined));
+}
+
 // Friendly error detail based on what we found
 function errorDetail(stdout, stderr) {
   const combined = (stdout || '') + (stderr || '');
@@ -236,7 +255,11 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
   let diffInfo = null;
 
   // Decision tree -- in order of confidence
-  if (isError) {
+  // Rate limits are special: they look like errors but deserve their own state
+  if (looksLikeRateLimit(stdout, stderr)) {
+    state = 'ratelimited';
+    detail = 'usage limit';
+  } else if (isError) {
     state = 'error';
     detail = errorDetail(stdout, stderr);
   } else if (toolResponse?.interrupted) {
@@ -374,6 +397,8 @@ module.exports = {
   falsePositives,
   isMergeConflict,
   looksLikeError,
+  looksLikeRateLimit,
+  rateLimitPatterns,
   errorDetail,
   extractExitCode,
   classifyToolResult,

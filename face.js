@@ -128,7 +128,7 @@ class ClaudeFace {
       error: 3500, coding: 2500, thinking: 2500, responding: 3000, reading: 2000,
       searching: 2000, executing: 2500, testing: 2500, installing: 2500,
       caffeinated: 2500, subagent: 2500, waiting: 1500, sleeping: 1000,
-      starting: 2500, spawning: 2000, committing: 3000, reviewing: 3000,
+      starting: 2500, spawning: 2000, committing: 3000, reviewing: 3000, ratelimited: 5000,
     };
     return times[state] || 1000;
   }
@@ -138,8 +138,8 @@ class ClaudeFace {
       const now = Date.now();
 
       // Minimum display time: buffer incoming state if current hasn't shown long enough.
-      // Errors always bypass -- they're important visual feedback, not flickering noise.
-      if (now < this.minDisplayUntil && newState !== 'error') {
+      // Errors and rate limits always bypass -- they're important visual feedback, not flickering noise.
+      if (now < this.minDisplayUntil && newState !== 'error' && newState !== 'ratelimited') {
         // Don't overwrite a pending error with a non-error state
         if (this.pendingState !== 'error') {
           this.pendingState = newState;
@@ -188,6 +188,8 @@ class ClaudeFace {
         this.particles.spawn(6, 'speedline');
       } else if (newState === 'committing') {
         this.particles.spawn(14, 'push');
+      } else if (newState === 'ratelimited') {
+        this.particles.spawn(5, 'question');
       }
     } else {
       this.lastStateChange = Date.now();
@@ -425,6 +427,7 @@ class ClaudeFace {
       case 'starting':    return eyes.spin(theme, Math.floor(frame / 4));
       case 'committing':  return eyes.focused(theme, frame);
       case 'reviewing':   return eyes.narrowed(theme, frame);
+      case 'ratelimited': return eyes.tired(theme, frame);
       default:            return eyes.open(theme, frame);
     }
   }
