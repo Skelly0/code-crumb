@@ -399,8 +399,12 @@ class OrbitalSystem {
 
   calculateOrbit(cols, rows, mainPos) {
     // Minimum ellipse semi-axes: must clear the main face box + decorations
-    // Vertical padding: accessories/thought bubble above need more clearance than bare face
-    const verticalPad = mainPos.accessoriesActive ? 6 : (mainPos.bubble ? 4 : 2);
+    // Vertical padding above: accessories/thought bubble need more clearance than bare face
+    const verticalPadAbove = mainPos.accessoriesActive ? 6 : (mainPos.bubble ? 4 : 2);
+    // Vertical padding below: stats area extends well past the face box bottom
+    // (indicators +8, status +9, detail +10, project ctx +11, streak +12, timeline +13, sparkline +14)
+    const STATS_ROWS_BELOW = 7;
+    const verticalPad = Math.max(verticalPadAbove, STATS_ROWS_BELOW);
     const minA = Math.floor(mainPos.w / 2) + Math.floor(MINI_W / 2) + 3;
     const minB = Math.floor(mainPos.h / 2) + Math.floor(MINI_H / 2) + verticalPad;
 
@@ -461,12 +465,12 @@ class OrbitalSystem {
         const row = Math.round(mainPos.centerY + dy * t);
 
         // Skip if inside main face area (extended for thought bubbles,
-        // accessories above, and status/indicators below)
+        // accessories above, and stats/indicators below — stats extend ~7 rows past face box)
         const rightExclude = mainPos.bubble
             ? mainPos.bubble.col + mainPos.bubble.w + 2
             : mainRight + 2;
         if (col >= mainLeft - 2 && col <= rightExclude &&
-            row >= mainTop - 5 && row <= mainBot + 4) continue;
+            row >= mainTop - 5 && row <= mainBot + 7) continue;
 
         // Skip if inside orbital box
         if (col >= pos.col - 1 && col <= pos.col + MINI_W + 1 &&
@@ -589,8 +593,10 @@ class OrbitalSystem {
     for (let i = 0; i < n; i++) {
       const angle = (Math.PI * 2 * i / n) + this.rotationAngle;
       const col = Math.round(mainPos.centerX + Math.cos(angle) * a - MINI_W / 2);
-      // Shift orbit center down only when accessories are active above the face
-      const verticalShift = mainPos.accessoriesActive ? 2 : 0;
+      // Shift orbit center down to account for stats/indicator rows below the face box,
+      // plus extra when accessories are active above the face
+      const statsShift = 3;  // half of stats area height (~7 rows / 2, rounded)
+      const verticalShift = statsShift + (mainPos.accessoriesActive ? 2 : 0);
       const row = Math.round((mainPos.centerY + verticalShift) + Math.sin(angle) * b - MINI_H / 2);
 
       // Clamp to terminal bounds
@@ -606,7 +612,7 @@ class OrbitalSystem {
           clampedRow < bub.row + bub.h + pad && clampedRow + MINI_H > bub.row - pad;
         if (bubHit()) {
           const nCol = Math.round(mainPos.centerX + Math.cos(angle) * (a + 6) - MINI_W / 2);
-          const nRow = Math.round((mainPos.centerY + verticalShift) + Math.sin(angle) * (b + 4) - MINI_H / 2);
+          const nRow = Math.round((mainPos.centerY + verticalShift) + Math.sin(angle) * (b + 3) - MINI_H / 2);
           clampedCol = Math.max(1, Math.min(cols - MINI_W, nCol));
           clampedRow = Math.max(1, Math.min(rows - MINI_H, nRow));
           // If still overlapping (wide bubble + narrow terminal), push below the bubble
