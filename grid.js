@@ -73,6 +73,10 @@ class MiniFace {
     this.teamColor = null;     // RGB color derived from teamName
     this.gitBranch = null;     // current git branch (if known)
     this.minDisplayUntil = 0;  // Minimum display time to prevent flashing
+    // Startup/spawn animation state for orbitals
+    this.spawning = false;      // true while this mini-face is entering the orbit
+    this.spawnProgress = 0;       // ms elapsed since spawn began
+    this.SPAWN_MS = 800;          // duration of the spawn animation in ms
   }
 
   updateFromFile(data) {
@@ -140,6 +144,14 @@ class MiniFace {
     // Spawning is a transient boot state — auto-transition to thinking after 2s
     if (this.state === 'spawning' && Date.now() - this.firstSeen > 2000) {
       this.state = 'thinking';
+    }
+    // Update startup spawn progress for orbitals
+    if (this.spawning) {
+      this.spawnProgress += dt;
+      if (this.spawnProgress >= this.SPAWN_MS) {
+        this.spawning = false;
+        this.spawnProgress = this.SPAWN_MS;
+      }
     }
 
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
@@ -343,7 +355,11 @@ class OrbitalSystem {
         seenIds.add(id);
 
         if (!this.faces.has(id)) {
-          this.faces.set(id, new MiniFace(id));
+          // New orbital session detected on startup; mark it to spawn with a startup animation
+          const mf = new MiniFace(id);
+          mf.spawning = true;
+          mf.spawnProgress = 0;
+          this.faces.set(id, mf);
         }
         this.faces.get(id).updateFromFile(data);
       } catch {
@@ -592,12 +608,15 @@ class OrbitalSystem {
     const positions = [];
     for (let i = 0; i < n; i++) {
       const angle = (Math.PI * 2 * i / n) + this.rotationAngle;
-      const col = Math.round(mainPos.centerX + Math.cos(angle) * a - MINI_W / 2);
+      // Startup spawn scale for this face (0 -> 1)
+      const face = visible[i];
+      const scale = (face.spawning ? Math.max(0, face.spawnProgress / face.SPAWN_MS) : 1);
+      const col = Math.round(mainPos.centerX + Math.cos(angle) * a * scale - MINI_W / 2);
       // Shift orbit center down to account for stats/indicator rows below the face box,
       // plus extra when accessories are active above the face
       const statsShift = 3;  // half of stats area height (~7 rows / 2, rounded)
       const verticalShift = statsShift + (mainPos.accessoriesActive ? 2 : 0);
-      const row = Math.round((mainPos.centerY + verticalShift) + Math.sin(angle) * b - MINI_H / 2);
+      const row = Math.round((mainPos.centerY + verticalShift) + Math.sin(angle) * b * scale - MINI_H / 2);
 
       // Clamp to terminal bounds
       let clampedCol = Math.max(1, Math.min(cols - MINI_W, col));
