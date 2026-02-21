@@ -39,8 +39,8 @@ const CELL_W = 12;
 const CELL_H = 7;
 const BOX_W = 8;
 const BOX_INNER = 6;
-const STALE_MS = 120000;
-const STOPPED_LINGER_MS = 15000;
+const STALE_MS = 60000;
+const STOPPED_LINGER_MS = 10000;
 const MIN_COLS_GRID = 14;
 const MIN_ROWS_GRID = 9;
 const IDLE_TIMEOUT = 8000;
@@ -334,6 +334,11 @@ class OrbitalSystem {
 
         // Skip the main session — it's the big face, not an orbital
         if (excludeId && id === excludeId) continue;
+
+        // Only show real subagents (have parentSession) or team members (isTeammate).
+        // Plain sessions without either field are just the main session echoed
+        // into SESSIONS_DIR — they'd appear as ghost orbitals.
+        if (!data.parentSession && !data.isTeammate) continue;
 
         seenIds.add(id);
 

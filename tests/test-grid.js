@@ -81,7 +81,7 @@ describe('grid.js -- MiniFace', () => {
   test('isStale returns true for old stopped face', () => {
     const face = new MiniFace('test');
     face.stopped = true;
-    face.stoppedAt = Date.now() - 20000; // Past STOPPED_LINGER_MS (15s)
+    face.stoppedAt = Date.now() - 15000; // Past STOPPED_LINGER_MS (10s)
     assert.ok(face.isStale());
   });
 
@@ -246,20 +246,98 @@ describe('grid.js -- OrbitalSystem stale cleanup', () => {
   test('stale stopped faces are detected', () => {
     const face = new MiniFace('stale');
     face.stopped = true;
-    face.stoppedAt = Date.now() - 20000; // Past STOPPED_LINGER_MS (15s)
+    face.stoppedAt = Date.now() - 15000; // Past STOPPED_LINGER_MS (10s)
     assert.ok(face.isStale());
   });
 
   test('recently stopped faces are not stale', () => {
     const face = new MiniFace('recent');
     face.stopped = true;
-    face.stoppedAt = Date.now() - 5000; // Within STOPPED_LINGER_MS (15s)
+    face.stoppedAt = Date.now() - 5000; // Within STOPPED_LINGER_MS (10s)
     assert.ok(!face.isStale());
   });
 
   test('fresh faces are not stale', () => {
     const face = new MiniFace('fresh');
     assert.ok(!face.isStale());
+  });
+});
+
+describe('grid.js -- OrbitalSystem session schema validation', () => {
+  test('loadSessions skips sessions without parentSession or isTeammate', () => {
+    // Sessions that are just the main session echoed to SESSIONS_DIR
+    // should be filtered out — they lack parentSession and isTeammate fields
+    const fs = require('fs');
+    const path = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    const orbital = new OrbitalSystem();
+
+    // Create a temp session file WITHOUT parentSession or isTeammate
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const ghostFile = path.join(SESSIONS_DIR, 'ghost-main-echo.json');
+    fs.writeFileSync(ghostFile, JSON.stringify({
+      session_id: 'ghost-main-echo',
+      state: 'thinking',
+      detail: '',
+      timestamp: Date.now(),
+    }));
+
+    orbital.loadSessions('different-id');
+    assert.ok(!orbital.faces.has('ghost-main-echo'),
+      'session without parentSession/isTeammate should be filtered out');
+
+    // Clean up
+    try { fs.unlinkSync(ghostFile); } catch {}
+  });
+
+  test('loadSessions includes sessions with parentSession', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    const orbital = new OrbitalSystem();
+
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const subFile = path.join(SESSIONS_DIR, 'real-subagent.json');
+    fs.writeFileSync(subFile, JSON.stringify({
+      session_id: 'real-subagent',
+      state: 'coding',
+      detail: 'editing',
+      timestamp: Date.now(),
+      parentSession: 'main-session',
+    }));
+
+    orbital.loadSessions('main-session');
+    assert.ok(orbital.faces.has('real-subagent'),
+      'session with parentSession should be included');
+
+    // Clean up
+    try { fs.unlinkSync(subFile); } catch {}
+  });
+
+  test('loadSessions includes sessions with isTeammate', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    const orbital = new OrbitalSystem();
+
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const teamFile = path.join(SESSIONS_DIR, 'teammate-session.json');
+    fs.writeFileSync(teamFile, JSON.stringify({
+      session_id: 'teammate-session',
+      state: 'reading',
+      detail: '',
+      timestamp: Date.now(),
+      isTeammate: true,
+      teamName: 'alpha',
+      teammateName: 'researcher',
+    }));
+
+    orbital.loadSessions('main-session');
+    assert.ok(orbital.faces.has('teammate-session'),
+      'session with isTeammate should be included');
+
+    // Clean up
+    try { fs.unlinkSync(teamFile); } catch {}
   });
 });
 
