@@ -119,20 +119,31 @@ function scanTeams() {
 
 // -- Unified mode (main face + orbital subagents) ------------------
 function runUnifiedMode() {
+  const minimal = process.argv.includes('--minimal');
   const face = new ClaudeFace();
   const rendererStartTime = Date.now();
   face.setState('starting');
   const orbital = new OrbitalSystem();
 
+  // Minimal mode: strip all UI chrome, just face + status line
+  if (minimal) {
+    face.minimalMode = true;
+    face.accessoriesEnabled = false;
+    face.showStats = false;
+    face.showOrbitals = false;
+  }
+
   // Ensure sessions directory exists
   try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
 
-  // Load persisted preferences
-  const prefs = loadPrefs();
-  if (typeof prefs.paletteIndex === 'number') face.paletteIndex = prefs.paletteIndex % PALETTES.length;
-  if (typeof prefs.accessoriesEnabled === 'boolean') face.accessoriesEnabled = prefs.accessoriesEnabled;
-  if (typeof prefs.showStats === 'boolean') face.showStats = prefs.showStats;
-  if (typeof prefs.showOrbitals === 'boolean') face.showOrbitals = prefs.showOrbitals;
+  // Load persisted preferences (skipped in minimal mode)
+  if (!minimal) {
+    const prefs = loadPrefs();
+    if (typeof prefs.paletteIndex === 'number') face.paletteIndex = prefs.paletteIndex % PALETTES.length;
+    if (typeof prefs.accessoriesEnabled === 'boolean') face.accessoriesEnabled = prefs.accessoriesEnabled;
+    if (typeof prefs.showStats === 'boolean') face.showStats = prefs.showStats;
+    if (typeof prefs.showOrbitals === 'boolean') face.showOrbitals = prefs.showOrbitals;
+  }
 
   // Main session isolation
   let mainSessionId = null;
@@ -277,16 +288,18 @@ function runUnifiedMode() {
     });
   } catch {}
 
-  // Watch sessions directory for subagent changes
-  try {
-    fs.watch(SESSIONS_DIR, () => { orbital.loadSessions(mainSessionId); });
-  } catch {}
+  // Watch sessions directory for subagent changes (skipped in minimal mode)
+  if (!minimal) {
+    try {
+      fs.watch(SESSIONS_DIR, () => { orbital.loadSessions(mainSessionId); });
+    } catch {}
+  }
 
-  // Initial session load
-  orbital.loadSessions(mainSessionId);
+  // Initial session load (skipped in minimal mode)
+  if (!minimal) orbital.loadSessions(mainSessionId);
 
-  // Initial team discovery
-  let activeTeams = scanTeams();
+  // Initial team discovery (skipped in minimal mode)
+  let activeTeams = minimal ? {} : scanTeams();
 
   // Raw stdin keypress handling
   if (process.stdin.isTTY) {
@@ -303,15 +316,20 @@ function runUnifiedMode() {
     }
 
     process.stdin.on('data', (key) => {
+      if (key === 'q' || key === '\x03') { cleanup(); return; } // q or Ctrl+C
+      if (minimal) {
+        // Minimal mode: only pet and quit
+        if (key === ' ') face.pet();
+        return;
+      }
       // Help dismiss: any key while help is showing closes it
-      if (face.showHelp && key !== '\x03') { face.showHelp = false; return; }
+      if (face.showHelp) { face.showHelp = false; return; }
       if (key === ' ') face.pet();
       else if (key === 't' && !isNoColor()) { face.cycleTheme(); orbital.paletteIndex = face.paletteIndex; persistPrefs(); }
       else if (key === 's') { face.toggleStats(); persistPrefs(); }
       else if (key === 'a') { face.toggleAccessories(); persistPrefs(); }
       else if (key === 'o') { face.toggleOrbitals(); persistPrefs(); }
       else if (key === 'h' || key === '?') face.toggleHelp();
-      else if (key === 'q' || key === '\x03') cleanup(); // q or Ctrl+C
     });
   }
 
@@ -347,7 +365,7 @@ function runUnifiedMode() {
     const rows = process.stdout.rows || 24;
 
     let out = face.render();
-    if (face.showOrbitals && face.lastPos && orbital.faces.size > 0) {
+    if (!minimal && face.showOrbitals && face.lastPos && orbital.faces.size > 0) {
       const paletteThemes = (PALETTES[face.paletteIndex] || PALETTES[0]).themes;
       out += orbital.render(cols, rows, face.lastPos, paletteThemes);
     }

@@ -108,6 +108,9 @@ class ClaudeFace {
     this.subagentCount = 0;
     this.lastPos = null;
 
+    // Minimal mode (--minimal flag: face + status only, no chrome)
+    this.minimalMode = false;
+
     // Model name (shown in status line: "{name} is thinking")
     this.modelName = process.env.CODE_CRUMB_MODEL || 'claude';
 
@@ -729,7 +732,7 @@ class ClaudeFace {
     buf += `${fc}    \u2570${'\u2500'.repeat(inner)}\u256f${r}`;
 
     // Accessories (above face box, rendered before thought bubble so bubble takes priority)
-    if (this.accessoriesEnabled) {
+    if (this.accessoriesEnabled && !this.minimalMode) {
       const accessory = getAccessory(this.state);
       if (accessory) {
         const ac = ansi.fg(...dimColor(breathe(theme.accent, breathTime), 0.85));
@@ -767,8 +770,8 @@ class ClaudeFace {
       buf += `${ansi.fg(...dimColor(theme.label, 0.65))}${' '.repeat(Math.max(0, detailPad))}${detailText}${r}`;
     }
 
-    // Thought bubble
-    if (this.thoughtText) {
+    // Thought bubble (skipped in minimal mode)
+    if (this.thoughtText && !this.minimalMode) {
       const bc = ansi.fg(...dimColor(theme.accent, 0.5));
       const tc = `${ansi.italic}${ansi.fg(...dimColor(theme.label, 0.7))}`;
       const hasAccessory = this.accessoriesEnabled && getAccessory(this.state);
@@ -814,8 +817,8 @@ class ClaudeFace {
       }
     }
 
-    // Streak counter, timeline, sparkline (togglable via 's')
-    if (this.showStats) {
+    // Streak counter, timeline, sparkline (togglable via 's', skipped in minimal mode)
+    if (this.showStats && !this.minimalMode) {
       if (this.streak > 0 || this.milestoneShowTime > 0) {
         let streakText, sc;
         if (this.milestoneShowTime > 0 && this.milestone) {
@@ -894,8 +897,8 @@ class ClaudeFace {
       }
     }
 
-    // Indicators row: accs + subs (left), palette name (right)
-    {
+    // Indicators row: accs + subs (left), palette name (right) — skipped in minimal mode
+    if (!this.minimalMode) {
       const dc = ansi.fg(...dimColor(theme.label, 0.55));
       const accText = this.accessoriesEnabled ? '\u25cf accs' : '\u25cb accs';
       const subText = this.showOrbitals ? '\u25cf subs' : '\u25cb subs';
@@ -909,8 +912,8 @@ class ClaudeFace {
       }
     }
 
-    // Project context row: folder + branch, centered below status/detail
-    {
+    // Project context row: folder + branch, centered below status/detail — skipped in minimal mode
+    if (!this.minimalMode) {
       const folder = this.cwd ? path.basename(this.cwd) : '';
       if (folder || this.gitBranch) {
         const dc = ansi.fg(...dimColor(theme.label, 0.45));
@@ -951,8 +954,8 @@ class ClaudeFace {
       }
     }
 
-    // Key hints bar (bottom of terminal)
-    {
+    // Key hints bar (bottom of terminal) — skipped in minimal mode
+    if (!this.minimalMode) {
       const dc = ansi.fg(...dimColor(theme.label, 0.55));
       const kc = ansi.fg(...dimColor(theme.accent, 0.6));
       const sep = `${dc}\u00b7${r}`;
@@ -963,8 +966,8 @@ class ClaudeFace {
       buf += ansi.to(rows, hintCol) + hint;
     }
 
-    // Help overlay
-    if (this.showHelp) {
+    // Help overlay (skipped in minimal mode)
+    if (this.showHelp && !this.minimalMode) {
       buf += this._renderHelp(cols, rows, theme);
     }
 
