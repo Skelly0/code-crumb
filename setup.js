@@ -32,62 +32,24 @@ const editor = (process.argv[2] || 'claude').toLowerCase();
 function setupClaude() {
   const CLAUDE_SETTINGS = path.join(HOME, '.claude', 'settings.json');
 
-  const faceHooks = {
-    PreToolUse: [
+  const hookEvents = [
+    'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop',
+    'Notification', 'SubagentStart', 'SubagentStop',
+    'TeammateIdle', 'TaskCompleted', 'SessionStart', 'SessionEnd',
+  ];
+
+  const faceHooks = {};
+  for (const event of hookEvents) {
+    faceHooks[event] = [
       {
         matcher: '',
         hooks: [{
           type: 'command',
-          command: `node "${hookPath}" PreToolUse`,
+          command: `node "${hookPath}" ${event}`,
         }],
       },
-    ],
-    PostToolUse: [
-      {
-        matcher: '',
-        hooks: [{
-          type: 'command',
-          command: `node "${hookPath}" PostToolUse`,
-        }],
-      },
-    ],
-    Stop: [
-      {
-        matcher: '',
-        hooks: [{
-          type: 'command',
-          command: `node "${hookPath}" Stop`,
-        }],
-      },
-    ],
-    Notification: [
-      {
-        matcher: '',
-        hooks: [{
-          type: 'command',
-          command: `node "${hookPath}" Notification`,
-        }],
-      },
-    ],
-    TeammateIdle: [
-      {
-        matcher: '',
-        hooks: [{
-          type: 'command',
-          command: `node "${hookPath}" TeammateIdle`,
-        }],
-      },
-    ],
-    TaskCompleted: [
-      {
-        matcher: '',
-        hooks: [{
-          type: 'command',
-          command: `node "${hookPath}" TaskCompleted`,
-        }],
-      },
-    ],
-  };
+    ];
+  }
 
   console.log('\n  Code Crumb Setup (Claude Code)');
   console.log('  ' + '='.repeat(40) + '\n');
@@ -161,10 +123,12 @@ console.log(`
   3. To preview all expressions:
      node "${demoPath}"
 
-  Plugin install (alternative to manual setup):
+  Plugin install (recommended -- works with marketplace):
      claude plugin install --plugin-dir "${path.resolve(__dirname).replace(/\\/g, '/')}"
 
-  To uninstall, remove the code-crumb hooks from:
+  To uninstall:
+     claude plugin uninstall code-crumb
+  Or remove the code-crumb hooks manually from:
      ${CLAUDE_SETTINGS}
 
   ${'─'.repeat(42)}

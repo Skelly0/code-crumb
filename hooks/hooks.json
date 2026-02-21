@@ -22,6 +22,17 @@
         ]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" PostToolUseFailure"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "",
@@ -44,6 +55,28 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" SubagentStart"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" SubagentStop"
+          }
+        ]
+      }
+    ],
     "TeammateIdle": [
       {
         "matcher": "",
@@ -62,6 +95,28 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" TaskCompleted"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" SessionStart"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" SessionEnd"
           }
         ]
       }
