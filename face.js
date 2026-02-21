@@ -898,11 +898,15 @@ class ClaudeFace {
         leftText += `  \u2387 ${branch}`;
         if (this.commitCount > 0) leftText += `  \u2191${this.commitCount}`;
       }
-      buf += ansi.to(startRow + 8, startCol) + `${dc}${leftText}${r}`;
       if (this.paletteIndex > 0) {
         const pName = PALETTE_NAMES[this.paletteIndex] || '';
+        const maxLeft = faceW - pName.length - 2;
+        if (leftText.length > maxLeft) leftText = leftText.slice(0, maxLeft);
+        buf += ansi.to(startRow + 8, startCol) + `${dc}${leftText}${r}`;
         buf += ansi.to(startRow + 8, startCol + faceW - pName.length);
         buf += `${dc}${pName}${r}`;
+      } else {
+        buf += ansi.to(startRow + 8, startCol) + `${dc}${leftText}${r}`;
       }
     }
 
