@@ -187,7 +187,9 @@ process.stdin.on('end', () => {
       // Clean up synthetic subagent sessions — main turn ended
       for (const sub of stats.session.activeSubagents) {
         writeSessionState(sub.id, 'happy', 'done', true, {
-          sessionId: sub.id, stopped: true, cwd: '', parentSession: sessionId,
+          sessionId: sub.id, stopped: true, cwd: process.cwd(),
+          gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
+          parentSession: sessionId,
         });
       }
       stats.session.activeSubagents = [];
@@ -240,7 +242,9 @@ process.stdin.on('end', () => {
       const desc = (toolInput.description || toolInput.prompt || 'subagent').slice(0, 40);
       stats.session.activeSubagents.push({ id: subId, description: desc, startedAt: Date.now() });
       writeSessionState(subId, 'spawning', desc, false, {
-        sessionId: subId, modelName: toolInput.model || 'haiku', cwd: '', parentSession: sessionId,
+        sessionId: subId, modelName: toolInput.model || 'haiku', cwd: process.cwd(),
+        gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
+        parentSession: sessionId,
       });
       state = 'subagent';
       detail = `conducting ${stats.session.activeSubagents.length}`;
@@ -248,7 +252,9 @@ process.stdin.on('end', () => {
       // Subagent finished — mark oldest synthetic session as stopped
       const finished = stats.session.activeSubagents.shift();
       writeSessionState(finished.id, 'happy', 'done', true, {
-        sessionId: finished.id, stopped: true, cwd: '', parentSession: sessionId,
+        sessionId: finished.id, stopped: true, cwd: process.cwd(),
+        gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
+        parentSession: sessionId,
       });
       if (stats.session.activeSubagents.length > 0) {
         state = 'subagent';
@@ -259,7 +265,9 @@ process.stdin.on('end', () => {
       // Tool call from within a subagent — update latest synthetic session
       const latestSub = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
       writeSessionState(latestSub.id, state, detail, false, {
-        sessionId: latestSub.id, cwd: '', parentSession: sessionId,
+        sessionId: latestSub.id, cwd: process.cwd(),
+        gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
+        parentSession: sessionId,
         modelName: toolInput.model || data.model_name || process.env.CODE_CRUMB_MODEL || 'claude',
       });
       // Main face stays in conducting mode — but don't override errors or
