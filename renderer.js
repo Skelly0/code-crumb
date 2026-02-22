@@ -119,22 +119,10 @@ function scanTeams() {
 
 // -- Unified mode (main face + orbital subagents) ------------------
 function runUnifiedMode() {
-  const minimal = process.argv.includes('--minimal');
+  const minimal = (process.argv.includes('--minimal') || process.env.MINIMAL_BOOT === '1');
   const face = new ClaudeFace();
   const rendererStartTime = Date.now();
   face.setState('starting');
-  // Boot sequence demo: show quick capability states on startup unless minimal mode is enabled
-  const minimal = (process.argv.includes('--minimal') || process.env.MINIMAL_BOOT === '1');
-  if (!minimal) {
-    // After ~2s: reading
-    setTimeout(() => { face.setState('reading'); }, 2000);
-    // After ~2.2s: coding
-    setTimeout(() => { face.setState('coding'); }, 2200);
-    // After ~2.4s: searching
-    setTimeout(() => { face.setState('searching'); }, 2400);
-    // After ~2.6s: idle
-    setTimeout(() => { face.setState('idle'); }, 2600);
-  }
   const orbital = new OrbitalSystem();
 
   // Minimal mode: strip all UI chrome, just face + status line
@@ -377,10 +365,17 @@ function runUnifiedMode() {
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
 
-    let out = face.render();
+    let out;
+    try {
+      out = face.render();
+    } catch {
+      out = '';
+    }
     if (!minimal && face.showOrbitals && face.lastPos && orbital.faces.size > 0) {
       const paletteThemes = (PALETTES[face.paletteIndex] || PALETTES[0]).themes;
-      out += orbital.render(cols, rows, face.lastPos, paletteThemes);
+      try {
+        out += orbital.render(cols, rows, face.lastPos, paletteThemes);
+      } catch {}
     }
     // Update terminal title bar to reflect current state
     const _pal = PALETTES[face.paletteIndex] || PALETTES[0];

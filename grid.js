@@ -416,7 +416,7 @@ class OrbitalSystem {
   calculateOrbit(cols, rows, mainPos) {
     // Minimum ellipse semi-axes: must clear the main face box + decorations
     // Vertical padding above: accessories/thought bubble need more clearance than bare face
-    const verticalPadAbove = mainPos.accessoriesActive ? 6 : (mainPos.bubble ? 4 : 2);
+    const verticalPadAbove = mainPos.accessoriesActive ? 8 : (mainPos.bubble ? 4 : 2);
     // Vertical padding below: stats area extends well past the face box bottom
     // (indicators +8, status +9, detail +10, project ctx +11, streak +12, timeline +13, sparkline +14)
     const STATS_ROWS_BELOW = 7;
@@ -486,7 +486,7 @@ class OrbitalSystem {
             ? mainPos.bubble.col + mainPos.bubble.w + 2
             : mainRight + 2;
         if (col >= mainLeft - 2 && col <= rightExclude &&
-            row >= mainTop - 5 && row <= mainBot + 7) continue;
+            row >= mainTop - 8 && row <= mainBot + 7) continue;
 
         // Skip if inside orbital box
         if (col >= pos.col - 1 && col <= pos.col + MINI_W + 1 &&
@@ -610,7 +610,7 @@ class OrbitalSystem {
       const angle = (Math.PI * 2 * i / n) + this.rotationAngle;
       // Startup spawn scale for this face (0 -> 1)
       const face = visible[i];
-      const scale = (face.spawning ? Math.max(0, face.spawnProgress / face.SPAWN_MS) : 1);
+      const scale = (face.spawning ? Math.max(0.3, face.spawnProgress / face.SPAWN_MS) : 1);
       const col = Math.round(mainPos.centerX + Math.cos(angle) * a * scale - MINI_W / 2);
       // Shift orbit center down to account for stats/indicator rows below the face box,
       // plus extra when accessories are active above the face

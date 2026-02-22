@@ -215,7 +215,7 @@ class ParticleSystem {
     for (const p of this.particles) {
       const col = Math.round(p.x) + offsetCol;
       const row = Math.round(p.y) + offsetRow;
-      if (row >= 1 && col >= 1 && row < process.stdout.rows && col < process.stdout.columns) {
+      if (row >= 1 && col >= 1 && row < (process.stdout.rows || 24) && col < (process.stdout.columns || 80)) {
         const fade = Math.min(1, p.life / (p.maxLife * 0.3));
         const color = dimColor(accentColor, fade);
         out += ansi.to(row, col) + ansi.fg(...color) + p.char;

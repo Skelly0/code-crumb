@@ -864,4 +864,120 @@ describe('adapters -- openclaw normalisePiEvent coverage', () => {
   });
 });
 
+// -- engmux-adapter.js (structural) ------------------------------------
+
+describe('adapters -- engmux-adapter (structural)', () => {
+  const ADAPTER = path.join(ADAPTERS_DIR, 'engmux-adapter.js');
+
+  test('adapter file exists', () => {
+    assert.ok(fs.existsSync(ADAPTER));
+  });
+
+  test('adapter file starts with use strict', () => {
+    const src = fs.readFileSync(ADAPTER, 'utf8');
+    assert.ok(src.includes("'use strict'"));
+  });
+
+  test('adapter imports base-adapter writeSessionState', () => {
+    const src = fs.readFileSync(ADAPTER, 'utf8');
+    assert.ok(src.includes("require('./base-adapter')"));
+    assert.ok(src.includes('writeSessionState'));
+  });
+
+  test('adapter uses spawn for child process', () => {
+    const src = fs.readFileSync(ADAPTER, 'utf8');
+    assert.ok(src.includes("require('child_process')"));
+    assert.ok(src.includes('spawn'));
+  });
+
+  test('adapter cycles through SUB_STATES', () => {
+    const src = fs.readFileSync(ADAPTER, 'utf8');
+    assert.ok(src.includes('SUB_STATES'));
+    assert.ok(src.includes('thinking'));
+    assert.ok(src.includes('coding'));
+    assert.ok(src.includes('searching'));
+  });
+
+  test('adapter writes spawning state on start', () => {
+    const src = fs.readFileSync(ADAPTER, 'utf8');
+    assert.ok(src.includes("'spawning'"));
+  });
+
+  test('adapter writes happy on success and error on failure', () => {
+    const src = fs.readFileSync(ADAPTER, 'utf8');
+    assert.ok(src.includes("'happy'"));
+    assert.ok(src.includes("'error'"));
+  });
+
+  test('adapter sets parentSession from env', () => {
+    const src = fs.readFileSync(ADAPTER, 'utf8');
+    assert.ok(src.includes('PARENT_SESSION'));
+    assert.ok(src.includes('parentSession'));
+  });
+
+  test('adapter extracts model name from -m flag', () => {
+    const src = fs.readFileSync(ADAPTER, 'utf8');
+    assert.ok(src.includes('extractModel'));
+    // Strips prefix like "opencode/"
+    assert.ok(src.includes("replace(/^[^/]+\\//"));
+  });
+
+  test('adapter passes through engmux JSON stdout', () => {
+    const src = fs.readFileSync(ADAPTER, 'utf8');
+    assert.ok(src.includes('process.stdout.write(stdout)'));
+  });
+});
+
+// -- Bug fix regression tests -------------------------------------------
+
+describe('bug fix regressions', () => {
+  test('renderer.js has no duplicate const minimal', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    const matches = src.match(/const minimal\b/g) || [];
+    assert.strictEqual(matches.length, 1, `Expected 1 "const minimal" but found ${matches.length}`);
+  });
+
+  test('face.js uses petSpamLevel not petCount in getEyes', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'face.js'), 'utf8');
+    assert.ok(!src.includes('this.petCount'), 'should not reference this.petCount');
+    assert.ok(src.includes('this.petSpamLevel > 3'));
+  });
+
+  test('particles.js has TTY fallbacks for rows/columns', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'particles.js'), 'utf8');
+    assert.ok(src.includes('process.stdout.rows || 24'));
+    assert.ok(src.includes('process.stdout.columns || 80'));
+  });
+
+  test('grid.js verticalPadAbove is 8 when accessories active', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'grid.js'), 'utf8');
+    assert.ok(src.includes('accessoriesActive ? 8'));
+  });
+
+  test('grid.js connection exclusion uses mainTop - 8', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'grid.js'), 'utf8');
+    assert.ok(src.includes('mainTop - 8'));
+  });
+
+  test('grid.js spawn scale starts at 0.3 minimum', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'grid.js'), 'utf8');
+    assert.ok(src.includes('Math.max(0.3,'));
+  });
+
+  test('update-state.js rate-limits subagent cycling', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
+    assert.ok(src.includes('lastCycleTime'));
+    assert.ok(src.includes('now_cycle - lastCycle > 4000'));
+  });
+
+  test('renderer.js wraps face.render() in try-catch', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    // Should have try { out = face.render() } catch
+    assert.ok(src.includes('out = face.render()'));
+    const renderIdx = src.indexOf('out = face.render()');
+    const preceding = src.slice(Math.max(0, renderIdx - 30), renderIdx);
+    assert.ok(preceding.includes('try'), 'face.render() should be inside a try block');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
