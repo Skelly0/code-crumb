@@ -1,0 +1,28 @@
+{
+  "name": "code-crumb",
+  "owner": {
+    "name": "Skelly0",
+    "email": "https://github.com/Skelly0"
+  },
+  "metadata": {
+    "description": "Terminal tamagotchi that visualizes AI coding assistant activity as an animated ASCII face"
+  },
+  "plugins": [
+    {
+      "name": "code-crumb",
+      "source": ".",
+      "description": "Terminal tamagotchi that visualizes AI coding assistant activity as an animated ASCII face",
+      "version": "1.1.0",
+      "author": {
+        "name": "Skelly0",
+        "url": "https://github.com/Skelly0"
+      },
+      "homepage": "https://github.com/Skelly0/code-crumb",
+      "repository": "https://github.com/Skelly0/code-crumb",
+      "license": "MIT",
+      "keywords": ["visualization", "terminal", "tamagotchi", "ascii-art", "hooks", "face", "ai-assistant"],
+      "category": "visualization",
+      "tags": ["terminal", "ascii", "face", "animation", "hooks", "subagents", "teams"]
+    }
+  ]
+}
