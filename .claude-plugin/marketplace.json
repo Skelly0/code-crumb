@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "code-crumb",
-      "source": "https://github.com/Skelly0/code-crumb",
+      "source": ".claude-plugin",
       "description": "Terminal tamagotchi that visualizes AI coding assistant activity as an animated ASCII face",
       "version": "1.1.0",
       "author": {
