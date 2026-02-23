@@ -34,7 +34,8 @@ Then open a second terminal and run the face:
 node ~/.claude/plugins/cache/code-crumb/*/renderer.js
 ```
 
-Or clone the repo and run `node code-crumb/renderer.js` if you prefer a stable path.
+> [!TIP]
+> The renderer runs in its own terminal window alongside your editor — it doesn't block anything. If you want a stable path, clone the repo and run `node code-crumb/renderer.js` instead.
 
 ### Claude Code (local plugin)
 
@@ -220,7 +221,10 @@ Five palettes — press `t` to cycle. Preferences persist between sessions.
 
 ### Claude Code
 
-**Plugin install** (recommended): `claude plugin install --plugin-dir ./code-crumb` — hooks into 11 lifecycle events automatically: PreToolUse, PostToolUse, PostToolUseFailure, Stop, Notification, SubagentStart, SubagentStop, TeammateIdle, TaskCompleted, SessionStart, and SessionEnd. Subagent sessions appear as orbital mini-faces. Team members (with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`) show in orbitals with role labels and accent colors.
+**Plugin install** (recommended): `claude plugin install --plugin-dir ./code-crumb` — hooks into 11 lifecycle events automatically: PreToolUse, PostToolUse, PostToolUseFailure, Stop, Notification, SubagentStart, SubagentStop, TeammateIdle, TaskCompleted, SessionStart, and SessionEnd. Subagent sessions appear as orbital mini-faces.
+
+> [!NOTE]
+> Agent teams support requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. When enabled, team members appear in the orbital display with role labels and accent colors.
 
 **Manual hooks**: `node setup.js` installs the core hooks (Pre/PostToolUse, Stop, Notification). See the [manual config](#manual-hook-setup) section for details.
 
@@ -234,6 +238,9 @@ Two adapter modes since Codex doesn't have a hook system:
 | **Wrapper** | `launch.js --editor codex` | Tool-level (full reactions) |
 
 The wrapper gives richer reactions but only works with `codex exec` (non-interactive).
+
+> [!IMPORTANT]
+> The wrapper mode requires `codex exec` — it won't work in interactive Codex sessions. Use notify mode if you need interactive support.
 
 ### OpenCode
 
@@ -330,6 +337,9 @@ Or: `cd code-crumb && npm link`
 | macOS Terminal.app | Works (some Unicode may render oddly) |
 | ConEmu / cmder | Should work |
 | Legacy cmd.exe | No ANSI support — won't render |
+
+> [!WARNING]
+> Legacy `cmd.exe` does not support ANSI escape codes and will not render the face. Use Windows Terminal, VS Code terminal, or any modern terminal emulator instead.
 
 <details>
 <summary>Project files reference</summary>
