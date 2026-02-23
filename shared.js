@@ -16,6 +16,7 @@ const SESSIONS_DIR = path.join(HOME, '.code-crumb-sessions');
 const STATS_FILE = path.join(HOME, '.code-crumb-stats.json');
 const PREFS_FILE = path.join(HOME, '.code-crumb-prefs.json');
 const TEAMS_DIR = path.join(HOME, '.claude', 'teams');
+const PID_FILE = path.join(HOME, '.code-crumb.pid');
 const TMUX_FILE = path.join(HOME, '.code-crumb-tmux');
 
 // -- Utilities -------------------------------------------------------
@@ -102,4 +103,4 @@ function getGitBranch(cwd) {
   return null;
 }
 
-module.exports = { HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, TEAMS_DIR, TMUX_FILE, safeFilename, loadPrefs, savePrefs, getGitBranch, getIsWorktree };
+module.exports = { HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, TEAMS_DIR, TMUX_FILE, safeFilename, loadPrefs, savePrefs, getGitBranch, getIsWorktree };

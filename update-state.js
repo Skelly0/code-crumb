@@ -14,7 +14,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename, getGitBranch, getIsWorktree } = require('./shared');
+const { STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, safeFilename, getGitBranch, getIsWorktree } = require('./shared');
 const {
   toolToState, classifyToolResult, updateStreak, defaultStats,
   EDIT_TOOLS, SUBAGENT_TOOLS,
@@ -64,6 +64,64 @@ function writeStats(stats) {
   try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats), 'utf8'); } catch {}
 }
 
+// -- Autolaunch ------------------------------------------------------
+
+// If the renderer isn't running and the user has opted in, spawn it in
+// a new terminal window. Runs on every hook call — the fast path (PID
+// alive) costs ~1-2ms, well within the 50ms hook budget.
+function ensureRendererRunning() {
+  try {
+    // Check pref — fast sync read, bail early if disabled
+    let prefs = {};
+    try { prefs = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')); } catch {}
+    if (!prefs.autolaunch) return;
+
+    // Check if renderer alive via PID file
+    try {
+      const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+      if (!isNaN(pid)) { process.kill(pid, 0); return; } // alive
+    } catch {}
+
+    // Renderer dead/missing — spawn in new terminal, detached
+    const rendererPath = path.resolve(__dirname, 'renderer.js');
+    const { spawn } = require('child_process');
+    const platform = process.platform;
+
+    let child;
+    if (platform === 'win32') {
+      // Try Windows Terminal first, fall back to cmd start
+      try {
+        child = spawn('wt', ['-w', '0', 'new-tab', '--title', 'Code Crumb', 'node', rendererPath],
+          { detached: true, stdio: 'ignore', shell: false });
+      } catch {
+        child = spawn('cmd', ['/c', 'start', '"Code Crumb"', 'node', rendererPath],
+          { detached: true, stdio: 'ignore', shell: true });
+      }
+    } else if (platform === 'darwin') {
+      const escaped = rendererPath.replace(/'/g, "'\\''");
+      child = spawn('osascript', ['-e',
+        `tell application "Terminal" to do script "node '${escaped}'; exit"`],
+        { detached: true, stdio: 'ignore' });
+    } else {
+      // Linux — try common terminal emulators in order
+      const terms = [
+        ['gnome-terminal', ['--', 'node', rendererPath]],
+        ['konsole', ['-e', 'node', rendererPath]],
+        ['xfce4-terminal', ['-e', `node ${rendererPath}`]],
+        ['xterm', ['-e', `node ${rendererPath}`]],
+      ];
+      for (const [term, args] of terms) {
+        try {
+          require('child_process').execSync(`command -v ${term}`, { stdio: 'ignore' });
+          child = spawn(term, args, { detached: true, stdio: 'ignore' });
+          break;
+        } catch {}
+      }
+    }
+    if (child) child.unref();
+  } catch {} // Never throw from a hook
+}
+
 // -- Main handler ----------------------------------------------------
 
 // Read stdin
@@ -71,6 +129,7 @@ let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => { input += chunk; });
 process.stdin.on('end', () => {
+  ensureRendererRunning();
   let state = 'thinking';
   let detail = '';
   let stopped = false;

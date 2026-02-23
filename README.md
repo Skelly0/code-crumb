@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js 18+](https://img.shields.io/badge/node-18%2B-brightgreen.svg)](https://nodejs.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-blue.svg)](#)
-[![411 Tests](https://img.shields.io/badge/tests-411-passing.svg)](#)
+[![591 Tests](https://img.shields.io/badge/tests-591-passing.svg)](#)
 
 A terminal tamagotchi that shows what your AI coding assistant is doing.
 
@@ -64,6 +64,13 @@ node code-crumb/setup.js
 node code-crumb/renderer.js   # in a separate terminal
 ```
 
+> [!TIP]
+> Pass `--autolaunch` to have the renderer start automatically whenever your editor fires a hook — no need to open a second terminal manually:
+> ```bash
+> node code-crumb/setup.js --autolaunch
+> ```
+> You can also enable it later with `node setup.js --autolaunch`. The setting persists in `~/.code-crumb-prefs.json`.
+
 ### Other editors
 
 ```bash
@@ -75,6 +82,8 @@ node code-crumb/setup.js openclaw     # OpenClaw/Pi
 
 node code-crumb/renderer.js           # in a separate terminal
 ```
+
+Add `--autolaunch` to any setup command to skip the manual renderer step entirely.
 
 ### Launcher (auto-opens face + editor)
 

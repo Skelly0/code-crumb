@@ -25,7 +25,10 @@ const hookPath = HOOK_SCRIPT.replace(/\\/g, '/');
 
 // -- Editor detection ------------------------------------------------
 
-const editor = (process.argv[2] || 'claude').toLowerCase();
+const args = process.argv.slice(2).filter(a => !a.startsWith('--'));
+const flags = process.argv.slice(2).filter(a => a.startsWith('--'));
+const editor = (args[0] || 'claude').toLowerCase();
+const autolaunchFlag = flags.includes('--autolaunch');
 
 // -- Claude Code Setup -----------------------------------------------
 
@@ -404,6 +407,34 @@ switch (editor) {
   default:
     console.log(`\n  Unknown editor: "${editor}"`);
     console.log('  Supported editors: claude, codex, opencode, openclaw');
-    console.log('  Usage: node setup.js [claude|codex|opencode|openclaw]\n');
+    console.log('  Usage: node setup.js [claude|codex|opencode|openclaw] [--autolaunch]\n');
     process.exit(1);
+}
+
+// -- Autolaunch preference -------------------------------------------
+
+const PREFS_FILE = path.join(HOME, '.code-crumb-prefs.json');
+
+function enableAutolaunch() {
+  let prefs = {};
+  try { prefs = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')); } catch {}
+  prefs.autolaunch = true;
+  fs.writeFileSync(PREFS_FILE, JSON.stringify(prefs, null, 2), 'utf8');
+  console.log('  ✓ Autolaunch enabled — renderer will start automatically on first hook call');
+}
+
+if (autolaunchFlag) {
+  enableAutolaunch();
+} else if (process.stdout.isTTY && process.stdin.isTTY) {
+  // Interactive prompt
+  const readline = require('readline');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  rl.question('  Auto-launch renderer when your editor starts? [y/N] ', (answer) => {
+    if (answer.trim().toLowerCase() === 'y') {
+      enableAutolaunch();
+    } else {
+      console.log('  Autolaunch skipped (enable later with: node setup.js --autolaunch)');
+    }
+    rl.close();
+  });
 }
