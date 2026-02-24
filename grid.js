@@ -45,7 +45,7 @@ const MIN_COLS_GRID = 14;
 const MIN_ROWS_GRID = 9;
 const IDLE_TIMEOUT = 8000;
 const SLEEP_TIMEOUT = 60000;
-const THINKING_TIMEOUT = 300000;
+const THINKING_TIMEOUT = 45000;
 
 // -- MiniFace (compact, for grid) ----------------------------------
 class MiniFace {

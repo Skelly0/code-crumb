@@ -125,7 +125,7 @@ describe('grid.js -- MiniFace tick() timeout logic', () => {
     const face = new MiniFace('test');
     face.state = 'thinking';
     face.stopped = false;
-    face.lastUpdate = Date.now() - 10000; // Past IDLE_TIMEOUT (8s) but not THINKING_TIMEOUT (300s)
+    face.lastUpdate = Date.now() - 10000; // Past IDLE_TIMEOUT (8s) but not THINKING_TIMEOUT (45s)
     face.tick(16);
     assert.strictEqual(face.state, 'thinking');
   });

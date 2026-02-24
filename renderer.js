@@ -30,7 +30,7 @@ const PID_FILE = path.join(HOME, '.code-crumb.pid');
 const FPS = 15;
 const FRAME_MS = Math.floor(1000 / FPS);
 const IDLE_TIMEOUT = 8000;
-const THINKING_TIMEOUT = 300000; // 5min -- stay thinking while Claude processes between tools
+const THINKING_TIMEOUT = 45000; // 45s -- safety net if Stop event is missed
 const SLEEP_TIMEOUT = 60000;
 
 // ===================================================================
@@ -160,12 +160,17 @@ function runUnifiedMode() {
   let lastMtime = 0;
   let lastFileState = 'idle'; // Track the last state written to the file by hooks
   let lastStopped = false;    // Track if Stop hook has fired (session ended)
+  let lastForceReadTime = 0;  // Track periodic forced re-reads (bypasses mtime race)
   function checkState() {
+    const now = Date.now();
     try {
       const stat = fs.statSync(STATE_FILE);
+      // Every 2s, bypass mtime check to eliminate NTFS 1-second mtime race
+      const forceRead = (now - lastForceReadTime > 2000);
       if (stat.mtimeMs < rendererStartTime) {
         // File predates this renderer session — ignore stale state, fall through to timeouts
-      } else if (stat.mtimeMs > lastMtime) {
+      } else if (stat.mtimeMs > lastMtime || forceRead) {
+        if (forceRead) lastForceReadTime = now;
         lastMtime = stat.mtimeMs;
         const stateData = readState();
 
@@ -202,8 +207,6 @@ function runUnifiedMode() {
       }
     } catch {}
 
-    const now = Date.now();
-
     // -- Stopped-flag rescue: runs BEFORE the minDisplayUntil early return --
     // If Stop hook fired (lastStopped=true) but the face is still showing
     // 'thinking' (either because the file read was missed due to mtime
@@ -224,10 +227,13 @@ function runUnifiedMode() {
       if (face.timeline.length > 200) face.timeline.shift();
     }
 
-    // If we're past minDisplayUntil and still thinking with no stopped signal,
+    // If we're past minDisplayUntil and in an active state with no stopped signal,
     // do a fresh file read to catch any stop event missed by fs.watch mtime
     // granularity (common on Windows FAT/NTFS with 1-second mtime resolution).
-    if (!lastStopped && face.state === 'thinking' && now >= face.minDisplayUntil) {
+    const freshReadStates = ['thinking', 'executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'responding'];
+    if (!lastStopped && now >= face.minDisplayUntil &&
+        freshReadStates.includes(face.state) &&
+        (face.state === 'thinking' || now - lastMainUpdate > 2000)) {
       try {
         const freshData = readState();
         if (freshData.stopped) {
