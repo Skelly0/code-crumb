@@ -34,6 +34,7 @@ function writeSession(id, state, detail, cwd, stopped = false) {
     cwd: cwd || process.cwd(),
     stopped,
     modelName: 'claude',
+    parentSession: mainId,
   }), 'utf8');
 }
 
