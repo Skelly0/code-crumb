@@ -30,7 +30,7 @@ const PID_FILE = path.join(HOME, '.code-crumb.pid');
 const FPS = 15;
 const FRAME_MS = Math.floor(1000 / FPS);
 const IDLE_TIMEOUT = 8000;
-const THINKING_TIMEOUT = 45000; // 45s -- safety net if Stop event is missed
+const THINKING_TIMEOUT = 120000; // 2min -- safety net if Stop event is missed
 const SLEEP_TIMEOUT = 60000;
 
 // ===================================================================

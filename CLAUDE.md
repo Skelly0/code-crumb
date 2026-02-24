@@ -127,7 +127,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 |---|---|---|
 | `FPS` | 15 | renderer.js |
 | `IDLE_TIMEOUT` | 8000ms | renderer.js |
-| `THINKING_TIMEOUT` | 45000ms | renderer.js, grid.js |
+| `THINKING_TIMEOUT` | 120000ms | renderer.js, grid.js |
 | `SLEEP_TIMEOUT` | 60000ms | renderer.js |
 | `CAFFEINE_THRESHOLD` | 5 calls in 10s | face.js |
 | `STALE_MS` | 120000ms | grid.js (orbital session timeout) |

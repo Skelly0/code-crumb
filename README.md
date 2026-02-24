@@ -3,11 +3,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js 18+](https://img.shields.io/badge/node-18%2B-brightgreen.svg)](https://nodejs.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-blue.svg)](#)
-[![591 Tests](https://img.shields.io/badge/tests-591-passing.svg)](#)
+[![662 Tests](https://img.shields.io/badge/tests-662-passing.svg)](#)
 
 A terminal tamagotchi that shows what your AI coding assistant is doing.
 
-![Code Crumb coding state — cat ears, 25 streak, neon theme](images/claudecoding.png)
+![Code Crumb proud state — crown accessory, 43 streak, diff info, neon theme](images/proud-crown-diffinfo.png)
 
 Code Crumb hooks into AI coding tool lifecycle events and displays an animated ASCII face that reacts in real time — blinking, searching, coding, celebrating, and occasionally glitching when things go wrong. 18 expressive states, 12 particle effects, 5 color palettes, orbital subagent tracking, streak counters, and you can pet it.
 
@@ -130,6 +130,8 @@ The face has 18 distinct states — each with unique eyes, mouth, particles, and
 
 ![Sleeping state with Zzz particles and thought bubble](images/sleeping.png)
 
+![Error state — X X eyes, merge conflict, broken streak](images/error-merge-conflict.png)
+
 ### Thought Bubbles
 
 A tiny thought bubble floats above the face with contextual content — file count when editing multiple files, tool call number, session duration, or idle flavor text ("thinking about types", "contemplating recursion").
@@ -156,7 +158,7 @@ Purple for thinking, green for coding, red for errors, gold for happy. A tiny EK
 
 When your session spawns subagents (e.g. Claude Code's `Task` tool), mini-faces orbit the main face like satellites:
 
-![Orbital subagents — three mini-faces orbiting the main face](images/orbital-subagents.png)
+![Orbital subagents — four mini-faces orbiting the main face in neon theme](images/orbital-neon-thinking.png)
 
 - Elliptical orbits, slowly rotating as a constellation
 - Faint dotted connection lines pulse outward from the main face
@@ -178,7 +180,7 @@ Five palettes — press `t` to cycle. Preferences persist between sessions.
 | **sunset** | Warm oranges, reds, golds, purples |
 
 <p>
-  <img src="images/neon-theme.png" width="49%" alt="Neon theme — cyan glow" />
+  <img src="images/satisfied-neon-streak.png" width="49%" alt="Satisfied state — neon theme, 30 streak" />
   <img src="images/opencode-neon-pink.png" width="49%" alt="Neon pink with party hat accessory" />
 </p>
 <p>
