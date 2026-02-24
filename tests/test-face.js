@@ -109,10 +109,12 @@ describe('face.js -- ClaudeFace.setState', () => {
 
   test('buffers pending state during min display time', () => {
     const face = new ClaudeFace();
-    face.setState('happy');
+    // caffeinated is NOT an active work state, so it should be buffered
+    // when happy (interruptible) has min display time remaining
     face.setState('coding');
-    assert.strictEqual(face.state, 'happy');
-    assert.strictEqual(face.pendingState, 'coding');
+    face.setState('caffeinated');
+    assert.strictEqual(face.state, 'coding');
+    assert.strictEqual(face.pendingState, 'caffeinated');
   });
 
   test('same state updates detail without changing state', () => {
@@ -1062,6 +1064,111 @@ describe('face.js -- minimalMode', () => {
     const outNormal = renderStrippedMinimal(face2);
     // Minimal output should be shorter (less chrome)
     assert.ok(outMinimal.length <= outNormal.length, 'minimal output should not be longer than normal');
+  });
+});
+
+describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
+  test('executing bypasses thinking min display', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    assert.strictEqual(face.state, 'thinking');
+    // thinking has 2500ms min display — executing should punch through
+    face.setState('executing', 'git status');
+    assert.strictEqual(face.state, 'executing');
+    assert.strictEqual(face.stateDetail, 'git status');
+  });
+
+  test('coding bypasses relieved min display', () => {
+    const face = new ClaudeFace();
+    face.setState('relieved');
+    assert.strictEqual(face.state, 'relieved');
+    face.setState('coding', 'editing app.ts');
+    assert.strictEqual(face.state, 'coding');
+  });
+
+  test('responding bypasses thinking min display', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    face.setState('responding', 'generating');
+    assert.strictEqual(face.state, 'responding');
+  });
+
+  test('searching bypasses idle min display', () => {
+    const face = new ClaudeFace();
+    face.setState('idle');
+    face.setState('searching', 'grep pattern');
+    assert.strictEqual(face.state, 'searching');
+  });
+
+  test('active work does NOT bypass other active work (coding blocked by executing)', () => {
+    const face = new ClaudeFace();
+    face.setState('executing', 'npm test');
+    assert.strictEqual(face.state, 'executing');
+    face.setState('coding', 'editing file');
+    // executing is not interruptible, so coding should be buffered
+    assert.strictEqual(face.state, 'executing');
+    assert.strictEqual(face.pendingState, 'coding');
+  });
+
+  test('idle does NOT bypass thinking (passive-to-passive)', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    face.setState('idle');
+    assert.strictEqual(face.state, 'thinking');
+    assert.strictEqual(face.pendingState, 'idle');
+  });
+
+  test('sleeping does NOT bypass thinking', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    face.setState('sleeping');
+    assert.strictEqual(face.state, 'thinking');
+    assert.strictEqual(face.pendingState, 'sleeping');
+  });
+
+  test('error still bypasses any state (unchanged behavior)', () => {
+    const face = new ClaudeFace();
+    face.setState('executing', 'running');
+    assert.strictEqual(face.state, 'executing');
+    face.setState('error', 'command failed');
+    assert.strictEqual(face.state, 'error');
+    assert.strictEqual(face.stateDetail, 'command failed');
+  });
+
+  test('ratelimited still bypasses any state (unchanged behavior)', () => {
+    const face = new ClaudeFace();
+    face.setState('coding', 'editing');
+    face.setState('ratelimited', 'rate limited');
+    assert.strictEqual(face.state, 'ratelimited');
+  });
+
+  test('caffeinated does NOT bypass thinking (not an active work state)', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    face.setState('caffeinated', 'hyperdrive!');
+    assert.strictEqual(face.state, 'thinking');
+    assert.strictEqual(face.pendingState, 'caffeinated');
+  });
+
+  test('executing bypasses happy min display', () => {
+    const face = new ClaudeFace();
+    face.setState('happy');
+    face.setState('executing', 'next command');
+    assert.strictEqual(face.state, 'executing');
+  });
+
+  test('testing bypasses satisfied min display', () => {
+    const face = new ClaudeFace();
+    face.setState('satisfied');
+    face.setState('testing', 'npm test');
+    assert.strictEqual(face.state, 'testing');
+  });
+
+  test('installing bypasses waiting min display', () => {
+    const face = new ClaudeFace();
+    face.setState('waiting');
+    face.setState('installing', 'npm install');
+    assert.strictEqual(face.state, 'installing');
   });
 });
 

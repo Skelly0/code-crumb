@@ -39,7 +39,7 @@ const CELL_W = 12;
 const CELL_H = 7;
 const BOX_W = 8;
 const BOX_INNER = 6;
-const STALE_MS = 60000;
+const STALE_MS = 120000;
 const STOPPED_LINGER_MS = 10000;
 const MIN_COLS_GRID = 14;
 const MIN_ROWS_GRID = 9;
@@ -88,13 +88,15 @@ class MiniFace {
       // Spawning always bypasses so the initial state is applied immediately
       if (now >= this.minDisplayUntil || newState === 'error' || newState === 'spawning' || data.stopped) {
         this.state = newState;
+        this.detail = data.detail || '';
         this.minDisplayUntil = now + 1500;
       }
+      // rejected: don't update detail either (prevents text flickering while state is locked)
     } else {
-      // Same state — refresh the timer
+      // Same state — refresh the timer and update detail
       this.minDisplayUntil = now + 1500;
+      this.detail = data.detail || '';
     }
-    this.detail = data.detail || '';
     this.lastUpdate = data.timestamp || Date.now();
     if (data.cwd) this.cwd = data.cwd;
     if (data.modelName) this.modelName = data.modelName;
@@ -121,6 +123,7 @@ class MiniFace {
     this.time += dt;
     this.frame++;
 
+    // Blink logic (always runs)
     this.blinkTimer -= dt;
     if (this.blinkTimer <= 0) {
       this.blinkFrame = 0;
@@ -131,6 +134,7 @@ class MiniFace {
       if (this.blinkFrame >= 3) this.blinkFrame = -1;
     }
 
+    // Search look direction (always runs)
     if (this.state === 'searching') {
       this.lookTimer += dt;
       if (this.lookTimer > 600) {
@@ -139,13 +143,7 @@ class MiniFace {
       }
     }
 
-    const elapsed = Date.now() - this.lastUpdate;
-
-    // Spawning is a transient boot state — auto-transition to thinking after 2s
-    if (this.state === 'spawning' && Date.now() - this.firstSeen > 2000) {
-      this.state = 'thinking';
-    }
-    // Update startup spawn progress for orbitals
+    // Update startup spawn progress for orbitals (always runs)
     if (this.spawning) {
       this.spawnProgress += dt;
       if (this.spawnProgress >= this.SPAWN_MS) {
@@ -154,23 +152,39 @@ class MiniFace {
       }
     }
 
+    // --- Timeout-based state transitions (guarded by minDisplayUntil) ---
+    const now = Date.now();
+    if (now < this.minDisplayUntil) return;
+
+    const elapsed = now - this.lastUpdate;
+
+    // Spawning is a transient boot state — auto-transition to thinking after 2s
+    if (this.state === 'spawning' && now - this.firstSeen > 2000) {
+      this.state = 'thinking';
+      this.minDisplayUntil = now + 1500;
+    }
+
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     const completionLinger = COMPLETION_LINGER[this.state];
     const sessionActive = !this.stopped;
 
     if (completionLinger && elapsed > completionLinger) {
       this.state = 'thinking';
+      this.minDisplayUntil = now + 1500;
     } else if (this.state === 'thinking' &&
                elapsed > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT)) {
       this.state = 'idle';
+      this.minDisplayUntil = now + 1500;
     } else if (!completionStates.includes(this.state) &&
                this.state !== 'idle' && this.state !== 'sleeping' &&
                this.state !== 'waiting' && this.state !== 'thinking' &&
                elapsed > IDLE_TIMEOUT) {
       this.state = sessionActive ? 'thinking' : 'idle';
+      this.minDisplayUntil = now + 1500;
     }
     if (this.state === 'idle' && elapsed > SLEEP_TIMEOUT) {
       this.state = 'sleeping';
+      this.minDisplayUntil = now + 1500;
     }
   }
 
@@ -346,11 +360,6 @@ class OrbitalSystem {
 
         // Skip the main session — it's the big face, not an orbital
         if (excludeId && id === excludeId) continue;
-
-        // Only show real subagents (have parentSession) or team members (isTeammate).
-        // Plain sessions without either field are just the main session echoed
-        // into SESSIONS_DIR — they'd appear as ghost orbitals.
-        if (!data.parentSession && !data.isTeammate) continue;
 
         seenIds.add(id);
 

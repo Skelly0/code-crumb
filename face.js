@@ -18,6 +18,18 @@ const { eyes, mouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { getAccessory } = require('./accessories');
 
+// Active tool states that represent real work happening NOW.
+// These bypass the min display time of passive/thinking/completion states,
+// mirroring how 'error' and 'ratelimited' already bypass.
+const ACTIVE_WORK_STATES = new Set([
+  'executing', 'coding', 'reading', 'searching', 'testing',
+  'installing', 'committing', 'reviewing', 'subagent', 'responding',
+]);
+const INTERRUPTIBLE_STATES = new Set([
+  'thinking', 'happy', 'satisfied', 'proud', 'relieved',
+  'idle', 'sleeping', 'waiting',
+]);
+
 // -- Config --------------------------------------------------------
 const BLINK_MIN = 2500;
 const BLINK_MAX = 6000;
@@ -142,7 +154,10 @@ class ClaudeFace {
 
       // Minimum display time: buffer incoming state if current hasn't shown long enough.
       // Errors and rate limits always bypass -- they're important visual feedback, not flickering noise.
-      if (now < this.minDisplayUntil && newState !== 'error' && newState !== 'ratelimited') {
+      if (now < this.minDisplayUntil
+          && newState !== 'error'
+          && newState !== 'ratelimited'
+          && !(ACTIVE_WORK_STATES.has(newState) && INTERRUPTIBLE_STATES.has(this.state))) {
         // Don't overwrite a pending error with a non-error state
         if (this.pendingState !== 'error') {
           this.pendingState = newState;

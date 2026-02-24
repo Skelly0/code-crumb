@@ -439,13 +439,9 @@ process.stdin.on('end', () => {
     } catch {}
 
     if (shouldWriteGlobal) writeState(state, detail, extra);
-    // Only write per-session file if this is a synthetic subagent session
-    // (has parentSession) or a teammate. The main session's state belongs in
-    // the global STATE_FILE only — writing it to SESSIONS_DIR creates ghost
-    // orbital faces that clutter the display (issue #42).
-    if (extra.parentSession || extra.isTeammate) {
-      writeSessionState(sessionId, state, detail, stopped, extra);
-    }
+    // Always write per-session file so parallel Claude Code sessions
+    // appear as orbitals. The renderer excludes the main session by ID.
+    writeSessionState(sessionId, state, detail, stopped, extra);
     writeStats(stats);
   } catch {
     // JSON parse may fail for Stop/Notification events with empty or
@@ -490,12 +486,9 @@ process.stdin.on('end', () => {
     }
 
     if (shouldWriteGlobal) writeState(fallbackState, fallbackDetail, fallbackExtra);
-    // Don't write main session to SESSIONS_DIR in fallback path either —
-    // only subagents/teammates belong there (issue #42).
-    if (fallbackExtra.parentSession || fallbackExtra.isTeammate) {
-      writeSessionState(fallbackSessionId, fallbackState, fallbackDetail,
-        hookEvent === 'Stop', fallbackExtra);
-    }
+    // Always write per-session file so parallel sessions appear as orbitals.
+    writeSessionState(fallbackSessionId, fallbackState, fallbackDetail,
+      hookEvent === 'Stop', fallbackExtra);
   }
 
   process.exit(0);

@@ -264,30 +264,54 @@ describe('grid.js -- OrbitalSystem stale cleanup', () => {
 });
 
 describe('grid.js -- OrbitalSystem session schema validation', () => {
-  test('loadSessions skips sessions without parentSession or isTeammate', () => {
-    // Sessions that are just the main session echoed to SESSIONS_DIR
-    // should be filtered out — they lack parentSession and isTeammate fields
+  test('loadSessions shows sessions without parentSession/isTeammate (parallel sessions)', () => {
+    // Parallel Claude Code sessions don't have parentSession or isTeammate.
+    // They should now appear as orbitals (excluded only by matching excludeId).
     const fs = require('fs');
     const path = require('path');
     const { SESSIONS_DIR } = require('../shared');
     const orbital = new OrbitalSystem();
 
-    // Create a temp session file WITHOUT parentSession or isTeammate
+    // Create a session file WITHOUT parentSession or isTeammate
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
-    const ghostFile = path.join(SESSIONS_DIR, 'ghost-main-echo.json');
-    fs.writeFileSync(ghostFile, JSON.stringify({
-      session_id: 'ghost-main-echo',
+    const parallelFile = path.join(SESSIONS_DIR, 'parallel-session.json');
+    fs.writeFileSync(parallelFile, JSON.stringify({
+      session_id: 'parallel-session',
       state: 'thinking',
       detail: '',
       timestamp: Date.now(),
     }));
 
     orbital.loadSessions('different-id');
-    assert.ok(!orbital.faces.has('ghost-main-echo'),
-      'session without parentSession/isTeammate should be filtered out');
+    assert.ok(orbital.faces.has('parallel-session'),
+      'session without parentSession/isTeammate should be included as parallel orbital');
 
     // Clean up
-    try { fs.unlinkSync(ghostFile); } catch {}
+    try { fs.unlinkSync(parallelFile); } catch {}
+  });
+
+  test('loadSessions excludes session matching excludeId', () => {
+    // The main session should be excluded by its ID, not by missing fields
+    const fs = require('fs');
+    const path = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    const orbital = new OrbitalSystem();
+
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const mainFile = path.join(SESSIONS_DIR, 'main-session.json');
+    fs.writeFileSync(mainFile, JSON.stringify({
+      session_id: 'main-session',
+      state: 'coding',
+      detail: '',
+      timestamp: Date.now(),
+    }));
+
+    orbital.loadSessions('main-session');
+    assert.ok(!orbital.faces.has('main-session'),
+      'session matching excludeId should be excluded');
+
+    // Clean up
+    try { fs.unlinkSync(mainFile); } catch {}
   });
 
   test('loadSessions includes sessions with parentSession', () => {
@@ -541,6 +565,108 @@ describe('OrbitalSystem._renderSidePanel', () => {
       minRightCol >= expectedCol,
       `right-side mini-face col ${minRightCol} should be >= ${expectedCol}`
     );
+  });
+});
+
+describe('grid.js -- MiniFace tick() minDisplayUntil guard (Bug 3)', () => {
+  test('tick does not override state during minDisplayUntil', () => {
+    const face = new MiniFace('test');
+    face.state = 'coding';
+    face.lastUpdate = Date.now() - 9000; // Past IDLE_TIMEOUT
+    face.minDisplayUntil = Date.now() + 5000; // Locked for 5 more seconds
+    face.tick(16);
+    assert.strictEqual(face.state, 'coding',
+      'state should not change while minDisplayUntil is in the future');
+  });
+
+  test('tick transitions after minDisplayUntil expires', () => {
+    const face = new MiniFace('test');
+    face.state = 'coding';
+    face.stopped = false;
+    face.lastUpdate = Date.now() - 9000; // Past IDLE_TIMEOUT
+    face.minDisplayUntil = Date.now() - 1; // Expired
+    face.tick(16);
+    assert.strictEqual(face.state, 'thinking',
+      'should transition to thinking after minDisplayUntil expires');
+  });
+
+  test('tick sets minDisplayUntil after timeout transition', () => {
+    const face = new MiniFace('test');
+    face.state = 'happy';
+    face.lastUpdate = Date.now() - 9000; // Past happy linger
+    face.minDisplayUntil = 0; // Expired
+    const before = Date.now();
+    face.tick(16);
+    assert.strictEqual(face.state, 'thinking');
+    assert.ok(face.minDisplayUntil >= before + 1500,
+      'minDisplayUntil should be set after timeout transition');
+  });
+
+  test('blink animation still runs during minDisplayUntil lock', () => {
+    const face = new MiniFace('test');
+    face.state = 'coding';
+    face.minDisplayUntil = Date.now() + 5000;
+    face.blinkTimer = 10; // About to blink
+    face.tick(20); // dt > blinkTimer — triggers blink then increments frame
+    assert.ok(face.blinkFrame >= 0,
+      'blink should trigger even during minDisplayUntil lock');
+    assert.strictEqual(face.state, 'coding',
+      'state should remain locked');
+  });
+
+  test('spawning auto-transition sets minDisplayUntil', () => {
+    const face = new MiniFace('test');
+    face.state = 'spawning';
+    face.firstSeen = Date.now() - 3000; // Past 2s spawn duration
+    face.minDisplayUntil = 0;
+    const before = Date.now();
+    face.tick(16);
+    assert.strictEqual(face.state, 'thinking');
+    assert.ok(face.minDisplayUntil >= before + 1500);
+  });
+});
+
+describe('grid.js -- MiniFace updateFromFile detail gating (Bug 3)', () => {
+  test('detail updates when state change is accepted', () => {
+    const face = new MiniFace('test');
+    face.state = 'idle';
+    face.minDisplayUntil = 0;
+    face.updateFromFile({ state: 'coding', detail: 'editing foo.js' });
+    assert.strictEqual(face.state, 'coding');
+    assert.strictEqual(face.detail, 'editing foo.js');
+  });
+
+  test('detail does NOT update when state change is rejected', () => {
+    const face = new MiniFace('test');
+    face.state = 'coding';
+    face.detail = 'editing foo.js';
+    face.minDisplayUntil = Date.now() + 5000; // Locked
+    face.updateFromFile({ state: 'reading', detail: 'reading bar.js' });
+    assert.strictEqual(face.state, 'coding',
+      'state should remain locked');
+    assert.strictEqual(face.detail, 'editing foo.js',
+      'detail should not update when state is rejected');
+  });
+
+  test('detail updates for same-state refresh', () => {
+    const face = new MiniFace('test');
+    face.state = 'coding';
+    face.detail = 'editing foo.js';
+    face.minDisplayUntil = Date.now() + 5000; // Locked
+    face.updateFromFile({ state: 'coding', detail: 'editing bar.js' });
+    assert.strictEqual(face.state, 'coding');
+    assert.strictEqual(face.detail, 'editing bar.js',
+      'detail should update when same state is refreshed');
+  });
+
+  test('error always bypasses and updates detail', () => {
+    const face = new MiniFace('test');
+    face.state = 'coding';
+    face.detail = 'editing foo.js';
+    face.minDisplayUntil = Date.now() + 5000; // Locked
+    face.updateFromFile({ state: 'error', detail: 'command failed' });
+    assert.strictEqual(face.state, 'error');
+    assert.strictEqual(face.detail, 'command failed');
   });
 });
 
