@@ -18,6 +18,9 @@ const {
   stderrErrorPatterns,
   falsePositives,
   looksLikeError,
+  looksLikeRateLimit,
+  rateLimitPatterns,
+  rateLimitFalsePositives,
   errorDetail,
   extractExitCode,
   isMergeConflict,
@@ -1142,6 +1145,217 @@ describe('state-machine.js -- looksLikeError (git merge conflicts)', () => {
 
   test('"no conflicts" is a false positive', () => {
     assert.ok(!looksLikeError('Merge succeeded with no conflicts.', stdoutErrorPatterns));
+  });
+});
+
+describe('state-machine.js -- looksLikeRateLimit (true positives)', () => {
+  test('detects "rate limit exceeded"', () => {
+    assert.ok(looksLikeRateLimit('rate limit exceeded', ''));
+  });
+
+  test('detects "rate-limit"', () => {
+    assert.ok(looksLikeRateLimit('rate-limit hit, please wait', ''));
+  });
+
+  test('detects "usage limit reached"', () => {
+    assert.ok(looksLikeRateLimit('usage limit reached', ''));
+  });
+
+  test('detects "too many requests"', () => {
+    assert.ok(looksLikeRateLimit('Error: too many requests', ''));
+  });
+
+  test('detects "quota exceeded"', () => {
+    assert.ok(looksLikeRateLimit('API quota exceeded', ''));
+  });
+
+  test('detects "at capacity"', () => {
+    assert.ok(looksLikeRateLimit('The server is at capacity', ''));
+  });
+
+  test('detects "over capacity"', () => {
+    assert.ok(looksLikeRateLimit('Service is over capacity', ''));
+  });
+
+  test('detects "server overloaded"', () => {
+    assert.ok(looksLikeRateLimit('server overloaded', ''));
+  });
+
+  test('detects "model is overloaded"', () => {
+    assert.ok(looksLikeRateLimit('model is overloaded', ''));
+  });
+
+  test('detects "system overloaded"', () => {
+    assert.ok(looksLikeRateLimit('system overloaded, try again', ''));
+  });
+
+  test('detects "retry after 30"', () => {
+    assert.ok(looksLikeRateLimit('retry after 30 seconds', ''));
+  });
+
+  test('detects "retry-after 5"', () => {
+    assert.ok(looksLikeRateLimit('retry-after 5', ''));
+  });
+
+  test('detects "throttled"', () => {
+    assert.ok(looksLikeRateLimit('Request was throttled', ''));
+  });
+
+  test('detects "concurrency limit"', () => {
+    assert.ok(looksLikeRateLimit('concurrency limit reached', ''));
+  });
+
+  test('detects "429 error"', () => {
+    assert.ok(looksLikeRateLimit('received 429 error from API', ''));
+  });
+
+  test('detects "status 429"', () => {
+    assert.ok(looksLikeRateLimit('HTTP status 429', ''));
+  });
+
+  test('detects rate limit in stderr', () => {
+    assert.ok(looksLikeRateLimit('', 'Error: rate limit exceeded'));
+  });
+});
+
+describe('state-machine.js -- looksLikeRateLimit (false positive guards)', () => {
+  test('"capacity" alone does not trigger', () => {
+    assert.ok(!looksLikeRateLimit('capacity planning document', ''));
+  });
+
+  test('"disk capacity" does not trigger', () => {
+    assert.ok(!looksLikeRateLimit('check disk capacity usage', ''));
+  });
+
+  test('"memory capacity" does not trigger', () => {
+    assert.ok(!looksLikeRateLimit('memory capacity is 16GB', ''));
+  });
+
+  test('"storage capacity" does not trigger', () => {
+    assert.ok(!looksLikeRateLimit('storage capacity report', ''));
+  });
+
+  test('"overloaded" alone does not trigger', () => {
+    assert.ok(!looksLikeRateLimit('the overloaded function handles both cases', ''));
+  });
+
+  test('"overloaded function" does not trigger', () => {
+    assert.ok(!looksLikeRateLimit('overloaded function signature', ''));
+  });
+
+  test('"operator overloading" does not trigger', () => {
+    assert.ok(!looksLikeRateLimit('C++ operator overloading tutorial', ''));
+  });
+
+  test('"throttle(" (function call) does not trigger', () => {
+    assert.ok(!looksLikeRateLimit('lodash.throttle(fn, 200)', ''));
+  });
+
+  test('"throttle.js" (filename) does not trigger', () => {
+    assert.ok(!looksLikeRateLimit('import from throttle.js', ''));
+  });
+
+  test('"useThrottle" (React hook) does not trigger', () => {
+    assert.ok(!looksLikeRateLimit('const val = useThrottle(input)', ''));
+  });
+
+  test('"import throttle" does not trigger', () => {
+    assert.ok(!looksLikeRateLimit("import { throttle } from 'lodash'", ''));
+  });
+
+  test('"require throttle" does not trigger', () => {
+    assert.ok(!looksLikeRateLimit("const throttle = require('lodash/throttle')", ''));
+  });
+
+  test('"retry after" without a number does not trigger', () => {
+    assert.ok(!looksLikeRateLimit('retry after the deployment completes', ''));
+  });
+
+  test('bare "429" (line number, port) does not trigger', () => {
+    assert.ok(!looksLikeRateLimit('line 429: const x = 5', ''));
+  });
+
+  test('"429" as port number does not trigger', () => {
+    assert.ok(!looksLikeRateLimit('listening on port 429', ''));
+  });
+
+  test('clean output returns false', () => {
+    assert.ok(!looksLikeRateLimit('all tests passed', ''));
+  });
+
+  test('null/empty returns false', () => {
+    assert.ok(!looksLikeRateLimit('', ''));
+    assert.ok(!looksLikeRateLimit(null, null));
+  });
+});
+
+describe('state-machine.js -- classifyToolResult (rate limit gating)', () => {
+  test('Read tool with "throttle.js" content → satisfied (NOT ratelimited)', () => {
+    const r = classifyToolResult('Read', { file_path: '/throttle.js' },
+      { stdout: 'export function throttle(fn) { return fn; }' }, false);
+    assert.strictEqual(r.state, 'satisfied');
+  });
+
+  test('Search results with "capacity" → satisfied (NOT ratelimited)', () => {
+    const r = classifyToolResult('Grep', { pattern: 'capacity' },
+      { stdout: 'disk capacity is at 80%' }, false);
+    assert.strictEqual(r.state, 'satisfied');
+  });
+
+  test('Read file mentioning "429" → satisfied (NOT ratelimited)', () => {
+    const r = classifyToolResult('Read', { file_path: '/src/errors.ts' },
+      { stdout: 'line 429: export const MAX_RETRIES = 3' }, false);
+    assert.strictEqual(r.state, 'satisfied');
+  });
+
+  test('Read file mentioning "overloaded method" → satisfied (NOT ratelimited)', () => {
+    const r = classifyToolResult('Read', { file_path: '/src/utils.ts' },
+      { stdout: 'the overloaded method accepts two signatures' }, false);
+    assert.strictEqual(r.state, 'satisfied');
+  });
+
+  test('Bash with rate limit + isError → ratelimited', () => {
+    const r = classifyToolResult('Bash', { command: 'curl api' },
+      { stdout: 'rate limit exceeded', isError: true }, true);
+    assert.strictEqual(r.state, 'ratelimited');
+    assert.strictEqual(r.detail, 'usage limit');
+  });
+
+  test('Bash with "too many requests" + error flag → ratelimited', () => {
+    const r = classifyToolResult('Bash', { command: 'curl api' },
+      { stderr: 'Error: too many requests' }, true);
+    assert.strictEqual(r.state, 'ratelimited');
+  });
+
+  test('Bash with rate limit in stderr error pattern → ratelimited', () => {
+    const r = classifyToolResult('Bash', { command: 'node app.js' },
+      { stderr: 'fatal: rate limit exceeded' }, false);
+    assert.strictEqual(r.state, 'ratelimited');
+  });
+
+  test('Bash with exit code + rate limit → ratelimited', () => {
+    const r = classifyToolResult('Bash', { command: 'node app.js' },
+      { stdout: 'rate limit exceeded\nExit code: 1' }, false);
+    assert.strictEqual(r.state, 'ratelimited');
+  });
+
+  test('Bash stdout error + rate limit text → ratelimited', () => {
+    const r = classifyToolResult('Bash', { command: 'node fetch.js' },
+      { stdout: 'FATAL: rate limit hit' }, false);
+    assert.strictEqual(r.state, 'ratelimited');
+  });
+
+  test('successful Bash with rate-limit-like text → relieved (NOT ratelimited)', () => {
+    const r = classifyToolResult('Bash', { command: 'echo test' },
+      { stdout: 'implemented rate limit handling' }, false);
+    assert.strictEqual(r.state, 'relieved');
+    assert.notStrictEqual(r.state, 'ratelimited');
+  });
+
+  test('Edit tool with rate-limit-like content → proud (NOT ratelimited)', () => {
+    const r = classifyToolResult('Edit', { file_path: '/src/api.ts' },
+      { stdout: 'added rate limit retry logic' }, false);
+    assert.strictEqual(r.state, 'proud');
   });
 });
 
