@@ -205,7 +205,8 @@ class ClaudeFace {
       } else if (newState === 'committing') {
         this.particles.spawn(14, 'push');
       } else if (newState === 'ratelimited') {
-        this.particles.spawn(5, 'question');
+        this.particles.spawn(8, 'glitch');
+        this.glitchIntensity = 1.0;
       }
     } else {
       this.lastStateChange = Date.now();
@@ -443,7 +444,7 @@ class ClaudeFace {
       case 'starting':    return eyes.spin(theme, Math.floor(frame / 4));
       case 'committing':  return eyes.focused(theme, frame);
       case 'reviewing':   return eyes.narrowed(theme, frame);
-      case 'ratelimited': return eyes.tired(theme, frame);
+      case 'ratelimited': return eyes.cross(theme, frame);
       default:            return eyes.open(theme, frame);
     }
   }
@@ -478,6 +479,7 @@ class ClaudeFace {
       case 'starting':    return mouths.dots();
       case 'committing':  return mouths.determined();
       case 'reviewing':   return mouths.neutral();
+      case 'ratelimited': return mouths.frown();
       default:          return mouths.smile();
     }
   }
@@ -520,7 +522,7 @@ class ClaudeFace {
     // Continuous particle spawning per state
     if (this.state === 'thinking' && this.frame % 15 === 0) this.particles.spawn(1, 'orbit');
     if (this.state === 'idle' && this.frame % 40 === 0) this.particles.spawn(1, 'float');
-    if (this.state === 'error' && this.glitchIntensity > 0.1 && this.frame % 5 === 0) this.particles.spawn(1, 'glitch');
+    if ((this.state === 'error' || this.state === 'ratelimited') && this.glitchIntensity > 0.1 && this.frame % 5 === 0) this.particles.spawn(1, 'glitch');
     if (this.state === 'happy' && this.frame % 20 === 0) this.particles.spawn(2, 'sparkle');
     if (this.state === 'proud' && this.frame % 30 === 0) this.particles.spawn(1, 'sparkle');
     if (this.state === 'satisfied' && this.frame % 50 === 0) this.particles.spawn(1, 'float');
