@@ -14,7 +14,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, safeFilename, getGitBranch, getIsWorktree } = require('./shared');
+const { STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, QUIT_FLAG_FILE, safeFilename, getGitBranch, getIsWorktree } = require('./shared');
 const {
   toolToState, classifyToolResult, updateStreak, defaultStats,
   EDIT_TOOLS,
@@ -75,6 +75,9 @@ function ensureRendererRunning() {
     let prefs = {};
     try { prefs = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')); } catch {}
     if (!prefs.autolaunch) return;
+
+    // Check quit flag — user intentionally quit, don't auto-relaunch
+    try { fs.accessSync(QUIT_FLAG_FILE); return; } catch {}
 
     // Check if renderer alive via PID file
     try {

@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, STATE_FILE, SESSIONS_DIR, TEAMS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch } = require('./shared');
+const { HOME, STATE_FILE, SESSIONS_DIR, TEAMS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch, QUIT_FLAG_FILE } = require('./shared');
 
 // -- Modules -------------------------------------------------------
 const {
@@ -89,6 +89,14 @@ function writePid() {
 
 function removePid() {
   try { fs.unlinkSync(PID_FILE); } catch {}
+}
+
+function clearQuitFlag() {
+  try { fs.unlinkSync(QUIT_FLAG_FILE); } catch {}
+}
+
+function writeQuitFlag() {
+  try { fs.writeFileSync(QUIT_FLAG_FILE, String(Date.now()), 'utf8'); } catch {}
 }
 
 // -- Team discovery ------------------------------------------------
@@ -452,6 +460,8 @@ function main() {
 
   // Skip PID guard for tmux mode — can run alongside full renderer
   if (!tmuxMode) {
+    // Clear quit flag on normal startup so autolaunch works for new sessions
+    clearQuitFlag();
     if (isAlreadyRunning()) {
       console.log('Code Crumb is already running in another window.');
       process.exit(0);
@@ -470,6 +480,7 @@ function main() {
   }
 
   function cleanup() {
+    writeQuitFlag();
     removePid();
     try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch {}
     process.stdout.write(ansi.show + ansi.clear + ansi.reset);
