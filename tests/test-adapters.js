@@ -978,6 +978,50 @@ describe('bug fix regressions', () => {
     const preceding = src.slice(Math.max(0, renderIdx - 30), renderIdx);
     assert.ok(preceding.includes('try'), 'face.render() should be inside a try block');
   });
+
+  test('update-state.js SessionStart writes idle (not waiting)', () => {
+    // Bug: SessionStart was writing 'waiting', which the renderer degrades to
+    // 'thinking' after IDLE_TIMEOUT because 'waiting' is not in the exclusion
+    // list. 'idle' is in the exclusion list and is semantically correct.
+    const { tmp, stateFile, env } = makeTempEnv('ss-idle-1');
+    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
+    try {
+      execFileSync(NODE, [UPDATE_STATE, 'SessionStart'], {
+        input: JSON.stringify({ session_id: 'ss-idle-1' }),
+        env,
+        timeout: 10000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'idle',
+      `SessionStart should write 'idle', got '${state.state}'`);
+    cleanup(tmp);
+  });
+
+  test('update-state.js has no PreToolUse synthetic subagent session block', () => {
+    // Bug: PreToolUse + SubagentStart both created orbital sessions, causing
+    // duplicate faces. The PreToolUse block was the old workaround before
+    // SubagentStart/SubagentStop hooks existed — it's been removed.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
+    assert.ok(!src.includes('isSubagentTool'),
+      'isSubagentTool variable should be gone (PreToolUse synthetic session block removed)');
+    assert.ok(!src.includes("'PreToolUse' && isSubagentTool"),
+      'PreToolUse isSubagentTool branch should not exist');
+  });
+
+  test('update-state.js has no state-mirroring block for orbital faces', () => {
+    // Bug: an else-if block mirrored every parent tool call's state directly
+    // into the latest subagent session file, making orbital faces flicker
+    // and mirror the main face. Removed in favour of the time-based cycling.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
+    assert.ok(!src.includes('latestSub'),
+      'latestSub variable should be gone (state-mirroring block removed)');
+    assert.ok(!src.includes('!isSubagentTool'),
+      '!isSubagentTool guard should be gone (state-mirroring block removed)');
+  });
 });
 
 module.exports = { passed: () => passed, failed: () => failed };

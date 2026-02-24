@@ -17,7 +17,7 @@ const path = require('path');
 const { STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, safeFilename, getGitBranch, getIsWorktree } = require('./shared');
 const {
   toolToState, classifyToolResult, updateStreak, defaultStats,
-  EDIT_TOOLS, SUBAGENT_TOOLS,
+  EDIT_TOOLS,
 } = require('./state-machine');
 
 // Event type passed as CLI argument (cross-platform -- no env var tricks)
@@ -335,7 +335,7 @@ process.stdin.on('end', () => {
       }
     }
     else if (hookEvent === 'SessionStart') {
-      state = 'waiting';
+      state = 'idle';
       detail = 'session starting';
       // Force-initialize a fresh session
       stats.daily.sessionCount++;
@@ -372,48 +372,6 @@ process.stdin.on('end', () => {
     else {
       if (toolName) {
         ({ state, detail } = toolToState(toolName, toolInput));
-      }
-    }
-
-    // -- Synthetic subagent tracking for orbital mini-faces --
-    // Claude Code subagents share the parent session ID, so they don't
-    // create their own session files. We create synthetic sessions for
-    // Task/subagent tool spawns so they appear as orbital mini-faces.
-    const isSubagentTool = SUBAGENT_TOOLS.test(toolName);
-
-    if (hookEvent === 'PreToolUse' && isSubagentTool) {
-      // New subagent spawned — create synthetic orbital session
-      const subId = `${sessionId}-sub-${Date.now()}`;
-      const desc = (toolInput.description || toolInput.prompt || 'subagent').slice(0, 40);
-      stats.session.activeSubagents.push({ id: subId, description: desc, startedAt: Date.now(), modelName: toolInput.model || 'haiku' });
-      writeSessionState(subId, 'spawning', desc, false, {
-        sessionId: subId, modelName: toolInput.model || 'haiku', cwd: process.cwd(),
-        gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
-        parentSession: sessionId,
-      });
-      state = 'subagent';
-      detail = `conducting ${stats.session.activeSubagents.length}`;
-    } 
-    // PostToolUse handling removed: PostToolUse fires when the Task tool 
-    // invocation completes, not when the subagent finishes. Subagents run 
-    // asynchronously, so we can't know when they're done. Leave them 
-    // active until the parent session ends (Stop hook handles cleanup).
-    else if (stats.session.activeSubagents.length > 0 && !isSubagentTool &&
-               hookEvent !== 'Stop' && hookEvent !== 'Notification') {
-      // Tool call from within a subagent — update latest synthetic session
-      const latestSub = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
-      writeSessionState(latestSub.id, state, detail, false, {
-        sessionId: latestSub.id, cwd: process.cwd(),
-        gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
-        parentSession: sessionId,
-        modelName: toolInput.model || data.model_name || process.env.CODE_CRUMB_MODEL || 'claude',
-      });
-      // Main face stays in conducting mode — but don't override errors or
-      // completion states, those are important visual feedback
-      const noOverride = ['error', 'happy', 'satisfied', 'proud', 'relieved'];
-      if (!noOverride.includes(state)) {
-        state = 'subagent';
-        detail = `conducting ${stats.session.activeSubagents.length}`;
       }
     }
 
