@@ -330,6 +330,7 @@ class OrbitalSystem {
   }
 
   loadSessions(excludeId) {
+    if (!excludeId) return;  // Can't filter main session yet — wait for mainSessionId
     let files;
     try {
       files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'));
