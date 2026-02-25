@@ -1172,4 +1172,93 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
   });
 });
 
+// -- Caffeinated detection (update-driven) --------------------------------
+
+describe('caffeinated detection', () => {
+  // Helper: pump enough setState calls to exceed CAFFEINE_THRESHOLD (5 in 10s)
+  function pumpStates(face, count = 6) {
+    const states = ['coding', 'reading', 'searching', 'executing', 'testing', 'coding', 'reading', 'searching'];
+    for (let i = 0; i < count; i++) {
+      face.setState(states[i % states.length]);
+      // Expire min display so next setState applies immediately
+      face.minDisplayUntil = 0;
+    }
+  }
+
+  test('triggers caffeinated after rapid state changes via update()', () => {
+    const face = new ClaudeFace();
+    pumpStates(face, 6);
+    // Land on an active state that isn't excluded
+    face.minDisplayUntil = 0;
+    face.setState('coding');
+    face.minDisplayUntil = 0; // expire so update's setState can apply
+    face.update(16);
+    assert.strictEqual(face.state, 'caffeinated');
+  });
+
+  test('caffeinated routes through setState (sets minDisplayUntil)', () => {
+    const face = new ClaudeFace();
+    pumpStates(face, 6);
+    face.minDisplayUntil = 0;
+    face.setState('coding');
+    face.minDisplayUntil = 0;
+    const before = Date.now();
+    face.update(16);
+    assert.strictEqual(face.state, 'caffeinated');
+    // minDisplayUntil should be set (2500ms from now)
+    assert.ok(face.minDisplayUntil >= before + 2000, 'minDisplayUntil should be set by setState');
+  });
+
+  test('caffeinated does NOT trigger on responding (prevents post-Stop oscillation)', () => {
+    const face = new ClaudeFace();
+    pumpStates(face, 6);
+    face.minDisplayUntil = 0;
+    face.setState('responding');
+    face.minDisplayUntil = 0;
+    face.update(16);
+    assert.strictEqual(face.state, 'responding');
+  });
+
+  test('caffeinated does NOT trigger on ratelimited', () => {
+    const face = new ClaudeFace();
+    pumpStates(face, 6);
+    face.minDisplayUntil = 0;
+    face.setState('ratelimited');
+    face.minDisplayUntil = 0;
+    face.update(16);
+    assert.strictEqual(face.state, 'ratelimited');
+  });
+
+  test('caffeinated does NOT trigger on waiting', () => {
+    const face = new ClaudeFace();
+    pumpStates(face, 6);
+    face.minDisplayUntil = 0;
+    face.setState('waiting');
+    face.minDisplayUntil = 0;
+    face.update(16);
+    assert.strictEqual(face.state, 'waiting');
+  });
+
+  test('caffeinated decays back to prevState when timestamps age out', () => {
+    const face = new ClaudeFace();
+    pumpStates(face, 6);
+    face.minDisplayUntil = 0;
+    face.setState('executing');
+    face.minDisplayUntil = 0;
+    face.update(16);
+    assert.strictEqual(face.state, 'caffeinated');
+    // Simulate timestamps aging out (clear them to mimic 10s passing)
+    face.stateChangeTimes = [];
+    face.minDisplayUntil = 0;
+    face.update(16);
+    // Should decay back to prevState (executing was the state before caffeinated)
+    assert.notStrictEqual(face.state, 'caffeinated', 'should exit caffeinated after decay');
+  });
+
+  test('no isCaffeinated property (dead code removed)', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.hasOwnProperty('isCaffeinated'), false);
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

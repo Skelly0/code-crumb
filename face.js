@@ -67,8 +67,6 @@ class ClaudeFace {
     this.transitionFrame = 0;
     this.glitchIntensity = 0;
     this.stateChangeTimes = [];
-    this.isCaffeinated = false;
-
     // Minimum display time (prevents rapid state flickering)
     this.minDisplayUntil = 0;
     this.pendingState = null;
@@ -552,7 +550,10 @@ class ClaudeFace {
     if (this.state === 'committing' && this.frame % 5 === 0) this.particles.spawn(2, 'push');
     if (this.state === 'coding' && this.frame % 6 === 0) this.particles.spawn(1, 'rain');
 
-    // Caffeinated detection
+    // Caffeinated detection — triggers when 5+ state changes happen within 10s.
+    // Routes through setState() for proper minDisplayUntil / lastStateChange tracking.
+    // Excludes completion, idle, error, and post-stop states to prevent oscillation
+    // (responding + caffeinated would feed stateChangeTimes indefinitely).
     const now = Date.now();
     const recentChanges = this.stateChangeTimes.filter(t => now - t < CAFFEINE_WINDOW);
     if (recentChanges.length >= CAFFEINE_THRESHOLD &&
@@ -560,14 +561,11 @@ class ClaudeFace {
         this.state !== 'happy' && this.state !== 'satisfied' &&
         this.state !== 'proud' && this.state !== 'relieved' &&
         this.state !== 'error' && this.state !== 'caffeinated' &&
-        this.state !== 'committing') {
-      this.isCaffeinated = true;
-      this.prevState = this.state;
-      this.state = 'caffeinated';
-      this.stateDetail = this.stateDetail || 'hyperdrive!';
-      this.particles.spawn(4, 'speedline');
+        this.state !== 'committing' && this.state !== 'responding' &&
+        this.state !== 'ratelimited' && this.state !== 'waiting') {
+      this.setState('caffeinated', this.stateDetail || 'hyperdrive!');
     } else if (this.state === 'caffeinated' && recentChanges.length < CAFFEINE_THRESHOLD - 1) {
-      this.isCaffeinated = false;
+      this.setState(this.prevState || 'idle');
     }
 
     // Thought bubble cycling (jittery at pet spam level 3+)
