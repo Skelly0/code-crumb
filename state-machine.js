@@ -26,9 +26,9 @@ const EDIT_TOOLS = /^(edit|multiedit|write|str_replace|create_file|file_edit|wri
 const BASH_TOOLS = /^(bash|shell|terminal|execute|run_command|run|exec|process|sh|cmd|powershell|command|cli)$/i;
 const READ_TOOLS = /^(read|view|cat|file_read|read_file|get_file_contents|open_file)$/i;
 const SEARCH_TOOLS = /^(grep|glob|search|ripgrep|find|list|search_files|list_files|list_dir|find_files|file_search|codebase_search)$/i;
-const WEB_TOOLS = /^(web_search|web_fetch|fetch|webfetch|browser|browse|http_request|curl|canvas)$/i;
+const WEB_TOOLS = /^(web_search|websearch|web_fetch|fetch|webfetch|browser|browse|http_request|curl|canvas)$/i;
 const SUBAGENT_TOOLS = /^(task|subagent|spawn_agent|delegate|codex_agent|sessions)$/i;
-const REVIEW_TOOLS = /diff|review|compare|patch/i;
+const REVIEW_TOOLS = /^(diff|review|compare|patch)$/i;
 
 function toolToState(toolName, toolInput) {
   // Writing/editing code

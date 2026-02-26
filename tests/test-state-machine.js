@@ -222,6 +222,12 @@ describe('state-machine.js -- toolToState', () => {
     assert.strictEqual(toolToState('WebFetch', { url: 'https://example.com' }).state, 'searching');
   });
 
+  test('WebSearch → searching', () => {
+    const r = toolToState('WebSearch', { query: 'node.js docs' });
+    assert.strictEqual(r.state, 'searching');
+    assert.ok(r.detail.includes('node.js docs'));
+  });
+
   test('Task → subagent', () => {
     const r = toolToState('Task', { description: 'explore the codebase' });
     assert.strictEqual(r.state, 'subagent');
