@@ -17,7 +17,7 @@ const path = require('path');
 const { STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, QUIT_FLAG_FILE, safeFilename, getGitBranch, getIsWorktree } = require('./shared');
 const {
   toolToState, classifyToolResult, updateStreak, defaultStats,
-  EDIT_TOOLS,
+  looksLikeRateLimit, EDIT_TOOLS,
 } = require('./state-machine');
 
 // Event type passed as CLI argument (cross-platform -- no env var tricks)
@@ -235,8 +235,14 @@ process.stdin.on('end', () => {
       updateStreak(stats, state === 'error');
     }
     else if (hookEvent === 'Stop') {
-      state = 'responding';
-      detail = 'wrapping up';
+      const lastMsg = data.last_assistant_message || '';
+      if (looksLikeRateLimit(lastMsg, '')) {
+        state = 'ratelimited';
+        detail = 'usage limit';
+      } else {
+        state = 'responding';
+        detail = 'wrapping up';
+      }
       stopped = true;
 
       // Update session records

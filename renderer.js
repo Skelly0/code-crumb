@@ -161,6 +161,7 @@ function runUnifiedMode() {
   let lastFileState = 'idle'; // Track the last state written to the file by hooks
   let lastStopped = false;    // Track if Stop hook has fired (session ended)
   let lastForceReadTime = 0;  // Track periodic forced re-reads (bypasses mtime race)
+  let lastAppliedTimestamp = 0; // Dedup: skip re-applying state with same timestamp
   function checkState() {
     const now = Date.now();
     try {
@@ -197,13 +198,18 @@ function runUnifiedMode() {
         lastMainUpdate = Date.now();
         lastFileState = stateData.state;
         lastStopped = stateData.stopped || false;
-        // Force-apply stopped state (session ended) — bypass minimum display time
-        // so the face doesn't get stuck on "thinking" when Claude is interrupted
-        if (stateData.stopped && Date.now() < face.minDisplayUntil) {
-          face.minDisplayUntil = Date.now();
+
+        const ts = stateData.timestamp || 0;
+        if (ts > lastAppliedTimestamp) {
+          lastAppliedTimestamp = ts;
+          // Force-apply stopped state (session ended) — bypass minimum display time
+          // so the face doesn't get stuck on "thinking" when Claude is interrupted
+          if (stateData.stopped && Date.now() < face.minDisplayUntil) {
+            face.minDisplayUntil = Date.now();
+          }
+          face.setState(stateData.state, stateData.detail);
+          face.setStats(stateData);
         }
-        face.setState(stateData.state, stateData.detail);
-        face.setStats(stateData);
       }
     } catch {}
 
@@ -236,14 +242,16 @@ function runUnifiedMode() {
         (face.state === 'thinking' || now - lastMainUpdate > 2000)) {
       try {
         const freshData = readState();
-        if (freshData.stopped) {
+        const freshTs = freshData.timestamp || 0;
+        if (freshData.stopped && freshTs > lastAppliedTimestamp) {
+          lastAppliedTimestamp = freshTs;
           lastStopped = true;
           lastFileState = freshData.state;
-          // If the file says responding, apply it; otherwise we just set
-          // lastStopped so the rescue block above fires on the next frame.
-          if (freshData.state === 'responding') {
+          // If the file says responding (or ratelimited), apply it; otherwise
+          // we just set lastStopped so the rescue block above fires next frame.
+          if (freshData.state === 'responding' || freshData.state === 'ratelimited') {
             face.prevState = face.state;
-            face.state = 'responding';
+            face.state = freshData.state;
             face.transitionFrame = 0;
             face.lastStateChange = now;
             face.stateDetail = freshData.detail || 'wrapping up';
@@ -251,7 +259,7 @@ function runUnifiedMode() {
             face.pendingState = null;
             face.pendingDetail = '';
             face.particles.fadeAll();
-            face.timeline.push({ state: 'responding', at: now });
+            face.timeline.push({ state: freshData.state, at: now });
             if (face.timeline.length > 200) face.timeline.shift();
           }
         }

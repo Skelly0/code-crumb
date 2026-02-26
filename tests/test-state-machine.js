@@ -1379,4 +1379,28 @@ describe('state-machine.js -- classifyToolResult (rate limit gating)', () => {
   });
 });
 
+// -- Stop hook + rate limit detection (update-state.js integration logic) ------
+
+describe('looksLikeRateLimit — Stop hook last_assistant_message patterns', () => {
+  test('usage limit message triggers rate limit detection', () => {
+    assert.strictEqual(looksLikeRateLimit("I've hit my usage limit for now. Please try again later.", ''), true);
+  });
+
+  test('rate limit exceeded message triggers detection', () => {
+    assert.strictEqual(looksLikeRateLimit("Rate limit exceeded. Please wait before sending more messages.", ''), true);
+  });
+
+  test('too many requests message triggers detection', () => {
+    assert.strictEqual(looksLikeRateLimit("Too many requests, please slow down.", ''), true);
+  });
+
+  test('normal assistant farewell does NOT trigger rate limit', () => {
+    assert.strictEqual(looksLikeRateLimit("I've made all the changes. Let me know if you need anything else!", ''), false);
+  });
+
+  test('empty last_assistant_message does NOT trigger rate limit', () => {
+    assert.strictEqual(looksLikeRateLimit('', ''), false);
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
