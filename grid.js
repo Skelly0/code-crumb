@@ -426,7 +426,8 @@ class OrbitalSystem {
   calculateOrbit(cols, rows, mainPos) {
     // Minimum ellipse semi-axes: must clear the main face box + decorations
     // Vertical padding above: accessories/thought bubble need more clearance than bare face
-    const verticalPadAbove = mainPos.accessoriesActive ? 8 : (mainPos.bubble ? 4 : 2);
+    const accH = mainPos.accessoryHeight || 0;
+    const verticalPadAbove = mainPos.accessoriesActive ? (accH + 7) : (mainPos.bubble ? 4 : 2);
     // Vertical padding below: stats area extends well past the face box bottom
     // (indicators +8, status +9, detail +10, project ctx +11, streak +12, timeline +13, sparkline +14)
     const STATS_ROWS_BELOW = 7;

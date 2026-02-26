@@ -949,9 +949,9 @@ describe('bug fix regressions', () => {
     assert.ok(src.includes('process.stdout.columns || 80'));
   });
 
-  test('grid.js verticalPadAbove is 8 when accessories active', () => {
+  test('grid.js verticalPadAbove uses dynamic accH when accessories active', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'grid.js'), 'utf8');
-    assert.ok(src.includes('accessoriesActive ? 8'));
+    assert.ok(src.includes('accessoriesActive ? (accH + 7)'));
   });
 
   test('grid.js connection exclusion uses mainTop - 8', () => {
