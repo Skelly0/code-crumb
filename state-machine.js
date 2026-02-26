@@ -148,7 +148,7 @@ const stdoutErrorPatterns = [
   /\bnpm ERR!/,
   /\bcargo error\b/i,
   /\frustc.*error\[E\d+\]/,                       // Rust compiler errors
-  /\bCONFLICT\b/,                                 // git merge conflicts
+  /\bCONFLICT\s+\(.*?\):/,                         // git merge conflicts (requires git format)
   /\bAutomatic merge failed\b/i,
   /\bfix conflicts and then commit\b/i,
 ];

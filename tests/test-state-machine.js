@@ -1067,10 +1067,24 @@ describe('state-machine.js -- isMergeConflict', () => {
     assert.ok(!isMergeConflict('', ''));
   });
 
-  test('CONFLICT word alone in stdout triggers', () => {
-    // The pattern requires \bCONFLICT\s+\(.*\): so bare CONFLICT alone does NOT match this pattern
-    // but it does match the /\bCONFLICT\b/ pattern in stdoutErrorPatterns via looksLikeError
+  test('CONFLICT word alone does not trigger', () => {
+    // Bare CONFLICT should not match isMergeConflict or looksLikeError (pattern requires git format)
     assert.ok(!isMergeConflict('CONFLICT without parens', ''));
+    assert.ok(!looksLikeError('CONFLICT without parens', stdoutErrorPatterns));
+  });
+});
+
+describe('state-machine.js -- classifyToolResult (CONFLICT false positive)', () => {
+  test('bash test output containing bare CONFLICT does not trigger error', () => {
+    const r = classifyToolResult('Bash',
+      { command: 'npm test' },
+      { stdout: 'PASS test/conflict-resolver.test.js\n  ✓ CONFLICT resolution works (5ms)\n\nTests: 1 passed, 1 total' },
+      false);
+    assert.notStrictEqual(r.state, 'error');
+  });
+
+  test('real git merge CONFLICT still triggers error via looksLikeError', () => {
+    assert.ok(looksLikeError('CONFLICT (content): Merge conflict in foo.js', stdoutErrorPatterns));
   });
 });
 
