@@ -441,7 +441,9 @@ process.stdin.on('end', () => {
     if (shouldWriteGlobal) writeState(state, detail, extra);
     // Always write per-session file so parallel Claude Code sessions
     // appear as orbitals. The renderer excludes the main session by ID.
-    writeSessionState(sessionId, state, detail, stopped, extra);
+    if (hookEvent !== 'SessionStart') {
+      writeSessionState(sessionId, state, detail, stopped, extra);
+    }
     writeStats(stats);
   } catch {
     // JSON parse may fail for Stop/Notification events with empty or

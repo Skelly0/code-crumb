@@ -305,7 +305,7 @@ function runUnifiedMode() {
   // Watch sessions directory for subagent changes (skipped in minimal mode)
   if (!minimal) {
     try {
-      fs.watch(SESSIONS_DIR, () => { if (mainSessionId) orbital.loadSessions(mainSessionId); });
+      fs.watch(SESSIONS_DIR, () => { checkState(); if (mainSessionId) orbital.loadSessions(mainSessionId); });
     } catch {}
   }
 
