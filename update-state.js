@@ -456,14 +456,15 @@ process.stdin.on('end', () => {
     // non-JSON stdin -- still write the correct state for the hook event.
     // Try to reuse the session ID from the global state file so we don't
     // create an orphan session file that appears as a phantom orbital.
-    let fallbackSessionId = process.env.CLAUDE_SESSION_ID || String(process.ppid);
+    const originalFallbackId = process.env.CLAUDE_SESSION_ID || String(process.ppid);
+    let fallbackSessionId = originalFallbackId;
     let shouldWriteGlobal = true;
     try {
       const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
       if (existing.sessionId) {
         fallbackSessionId = existing.sessionId;
       }
-      if (existing.sessionId && existing.sessionId !== fallbackSessionId &&
+      if (existing.sessionId && existing.sessionId !== originalFallbackId &&
           !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
         shouldWriteGlobal = false;
       }
