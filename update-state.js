@@ -18,6 +18,7 @@ const { STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, QUIT_FLAG_FI
 const {
   toolToState, classifyToolResult, updateStreak, defaultStats,
   looksLikeRateLimit, EDIT_TOOLS,
+  pruneFrequentFiles, topFrequentFiles,
 } = require('./state-machine');
 
 // Event type passed as CLI argument (cross-platform -- no env var tricks)
@@ -427,7 +428,7 @@ process.stdin.on('end', () => {
       diffInfo,
       dailySessions: stats.daily.sessionCount,
       dailyCumulativeMs: stats.daily.cumulativeMs + currentSessionMs,
-      frequentFiles: stats.frequentFiles,
+      frequentFiles: topFrequentFiles(stats.frequentFiles),
     };
 
     if (stopped) extra.stopped = true;
@@ -450,6 +451,7 @@ process.stdin.on('end', () => {
     if (hookEvent !== 'SessionStart') {
       writeSessionState(sessionId, state, detail, stopped, extra);
     }
+    pruneFrequentFiles(stats.frequentFiles);
     writeStats(stats);
   } catch {
     // JSON parse may fail for Stop/Notification events with empty or

@@ -28,6 +28,9 @@ const {
   MILESTONES,
   updateStreak,
   defaultStats,
+  MAX_FREQUENT_FILES,
+  pruneFrequentFiles,
+  topFrequentFiles,
 } = require('../state-machine');
 
 let passed = 0;
@@ -1400,6 +1403,130 @@ describe('looksLikeRateLimit — Stop hook last_assistant_message patterns', () 
 
   test('empty last_assistant_message does NOT trigger rate limit', () => {
     assert.strictEqual(looksLikeRateLimit('', ''), false);
+  });
+});
+
+// ================================================================
+// pruneFrequentFiles
+// ================================================================
+
+describe('state-machine.js -- pruneFrequentFiles', () => {
+  test('no-ops on empty object', () => {
+    const ff = {};
+    pruneFrequentFiles(ff);
+    assert.deepStrictEqual(ff, {});
+  });
+
+  test('returns null/undefined unchanged', () => {
+    assert.strictEqual(pruneFrequentFiles(null), null);
+    assert.strictEqual(pruneFrequentFiles(undefined), undefined);
+  });
+
+  test('does not prune when under cap', () => {
+    const ff = { 'a.js': 1, 'b.js': 5, 'c.js': 1, 'd.js': 3 };
+    pruneFrequentFiles(ff);
+    assert.strictEqual(Object.keys(ff).length, 4);
+    assert.strictEqual(ff['a.js'], 1);
+    assert.strictEqual(ff['b.js'], 5);
+  });
+
+  test('removes count < 2 entries when over cap', () => {
+    const ff = {};
+    for (let i = 0; i < 55; i++) {
+      ff[`file${i}.js`] = i < 5 ? 1 : i + 2; // 5 entries with count=1
+    }
+    pruneFrequentFiles(ff);
+    // count=1 entries should be filtered out
+    for (let i = 0; i < 5; i++) {
+      assert.strictEqual(ff[`file${i}.js`], undefined);
+    }
+    assert.strictEqual(Object.keys(ff).length, MAX_FREQUENT_FILES);
+  });
+
+  test('caps at MAX_FREQUENT_FILES when over limit', () => {
+    const ff = {};
+    for (let i = 0; i < 100; i++) {
+      ff[`file${i}.js`] = i + 2; // all count >= 2
+    }
+    pruneFrequentFiles(ff);
+    assert.strictEqual(Object.keys(ff).length, MAX_FREQUENT_FILES);
+  });
+
+  test('keeps highest-count entries when pruning', () => {
+    const ff = {};
+    for (let i = 0; i < 60; i++) {
+      ff[`file${i}.js`] = i + 2;
+    }
+    pruneFrequentFiles(ff);
+    // file59.js (count=61) should survive, file0.js (count=2) should not
+    assert.strictEqual(ff['file59.js'], 61);
+    assert.strictEqual(ff['file0.js'], undefined);
+  });
+
+  test('under-cap object is not truncated', () => {
+    const ff = {};
+    for (let i = 0; i < 30; i++) {
+      ff[`file${i}.js`] = i + 5;
+    }
+    pruneFrequentFiles(ff);
+    assert.strictEqual(Object.keys(ff).length, 30);
+  });
+
+  test('mutates in-place and returns same reference', () => {
+    const ff = { 'a.js': 1 };
+    const result = pruneFrequentFiles(ff);
+    assert.strictEqual(result, ff);
+  });
+
+  test('MAX_FREQUENT_FILES is 50', () => {
+    assert.strictEqual(MAX_FREQUENT_FILES, 50);
+  });
+});
+
+// ================================================================
+// topFrequentFiles
+// ================================================================
+
+describe('state-machine.js -- topFrequentFiles', () => {
+  test('returns empty object for null/undefined', () => {
+    assert.deepStrictEqual(topFrequentFiles(null), {});
+    assert.deepStrictEqual(topFrequentFiles(undefined), {});
+  });
+
+  test('filters entries below count 3', () => {
+    const ff = { 'a.js': 1, 'b.js': 2, 'c.js': 3, 'd.js': 10 };
+    const result = topFrequentFiles(ff);
+    assert.strictEqual(result['a.js'], undefined);
+    assert.strictEqual(result['b.js'], undefined);
+    assert.strictEqual(result['c.js'], 3);
+    assert.strictEqual(result['d.js'], 10);
+  });
+
+  test('caps at default limit of 10', () => {
+    const ff = {};
+    for (let i = 0; i < 50; i++) {
+      ff[`file${i}.js`] = i + 3;
+    }
+    const result = topFrequentFiles(ff);
+    assert.strictEqual(Object.keys(result).length, 10);
+  });
+
+  test('returns a new object (does not mutate input)', () => {
+    const ff = { 'a.js': 5 };
+    const result = topFrequentFiles(ff);
+    assert.notStrictEqual(result, ff);
+  });
+
+  test('respects custom limit parameter', () => {
+    const ff = { 'a.js': 5, 'b.js': 10, 'c.js': 3 };
+    const result = topFrequentFiles(ff, 2);
+    assert.strictEqual(Object.keys(result).length, 2);
+    assert.strictEqual(result['b.js'], 10);
+    assert.strictEqual(result['a.js'], 5);
+  });
+
+  test('returns empty object for empty input', () => {
+    assert.deepStrictEqual(topFrequentFiles({}), {});
   });
 });
 
