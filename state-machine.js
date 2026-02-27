@@ -147,7 +147,7 @@ const stdoutErrorPatterns = [
   /\bfailed with exit code\b/i,
   /\bnpm ERR!/,
   /\bcargo error\b/i,
-  /\frustc.*error\[E\d+\]/,                       // Rust compiler errors
+  /\brustc.*error\[E\d+\]/,                       // Rust compiler errors
   /\bCONFLICT\s+\(.*?\):/,                         // git merge conflicts (requires git format)
   /\bAutomatic merge failed\b/i,
   /\bfix conflicts and then commit\b/i,
@@ -284,7 +284,7 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
   } else if (inferredExit !== null && inferredExit !== 0) {
     if (isRateLimited) { state = 'ratelimited'; detail = 'usage limit'; }
     else { state = 'error'; detail = errorDetail(stdout, stderr) || `exit ${inferredExit}`; }
-  } else if (looksLikeError(stderr, stderrErrorPatterns)) {
+  } else if (!READ_TOOLS.test(toolName) && !SEARCH_TOOLS.test(toolName) && !WEB_TOOLS.test(toolName) && looksLikeError(stderr, stderrErrorPatterns)) {
     if (isRateLimited) { state = 'ratelimited'; detail = 'usage limit'; }
     else { state = 'error'; detail = errorDetail(stdout, stderr); }
   } else if (BASH_TOOLS.test(toolName) && looksLikeError(stdout, stdoutErrorPatterns)) {

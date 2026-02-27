@@ -634,6 +634,14 @@ describe('state-machine.js -- looksLikeError (stdout)', () => {
     assert.ok(looksLikeError('npm ERR! code ERESOLVE', stdoutErrorPatterns));
   });
 
+  test('detects "cargo error"', () => {
+    assert.ok(looksLikeError('cargo error: could not compile `myproject`', stdoutErrorPatterns));
+  });
+
+  test('detects rustc compiler error', () => {
+    assert.ok(looksLikeError('rustc error[E0308]: mismatched types', stdoutErrorPatterns));
+  });
+
   test('detects "permission denied"', () => {
     assert.ok(looksLikeError('error: permission denied for /root', stdoutErrorPatterns));
   });
@@ -810,6 +818,23 @@ describe('state-machine.js -- classifyToolResult (error detection)', () => {
   test('stderr false positive → not error', () => {
     const r = classifyToolResult('Bash', { command: 'echo' }, { stderr: '0 errors, 5 warnings' }, false);
     assert.notStrictEqual(r.state, 'error');
+  });
+
+  test('Read tool with stderr "error" → satisfied, not error (read-only gate)', () => {
+    const r = classifyToolResult('Read', { file_path: '/src/errors.ts' }, { stderr: 'found error in output' }, false);
+    assert.strictEqual(r.state, 'satisfied');
+    assert.notStrictEqual(r.state, 'error');
+  });
+
+  test('Grep tool with stderr "error" → satisfied, not error (read-only gate)', () => {
+    const r = classifyToolResult('Grep', { pattern: 'error' }, { stderr: 'error pattern matched' }, false);
+    assert.strictEqual(r.state, 'satisfied');
+    assert.notStrictEqual(r.state, 'error');
+  });
+
+  test('Bash tool with stderr "error" → still error (not gated)', () => {
+    const r = classifyToolResult('Bash', { command: 'make' }, { stderr: 'fatal error occurred' }, false);
+    assert.strictEqual(r.state, 'error');
   });
 });
 
