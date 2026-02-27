@@ -635,6 +635,13 @@ describe('adapters -- openclaw-adapter', () => {
 
   test('tracks edited files in stats', () => {
     const { tmp, statsFile, env } = makeTempEnv('claw-17');
+    // Send two edit events so count >= 2 survives frequentFiles pruning
+    runStdinAdapter(ADAPTER, {
+      event: 'tool_call',
+      toolName: 'edit',
+      input: { file_path: '/home/user/project/main.py' },
+      session_id: 'claw-17',
+    }, env);
     runStdinAdapter(ADAPTER, {
       event: 'tool_call',
       toolName: 'edit',
@@ -643,7 +650,7 @@ describe('adapters -- openclaw-adapter', () => {
     }, env);
     const stats = readJSON(statsFile);
     assert.ok(stats.session.filesEdited.includes('main.py'), 'should track edited file');
-    assert.ok(stats.frequentFiles['main.py'] >= 1, 'should track in frequentFiles');
+    assert.ok(stats.frequentFiles['main.py'] >= 2, 'should track in frequentFiles');
     cleanup(tmp);
   });
 

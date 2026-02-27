@@ -384,6 +384,41 @@ function updateStreak(stats, isError) {
   return stats;
 }
 
+// -- Frequent Files Management ----------------------------------------
+
+const MAX_FREQUENT_FILES = 50;
+
+// Prunes the frequentFiles map in-place to stay within bounds.
+// Only acts when the map exceeds MAX_FREQUENT_FILES entries.
+// Filters out count < 2 (single-touch noise), then keeps the top N by count.
+function pruneFrequentFiles(frequentFiles) {
+  if (!frequentFiles) return frequentFiles;
+  const keys = Object.keys(frequentFiles);
+  if (keys.length <= MAX_FREQUENT_FILES) return frequentFiles;
+  const sorted = keys
+    .map(k => [k, frequentFiles[k]])
+    .filter(([, count]) => count >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_FREQUENT_FILES);
+  for (const k of keys) delete frequentFiles[k];
+  for (const [k, v] of sorted) frequentFiles[k] = v;
+  return frequentFiles;
+}
+
+// Returns a small subset of frequentFiles suitable for embedding in state files.
+// Only includes entries with count >= 3 (the _getTopFile threshold), capped at 10.
+function topFrequentFiles(frequentFiles, limit) {
+  if (!frequentFiles) return {};
+  const cap = limit || 10;
+  const entries = Object.entries(frequentFiles)
+    .filter(([, count]) => count >= 3)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, cap);
+  const result = {};
+  for (const [k, v] of entries) result[k] = v;
+  return result;
+}
+
 // -- Default Stats ---------------------------------------------------
 
 function defaultStats() {
@@ -422,4 +457,7 @@ module.exports = {
   MILESTONES,
   updateStreak,
   defaultStats,
+  MAX_FREQUENT_FILES,
+  pruneFrequentFiles,
+  topFrequentFiles,
 };

@@ -23,6 +23,7 @@ const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename } = require('../share
 const {
   toolToState, classifyToolResult, updateStreak, defaultStats,
   EDIT_TOOLS,
+  pruneFrequentFiles, topFrequentFiles,
 } = require('../state-machine');
 
 // -- State file writing ------------------------------------------------
@@ -107,7 +108,7 @@ function buildExtra(stats, sessionId, modelName) {
     diffInfo: null,
     dailySessions: stats.daily.sessionCount,
     dailyCumulativeMs: stats.daily.cumulativeMs + currentSessionMs,
-    frequentFiles: stats.frequentFiles,
+    frequentFiles: topFrequentFiles(stats.frequentFiles),
   };
 }
 
@@ -274,6 +275,7 @@ function runStdinAdapter(options) {
 
     guardedWriteState(sessionId, state, detail, extra);
     writeSessionState(sessionId, state, detail, stopped, extra);
+    pruneFrequentFiles(stats.frequentFiles);
     writeStats(stats);
   }, () => {
     // Fallback on parse error -- write thinking state with guard
