@@ -1012,6 +1012,75 @@ describe('bug fix regressions', () => {
       'PreToolUse isSubagentTool branch should not exist');
   });
 
+  test('update-state.js fallback catch block respects subagent isolation', () => {
+    // Bug #69: The fallback catch block (for Stop/Notification with empty stdin)
+    // set fallbackSessionId = existing.sessionId, then compared them — always equal.
+    // A subagent Stop with empty stdin would overwrite the main session's global state.
+    const { tmp, stateFile, env } = makeTempEnv('sub-iso-1');
+    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
+
+    // Pre-seed the global state file with an active main session
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'coding', detail: 'editing file',
+      sessionId: 'main-session-abc', stopped: false,
+      timestamp: Date.now(),
+    }), 'utf8');
+
+    // Run a Stop event with non-JSON stdin so it hits the catch block.
+    // Use a different session ID (from env) than what's in the state file.
+    const subEnv = { ...env, CLAUDE_SESSION_ID: 'sub-iso-1' };
+    try {
+      execFileSync(NODE, [UPDATE_STATE, 'Stop'], {
+        input: 'not valid json',
+        env: subEnv,
+        timeout: 10000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+
+    // The global state file should still belong to the main session —
+    // the subagent's Stop should NOT have overwritten it.
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.sessionId, 'main-session-abc',
+      `global state should still belong to main session, got '${state.sessionId}'`);
+    assert.strictEqual(state.state, 'coding',
+      `global state should still be 'coding', got '${state.state}'`);
+    cleanup(tmp);
+  });
+
+  test('update-state.js fallback catch block writes global when session matches', () => {
+    // Complementary test: when the fallback session ID matches the existing file,
+    // it SHOULD write to the global state file.
+    const { tmp, stateFile, env } = makeTempEnv('fallback-match-1');
+    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
+
+    // Pre-seed with same session ID as the env will provide
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'thinking', detail: '',
+      sessionId: 'fallback-match-1', stopped: false,
+      timestamp: Date.now(),
+    }), 'utf8');
+
+    try {
+      execFileSync(NODE, [UPDATE_STATE, 'Stop'], {
+        input: 'not valid json',
+        env,
+        timeout: 10000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+
+    // The global state should have been updated to 'responding' (Stop event)
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'responding',
+      `global state should be 'responding' after Stop, got '${state.state}'`);
+    cleanup(tmp);
+  });
+
   test('update-state.js has no state-mirroring block for orbital faces', () => {
     // Bug: an else-if block mirrored every parent tool call's state directly
     // into the latest subagent session file, making orbital faces flicker
