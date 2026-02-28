@@ -173,6 +173,16 @@ function processStdinEvent(handler, fallbackFn) {
 
 function processJsonlStream(stream, handler) {
   let buffer = '';
+  const flush = () => {
+    if (buffer.trim()) {
+      try {
+        const event = JSON.parse(buffer);
+        handler(event);
+      } catch {
+        // Not valid JSON, skip
+      }
+    }
+  };
   stream.on('data', (chunk) => {
     buffer += chunk.toString();
     const lines = buffer.split(/\r?\n/);
@@ -187,6 +197,7 @@ function processJsonlStream(stream, handler) {
       }
     }
   });
+  stream.on('end', flush);
 }
 
 // -- Full stdin-based adapter runner -----------------------------------
