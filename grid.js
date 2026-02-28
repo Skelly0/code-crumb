@@ -169,7 +169,7 @@ class MiniFace {
     const sessionActive = !this.stopped;
 
     if (completionLinger && elapsed > completionLinger) {
-      this.state = 'thinking';
+      this.state = sessionActive ? 'thinking' : 'idle';
       this.minDisplayUntil = now + 1500;
     } else if (this.state === 'thinking' &&
                elapsed > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT)) {

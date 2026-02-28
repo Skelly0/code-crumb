@@ -670,4 +670,28 @@ describe('grid.js -- MiniFace updateFromFile detail gating (Bug 3)', () => {
   });
 });
 
+describe('grid.js -- completion linger respects sessionActive (#70)', () => {
+  test('stopped session decays to idle after completion linger', () => {
+    const face = new MiniFace('test');
+    face.state = 'happy';
+    face.stopped = true;
+    face.lastUpdate = Date.now() - 9000;
+    face.minDisplayUntil = 0;
+    face.tick(16);
+    assert.strictEqual(face.state, 'idle',
+      'stopped session should decay to idle, not thinking');
+  });
+
+  test('active session decays to thinking after completion linger', () => {
+    const face = new MiniFace('test');
+    face.state = 'happy';
+    face.stopped = false;
+    face.lastUpdate = Date.now() - 9000;
+    face.minDisplayUntil = 0;
+    face.tick(16);
+    assert.strictEqual(face.state, 'thinking',
+      'active session should decay to thinking');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
