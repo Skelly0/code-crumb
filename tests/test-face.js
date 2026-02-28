@@ -1170,6 +1170,44 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     face.setState('installing', 'npm install');
     assert.strictEqual(face.state, 'installing');
   });
+
+  test('completion state in pending is NOT overwritten by next PreToolUse (Bug 66)', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    face.setState('happy');
+    // happy is now pending (thinking hasn't shown long enough)
+    assert.strictEqual(face.pendingState, 'happy');
+    // Next tool use arrives before happy displays
+    face.setState('coding', 'editing file');
+    // happy should NOT be overwritten - it stays pending
+    assert.strictEqual(face.pendingState, 'happy');
+    // state is still thinking (waiting for minDisplayUntil)
+    assert.strictEqual(face.state, 'thinking');
+  });
+
+  test('proud in pending is NOT overwritten by executing (Bug 66)', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    face.setState('proud', 'saved file.js');
+    // proud is pending
+    assert.strictEqual(face.pendingState, 'proud');
+    // Next tool use arrives
+    face.setState('executing', 'npm test');
+    // proud should NOT be overwritten
+    assert.strictEqual(face.pendingState, 'proud');
+  });
+
+  test('satisfied in pending is NOT overwritten by reading (Bug 66)', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');  // Set initial state to establish minDisplayUntil
+    face.setState('satisfied', 'read file.js');
+    // satisfied is pending
+    assert.strictEqual(face.pendingState, 'satisfied');
+    // Next tool use arrives
+    face.setState('reading', 'reading another file');
+    // satisfied should NOT be overwritten
+    assert.strictEqual(face.pendingState, 'satisfied');
+  });
 });
 
 // -- Caffeinated detection (update-driven) --------------------------------
