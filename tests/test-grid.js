@@ -790,4 +790,30 @@ describe('grid.js -- MiniFace pending state queue (#55)', () => {
   });
 });
 
+describe('grid.js -- MiniFace detail row rendering (#57)', () => {
+  test('render includes detail text when detail is set', () => {
+    const face = new MiniFace('test');
+    face.detail = 'foo.js';
+    const out = face.render(1, 1, 0, null);
+    assert.ok(out.includes('foo.js'), 'render output should include detail text');
+  });
+
+  test('render omits detail row when detail is empty', () => {
+    const face = new MiniFace('test');
+    face.detail = '';
+    const out = face.render(1, 1, 0, null);
+    // Row 6 should not be written — no extra ansi.to positioning beyond row 5
+    const row6Marker = '\x1b[7;'; // ansi.to(startRow+6=7, col=1) → ESC[7;1H
+    assert.ok(!out.includes(row6Marker), 'row 6 should not be rendered when detail is empty');
+  });
+
+  test('detail is truncated to BOX_W (8) characters', () => {
+    const face = new MiniFace('test');
+    face.detail = 'this-is-a-very-long-filename.js';
+    const out = face.render(1, 1, 0, null);
+    assert.ok(out.includes('this-is-'), 'detail should be truncated to 8 chars');
+    assert.ok(!out.includes('this-is-a-'), 'detail should not exceed 8 chars');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
