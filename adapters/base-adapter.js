@@ -67,7 +67,8 @@ function guardedWriteState(sessionId, state, detail, extra) {
         !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
       return; // Another session owns the state file
     }
-    // Preserve model name established by the session owner
+    // Preserve model name established by the session owner. See also: update-state.js guard
+    // block (same logic for Claude Code hooks) and face.js setStats (env var wins at render).
     if (existing.sessionId === sessionId && existing.modelName) {
       writeExtra = { ...extra, modelName: existing.modelName };
     }

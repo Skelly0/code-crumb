@@ -192,7 +192,7 @@ function runUnifiedMode() {
           // Adopt as new main only if old main session ended, is very stale,
           // or a new session is explicitly starting (SessionStart hook)
           if (lastStopped || Date.now() - lastMainUpdate > 120000
-              || stateData.detail === 'session starting') {
+              || stateData.isSessionStart === true) {
             mainSessionId = incomingId;
             lastStopped = false;
           } else {
