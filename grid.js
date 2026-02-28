@@ -835,38 +835,42 @@ function renderSessionList(cols, rows, faces, paletteThemes, mainInfo) {
       const [dot, dotColor] = _sessionDot(face, themeMap);
       const dotC = ansi.fg(...dotColor);
       const stateTheme = themeMap[face.state] || themeMap.idle;
-      const stateName = (stateTheme.status || face.state).slice(0, 10);
-      const label = (face.label || '?').slice(0, 12);
-      const branch = face.gitBranch ? ('\u2387 ' + face.gitBranch).slice(0, 16) : '';
+      const stateName = (stateTheme.status || face.state).slice(0, 12);
+      const label = (face.label || '?').slice(0, 14);
 
-      // Row A: dot + state + label + branch
-      const rowABase = 2 + 1 + 1 + stateName.length; // "  ● state"
-      const labelGap = Math.max(1, 14 - rowABase);
-      let rowABranch = '';
-      if (branch) {
-        const branchGap = Math.max(1, innerW - (rowABase + labelGap + label.length) - branch.length - 1);
-        rowABranch = ' '.repeat(Math.max(1, branchGap)) + branch;
+      // Row 1: "  ● statename    label" — dot, state, and label only
+      const row1Prefix = 4; // "  ● " before stateName
+      const labelGap = Math.max(2, innerW - row1Prefix - stateName.length - label.length);
+      const row1Content = `${stateName}${' '.repeat(labelGap)}${label}`;
+      const row1Sliced = row1Content.slice(0, innerW - row1Prefix);
+      const r1Pad = Math.max(0, innerW - row1Prefix - row1Sliced.length);
+      buf += ansi.to(row, bx) + `${bc}\u2502${r}  ${dotC}${dot}${r} ${tc}${row1Sliced}${' '.repeat(r1Pad)}${bc}\u2502${r}`;
+      row++;
+
+      // Row 2: "    ⎇ branch  ~/path" — branch and path share the line
+      const indent2 = '    ';
+      const branchRaw = face.gitBranch || '';
+      let row2Text = '';
+      if (branchRaw) {
+        const branchDisplay = ('\u2387 ' + branchRaw).slice(0, 20);
+        const pathSpace = innerW - indent2.length - branchDisplay.length - 2; // 2 = gap
+        const cwdStr = _truncatePath(face.cwd, Math.max(8, pathSpace));
+        row2Text = branchDisplay + '  ' + cwdStr;
+      } else {
+        const cwdStr = _truncatePath(face.cwd, innerW - indent2.length);
+        row2Text = cwdStr;
       }
-      const afterDot = `${stateName}${' '.repeat(labelGap)}${label}${rowABranch}`;
-      const afterDotSliced = afterDot.slice(0, innerW - 4); // 4 = "  ● "
-      const aPad = Math.max(0, innerW - 4 - afterDotSliced.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${r}  ${dotC}${dot}${r} ${tc}${afterDotSliced}${' '.repeat(aPad)}${bc}\u2502${r}`;
+      const row2Full = indent2 + row2Text.slice(0, innerW - indent2.length);
+      const r2Pad = Math.max(0, innerW - row2Full.length);
+      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${row2Full}${' '.repeat(r2Pad)}${bc}\u2502${r}`;
       row++;
 
-      // Row B: cwd path (dimmed)
-      const cwdStr = _truncatePath(face.cwd, innerW - 14);
-      const rowB = '              ' + cwdStr; // 14-char indent
-      const rowBSliced = rowB.slice(0, innerW);
-      const bPad = Math.max(0, innerW - rowBSliced.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${rowBSliced}${' '.repeat(bPad)}${bc}\u2502${r}`;
-      row++;
-
-      // Row C: detail or task description (dimmed)
-      const detailText = (face.detail || face.taskDescription || 'waiting...').slice(0, innerW - 14);
-      const rowC = '              ' + detailText; // 14-char indent
-      const rowCSliced = rowC.slice(0, innerW);
-      const cPad = Math.max(0, innerW - rowCSliced.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${rowCSliced}${' '.repeat(cPad)}${bc}\u2502${r}`;
+      // Row 3: "    detail text" — detail or task description, dimmed
+      const indent3 = '    ';
+      const detailText = (face.detail || face.taskDescription || 'waiting...').slice(0, innerW - indent3.length);
+      const row3Full = indent3 + detailText;
+      const r3Pad = Math.max(0, innerW - row3Full.length);
+      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${row3Full}${' '.repeat(r3Pad)}${bc}\u2502${r}`;
       row++;
 
       // Separator between entries (not after last)
