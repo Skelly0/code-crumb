@@ -344,8 +344,9 @@ class MiniFace {
 
     if (this.detail) {
       const detailStr = this.detail.slice(0, BOX_W);
+      const dPad = Math.max(0, Math.floor((BOX_W - detailStr.length) / 2));
       buf += ansi.to(startRow + 6, startCol);
-      buf += `${dc}${detailStr}${r}`;
+      buf += `${dc}${' '.repeat(dPad)}${detailStr}${r}`;
     }
 
     return buf;

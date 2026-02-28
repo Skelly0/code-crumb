@@ -414,6 +414,7 @@ process.stdin.on('end', () => {
     };
 
     if (stopped) extra.stopped = true;
+    if (hookEvent === 'SessionStart') extra.isSessionStart = true;
 
     // Only write to global state file if this session "owns" it.
     // Subagents should only write to their per-session file so they
@@ -430,7 +431,8 @@ process.stdin.on('end', () => {
         stopped = true;
         extra.stopped = true;
       }
-      // Preserve model name — subagents sharing session ID must not overwrite the owner's name
+      // Preserve model name — subagents sharing session ID must not overwrite the owner's name.
+      // See also: base-adapter.js guardedWriteState (adapters) and face.js setStats (env var).
       if (existing.sessionId === sessionId && existing.modelName &&
           extra.modelName !== existing.modelName) {
         extra.modelName = existing.modelName;
@@ -496,6 +498,7 @@ process.stdin.on('end', () => {
     } else if (hookEvent === 'SessionStart') {
       fallbackState = 'waiting';
       fallbackDetail = 'session starting';
+      fallbackExtra.isSessionStart = true;
       // Clean up any stale session file from previous session with same ID
       const staleSessionFile = path.join(SESSIONS_DIR, safeFilename(fallbackSessionId) + '.json');
       try { fs.unlinkSync(staleSessionFile); } catch {}

@@ -263,6 +263,9 @@ class ClaudeFace {
   }
 
   setStats(data) {
+    // modelName priority: CODE_CRUMB_MODEL env var > state file value.
+    // Lower layers (update-state.js guard, base-adapter.js guardedWriteState) preserve
+    // the owner's name on disk; this layer ensures the env var always wins at render time.
     if (data.modelName && !process.env.CODE_CRUMB_MODEL) this.modelName = data.modelName;
     this.toolCallCount = data.toolCalls || 0;
     this.filesEditedCount = data.filesEdited || 0;
@@ -943,10 +946,10 @@ class ClaudeFace {
 
       // Session timeline bar (with time-compression for long idle/sleep gaps)
       const tlColors = this.getTimelineColors();
+      const now = Date.now();
+      const compressed = this._compressTimeline(now); // computed once, shared with sparkline
       if (this.timeline.length > 1) {
         const barWidth = Math.min(faceW - 2, 38);
-        const now = Date.now();
-        const compressed = this._compressTimeline(now);
         const cTl = compressed.entries;
         const cNow = compressed.displayNow;
         const tlStart = cTl[0].at;
@@ -971,8 +974,6 @@ class ClaudeFace {
       // Activity sparkline (tool call density below timeline)
       {
         const spkWidth = Math.min(faceW - 2, 38);
-        const now = Date.now();
-        const compressed = this._compressTimeline(now);
         const sparkBuckets = this._buildSparkline(spkWidth, now, compressed);
         if (sparkBuckets) {
           const maxCount = Math.max(1, ...sparkBuckets);
