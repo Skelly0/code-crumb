@@ -947,7 +947,7 @@ describe('bug fix regressions', () => {
   test('face.js uses petSpamLevel not petCount in getEyes', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'face.js'), 'utf8');
     assert.ok(!src.includes('this.petCount'), 'should not reference this.petCount');
-    assert.ok(src.includes('this.petSpamLevel > 3'));
+    assert.ok(src.includes('this.petSpamLevel >= 3'));
   });
 
   test('particles.js has TTY fallbacks for rows/columns', () => {
@@ -1576,6 +1576,103 @@ describe('base-adapter -- processJsonlStream unit tests', () => {
         assert.strictEqual(events[0].type, 'a');
       }, 10);
     });
+  });
+});
+
+// -- Bug fix structural tests (bugs #1, #2, #4, #5, #7, #10, #13, #16) --------
+
+describe('bug fix structural tests', () => {
+  const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
+  const BASE_ADAPTER = path.join(ADAPTERS_DIR, 'base-adapter.js');
+  const OPENCODE_ADAPTER = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+  const PARTICLES = path.join(__dirname, '..', 'particles.js');
+  const FACE = path.join(__dirname, '..', 'face.js');
+
+  // Bug #1 -- Windows Terminal fallback probes with execSync('where wt')
+  test('update-state.js probes for wt with "where wt" before spawning', () => {
+    const src = fs.readFileSync(UPDATE_STATE, 'utf8');
+    assert.ok(src.includes('where wt'),
+      'should probe for wt with execSync("where wt") instead of relying on spawn throw');
+  });
+
+  test('update-state.js sets hasWt flag from where-wt probe result', () => {
+    const src = fs.readFileSync(UPDATE_STATE, 'utf8');
+    assert.ok(src.includes('hasWt'),
+      'should have hasWt boolean flag controlled by where-wt probe');
+  });
+
+  // Bug #2 -- OpenCode adapter toolInput uses data.tool_input || toolArgs, not data.input
+  test('opencode-adapter.js does not use data.input as first choice for toolInput', () => {
+    const src = fs.readFileSync(OPENCODE_ADAPTER, 'utf8');
+    // data.input is the full {tool, args} wrapper — should not be used directly as toolInput
+    assert.ok(!src.includes('toolInput = data.input'),
+      'toolInput must not be set to data.input (the full wrapper object)');
+  });
+
+  test('opencode-adapter.js uses data.tool_input || toolArgs pattern for toolInput', () => {
+    const src = fs.readFileSync(OPENCODE_ADAPTER, 'utf8');
+    assert.ok(src.includes('data.tool_input || toolArgs'),
+      'toolInput should prefer data.tool_input, falling back to the unwrapped toolArgs');
+  });
+
+  // Bug #4 -- SubagentStop only splices when idx >= 0
+  test('update-state.js guards SubagentStop splice with idx >= 0 check', () => {
+    const src = fs.readFileSync(UPDATE_STATE, 'utf8');
+    assert.ok(src.includes('if (idx >= 0)'),
+      'SubagentStop handler must check idx >= 0 before splicing to avoid removing wrong subagent');
+  });
+
+  // Bug #5 -- Redundant stdin close handlers removed
+  test('update-state.js does not have process.stdin.on("close") handler', () => {
+    const src = fs.readFileSync(UPDATE_STATE, 'utf8');
+    assert.ok(!src.includes("process.stdin.on('close'"),
+      'update-state.js should not have a stdin close handler (process.exit is in end handler)');
+  });
+
+  test('base-adapter.js does not have process.stdin.on("close") calling process.exit', () => {
+    const src = fs.readFileSync(BASE_ADAPTER, 'utf8');
+    // Check that there is no close handler that calls process.exit
+    const hasCloseExit = src.includes("process.stdin.on('close'") &&
+      src.includes('process.exit');
+    // The close handler specifically (not just process.exit elsewhere) should be gone
+    assert.ok(!src.includes("process.stdin.on('close', () => { process.exit"),
+      'base-adapter.js should not have redundant stdin close handler that calls process.exit');
+  });
+
+  // Bug #7 -- Particle render includes ansi.reset after char
+  test('particles.js render method appends ansi.reset after particle character', () => {
+    const src = fs.readFileSync(PARTICLES, 'utf8');
+    assert.ok(src.includes('ansi.reset'),
+      'particles.js render should include ansi.reset to avoid color bleed after particle chars');
+  });
+
+  // Bug #10 -- base-adapter initSession includes commitCount and activeSubagents
+  test('base-adapter.js initSession initialises commitCount in session object', () => {
+    const src = fs.readFileSync(BASE_ADAPTER, 'utf8');
+    assert.ok(src.includes('commitCount: 0'),
+      'initSession must include commitCount: 0 in the new session object');
+  });
+
+  test('base-adapter.js initSession initialises activeSubagents in session object', () => {
+    const src = fs.readFileSync(BASE_ADAPTER, 'utf8');
+    assert.ok(src.includes('activeSubagents: []'),
+      'initSession must include activeSubagents: [] in the new session object');
+  });
+
+  // Bug #13 -- base-adapter guardedWriteState preserves existing.stopped flag
+  test('base-adapter.js guardedWriteState checks existing.stopped to preserve the flag', () => {
+    const src = fs.readFileSync(BASE_ADAPTER, 'utf8');
+    assert.ok(src.includes('existing.stopped'),
+      'guardedWriteState must read existing.stopped to preserve it for same-session writes');
+  });
+
+  // Bug #16 -- petSpamLevel threshold is >= 3, not > 3
+  test('face.js uses petSpamLevel >= 3 threshold (not > 3)', () => {
+    const src = fs.readFileSync(FACE, 'utf8');
+    assert.ok(src.includes('petSpamLevel >= 3'),
+      'face.js should activate caffeinated mode at petSpamLevel >= 3, not > 3');
+    assert.ok(!src.includes('petSpamLevel > 3'),
+      'face.js must not use petSpamLevel > 3 (off-by-one: level 3 would never trigger)');
   });
 });
 

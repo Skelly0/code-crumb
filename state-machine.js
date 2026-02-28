@@ -188,14 +188,21 @@ function looksLikeError(text, patterns) {
   const hit = patterns.some(p => p.test(text));
   if (!hit) return false;
   // Check it's not a false positive
-  return !falsePositives.some(p => p.test(text));
+  if (!falsePositives.some(p => p.test(text))) return true;
+  // If "warning" triggered the false positive, check if explicit error keywords
+  // also appear (mixed warning+error output like "2 warnings, 1 error" should detect)
+  if (/warning/i.test(text) && /\berrors?\b/i.test(text)
+      && !/0 errors?\b/i.test(text) && !/no errors?\b/i.test(text) && !/errors?:\s*0\b/i.test(text)) {
+    return true;
+  }
+  return false;
 }
 
 // Try to extract an exit code from stdout -- Claude Code often
 // appends "Exit code: N" to the output even though it doesn't
 // give us exit_code as a field.
 function extractExitCode(stdout) {
-  const match = stdout.match(/(?:exit code|exited with|returned?)[:=\s]+(\d+)/i);
+  const match = stdout.match(/(?:exit code|exited with|exit status|returned)[:=\s]+(\d+)/i);
   return match ? parseInt(match[1], 10) : null;
 }
 

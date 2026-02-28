@@ -162,8 +162,8 @@ if (require.main === module) {
 
   if (!isRendererRunning()) {
     startRenderer();
-    const start = Date.now();
-    while (Date.now() - start < 500) { /* spin */ }
+    // Wait 500ms for renderer to initialize (without busy-waiting)
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
   }
 
   const { cmd: editorCmd, args: editorCmdArgs } = resolveEditor(editorName, editorArgs, __dirname);

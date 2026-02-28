@@ -1663,6 +1663,43 @@ describe('state-machine.js -- extractExitCode edge cases', () => {
     const result = extractExitCode('exited with 1 then exited with 2');
     assert.strictEqual(result, 1);
   });
+
+  // Bug #11 — "return N" (source code) should not match; "returned N" still should
+  test('"return 0" does NOT extract an exit code (source code false positive)', () => {
+    assert.strictEqual(extractExitCode('return 0'), null);
+  });
+
+  test('"return 42" does NOT extract an exit code (source code false positive)', () => {
+    assert.strictEqual(extractExitCode('return 42'), null);
+  });
+
+  test('"returned 1" still extracts exit code 1', () => {
+    assert.strictEqual(extractExitCode('command returned 1'), 1);
+  });
+
+  test('"exit status: 1" extracts exit code 1', () => {
+    assert.strictEqual(extractExitCode('exit status: 1'), 1);
+  });
+});
+
+// -- looksLikeError — warning/error mixed output (Bug #3) -------------
+
+describe('state-machine.js -- looksLikeError (warning+error mixed output)', () => {
+  test('"2 warnings, 1 error: compilation failed" IS detected as error', () => {
+    assert.ok(looksLikeError('2 warnings, 1 error: compilation failed', stderrErrorPatterns));
+  });
+
+  test('"1 warning, 1 error" IS detected as error', () => {
+    assert.ok(looksLikeError('1 warning, 1 error', stderrErrorPatterns));
+  });
+
+  test('"warning: deprecated API" is NOT detected as error (pure warning)', () => {
+    assert.ok(!looksLikeError('warning: deprecated API', stderrErrorPatterns));
+  });
+
+  test('"0 errors, 3 warnings" is NOT detected as error (zero errors)', () => {
+    assert.ok(!looksLikeError('0 errors, 3 warnings', stderrErrorPatterns));
+  });
 });
 
 module.exports = { passed: () => passed, failed: () => failed };

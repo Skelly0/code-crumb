@@ -56,12 +56,22 @@ describe('shared.js -- safeFilename', () => {
   });
 
   test('handles empty string', () => {
-    assert.strictEqual(safeFilename(''), '');
+    assert.strictEqual(safeFilename(''), '_empty');
   });
 
   test('coerces non-string input', () => {
     assert.strictEqual(safeFilename(12345), '12345');
     assert.strictEqual(safeFilename(null), 'null');
+  });
+
+  test('null coerces to non-empty string', () => {
+    const result = safeFilename(null);
+    assert.ok(result.length > 0);
+  });
+
+  test('undefined coerces to non-empty string', () => {
+    const result = safeFilename(undefined);
+    assert.ok(result.length > 0);
   });
 });
 

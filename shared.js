@@ -23,7 +23,7 @@ const TMUX_FILE = path.join(HOME, '.code-crumb-tmux');
 // -- Utilities -------------------------------------------------------
 
 function safeFilename(id) {
-  return String(id).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  return String(id).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) || '_empty';
 }
 
 function loadPrefs() {

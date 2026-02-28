@@ -218,7 +218,7 @@ class ParticleSystem {
       if (row >= 1 && col >= 1 && row < (process.stdout.rows || 24) && col < (process.stdout.columns || 80)) {
         const fade = Math.min(1, p.life / (p.maxLife * 0.3));
         const color = dimColor(accentColor, fade);
-        out += ansi.to(row, col) + ansi.fg(...color) + p.char;
+        out += ansi.to(row, col) + ansi.fg(...color) + p.char + ansi.reset;
       }
     }
     return out;

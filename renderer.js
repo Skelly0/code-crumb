@@ -30,7 +30,7 @@ const PID_FILE = path.join(HOME, '.code-crumb.pid');
 const FPS = 15;
 const FRAME_MS = Math.floor(1000 / FPS);
 const IDLE_TIMEOUT = 8000;
-const THINKING_TIMEOUT = 120000; // 2min -- safety net if Stop event is missed
+const THINKING_TIMEOUT = 45000; // 45s -- safety net if Stop event is missed
 const SLEEP_TIMEOUT = 60000;
 
 // ===================================================================
@@ -219,12 +219,15 @@ function runUnifiedMode() {
     } catch {}
 
     // -- Stopped-flag rescue: runs BEFORE the minDisplayUntil early return --
-    // If Stop hook fired (lastStopped=true) but the face is still showing
-    // 'thinking' (either because the file read was missed due to mtime
+    // If Stop hook fired (lastStopped=true) but the face is still showing an
+    // active/thinking state (either because the file read was missed due to mtime
     // granularity, or because setState buffered 'responding' as pendingState
     // while minDisplayUntil was active), force-transition to 'responding' now.
     // We bypass setState() here to avoid it re-buffering the state.
-    if (lastStopped && face.state === 'thinking') {
+    // Completion states (happy/satisfied/proud/relieved) are excluded — they
+    // already transition to idle via the linger path with sessionActive=false.
+    const rescueExclude = new Set(['idle', 'sleeping', 'responding', 'starting', 'happy', 'satisfied', 'proud', 'relieved']);
+    if (lastStopped && !rescueExclude.has(face.state)) {
       face.prevState = face.state;
       face.state = 'responding';
       face.transitionFrame = 0;
@@ -241,7 +244,7 @@ function runUnifiedMode() {
     // If we're past minDisplayUntil and in an active state,
     // do a fresh file read to catch any stop/start event missed by fs.watch mtime
     // granularity (common on Windows FAT/NTFS with 1-second mtime resolution).
-    const freshReadStates = ['thinking', 'executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'responding'];
+    const freshReadStates = ['thinking', 'executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'responding', 'happy', 'satisfied', 'proud', 'relieved'];
     if (now >= face.minDisplayUntil &&
         freshReadStates.includes(face.state) &&
         (face.state === 'thinking' || now - lastMainUpdate > 2000)) {

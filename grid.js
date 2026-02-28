@@ -143,7 +143,7 @@ class MiniFace {
       const staleTime = this.stopped ? this.stoppedAt : this.lastUpdate;
       return Date.now() - staleTime > STOPPED_LINGER_MS;
     }
-    return Date.now() - this.lastUpdate > STALE_MS;
+    return Date.now() - this.lastUpdate > THINKING_TIMEOUT;
   }
 
   tick(dt) {
@@ -381,12 +381,19 @@ class OrbitalSystem {
       return;
     }
 
-    // Purge orphaned session files older than STALE_MS
+    // Purge orphaned/finished session files — but protect active thinking faces
     const now = Date.now();
+    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     for (const f of files) {
       try {
         const fp = path.join(SESSIONS_DIR, f);
-        if (now - fs.statSync(fp).mtimeMs > STALE_MS) fs.unlinkSync(fp);
+        if (now - fs.statSync(fp).mtimeMs > STALE_MS) {
+          // Don't delete files for active in-memory faces — they may just be thinking
+          const fileId = path.basename(f, '.json');
+          const knownFace = this.faces.get(fileId);
+          if (knownFace && !knownFace.stopped && !completionStates.includes(knownFace.state)) continue;
+          fs.unlinkSync(fp);
+        }
       } catch {}
     }
     files = files.filter(f => {

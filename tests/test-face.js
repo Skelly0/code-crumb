@@ -56,20 +56,20 @@ describe('face.js -- ClaudeFace constructor', () => {
 describe('face.js -- ClaudeFace._getMinDisplayMs', () => {
   const face = new ClaudeFace();
 
-  test('happy → 5000ms', () => {
-    assert.strictEqual(face._getMinDisplayMs('happy'), 5000);
+  test('happy → 4000ms', () => {
+    assert.strictEqual(face._getMinDisplayMs('happy'), 4000);
   });
 
-  test('error → 3500ms', () => {
-    assert.strictEqual(face._getMinDisplayMs('error'), 3500);
+  test('error → 4000ms', () => {
+    assert.strictEqual(face._getMinDisplayMs('error'), 4000);
   });
 
   test('coding → 6000ms', () => {
     assert.strictEqual(face._getMinDisplayMs('coding'), 6000);
   });
 
-  test('reading → 3000ms', () => {
-    assert.strictEqual(face._getMinDisplayMs('reading'), 3000);
+  test('reading → 4000ms', () => {
+    assert.strictEqual(face._getMinDisplayMs('reading'), 4000);
   });
 
   test('sleeping → 1000ms', () => {

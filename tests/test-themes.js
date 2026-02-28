@@ -52,6 +52,14 @@ describe('themes.js -- lerpColor', () => {
   test('works with same color', () => {
     assert.deepStrictEqual(lerpColor([100, 100, 100], [100, 100, 100], 0.7), [100, 100, 100]);
   });
+
+  test('clamps t > 1 to 1 (returns target color)', () => {
+    assert.deepStrictEqual(lerpColor([0, 0, 0], [255, 128, 64], 2), [255, 128, 64]);
+  });
+
+  test('clamps t < 0 to 0 (returns source color)', () => {
+    assert.deepStrictEqual(lerpColor([10, 20, 30], [255, 255, 255], -1), [10, 20, 30]);
+  });
 });
 
 describe('themes.js -- dimColor', () => {
@@ -65,6 +73,14 @@ describe('themes.js -- dimColor', () => {
 
   test('factor=0.5 → halved', () => {
     assert.deepStrictEqual(dimColor([100, 200, 50], 0.5), [50, 100, 25]);
+  });
+
+  test('clamps factor > 1 to 1 (returns original color)', () => {
+    assert.deepStrictEqual(dimColor([100, 200, 50], 2), [100, 200, 50]);
+  });
+
+  test('clamps factor < 0 to 0 (returns black)', () => {
+    assert.deepStrictEqual(dimColor([100, 200, 50], -1), [0, 0, 0]);
   });
 });
 

@@ -49,7 +49,7 @@ function normaliseEvent(data) {
   const opencodeInput = data.input || {};
   const toolName = opencodeInput.tool || data.tool || data.tool_name || '';
   const toolArgs = opencodeInput.args || {};
-  const toolInput = data.input || data.tool_input || toolArgs;
+  const toolInput = data.tool_input || toolArgs;
   const toolOutput = data.output?.content?.[0]?.text
     || data.output?.output
     || data.output

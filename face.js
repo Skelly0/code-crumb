@@ -473,7 +473,7 @@ class ClaudeFace {
         if (this.lookDir > 0) return eyes.lookRight(theme, frame);
         return eyes.wide(theme, frame);
       case 'executing':   return eyes.open(theme, frame);
-      case 'happy':       return this.petSpamLevel > 3 ? eyes.heart() : eyes.sparkle(theme, frame);
+      case 'happy':       return this.petSpamLevel >= 3 ? eyes.heart() : eyes.sparkle(theme, frame);
       case 'satisfied':   return eyes.content(theme, frame);
       case 'proud':       return eyes.pleased(theme, frame);
       case 'relieved':    return eyes.open(theme, frame);

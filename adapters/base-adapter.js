@@ -67,10 +67,14 @@ function guardedWriteState(sessionId, state, detail, extra) {
         !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
       return; // Another session owns the state file
     }
+    // Preserve stopped flag — late PostToolUse must not erase a prior Stop
+    if (existing.stopped && existing.sessionId === sessionId && !writeExtra?.stopped) {
+      writeExtra = { ...writeExtra, stopped: true };
+    }
     // Preserve model name established by the session owner. See also: update-state.js guard
     // block (same logic for Claude Code hooks) and face.js setStats (env var wins at render).
     if (existing.sessionId === sessionId && existing.modelName) {
-      writeExtra = { ...extra, modelName: existing.modelName };
+      writeExtra = { ...writeExtra, modelName: existing.modelName };
     }
   } catch {}
   writeState(state, detail, writeExtra);
@@ -88,7 +92,7 @@ function initSession(stats, sessionId) {
   if (!stats.frequentFiles) stats.frequentFiles = {};
   if (stats.session.id !== sessionId) {
     stats.daily.sessionCount++;
-    stats.session = { id: sessionId, start: Date.now(), toolCalls: 0, filesEdited: [], subagentCount: 0 };
+    stats.session = { id: sessionId, start: Date.now(), toolCalls: 0, filesEdited: [], subagentCount: 0, commitCount: 0, activeSubagents: [] };
   }
   if (stats.recentMilestone && Date.now() - stats.recentMilestone.at > 8000) {
     stats.recentMilestone = null;
@@ -170,7 +174,7 @@ function processStdinEvent(handler, fallbackFn) {
     }
     process.exit(0);
   });
-  process.stdin.on('close', () => { process.exit(0); });
+  // 'end' handler above already calls process.exit(0); no 'close' handler needed
 }
 
 // -- Stdin JSONL (streaming) reader ------------------------------------

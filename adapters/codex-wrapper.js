@@ -42,6 +42,13 @@ function extra() {
 // -- JSONL Event Processor -------------------------------------------
 
 function handleEvent(event) {
+  // Re-read stats from disk to avoid overwriting concurrent sessions' changes
+  const fresh = readStats();
+  fresh.session = stats.session;
+  fresh.daily = stats.daily;
+  fresh.frequentFiles = { ...fresh.frequentFiles, ...stats.frequentFiles };
+  Object.assign(stats, fresh);
+
   try {
     const type = event.type || '';
     const item = event.item || {};

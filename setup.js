@@ -174,12 +174,13 @@ if (configText.includes('codex-notify.js')) {
     }
   } else {
     // Append notify config
-    const notifyLine = `\n# Code Crumb integration\nnotify = ["node", "${notifyPath}"]\n`;
+    const notifyLine = `# Code Crumb integration\nnotify = ["node", "${notifyPath}"]\n\n`;
     const codexDir = path.dirname(CODEX_CONFIG);
     if (!fs.existsSync(codexDir)) {
       fs.mkdirSync(codexDir, { recursive: true });
     }
-    fs.writeFileSync(CODEX_CONFIG, configText + notifyLine, 'utf8');
+    // Insert at top so the key is at global scope (not under a [section])
+    fs.writeFileSync(CODEX_CONFIG, notifyLine + configText, 'utf8');
     console.log(`  + Added notify handler to ${CODEX_CONFIG}`);
   }
 

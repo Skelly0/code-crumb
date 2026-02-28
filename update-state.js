@@ -93,11 +93,13 @@ function ensureRendererRunning() {
 
     let child;
     if (platform === 'win32') {
-      // Try Windows Terminal first, fall back to cmd start
-      try {
+      // Probe for Windows Terminal before spawning (spawn doesn't throw synchronously)
+      let hasWt = false;
+      try { require('child_process').execSync('where wt', { stdio: 'ignore' }); hasWt = true; } catch {}
+      if (hasWt) {
         child = spawn('wt', ['-w', '0', 'new-tab', '--title', 'Code Crumb', 'node', rendererPath],
           { detached: true, stdio: 'ignore', shell: false });
-      } catch {
+      } else {
         child = spawn('cmd', ['/c', 'start', '"Code Crumb"', 'node', rendererPath],
           { detached: true, stdio: 'ignore', shell: true });
       }
@@ -320,14 +322,15 @@ process.stdin.on('end', () => {
       const subId = data.subagent_id || '';
       if (subId && stats.session.activeSubagents.length > 0) {
         const idx = stats.session.activeSubagents.findIndex(s => s.id === subId);
-        const finished = idx >= 0
-          ? stats.session.activeSubagents.splice(idx, 1)[0]
-          : stats.session.activeSubagents.shift();
-        writeSessionState(finished.id, 'happy', 'done', true, {
-          sessionId: finished.id, stopped: true, cwd: process.cwd(),
-          gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
-          parentSession: sessionId, taskDescription: finished.taskDescription || finished.description,
-        });
+        if (idx >= 0) {
+          const finished = stats.session.activeSubagents.splice(idx, 1)[0];
+          writeSessionState(finished.id, 'happy', 'done', true, {
+            sessionId: finished.id, stopped: true, cwd: process.cwd(),
+            gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
+            parentSession: sessionId, taskDescription: finished.taskDescription || finished.description,
+          });
+        }
+        // If subId not found in our list, skip — it may belong to another session
       } else if (stats.session.activeSubagents.length > 0) {
         const finished = stats.session.activeSubagents.shift();
         writeSessionState(finished.id, 'happy', 'done', true, {
@@ -496,7 +499,7 @@ process.stdin.on('end', () => {
       fallbackState = 'waiting';
       fallbackDetail = 'needs attention';
     } else if (hookEvent === 'SessionStart') {
-      fallbackState = 'waiting';
+      fallbackState = 'idle';
       fallbackDetail = 'session starting';
       fallbackExtra.isSessionStart = true;
       // Clean up any stale session file from previous session with same ID
@@ -522,6 +525,3 @@ process.stdin.on('end', () => {
   process.exit(0);
 });
 
-process.stdin.on('close', () => {
-  process.exit(0);
-});

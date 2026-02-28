@@ -98,3 +98,8 @@ child.on('error', (err) => {
   process.stderr.write(`engmux-adapter: ${err.message}\n`);
   process.exit(1);
 });
+
+// Clean up timer on signals to prevent process hanging
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => { clearInterval(cycleTimer); process.exit(0); });
+}
