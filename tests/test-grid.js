@@ -694,4 +694,23 @@ describe('grid.js -- completion linger respects sessionActive (#70)', () => {
   });
 });
 
+describe('grid.js -- lastUpdate uses Date.now() not data.timestamp (#71)', () => {
+  test('lastUpdate is set to current time regardless of data.timestamp', () => {
+    const face = new MiniFace('test');
+    const staleTimestamp = Date.now() - 300000;
+    const before = Date.now();
+    face.updateFromFile({ state: 'coding', timestamp: staleTimestamp });
+    assert.ok(face.lastUpdate >= before,
+      'lastUpdate should use Date.now(), not stale data.timestamp');
+  });
+
+  test('lastUpdate is set even without data.timestamp', () => {
+    const face = new MiniFace('test');
+    const before = Date.now();
+    face.updateFromFile({ state: 'reading' });
+    assert.ok(face.lastUpdate >= before,
+      'lastUpdate should be set even with no timestamp in data');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
