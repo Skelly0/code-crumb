@@ -9,7 +9,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { safeFilename, PREFS_FILE, loadPrefs, savePrefs, getGitBranch } = require('../shared');
+const { safeFilename, PREFS_FILE, loadPrefs, savePrefs, getGitBranch, getIsWorktree } = require('../shared');
 
 let passed = 0;
 let failed = 0;
@@ -155,6 +155,47 @@ describe('shared.js -- getGitBranch', () => {
     const root = path.parse(os.homedir()).root;
     const result = getGitBranch(root);
     assert.ok(result === null || typeof result === 'string');
+  });
+});
+
+describe('shared.js -- getIsWorktree', () => {
+  test('returns false for a regular git repo (.git is directory)', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'code-crumb-wt-'));
+    try {
+      fs.mkdirSync(path.join(tmpDir, '.git'));
+      assert.strictEqual(getIsWorktree(tmpDir), false);
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    }
+  });
+
+  test('returns true when .git is a file (worktree)', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'code-crumb-wt-'));
+    try {
+      fs.writeFileSync(path.join(tmpDir, '.git'), 'gitdir: /some/path/.git/worktrees/foo\n', 'utf8');
+      assert.strictEqual(getIsWorktree(tmpDir), true);
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    }
+  });
+
+  test('returns false for the project repo (regular clone)', () => {
+    const result = getIsWorktree(path.join(__dirname, '..'));
+    assert.strictEqual(result, false);
+  });
+
+  test('returns false for non-git directory', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'code-crumb-nogit-'));
+    try {
+      assert.strictEqual(getIsWorktree(tmpDir), false);
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    }
+  });
+
+  test('handles undefined cwd without throwing', () => {
+    const result = getIsWorktree(undefined);
+    assert.ok(typeof result === 'boolean');
   });
 });
 

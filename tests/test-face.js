@@ -64,20 +64,20 @@ describe('face.js -- ClaudeFace._getMinDisplayMs', () => {
     assert.strictEqual(face._getMinDisplayMs('error'), 3500);
   });
 
-  test('coding → 2500ms', () => {
-    assert.strictEqual(face._getMinDisplayMs('coding'), 2500);
+  test('coding → 6000ms', () => {
+    assert.strictEqual(face._getMinDisplayMs('coding'), 6000);
   });
 
-  test('reading → 2000ms', () => {
-    assert.strictEqual(face._getMinDisplayMs('reading'), 2000);
+  test('reading → 3000ms', () => {
+    assert.strictEqual(face._getMinDisplayMs('reading'), 3000);
   });
 
   test('sleeping → 1000ms', () => {
     assert.strictEqual(face._getMinDisplayMs('sleeping'), 1000);
   });
 
-  test('committing → 3000ms', () => {
-    assert.strictEqual(face._getMinDisplayMs('committing'), 3000);
+  test('committing → 3500ms', () => {
+    assert.strictEqual(face._getMinDisplayMs('committing'), 3500);
   });
 
   test('unknown state → 1000ms default', () => {
@@ -1552,6 +1552,259 @@ describe('_compressTimeline', () => {
     face.timeline = [{ state: 'idle', at: Date.now() }];
     const { entries: e2 } = face._compressTimeline(Date.now());
     assert.strictEqual(e2.length, 1);
+  });
+});
+
+// -- Petting system behavioral tests ------------------------------------------
+
+describe('face.js -- petting system', () => {
+  test('pet() once sets petTimer to 22 and spawns sparkle particles', () => {
+    const face = new ClaudeFace();
+    const before = face.particles.particles.length;
+    face.pet();
+    assert.strictEqual(face.petTimer, 22);
+    assert.ok(face.particles.particles.length > before, 'should spawn sparkle particles');
+  });
+
+  test('pet() once does not activate petSpamActive', () => {
+    const face = new ClaudeFace();
+    face.pet();
+    assert.strictEqual(face.petSpamActive, false);
+  });
+
+  test('8 rapid pet() calls activates petSpamActive', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamActive, true);
+  });
+
+  test('8 rapid pet() calls sets petSpamLevel to 1', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 1);
+  });
+
+  test('second spam burst within 10s escalates to level 2', () => {
+    const face = new ClaudeFace();
+    // First burst
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 1);
+    // Decay spam so we can re-trigger
+    face.petSpamActive = false;
+    face.petSpamTimer = 0;
+    face.petTimes = [];
+    // Second burst (within PET_SPAM_ESCALATE_WINDOW = 10s)
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 2);
+  });
+
+  test('third spam burst escalates to level 3', () => {
+    const face = new ClaudeFace();
+    for (let burst = 0; burst < 3; burst++) {
+      for (let i = 0; i < 8; i++) face.pet();
+      if (burst < 2) {
+        face.petSpamActive = false;
+        face.petSpamTimer = 0;
+        face.petTimes = [];
+      }
+    }
+    assert.strictEqual(face.petSpamLevel, 3);
+  });
+
+  test('spam burst after 10s gap resets to level 1', () => {
+    const face = new ClaudeFace();
+    // First burst
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 1);
+    // Simulate 10s+ gap
+    face.petSpamActive = false;
+    face.petSpamTimer = 0;
+    face.petTimes = [];
+    face.petSpamLastAt = Date.now() - 11000;
+    // New burst
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamLevel, 1);
+  });
+
+  test('petWiggle amplitude is +/-1 during normal pet', () => {
+    const face = new ClaudeFace();
+    face.pet();
+    face.update(16);
+    assert.ok(Math.abs(face.petWiggle) === 1, `expected wiggle ±1, got ${face.petWiggle}`);
+  });
+
+  test('petWiggle amplitude is +/-2 during spam', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    face.update(16);
+    assert.ok(Math.abs(face.petWiggle) === 2, `expected wiggle ±2 during spam, got ${face.petWiggle}`);
+  });
+
+  test('petSpamTimer decrements each update()', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    const initial = face.petSpamTimer;
+    face.update(16);
+    assert.strictEqual(face.petSpamTimer, initial - 1);
+  });
+
+  test('afterglow: petSpamActive becomes false, petAfterglowTimer > 0', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    assert.strictEqual(face.petSpamActive, true);
+    // First update: decrement petSpamTimer to 0 (the >0 branch fires)
+    face.petSpamTimer = 1;
+    face.update(16);
+    // petSpamTimer is now 0 but petSpamActive is still true
+    // Second update: the else-if branch fires, transitioning to afterglow
+    face.update(16);
+    assert.strictEqual(face.petSpamActive, false);
+    assert.ok(face.petAfterglowTimer > 0, 'afterglow timer should be set');
+  });
+
+  test('getMouth returns catMouth during pet', () => {
+    const face = new ClaudeFace();
+    face.pet();
+    const theme = face.getTheme();
+    const mouth = face.getMouth(theme, face.frame);
+    assert.strictEqual(mouth, mouths.catMouth());
+  });
+
+  test('getMouth returns catMouth during afterglow', () => {
+    const face = new ClaudeFace();
+    face.petAfterglowTimer = 10;
+    const theme = face.getTheme();
+    const mouth = face.getMouth(theme, face.frame);
+    assert.strictEqual(mouth, mouths.catMouth());
+  });
+
+  test('pet spam spawns heart particles', () => {
+    const face = new ClaudeFace();
+    const heartsBefore = face.particles.particles.filter(p => p.style === 'heart').length;
+    for (let i = 0; i < 8; i++) face.pet();
+    const heartsAfter = face.particles.particles.filter(p => p.style === 'heart').length;
+    assert.ok(heartsAfter > heartsBefore, 'should spawn heart particles during spam');
+  });
+});
+
+// -- Blinking system behavioral tests -----------------------------------------
+
+describe('face.js -- blinking system', () => {
+  test('_nextBlink returns value between 2500 and 6000', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 50; i++) {
+      const val = face._nextBlink();
+      assert.ok(val >= 2500, `blink interval ${val} should be >= 2500`);
+      assert.ok(val <= 6000, `blink interval ${val} should be <= 6000`);
+    }
+  });
+
+  test('blinkTimer decrements via update()', () => {
+    const face = new ClaudeFace();
+    const before = face.blinkTimer;
+    face.update(100);
+    assert.strictEqual(face.blinkTimer, before - 100);
+  });
+
+  test('blinkFrame becomes 0 when blinkTimer <= 0', () => {
+    const face = new ClaudeFace();
+    face.blinkTimer = 10;
+    face.update(20); // Timer goes to -10, triggers blink
+    assert.ok(face.blinkFrame >= 0, 'blinkFrame should be set after timer expires');
+  });
+
+  test('blinkFrame progresses 0 -> 1 -> 2 -> -1 over 3 updates', () => {
+    const face = new ClaudeFace();
+    // Force blink start
+    face.blinkTimer = 1;
+    face.update(2); // blinkFrame becomes 0, then incremented to 1 in same update
+    // Actually, let me trace the logic:
+    // blinkTimer -= dt => 1-2 = -1 <= 0 => blinkFrame = 0, blinkTimer = next
+    // then blinkFrame >= 0 => blinkFrame++ => 1
+    assert.strictEqual(face.blinkFrame, 1);
+    face.update(16);
+    // blinkFrame >= 0 => blinkFrame++ => 2
+    assert.strictEqual(face.blinkFrame, 2);
+    face.update(16);
+    // blinkFrame >= 0 and >= 3 => blinkFrame = -1
+    assert.strictEqual(face.blinkFrame, -1);
+  });
+
+  test('next blink is scheduled after completion', () => {
+    const face = new ClaudeFace();
+    face.blinkTimer = 1;
+    face.update(2); // triggers blink
+    const newTimer = face.blinkTimer;
+    assert.ok(newTimer >= 2500 && newTimer <= 6000, `new timer ${newTimer} should be 2500-6000`);
+  });
+
+  test('getEyes returns blink during active blinkFrame', () => {
+    const face = new ClaudeFace();
+    face.blinkFrame = 0;
+    const theme = face.getTheme();
+    const result = face.getEyes(theme, face.frame);
+    const blink = eyes.blink(theme, face.frame);
+    assert.deepStrictEqual(result, blink, 'should return blink eyes during blinkFrame');
+  });
+});
+
+// -- Pet overrides blink ------------------------------------------------------
+
+describe('face.js -- pet overrides blink', () => {
+  test('during petSpamActive, getEyes returns sparkle not blink', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 8; i++) face.pet();
+    face.blinkFrame = 0; // force blink active
+    const theme = face.getTheme();
+    const result = face.getEyes(theme, 10);
+    const blink = eyes.blink(theme, 10);
+    // Pet spam should override blink
+    assert.notDeepStrictEqual(result, blink, 'pet spam should override blink');
+  });
+
+  test('petSpamLevel >= 3 returns vibrate eyes', () => {
+    const face = new ClaudeFace();
+    face.petSpamActive = true;
+    face.petSpamLevel = 3;
+    const theme = face.getTheme();
+    const result = face.getEyes(theme, 0);
+    const vibrate = eyes.vibrate(theme, 0);
+    assert.deepStrictEqual(result, vibrate, 'level 3 should use vibrate eyes');
+  });
+
+  test('petSpamLevel < 3 returns sparkle eyes', () => {
+    const face = new ClaudeFace();
+    face.petSpamActive = true;
+    face.petSpamLevel = 2;
+    const theme = face.getTheme();
+    const result = face.getEyes(theme, 0);
+    const sparkle = eyes.sparkle(theme, 0);
+    assert.deepStrictEqual(result, sparkle, 'level 2 should use sparkle eyes');
+  });
+
+  test('afterglow returns content eyes', () => {
+    const face = new ClaudeFace();
+    face.petAfterglowTimer = 10;
+    const theme = face.getTheme();
+    const result = face.getEyes(theme, 0);
+    const content = eyes.content(theme, 0);
+    assert.deepStrictEqual(result, content, 'afterglow should use content eyes');
+  });
+
+  test('petSpam getMouth: level >= 2 returns grin', () => {
+    const face = new ClaudeFace();
+    face.petSpamActive = true;
+    face.petSpamLevel = 2;
+    const theme = face.getTheme();
+    assert.strictEqual(face.getMouth(theme, 0), mouths.grin());
+  });
+
+  test('petSpam getMouth: level 1 returns wide', () => {
+    const face = new ClaudeFace();
+    face.petSpamActive = true;
+    face.petSpamLevel = 1;
+    const theme = face.getTheme();
+    assert.strictEqual(face.getMouth(theme, 0), mouths.wide());
   });
 });
 

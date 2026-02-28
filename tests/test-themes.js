@@ -11,6 +11,7 @@ const {
   themes, COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
   PALETTES, PALETTE_NAMES,
+  setNoColor, isNoColor, ansi, BREATH_PERIOD,
 } = require('../themes');
 
 let passed = 0;
@@ -263,6 +264,69 @@ describe('themes.js -- PALETTES', () => {
       const same = defBorder[0] === palBorder[0] && defBorder[1] === palBorder[1] && defBorder[2] === palBorder[2];
       assert.ok(!same, `${PALETTES[i].name} idle border should differ from default`);
     }
+  });
+});
+
+describe('themes.js -- setNoColor / isNoColor', () => {
+  // Save and restore noColor state to avoid polluting other tests
+  const savedNoColor = isNoColor();
+
+  test('default state is false', () => {
+    setNoColor(false);
+    assert.strictEqual(isNoColor(), false);
+  });
+
+  test('setNoColor(true) activates no-color mode', () => {
+    setNoColor(true);
+    assert.strictEqual(isNoColor(), true);
+  });
+
+  test('setNoColor(false) reverts to color mode', () => {
+    setNoColor(true);
+    setNoColor(false);
+    assert.strictEqual(isNoColor(), false);
+  });
+
+  test('coerces falsy values to false', () => {
+    setNoColor(0);
+    assert.strictEqual(isNoColor(), false);
+    setNoColor('');
+    assert.strictEqual(isNoColor(), false);
+  });
+
+  test('coerces truthy values to true', () => {
+    setNoColor(1);
+    assert.strictEqual(isNoColor(), true);
+    setNoColor('yes');
+    assert.strictEqual(isNoColor(), true);
+  });
+
+  test('ansi.fg returns empty string when noColor active', () => {
+    setNoColor(true);
+    assert.strictEqual(ansi.fg(255, 0, 0), '');
+    setNoColor(false);
+  });
+
+  test('ansi.fg returns ANSI escape when noColor inactive', () => {
+    setNoColor(false);
+    const result = ansi.fg(255, 0, 0);
+    assert.ok(result.length > 0, 'should return non-empty ANSI string');
+    assert.ok(result.includes('38;2;255;0;0'), 'should contain RGB values');
+  });
+
+  test('ansi.reset returns empty string when noColor active', () => {
+    setNoColor(true);
+    assert.strictEqual(ansi.reset, '');
+    setNoColor(false);
+  });
+
+  // Restore
+  setNoColor(savedNoColor);
+});
+
+describe('themes.js -- BREATH_PERIOD', () => {
+  test('equals 4000', () => {
+    assert.strictEqual(BREATH_PERIOD, 4000);
   });
 });
 

@@ -1567,4 +1567,102 @@ describe('state-machine.js -- topFrequentFiles', () => {
   });
 });
 
+// -- errorDetail direct unit tests ------------------------------------
+
+describe('state-machine.js -- errorDetail', () => {
+  test('detects merge conflict', () => {
+    assert.strictEqual(errorDetail('CONFLICT (content): Merge conflict in foo.js', ''), 'merge conflict!');
+  });
+
+  test('detects command not found', () => {
+    assert.strictEqual(errorDetail('bash: foo: command not found', ''), 'command not found');
+  });
+
+  test('detects permission denied', () => {
+    assert.strictEqual(errorDetail('', 'Permission denied (publickey)'), 'permission denied');
+  });
+
+  test('detects file not found', () => {
+    assert.strictEqual(errorDetail('No such file or directory: /tmp/missing', ''), 'file not found');
+  });
+
+  test('detects segfault', () => {
+    assert.strictEqual(errorDetail('Segmentation fault (core dumped)', ''), 'segfault!');
+  });
+
+  test('detects ENOENT', () => {
+    assert.strictEqual(errorDetail('', 'Error: ENOENT: no such file'), 'missing file/path');
+  });
+
+  test('detects syntax error', () => {
+    assert.strictEqual(errorDetail('  File "x.py", line 5\n    syntax error near token', ''), 'syntax error');
+  });
+
+  test('detects traceback (Python)', () => {
+    assert.strictEqual(errorDetail('Traceback (most recent call last):\n  File "x.py"', ''), 'exception thrown');
+  });
+
+  test('detects missing module', () => {
+    assert.strictEqual(errorDetail('Cannot find module \'express\'', ''), 'missing module');
+  });
+
+  test('detects build failed', () => {
+    assert.strictEqual(errorDetail('', 'Compilation failed with 3 errors'), 'build broke');
+  });
+
+  test('detects tests failed', () => {
+    assert.strictEqual(errorDetail('5 tests failed', ''), 'tests failed');
+  });
+
+  test('detects npm error', () => {
+    assert.strictEqual(errorDetail('npm ERR! code E404', ''), 'npm error');
+  });
+
+  test('falls back to something went wrong', () => {
+    assert.strictEqual(errorDetail('some unknown output', 'some unknown error'), 'something went wrong');
+  });
+
+  test('handles empty inputs', () => {
+    assert.strictEqual(errorDetail('', ''), 'something went wrong');
+  });
+
+  test('handles null/undefined inputs', () => {
+    assert.strictEqual(errorDetail(null, null), 'something went wrong');
+    assert.strictEqual(errorDetail(undefined, undefined), 'something went wrong');
+  });
+});
+
+// -- extractExitCode edge cases ---------------------------------------
+
+describe('state-machine.js -- extractExitCode edge cases', () => {
+  test('parses "exited with 1"', () => {
+    assert.strictEqual(extractExitCode('Process exited with 1'), 1);
+  });
+
+  test('parses "returned 42"', () => {
+    assert.strictEqual(extractExitCode('Command returned 42'), 42);
+  });
+
+  test('parses "Exit code: 137"', () => {
+    assert.strictEqual(extractExitCode('Exit code: 137'), 137);
+  });
+
+  test('parses "exit code=0" as 0', () => {
+    assert.strictEqual(extractExitCode('exit code=0'), 0);
+  });
+
+  test('returns null when no match', () => {
+    assert.strictEqual(extractExitCode('all good'), null);
+  });
+
+  test('returns null for empty string', () => {
+    assert.strictEqual(extractExitCode(''), null);
+  });
+
+  test('takes first code when multiple present', () => {
+    const result = extractExitCode('exited with 1 then exited with 2');
+    assert.strictEqual(result, 1);
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
