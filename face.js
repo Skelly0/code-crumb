@@ -29,6 +29,7 @@ const INTERRUPTIBLE_STATES = new Set([
   'thinking', 'happy', 'satisfied', 'proud', 'relieved',
   'idle', 'sleeping', 'waiting',
 ]);
+const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
 
 // -- Config --------------------------------------------------------
 const BLINK_MIN = 2500;
@@ -152,12 +153,20 @@ class ClaudeFace {
 
       // Minimum display time: buffer incoming state if current hasn't shown long enough.
       // Errors and rate limits always bypass -- they're important visual feedback, not flickering noise.
-      if (now < this.minDisplayUntil
+      // Active work states bypass interruptible states (e.g., coding bypasses thinking).
+      // But don't bypass if there's a pending completion state - let it display first (Bug 66).
+      const hasPendingCompletion = this.pendingState !== null && COMPLETION_STATES.has(this.pendingState);
+      const shouldBypass = ACTIVE_WORK_STATES.has(newState) && INTERRUPTIBLE_STATES.has(this.state);
+      
+      // Buffer the new state unless: bypass conditions are met OR there's a pending completion
+      const shouldBuffer = now < this.minDisplayUntil
           && newState !== 'error'
           && newState !== 'ratelimited'
-          && !(ACTIVE_WORK_STATES.has(newState) && INTERRUPTIBLE_STATES.has(this.state))) {
-        // Don't overwrite a pending error with a non-error state
-        if (this.pendingState !== 'error') {
+          && (!shouldBypass || hasPendingCompletion);
+      
+      if (shouldBuffer) {
+        // Don't overwrite a pending error or completion state with a non-error state
+        if (this.pendingState !== 'error' && !COMPLETION_STATES.has(this.pendingState)) {
           this.pendingState = newState;
           this.pendingDetail = detail;
         }
