@@ -1104,6 +1104,19 @@ describe('bug fix regressions', () => {
     assert.ok(src.includes("err.code === 'EPERM'"),
       'PID guard catch should check for EPERM and treat as running');
   });
+
+  test('renderer.js responding state gets 3000ms minDisplayUntil (#67)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    // Both occurrences of the responding→happy transition should use now + 3000
+    const matches = src.match(/minDisplayUntil = now \+ 3000;.*responding/g)
+                 || src.match(/now \+ 3000;.*3s min display/g)
+                 || [];
+    // Source-level check: no `now;` (immediate expire) near 'wrapping up'
+    assert.ok(!src.includes("minDisplayUntil = now;"),
+      'responding should not use minDisplayUntil = now (immediate expire)');
+    assert.ok(src.includes("now + 3000"),
+      'responding transitions should use now + 3000');
+  });
 });
 
 module.exports = { passed: () => passed, failed: () => failed };
