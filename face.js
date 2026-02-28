@@ -30,6 +30,9 @@ const INTERRUPTIBLE_STATES = new Set([
   'idle', 'sleeping', 'waiting',
 ]);
 const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
+// Minimum ms a completion state must be visible before a work state can bypass it.
+// Prevents the "satisfied flicker" where work immediately swallows the reward face.
+const COMPLETION_MIN_SHOW_MS = 500;
 
 // -- Config --------------------------------------------------------
 const BLINK_MIN = 2500;
@@ -152,22 +155,35 @@ class ClaudeFace {
       const now = Date.now();
 
       // Minimum display time: buffer incoming state if current hasn't shown long enough.
-      // Errors, rate limits, and completion states always bypass -- they're important
-      // visual feedback, not flickering noise. Completion states (happy/satisfied/proud/
-      // relieved) signal tool success and should appear immediately.
-      // Active work states bypass interruptible states (e.g., coding bypasses thinking),
-      // even if there's a pending completion state -- work always takes priority (Fix #96).
-      const shouldBypass = ACTIVE_WORK_STATES.has(newState) && INTERRUPTIBLE_STATES.has(this.state);
+      // Errors and rate limits always bypass -- critical feedback.
+      //
+      // Anti-flicker rules (Fix #96 follow-up):
+      //   1. Work states bypass completion states, BUT only after COMPLETION_MIN_SHOW_MS
+      //      so the reward face isn't swallowed in a single frame.
+      //   2. Completion states do NOT bypass active work states -- they queue behind work
+      //      and show once the current tool finishes, preventing satisfied→reading→satisfied
+      //      oscillation on fast tool sequences.
+      //   3. update() flushes a buffered work state early once the completion window passes.
+      const completionAge = now - this.lastStateChange;
+      const shouldBypass = ACTIVE_WORK_STATES.has(newState)
+          && INTERRUPTIBLE_STATES.has(this.state)
+          && (!COMPLETION_STATES.has(this.state) || completionAge >= COMPLETION_MIN_SHOW_MS);
+
+      // Completion states are buffered (not bypassed) when work is actively running.
+      const isCompletionDuringWork = COMPLETION_STATES.has(newState) && ACTIVE_WORK_STATES.has(this.state);
 
       const shouldBuffer = now < this.minDisplayUntil
           && newState !== 'error'
           && newState !== 'ratelimited'
-          && !COMPLETION_STATES.has(newState)
+          && (!COMPLETION_STATES.has(newState) || isCompletionDuringWork)
           && !shouldBypass;
 
       if (shouldBuffer) {
-        // Don't overwrite a pending error or completion state with a non-error/non-completion state
-        if (this.pendingState !== 'error' && !COMPLETION_STATES.has(this.pendingState)) {
+        // Errors are never overwritten. Completions protect against mundane overwrites
+        // (e.g. idle shouldn't displace a pending satisfied), but yield to newer completions.
+        const pendingIsProtected = this.pendingState === 'error'
+            || (COMPLETION_STATES.has(this.pendingState) && !COMPLETION_STATES.has(newState) && newState !== 'error');
+        if (!pendingIsProtected) {
           this.pendingState = newState;
           this.pendingDetail = detail;
         }
@@ -513,7 +529,15 @@ class ClaudeFace {
     this.transitionFrame++;
 
     // Apply pending state if minimum display time has passed
-    if (this.pendingState && Date.now() >= this.minDisplayUntil) {
+    const nowMs = Date.now();
+    if (this.pendingState && nowMs >= this.minDisplayUntil) {
+      this.setState(this.pendingState, this.pendingDetail);
+    } else if (this.pendingState
+        && ACTIVE_WORK_STATES.has(this.pendingState)
+        && COMPLETION_STATES.has(this.state)
+        && nowMs - this.lastStateChange >= COMPLETION_MIN_SHOW_MS) {
+      // Work state was buffered during the completion guaranteed window -- flush it early
+      // now that the window has passed, so we don't sit on satisfied for 4 full seconds.
       this.setState(this.pendingState, this.pendingDetail);
     }
 
