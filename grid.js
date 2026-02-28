@@ -14,6 +14,15 @@ const { gridMouths } = require('./animations');
 
 // -- Config --------------------------------------------------------
 
+const ACTIVE_WORK_STATES = new Set([
+  'executing', 'coding', 'reading', 'searching', 'testing',
+  'installing', 'committing', 'reviewing', 'subagent', 'responding',
+]);
+const INTERRUPTIBLE_STATES = new Set([
+  'thinking', 'happy', 'satisfied', 'proud', 'relieved',
+  'idle', 'sleeping', 'waiting',
+]);
+
 // Predefined team accent colors — assigned consistently by hashing the team name
 const TEAM_COLORS = [
   [255, 120, 120],  // red
@@ -73,6 +82,8 @@ class MiniFace {
     this.teamColor = null;     // RGB color derived from teamName
     this.gitBranch = null;     // current git branch (if known)
     this.minDisplayUntil = 0;  // Minimum display time to prevent flashing
+    this.pendingState = null;  // Buffered state when minDisplayUntil blocks
+    this.pendingDetail = null;
     // Startup/spawn animation state for orbitals
     this.spawning = false;      // true while this mini-face is entering the orbit
     this.spawnProgress = 0;       // ms elapsed since spawn began
@@ -86,12 +97,22 @@ class MiniFace {
       // Minimum display time: don't flicker between states too rapidly
       // Errors always bypass (important feedback), stopped sessions always bypass
       // Spawning always bypasses so the initial state is applied immediately
-      if (now >= this.minDisplayUntil || newState === 'error' || newState === 'spawning' || data.stopped) {
+      // Active work states (reading, searching, coding, etc.) can interrupt
+      // interruptible states (satisfied, happy, thinking, idle, etc.) to show
+      // real-time activity without delay
+      const canInterrupt = ACTIVE_WORK_STATES.has(newState) && INTERRUPTIBLE_STATES.has(this.state);
+      if (now >= this.minDisplayUntil || newState === 'error' || newState === 'spawning' || data.stopped || canInterrupt) {
         this.state = newState;
         this.detail = data.detail || '';
-        this.minDisplayUntil = now + 1500;
+        // Work states get shorter display (800ms) so tool activity is visible
+        this.minDisplayUntil = now + (ACTIVE_WORK_STATES.has(newState) ? 800 : 1500);
+        this.pendingState = null;
+        this.pendingDetail = null;
+      } else {
+        // Buffer as pending instead of dropping — will flush when minDisplayUntil expires
+        this.pendingState = newState;
+        this.pendingDetail = data.detail || '';
       }
-      // rejected: don't update detail either (prevents text flickering while state is locked)
     } else {
       // Same state — refresh the timer and update detail
       this.minDisplayUntil = now + 1500;
@@ -156,8 +177,17 @@ class MiniFace {
       }
     }
 
-    // --- Timeout-based state transitions (guarded by minDisplayUntil) ---
+    // --- Flush pending state when minDisplayUntil expires ---
     const now = Date.now();
+    if (this.pendingState && now >= this.minDisplayUntil) {
+      this.state = this.pendingState;
+      this.detail = this.pendingDetail || '';
+      this.pendingState = null;
+      this.pendingDetail = null;
+      this.minDisplayUntil = now + 1500;
+    }
+
+    // --- Timeout-based state transitions (guarded by minDisplayUntil) ---
     if (now < this.minDisplayUntil) return;
 
     const elapsed = now - this.lastUpdate;
