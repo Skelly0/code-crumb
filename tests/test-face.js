@@ -1808,4 +1808,38 @@ describe('face.js -- pet overrides blink', () => {
   });
 });
 
+// -- Session list toggle -------------------------------------------
+
+describe('face.js -- toggleSessionList', () => {
+  test('toggleSessionList flips showSessionList', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.showSessionList, false);
+    face.toggleSessionList();
+    assert.strictEqual(face.showSessionList, true);
+    face.toggleSessionList();
+    assert.strictEqual(face.showSessionList, false);
+  });
+
+  test('toggleSessionList closes help overlay (mutual exclusion)', () => {
+    const face = new ClaudeFace();
+    face.showHelp = true;
+    face.toggleSessionList();
+    assert.strictEqual(face.showSessionList, true);
+    assert.strictEqual(face.showHelp, false, 'help should be closed when session list opens');
+  });
+
+  test('toggleHelp closes session list (mutual exclusion)', () => {
+    const face = new ClaudeFace();
+    face.showSessionList = true;
+    face.toggleHelp();
+    assert.strictEqual(face.showHelp, true);
+    assert.strictEqual(face.showSessionList, false, 'session list should be closed when help opens');
+  });
+
+  test('showSessionList initializes to false', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.showSessionList, false);
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

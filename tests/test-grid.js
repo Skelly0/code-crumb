@@ -6,7 +6,7 @@
 // +================================================================+
 
 const assert = require('assert');
-const { MiniFace, OrbitalSystem } = require('../grid');
+const { MiniFace, OrbitalSystem, renderSessionList } = require('../grid');
 const { gridMouths, eyes, mouths } = require('../animations');
 const { PALETTES } = require('../themes');
 const { ParticleSystem } = require('../particles');
@@ -1064,6 +1064,119 @@ describe('grid.js -- loadSessions mtime purge protects active faces (Bug #0)', (
 
     assert.ok(fileStillExists || orbital.faces.has(sessionId),
       'active thinking face should be protected from mtime purge deletion');
+  });
+});
+
+// -- Row 5 cwd basename fallback -----------------------------------
+
+describe('grid.js -- MiniFace row 5 cwd fallback', () => {
+  test('row 5 shows cwd basename when no gitBranch', () => {
+    const face = new MiniFace('test-cwd');
+    face.state = 'coding';
+    face.cwd = '/home/user/projects/my-app';
+    face.label = 'sub-1';
+    const output = face.render(1, 1, 0, PALETTES[0].themes);
+    // The 6th row (startRow + 5) should contain "my-app"
+    assert.ok(output.includes('my-app'), 'row 5 should show cwd basename');
+  });
+
+  test('row 5 shows branch when gitBranch is present (not cwd)', () => {
+    const face = new MiniFace('test-branch');
+    face.state = 'coding';
+    face.cwd = '/home/user/projects/my-app';
+    face.gitBranch = 'main';
+    face.label = 'sub-1';
+    const output = face.render(1, 1, 0, PALETTES[0].themes);
+    assert.ok(output.includes('\u2387'), 'row 5 should show branch indicator');
+    assert.ok(output.includes('main'), 'row 5 should show branch name');
+    // Should NOT show the cwd basename when branch is present
+    assert.ok(!output.includes('my-app'), 'row 5 should not show cwd when branch exists');
+  });
+
+  test('row 5 falls back to theme.status when no cwd and no branch', () => {
+    const face = new MiniFace('test-fallback');
+    face.state = 'coding';
+    face.cwd = '';
+    face.gitBranch = null;
+    face.label = 'sub-1';
+    const output = face.render(1, 1, 0, PALETTES[0].themes);
+    const theme = PALETTES[0].themes.coding;
+    // Status gets sliced to BOX_W (8 chars), so check for the beginning
+    if (theme && theme.status) {
+      const expected = theme.status.slice(0, 8);
+      assert.ok(output.includes(expected), 'row 5 should show theme status as fallback');
+    }
+  });
+});
+
+// -- renderSessionList overlay -------------------------------------
+
+describe('grid.js -- renderSessionList', () => {
+  test('returns string for empty Map', () => {
+    const result = renderSessionList(80, 40, new Map(), PALETTES[0].themes);
+    assert.strictEqual(typeof result, 'string');
+    assert.ok(result.includes('no sessions'), 'should show empty message');
+  });
+
+  test('returns string with session info for populated Map', () => {
+    const faces = new Map();
+    const f1 = new MiniFace('sess-1');
+    f1.state = 'coding';
+    f1.label = 'fix-auth';
+    f1.cwd = '/home/user/projects/my-app';
+    f1.detail = 'edit src/auth.ts';
+    faces.set('sess-1', f1);
+
+    const f2 = new MiniFace('sess-2');
+    f2.state = 'thinking';
+    f2.label = 'scraper';
+    f2.cwd = '/home/user/projects/scraper';
+    faces.set('sess-2', f2);
+
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes);
+    assert.strictEqual(typeof result, 'string');
+    assert.ok(result.length > 0, 'should produce output');
+    assert.ok(result.includes('2 total'), 'should show count');
+    assert.ok(result.includes('fix-auth'), 'should include label');
+  });
+
+  test('handles narrow terminal gracefully', () => {
+    const faces = new Map();
+    const f = new MiniFace('sess-1');
+    f.state = 'coding';
+    f.label = 'test';
+    faces.set('sess-1', f);
+
+    const result = renderSessionList(30, 40, faces, PALETTES[0].themes);
+    assert.strictEqual(result, '', 'should return empty for narrow terminal');
+  });
+
+  test('includes stopped sessions with different indicator', () => {
+    const faces = new Map();
+    const f = new MiniFace('sess-stopped');
+    f.state = 'idle';
+    f.stopped = true;
+    f.label = 'done';
+    f.cwd = '/tmp/project';
+    faces.set('sess-stopped', f);
+
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes);
+    assert.ok(result.includes('\u2715'), 'stopped session should show ✕ indicator');
+  });
+
+  test('shows overflow indicator when too many sessions', () => {
+    const faces = new Map();
+    for (let i = 0; i < 20; i++) {
+      const f = new MiniFace(`sess-${i}`);
+      f.state = 'coding';
+      f.label = `s-${i}`;
+      f.cwd = `/tmp/proj-${i}`;
+      faces.set(`sess-${i}`, f);
+    }
+
+    // Very short terminal -- can only fit a few
+    const result = renderSessionList(80, 15, faces, PALETTES[0].themes);
+    assert.ok(result.includes('more'), 'should show overflow indicator');
   });
 });
 

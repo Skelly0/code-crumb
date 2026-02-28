@@ -111,6 +111,7 @@ class ClaudeFace {
     this.paletteIndex = 0;
     this.showStats = true;
     this.showHelp = false;
+    this.showSessionList = false;
     this.petTimer = 0;
     this.petWiggle = 0;
     this.petTimes = [];
@@ -429,6 +430,12 @@ class ClaudeFace {
 
   toggleHelp() {
     this.showHelp = !this.showHelp;
+    if (this.showHelp) this.showSessionList = false;
+  }
+
+  toggleSessionList() {
+    this.showSessionList = !this.showSessionList;
+    if (this.showSessionList) this.showHelp = false;
   }
 
   toggleAccessories() {
@@ -696,6 +703,7 @@ class ClaudeFace {
       ' s      toggle stats',
       ' a      toggle accessories',
       ' o      toggle subagents',
+      ' l      session list',
       ' h/?    this help',
       ' q      quit',
     ];
@@ -1052,7 +1060,7 @@ class ClaudeFace {
       const dc = ansi.fg(...dimColor(theme.label, 0.55));
       const kc = ansi.fg(...dimColor(theme.accent, 0.6));
       const sep = `${dc}\u00b7${r}`;
-      const hint = `${kc}space${dc} pet ${sep} ${kc}t${dc} theme ${sep} ${kc}s${dc} stats ${sep} ${kc}a${dc} accs ${sep} ${kc}o${dc} subs ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
+      const hint = `${kc}space${dc} pet ${sep} ${kc}t${dc} theme ${sep} ${kc}s${dc} stats ${sep} ${kc}a${dc} accs ${sep} ${kc}o${dc} subs ${sep} ${kc}l${dc} list ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
       // Strip ANSI to measure visible length
       const visible = hint.replace(/\x1b\[[^m]*m/g, '');
       const hintCol = Math.max(1, Math.floor((cols - visible.length) / 2) + 1);

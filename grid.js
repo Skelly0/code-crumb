@@ -335,9 +335,12 @@ class MiniFace {
     buf += ansi.to(startRow + 4, startCol);
     buf += `${lc}${' '.repeat(lPad)}${lbl}${r}`;
 
+    const cwdBase = this.cwd ? path.basename(this.cwd) : '';
     const statusStr = this.gitBranch
       ? ('\u2387 ' + this.gitBranch).slice(0, BOX_W)   // ⎇ branchname
-      : (theme.status || '').slice(0, BOX_W);
+      : cwdBase
+        ? cwdBase.slice(0, BOX_W)
+        : (theme.status || '').slice(0, BOX_W);
     const sPad = Math.max(0, Math.floor((BOX_W - statusStr.length) / 2));
     buf += ansi.to(startRow + 5, startCol);
     buf += `${dc}${' '.repeat(sPad)}${statusStr}${r}`;
@@ -742,4 +745,150 @@ class OrbitalSystem {
   }
 }
 
-module.exports = { MiniFace, OrbitalSystem, hashTeamColor };
+// -- Session List Overlay -------------------------------------------
+// Renders a centered overlay listing the main session and all active
+// subagent sessions with state, label, path, and detail info.
+
+const MIN_SESSION_LIST_COLS = 50;
+
+function _truncatePath(fullPath, maxLen) {
+  if (!fullPath) return '';
+  // Normalize to forward slashes
+  const p = fullPath.replace(/\\/g, '/');
+  // Replace home dir with ~
+  const home = (process.env.USERPROFILE || process.env.HOME || '').replace(/\\/g, '/');
+  const display = home && p.startsWith(home) ? '~' + p.slice(home.length) : p;
+  if (display.length <= maxLen) return display;
+  // Show .../<last two segments>
+  const parts = display.split('/');
+  if (parts.length <= 2) return '...' + display.slice(display.length - maxLen + 3);
+  const tail = parts.slice(-2).join('/');
+  if (tail.length + 4 > maxLen) return '...' + tail.slice(tail.length - maxLen + 3);
+  return '.../' + tail;
+}
+
+function _sessionDot(face, themeMap) {
+  if (face.stopped) return ['\u2715', [120, 120, 120]]; // ✕ grey
+  const theme = themeMap[face.state] || themeMap.idle;
+  return ['\u25cf', theme.border]; // ● colored by state
+}
+
+function renderSessionList(cols, rows, faces, paletteThemes, mainInfo) {
+  if (cols < MIN_SESSION_LIST_COLS) return '';
+  const themeMap = paletteThemes || themes;
+  const r = ansi.reset;
+
+  // Build session list: main face first (if provided), then orbital subagents
+  const subSorted = [...faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+  const sorted = [];
+  if (mainInfo) sorted.push(mainInfo);
+  sorted.push(...subSorted);
+  const count = sorted.length;
+
+  // Box dimensions
+  const boxW = Math.min(cols - 4, 54);
+  const innerW = boxW - 2; // inside the │ borders
+  const headerText = '  Sessions';
+  const countText = `${count} total `;
+
+  // How many sessions can fit? 3 rows per session + separator between
+  const maxVisible = Math.max(1, Math.floor((rows - 6) / 4)); // 3 rows + 1 separator
+  const visible = sorted.slice(0, maxVisible);
+  const overflow = count - visible.length;
+
+  // Calculate total box height
+  let contentRows = 0;
+  if (count === 0) {
+    contentRows = 1; // "no sessions"
+  } else {
+    contentRows = visible.length * 3 + (visible.length - 1); // 3 per face + separators
+    if (overflow > 0) contentRows += 1;
+  }
+  const boxH = contentRows + 4; // top border + header + separator + bottom border
+
+  // Center the box
+  const bx = Math.max(1, Math.floor((cols - boxW) / 2));
+  const by = Math.max(1, Math.floor((rows - boxH - 1) / 2));
+
+  const bc = ansi.fg(...dimColor([140, 170, 200], 0.7));
+  const tc = ansi.fg(...dimColor([200, 220, 240], 0.9));
+  const dc = ansi.fg(...dimColor([140, 170, 200], 0.55));
+
+  let buf = '';
+
+  // Top border with header
+  const headerPad = innerW - headerText.length - countText.length;
+  buf += ansi.to(by, bx) + `${bc}\u256d${'\u2500'.repeat(innerW)}\u256e${r}`;
+  buf += ansi.to(by + 1, bx) + `${bc}\u2502${tc}${headerText}${' '.repeat(Math.max(0, headerPad))}${dc}${countText}${bc}\u2502${r}`;
+  buf += ansi.to(by + 2, bx) + `${bc}\u251c${'\u2500'.repeat(innerW)}\u2524${r}`;
+
+  let row = by + 3;
+
+  if (count === 0) {
+    const msg = 'no sessions';
+    const msgPad = Math.max(0, Math.floor((innerW - msg.length) / 2));
+    buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(msgPad)}${msg}${' '.repeat(Math.max(0, innerW - msgPad - msg.length))}${bc}\u2502${r}`;
+    row++;
+  } else {
+    for (let i = 0; i < visible.length; i++) {
+      const face = visible[i];
+      const [dot, dotColor] = _sessionDot(face, themeMap);
+      const dotC = ansi.fg(...dotColor);
+      const stateTheme = themeMap[face.state] || themeMap.idle;
+      const stateName = (stateTheme.status || face.state).slice(0, 10);
+      const label = (face.label || '?').slice(0, 12);
+      const branch = face.gitBranch ? ('\u2387 ' + face.gitBranch).slice(0, 16) : '';
+
+      // Row A: dot + state + label + branch
+      const rowABase = 2 + 1 + 1 + stateName.length; // "  ● state"
+      const labelGap = Math.max(1, 14 - rowABase);
+      let rowABranch = '';
+      if (branch) {
+        const branchGap = Math.max(1, innerW - (rowABase + labelGap + label.length) - branch.length - 1);
+        rowABranch = ' '.repeat(Math.max(1, branchGap)) + branch;
+      }
+      const afterDot = `${stateName}${' '.repeat(labelGap)}${label}${rowABranch}`;
+      const afterDotSliced = afterDot.slice(0, innerW - 4); // 4 = "  ● "
+      const aPad = Math.max(0, innerW - 4 - afterDotSliced.length);
+      buf += ansi.to(row, bx) + `${bc}\u2502${r}  ${dotC}${dot}${r} ${tc}${afterDotSliced}${' '.repeat(aPad)}${bc}\u2502${r}`;
+      row++;
+
+      // Row B: cwd path (dimmed)
+      const cwdStr = _truncatePath(face.cwd, innerW - 14);
+      const rowB = '              ' + cwdStr; // 14-char indent
+      const rowBSliced = rowB.slice(0, innerW);
+      const bPad = Math.max(0, innerW - rowBSliced.length);
+      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${rowBSliced}${' '.repeat(bPad)}${bc}\u2502${r}`;
+      row++;
+
+      // Row C: detail or task description (dimmed)
+      const detailText = (face.detail || face.taskDescription || 'waiting...').slice(0, innerW - 14);
+      const rowC = '              ' + detailText; // 14-char indent
+      const rowCSliced = rowC.slice(0, innerW);
+      const cPad = Math.max(0, innerW - rowCSliced.length);
+      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${rowCSliced}${' '.repeat(cPad)}${bc}\u2502${r}`;
+      row++;
+
+      // Separator between entries (not after last)
+      if (i < visible.length - 1) {
+        buf += ansi.to(row, bx) + `${bc}\u251c${'\u2500'.repeat(innerW)}\u2524${r}`;
+        row++;
+      }
+    }
+
+    // Overflow indicator
+    if (overflow > 0) {
+      const overText = `+${overflow} more`;
+      const oPad = Math.max(0, Math.floor((innerW - overText.length) / 2));
+      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(oPad)}${overText}${' '.repeat(Math.max(0, innerW - oPad - overText.length))}${bc}\u2502${r}`;
+      row++;
+    }
+  }
+
+  // Bottom border
+  buf += ansi.to(row, bx) + `${bc}\u2570${'\u2500'.repeat(innerW)}\u256f${r}`;
+
+  return buf;
+}
+
+module.exports = { MiniFace, OrbitalSystem, hashTeamColor, renderSessionList };

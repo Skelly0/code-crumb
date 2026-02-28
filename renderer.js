@@ -23,7 +23,7 @@ const {
 const { mouths, eyes, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { ClaudeFace } = require('./face');
-const { MiniFace, OrbitalSystem } = require('./grid');
+const { MiniFace, OrbitalSystem, renderSessionList } = require('./grid');
 
 // -- Config --------------------------------------------------------
 const PID_FILE = path.join(HOME, '.code-crumb.pid');
@@ -359,11 +359,14 @@ function runUnifiedMode() {
       }
       // Help dismiss: any key while help is showing closes it
       if (face.showHelp) { face.showHelp = false; return; }
+      // Session list dismiss: any key while list is showing closes it
+      if (face.showSessionList) { face.showSessionList = false; return; }
       if (key === ' ') face.pet();
       else if (key === 't' && !isNoColor()) { face.cycleTheme(); orbital.paletteIndex = face.paletteIndex; persistPrefs(); }
       else if (key === 's') { face.toggleStats(); persistPrefs(); }
       else if (key === 'a') { face.toggleAccessories(); persistPrefs(); }
       else if (key === 'o') { face.toggleOrbitals(); persistPrefs(); }
+      else if (key === 'l') face.toggleSessionList();
       else if (key === 'h' || key === '?') face.toggleHelp();
     });
   }
@@ -412,6 +415,21 @@ function runUnifiedMode() {
         out += orbital.render(cols, rows, face.lastPos, paletteThemes);
       } catch {}
     }
+    // Session list overlay (drawn on top of orbital)
+    if (!minimal && face.showSessionList) {
+      const paletteThemes = (PALETTES[face.paletteIndex] || PALETTES[0]).themes;
+      const mainInfo = {
+        state: face.state,
+        detail: face.stateDetail,
+        cwd: face.cwd,
+        gitBranch: face.gitBranch,
+        label: face.modelName || 'claude',
+        stopped: lastStopped,
+        firstSeen: 0, // sort first
+      };
+      try { out += renderSessionList(cols, rows, orbital.faces, paletteThemes, mainInfo); } catch {}
+    }
+
     // Update terminal title bar to reflect current state
     const _pal = PALETTES[face.paletteIndex] || PALETTES[0];
     const _status = (_pal.themes[face.state] || _pal.themes.idle).status;
