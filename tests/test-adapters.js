@@ -1311,4 +1311,272 @@ describe('base-adapter guardedWriteState modelName preservation (#78)', () => {
   });
 });
 
+// -- base-adapter unit tests (guardedWriteState, initSession, buildExtra, trackEditedFile, processJsonlStream)
+
+describe('base-adapter -- guardedWriteState unit tests', () => {
+  const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
+  const sharedMod = require(path.join(__dirname, '..', 'shared'));
+  const STATE_FILE = sharedMod.STATE_FILE;
+
+  // Save and restore state file
+  let savedState;
+  try { savedState = fs.readFileSync(STATE_FILE, 'utf8'); } catch { savedState = null; }
+
+  test('writes state when no existing file', () => {
+    try { fs.unlinkSync(STATE_FILE); } catch {}
+    baseAdapter.guardedWriteState('gw-1', 'thinking', 'test', { sessionId: 'gw-1' });
+    const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    assert.strictEqual(result.state, 'thinking');
+  });
+
+  test('writes state when existing file has same sessionId', () => {
+    fs.writeFileSync(STATE_FILE, JSON.stringify({
+      state: 'reading', sessionId: 'gw-2', timestamp: Date.now(), stopped: false,
+    }), 'utf8');
+    baseAdapter.guardedWriteState('gw-2', 'coding', 'editing', { sessionId: 'gw-2' });
+    const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    assert.strictEqual(result.state, 'coding');
+  });
+
+  test('skips write when different active session owns file', () => {
+    fs.writeFileSync(STATE_FILE, JSON.stringify({
+      state: 'executing', sessionId: 'owner-session', timestamp: Date.now(), stopped: false,
+    }), 'utf8');
+    baseAdapter.guardedWriteState('intruder-session', 'thinking', '', { sessionId: 'intruder-session' });
+    const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    assert.strictEqual(result.sessionId, 'owner-session', 'owner session should not be overwritten');
+    assert.strictEqual(result.state, 'executing');
+  });
+
+  test('writes when existing session is stopped', () => {
+    fs.writeFileSync(STATE_FILE, JSON.stringify({
+      state: 'happy', sessionId: 'old-session', timestamp: Date.now(), stopped: true,
+    }), 'utf8');
+    baseAdapter.guardedWriteState('new-session', 'thinking', '', { sessionId: 'new-session' });
+    const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    assert.strictEqual(result.state, 'thinking');
+  });
+
+  test('writes when existing session is stale (>120s old)', () => {
+    fs.writeFileSync(STATE_FILE, JSON.stringify({
+      state: 'coding', sessionId: 'stale-session', timestamp: Date.now() - 130000, stopped: false,
+    }), 'utf8');
+    baseAdapter.guardedWriteState('fresh-session', 'reading', '', { sessionId: 'fresh-session' });
+    const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    assert.strictEqual(result.state, 'reading');
+  });
+
+  test('preserves modelName for same session', () => {
+    fs.writeFileSync(STATE_FILE, JSON.stringify({
+      state: 'thinking', sessionId: 'gw-model', timestamp: Date.now(), stopped: false, modelName: 'claude',
+    }), 'utf8');
+    baseAdapter.guardedWriteState('gw-model', 'coding', 'edit', { sessionId: 'gw-model', modelName: 'other' });
+    const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    assert.strictEqual(result.modelName, 'claude', 'modelName should be preserved');
+  });
+
+  // Restore
+  try {
+    if (savedState !== null) fs.writeFileSync(STATE_FILE, savedState, 'utf8');
+    else fs.unlinkSync(STATE_FILE);
+  } catch {}
+});
+
+describe('base-adapter -- initSession unit tests', () => {
+  const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
+  const { defaultStats } = require(path.join(__dirname, '..', 'state-machine'));
+
+  test('creates daily bucket on first call', () => {
+    const stats = defaultStats();
+    stats.daily = { date: '', sessionCount: 0, cumulativeMs: 0 };
+    baseAdapter.initSession(stats, 'init-1');
+    const today = new Date().toISOString().slice(0, 10);
+    assert.strictEqual(stats.daily.date, today);
+  });
+
+  test('rolls over on date change', () => {
+    const stats = defaultStats();
+    stats.daily = { date: '2020-01-01', sessionCount: 5, cumulativeMs: 1000 };
+    baseAdapter.initSession(stats, 'init-2');
+    const today = new Date().toISOString().slice(0, 10);
+    assert.strictEqual(stats.daily.date, today);
+    assert.strictEqual(stats.daily.sessionCount, 1);
+  });
+
+  test('increments sessionCount on new session ID', () => {
+    const stats = defaultStats();
+    baseAdapter.initSession(stats, 'sess-a');
+    const count1 = stats.daily.sessionCount;
+    baseAdapter.initSession(stats, 'sess-b');
+    assert.strictEqual(stats.daily.sessionCount, count1 + 1);
+  });
+
+  test('does not increment sessionCount for same session ID', () => {
+    const stats = defaultStats();
+    baseAdapter.initSession(stats, 'sess-same');
+    const count1 = stats.daily.sessionCount;
+    baseAdapter.initSession(stats, 'sess-same');
+    assert.strictEqual(stats.daily.sessionCount, count1);
+  });
+
+  test('clears stale recentMilestone (>8s old)', () => {
+    const stats = defaultStats();
+    stats.recentMilestone = { type: 'streak', value: 10, at: Date.now() - 9000 };
+    baseAdapter.initSession(stats, 'init-ms');
+    assert.strictEqual(stats.recentMilestone, null);
+  });
+
+  test('preserves fresh recentMilestone (<8s old)', () => {
+    const stats = defaultStats();
+    stats.recentMilestone = { type: 'streak', value: 10, at: Date.now() - 3000 };
+    baseAdapter.initSession(stats, 'init-ms-fresh');
+    assert.ok(stats.recentMilestone !== null);
+    assert.strictEqual(stats.recentMilestone.value, 10);
+  });
+});
+
+describe('base-adapter -- buildExtra unit tests', () => {
+  const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
+  const { defaultStats } = require(path.join(__dirname, '..', 'state-machine'));
+
+  test('returns object with all expected fields', () => {
+    const stats = defaultStats();
+    stats.session = { id: 'be-1', start: Date.now() - 5000, toolCalls: 3, filesEdited: ['a.js', 'b.js'], subagentCount: 1 };
+    stats.streak = 5;
+    stats.bestStreak = 10;
+    const extra = baseAdapter.buildExtra(stats, 'be-1', 'claude');
+    assert.strictEqual(extra.sessionId, 'be-1');
+    assert.strictEqual(extra.modelName, 'claude');
+    assert.strictEqual(extra.toolCalls, 3);
+    assert.strictEqual(extra.filesEdited, 2);
+    assert.strictEqual(extra.streak, 5);
+    assert.strictEqual(extra.bestStreak, 10);
+    assert.ok('dailySessions' in extra);
+    assert.ok('dailyCumulativeMs' in extra);
+    assert.ok('frequentFiles' in extra);
+    assert.strictEqual(extra.diffInfo, null);
+  });
+
+  test('frequentFiles truncated to top 10 with count >= 3', () => {
+    const stats = defaultStats();
+    stats.session = { id: 'be-2', start: Date.now(), toolCalls: 0, filesEdited: [], subagentCount: 0 };
+    // Add 15 files, some below threshold
+    for (let i = 0; i < 15; i++) {
+      stats.frequentFiles[`file${i}.js`] = i + 1;
+    }
+    const extra = baseAdapter.buildExtra(stats, 'be-2', 'test');
+    const keys = Object.keys(extra.frequentFiles);
+    assert.ok(keys.length <= 10, `should have at most 10, got ${keys.length}`);
+    for (const [, count] of Object.entries(extra.frequentFiles)) {
+      assert.ok(count >= 3, `each file should have count >= 3, got ${count}`);
+    }
+  });
+
+  test('handles empty stats gracefully', () => {
+    const stats = defaultStats();
+    const extra = baseAdapter.buildExtra(stats, 'be-3', 'test');
+    assert.strictEqual(extra.toolCalls, 0);
+    assert.strictEqual(extra.filesEdited, 0);
+    assert.strictEqual(extra.streak, 0);
+  });
+});
+
+describe('base-adapter -- trackEditedFile unit tests', () => {
+  const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
+  const { defaultStats } = require(path.join(__dirname, '..', 'state-machine'));
+
+  test('detects edit tools and extracts file path', () => {
+    const stats = defaultStats();
+    baseAdapter.trackEditedFile(stats, 'Edit', { file_path: '/src/app.js' });
+    assert.ok(stats.session.filesEdited.includes('app.js'));
+    assert.strictEqual(stats.frequentFiles['app.js'], 1);
+  });
+
+  test('prevents duplicate file entries in session', () => {
+    const stats = defaultStats();
+    baseAdapter.trackEditedFile(stats, 'Edit', { file_path: '/src/app.js' });
+    baseAdapter.trackEditedFile(stats, 'Edit', { file_path: '/src/app.js' });
+    assert.strictEqual(stats.session.filesEdited.filter(f => f === 'app.js').length, 1);
+    assert.strictEqual(stats.frequentFiles['app.js'], 2);
+  });
+
+  test('ignores non-edit tools', () => {
+    const stats = defaultStats();
+    baseAdapter.trackEditedFile(stats, 'Read', { file_path: '/src/app.js' });
+    assert.strictEqual(stats.session.filesEdited.length, 0);
+  });
+
+  test('handles Write tool (edit variant)', () => {
+    const stats = defaultStats();
+    baseAdapter.trackEditedFile(stats, 'Write', { file_path: '/src/new.ts' });
+    assert.ok(stats.session.filesEdited.includes('new.ts'));
+  });
+
+  test('handles missing file_path gracefully', () => {
+    const stats = defaultStats();
+    baseAdapter.trackEditedFile(stats, 'Edit', {});
+    assert.strictEqual(stats.session.filesEdited.length, 0);
+  });
+});
+
+describe('base-adapter -- processJsonlStream unit tests', () => {
+  const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
+  const { Readable } = require('stream');
+
+  function makeStream(chunks) {
+    const stream = new Readable({ read() {} });
+    for (const chunk of chunks) stream.push(chunk);
+    stream.push(null);
+    return stream;
+  }
+
+  test('parses valid JSONL lines', (done) => {
+    const events = [];
+    const stream = makeStream(['{"a":1}\n{"b":2}\n']);
+    baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
+    stream.on('end', () => {
+      // Give a tick for the flush handler
+      setTimeout(() => {
+        assert.strictEqual(events.length, 2);
+        assert.strictEqual(events[0].a, 1);
+        assert.strictEqual(events[1].b, 2);
+      }, 10);
+    });
+  });
+
+  test('skips malformed lines silently', () => {
+    const events = [];
+    const stream = makeStream(['{"valid":true}\nnot json\n{"also":true}\n']);
+    baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
+    stream.on('end', () => {
+      setTimeout(() => {
+        assert.strictEqual(events.length, 2);
+      }, 10);
+    });
+  });
+
+  test('handles \\r\\n line endings', () => {
+    const events = [];
+    const stream = makeStream(['{"x":1}\r\n{"y":2}\r\n']);
+    baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
+    stream.on('end', () => {
+      setTimeout(() => {
+        assert.strictEqual(events.length, 2);
+      }, 10);
+    });
+  });
+
+  test('calls handler for each parsed object', () => {
+    const events = [];
+    const stream = makeStream(['{"type":"a"}\n', '{"type":"b"}\n']);
+    baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
+    stream.on('end', () => {
+      setTimeout(() => {
+        assert.ok(events.length >= 2);
+        assert.strictEqual(events[0].type, 'a');
+      }, 10);
+    });
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

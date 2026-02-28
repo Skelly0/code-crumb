@@ -147,11 +147,11 @@ class ClaudeFace {
 
   _getMinDisplayMs(state) {
     const times = {
-      happy: 5000, proud: 4500, satisfied: 2500, relieved: 2500,
-      error: 3500, coding: 3000, thinking: 2500, responding: 3000, reading: 3000,
-      searching: 3000, executing: 3000, testing: 3000, installing: 3000,
-      caffeinated: 2500, subagent: 2500, waiting: 1500, sleeping: 1000,
-      starting: 2500, spawning: 2000, committing: 3500, reviewing: 3500, ratelimited: 5000,
+      happy: 4000, proud: 4500, satisfied: 2500, relieved: 2500,
+      error: 4000, coding: 6000, thinking: 2500, responding: 3000, reading: 4000,
+      searching: 4000, executing: 4000, testing: 4000, installing: 4000,
+      caffeinated: 2500, subagent: 4000, waiting: 1500, sleeping: 1000,
+      starting: 1500, spawning: 4000, committing: 3500, reviewing: 3500, ratelimited: 5000,
     };
     return times[state] || 1000;
   }
