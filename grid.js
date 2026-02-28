@@ -39,7 +39,7 @@ const CELL_W = 12;
 const CELL_H = 7;
 const BOX_W = 8;
 const BOX_INNER = 6;
-const STALE_MS = 120000;
+const STALE_MS = 30000;
 const STOPPED_LINGER_MS = 10000;
 const MIN_COLS_GRID = 14;
 const MIN_ROWS_GRID = 9;
@@ -115,7 +115,11 @@ class MiniFace {
   }
 
   isStale() {
-    if (this.stopped) return Date.now() - this.stoppedAt > STOPPED_LINGER_MS;
+    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
+    if (this.stopped || completionStates.includes(this.state)) {
+      const staleTime = this.stopped ? this.stoppedAt : this.lastUpdate;
+      return Date.now() - staleTime > STOPPED_LINGER_MS;
+    }
     return Date.now() - this.lastUpdate > STALE_MS;
   }
 
