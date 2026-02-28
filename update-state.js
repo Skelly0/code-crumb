@@ -347,8 +347,7 @@ process.stdin.on('end', () => {
     else if (hookEvent === 'SessionStart') {
       state = 'idle';
       detail = 'session starting';
-      // Force-initialize a fresh session
-      stats.daily.sessionCount++;
+      // sessionCount already incremented in new-session block above
       stats.session = {
         id: sessionId, start: Date.now(),
         toolCalls: 0, filesEdited: [], subagentCount: 0, commitCount: 0,
