@@ -348,6 +348,9 @@ process.stdin.on('end', () => {
       state = 'idle';
       detail = 'session starting';
       // sessionCount already incremented in new-session block above
+      // Clean up any stale session file from previous session with same ID
+      const staleSessionFile = path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json');
+      try { fs.unlinkSync(staleSessionFile); } catch {}
       stats.session = {
         id: sessionId, start: Date.now(),
         toolCalls: 0, filesEdited: [], subagentCount: 0, commitCount: 0,
@@ -484,6 +487,9 @@ process.stdin.on('end', () => {
     } else if (hookEvent === 'SessionStart') {
       fallbackState = 'waiting';
       fallbackDetail = 'session starting';
+      // Clean up any stale session file from previous session with same ID
+      const staleSessionFile = path.join(SESSIONS_DIR, safeFilename(fallbackSessionId) + '.json');
+      try { fs.unlinkSync(staleSessionFile); } catch {}
     } else if (hookEvent === 'SubagentStart') {
       fallbackState = 'subagent';
       fallbackDetail = 'spawning subagent';
