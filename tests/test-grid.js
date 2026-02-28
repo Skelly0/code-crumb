@@ -261,6 +261,26 @@ describe('grid.js -- OrbitalSystem stale cleanup', () => {
     const face = new MiniFace('fresh');
     assert.ok(!face.isStale());
   });
+
+  test('completion states become stale after STOPPED_LINGER_MS (issue #59 fix)', () => {
+    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
+    for (const state of completionStates) {
+      const face = new MiniFace(state);
+      face.state = state;
+      face.lastUpdate = Date.now() - 15000; // Past STOPPED_LINGER_MS (10s)
+      assert.ok(face.isStale(), `${state} should be stale after 10s`);
+    }
+  });
+
+  test('recent completion states are not stale', () => {
+    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
+    for (const state of completionStates) {
+      const face = new MiniFace(state);
+      face.state = state;
+      face.lastUpdate = Date.now() - 5000; // Within STOPPED_LINGER_MS (10s)
+      assert.ok(!face.isStale(), `${state} should not be stale within 10s`);
+    }
+  });
 });
 
 describe('grid.js -- OrbitalSystem session schema validation', () => {
