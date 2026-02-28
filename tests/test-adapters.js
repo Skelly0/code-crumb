@@ -971,10 +971,10 @@ describe('bug fix regressions', () => {
     assert.ok(src.includes('Math.max(0.3,'));
   });
 
-  test('update-state.js rate-limits subagent cycling', () => {
+  test('update-state.js has no hardcoded subagent state cycling (Fix #79)', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
-    assert.ok(src.includes('lastCycleTime'));
-    assert.ok(src.includes('now_cycle - lastCycle > 4000'));
+    assert.ok(!src.includes('lastCycleTime'), 'cycling mechanism should be removed');
+    assert.ok(!src.includes('SUB_STATES'), 'hardcoded state array should be removed');
   });
 
   test('renderer.js wraps face.render() in try-catch', () => {

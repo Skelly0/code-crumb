@@ -178,6 +178,9 @@ const falsePositives = [
   /error_count.*0/i,
   /warning/i,                                       // warnings aren't errors
   /no conflicts?\b/i,                               // "no conflicts" isn't a conflict
+  /Merge made by/i,                                 // git merge success ("Merge made by recursive strategy")
+  /Already up.to.date/i,                            // git pull/merge when nothing to do
+  /conflicts? resolved/i,                           // past-tense resolution, not an active failure
 ];
 
 function looksLikeError(text, patterns) {

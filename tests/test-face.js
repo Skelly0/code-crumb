@@ -1126,6 +1126,26 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     assert.strictEqual(face.pendingState, 'sleeping');
   });
 
+  test('reading bypasses happy even with pending completion (Fix #96)', () => {
+    const face = new ClaudeFace();
+    face.setState('happy');
+    assert.strictEqual(face.state, 'happy');
+    // Simulate a pending completion in the queue
+    face.pendingState = 'satisfied';
+    // Work state should punch through regardless of pending completion
+    face.setState('reading');
+    assert.strictEqual(face.state, 'reading');
+    assert.strictEqual(face.pendingState, null);
+  });
+
+  test('coding bypasses relieved even with pending completion (Fix #96)', () => {
+    const face = new ClaudeFace();
+    face.setState('relieved');
+    face.pendingState = 'proud';
+    face.setState('coding', 'editing app.ts');
+    assert.strictEqual(face.state, 'coding');
+  });
+
   test('error still bypasses any state (unchanged behavior)', () => {
     const face = new ClaudeFace();
     face.setState('executing', 'running');
