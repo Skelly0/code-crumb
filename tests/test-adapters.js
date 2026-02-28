@@ -1098,6 +1098,12 @@ describe('bug fix regressions', () => {
     assert.ok(!src.includes('!isSubagentTool'),
       '!isSubagentTool guard should be gone (state-mirroring block removed)');
   });
+
+  test('renderer.js PID guard handles EPERM as running (#65)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    assert.ok(src.includes("err.code === 'EPERM'"),
+      'PID guard catch should check for EPERM and treat as running');
+  });
 });
 
 module.exports = { passed: () => passed, failed: () => failed };

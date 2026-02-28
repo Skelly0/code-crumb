@@ -78,7 +78,10 @@ function isAlreadyRunning() {
     if (isNaN(pid)) return false;
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (err) {
+    if (err.code === 'EPERM') {
+      return true;
+    }
     return false;
   }
 }
