@@ -425,12 +425,28 @@ process.stdin.on('end', () => {
           !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
         shouldWriteGlobal = false;
       }
+      // Preserve stopped flag — late PostToolUse must not erase a prior Stop/SessionEnd
+      if (existing.stopped && existing.sessionId === sessionId && !stopped) {
+        stopped = true;
+        extra.stopped = true;
+      }
     } catch {}
 
     if (shouldWriteGlobal) writeState(state, detail, extra);
     // Always write per-session file so parallel Claude Code sessions
     // appear as orbitals. The renderer excludes the main session by ID.
     if (hookEvent !== 'SessionStart') {
+      // Preserve stopped flag from existing session file (same logic as global file)
+      if (!stopped) {
+        try {
+          const existingSession = JSON.parse(fs.readFileSync(
+            path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
+          if (existingSession.stopped) {
+            stopped = true;
+            extra.stopped = true;
+          }
+        } catch {}
+      }
       writeSessionState(sessionId, state, detail, stopped, extra);
     }
     pruneFrequentFiles(stats.frequentFiles);

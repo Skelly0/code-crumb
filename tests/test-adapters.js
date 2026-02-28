@@ -1119,4 +1119,124 @@ describe('bug fix regressions', () => {
   });
 });
 
+// -- Stopped flag preservation (#98) ----------------------------------------
+
+describe('update-state.js stopped flag preservation (#98)', () => {
+  const updateStatePath = path.join(__dirname, '..', 'update-state.js');
+  const sharedMod = require(path.join(__dirname, '..', 'shared'));
+  const STATE_FILE = sharedMod.STATE_FILE;
+  const SESSIONS_DIR = sharedMod.SESSIONS_DIR;
+  const safeFilename = sharedMod.safeFilename;
+
+  test('source: global state file read preserves stopped flag for same session', () => {
+    const src = fs.readFileSync(updateStatePath, 'utf8');
+    assert.ok(
+      src.includes('existing.stopped && existing.sessionId === sessionId && !stopped'),
+      'update-state.js should check existing.stopped for same session and preserve it'
+    );
+  });
+
+  test('source: session file read preserves stopped flag before writeSessionState', () => {
+    const src = fs.readFileSync(updateStatePath, 'utf8');
+    assert.ok(
+      src.includes('existingSession.stopped'),
+      'update-state.js should read existing session file and preserve stopped flag'
+    );
+  });
+
+  test('source: renderer lastStopped only goes false->true from state file', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    // Should use `if (stateData.stopped) lastStopped = true` not `lastStopped = stateData.stopped || false`
+    assert.ok(
+      src.includes('if (stateData.stopped) lastStopped = true'),
+      'renderer.js should only set lastStopped to true, never back to false from state file'
+    );
+    assert.ok(
+      !src.includes('lastStopped = stateData.stopped || false'),
+      'renderer.js should not have the old bidirectional lastStopped assignment'
+    );
+  });
+
+  test('source: renderer fresh-read loop only detects false->true stopped transitions', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    assert.ok(
+      src.includes('stoppedNow && !lastStopped && freshTs'),
+      'renderer.js fresh-read should only detect false->true transitions'
+    );
+    assert.ok(
+      !src.includes('stoppedNow !== lastStopped && freshTs'),
+      'renderer.js should not have the old bidirectional stoppedNow !== lastStopped check'
+    );
+  });
+
+  test('integration: PostToolUse after Stop preserves stopped in global state file', () => {
+    // Write a stopped state file simulating a Stop event
+    const testSessionId = 'test-stopped-' + Date.now();
+    const stoppedState = JSON.stringify({
+      state: 'responding', detail: 'wrapping up',
+      timestamp: Date.now(), sessionId: testSessionId, stopped: true,
+    });
+    try { fs.writeFileSync(STATE_FILE, stoppedState, 'utf8'); } catch { return; }
+
+    // Simulate a late PostToolUse by spawning update-state.js
+    try {
+      execFileSync(process.execPath, [updateStatePath, 'PostToolUse'], {
+        input: JSON.stringify({
+          tool_name: 'Write', tool_input: { file_path: '/tmp/test.txt' },
+          tool_result: { stdout: 'ok' }, session_id: testSessionId,
+        }),
+        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
+        timeout: 5000,
+      });
+    } catch {}
+
+    // Read the state file back — stopped must still be true
+    try {
+      const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      assert.strictEqual(result.stopped, true,
+        'stopped flag must be preserved after late PostToolUse for same session');
+    } catch (e) {
+      // If the file can't be read (e.g. permissions), skip gracefully
+      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
+    }
+  });
+
+  test('integration: PostToolUse after Stop preserves stopped in session file', () => {
+    const testSessionId = 'test-session-stopped-' + Date.now();
+    const sessionFile = path.join(SESSIONS_DIR, safeFilename(testSessionId) + '.json');
+
+    // Write a stopped session file
+    try {
+      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+      fs.writeFileSync(sessionFile, JSON.stringify({
+        session_id: testSessionId, state: 'responding', detail: 'wrapping up',
+        timestamp: Date.now(), stopped: true,
+      }), 'utf8');
+    } catch { return; }
+
+    // Simulate late PostToolUse
+    try {
+      execFileSync(process.execPath, [updateStatePath, 'PostToolUse'], {
+        input: JSON.stringify({
+          tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
+          tool_result: { stdout: 'ok' }, session_id: testSessionId,
+        }),
+        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
+        timeout: 5000,
+      });
+    } catch {}
+
+    // Session file must still have stopped: true
+    try {
+      const result = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+      assert.strictEqual(result.stopped, true,
+        'session file stopped flag must be preserved after late PostToolUse');
+    } catch (e) {
+      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
+    } finally {
+      try { fs.unlinkSync(sessionFile); } catch {}
+    }
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

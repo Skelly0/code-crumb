@@ -200,7 +200,7 @@ function runUnifiedMode() {
 
         lastMainUpdate = Date.now();
         lastFileState = stateData.state;
-        lastStopped = stateData.stopped || false;
+        if (stateData.stopped) lastStopped = true;
 
         const ts = stateData.timestamp || 0;
         if (ts > lastAppliedTimestamp) {
@@ -246,9 +246,9 @@ function runUnifiedMode() {
       try {
         const freshData = readState();
         const freshTs = freshData.timestamp || 0;
-        // Detect stopped transitions: true->false (session restarted) or false->true (stop)
+        // Detect stopped transition: false->true only (resets via session adoption)
         const stoppedNow = freshData.stopped || false;
-        if (stoppedNow !== lastStopped && freshTs > lastAppliedTimestamp) {
+        if (stoppedNow && !lastStopped && freshTs > lastAppliedTimestamp) {
           lastAppliedTimestamp = freshTs;
           lastStopped = stoppedNow;
           lastFileState = freshData.state;
