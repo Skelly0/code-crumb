@@ -1078,10 +1078,12 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     assert.strictEqual(face.stateDetail, 'git status');
   });
 
-  test('coding bypasses relieved min display', () => {
+  test('coding bypasses relieved min display after 500ms guaranteed window', () => {
     const face = new ClaudeFace();
     face.setState('relieved');
     assert.strictEqual(face.state, 'relieved');
+    // Simulate relieved has been showing for 600ms (past the guaranteed window)
+    face.lastStateChange = Date.now() - 600;
     face.setState('coding', 'editing app.ts');
     assert.strictEqual(face.state, 'coding');
   });
@@ -1126,24 +1128,48 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     assert.strictEqual(face.pendingState, 'sleeping');
   });
 
-  test('reading bypasses happy even with pending completion (Fix #96)', () => {
+  test('work state buffered during fresh completion -- no immediate bypass (anti-flicker)', () => {
     const face = new ClaudeFace();
     face.setState('happy');
-    assert.strictEqual(face.state, 'happy');
-    // Simulate a pending completion in the queue
-    face.pendingState = 'satisfied';
-    // Work state should punch through regardless of pending completion
+    // reading arrives immediately -- happy hasn't shown for 500ms yet
     face.setState('reading');
-    assert.strictEqual(face.state, 'reading');
+    assert.strictEqual(face.state, 'happy');         // still on happy
+    assert.strictEqual(face.pendingState, 'reading'); // reading queued for early flush
+  });
+
+  test('work state bypasses completion after 500ms guaranteed window (Fix #96)', () => {
+    const face = new ClaudeFace();
+    face.setState('happy');
+    face.lastStateChange = Date.now() - 600; // simulate 600ms elapsed
+    face.setState('reading');
+    assert.strictEqual(face.state, 'reading'); // bypasses now that window passed
     assert.strictEqual(face.pendingState, null);
   });
 
-  test('coding bypasses relieved even with pending completion (Fix #96)', () => {
+  test('completion state buffered during active work -- no reverse bypass (anti-flicker)', () => {
     const face = new ClaudeFace();
-    face.setState('relieved');
-    face.pendingState = 'proud';
-    face.setState('coding', 'editing app.ts');
-    assert.strictEqual(face.state, 'coding');
+    face.setState('reading');
+    face.setState('satisfied');
+    assert.strictEqual(face.state, 'reading');           // still on reading
+    assert.strictEqual(face.pendingState, 'satisfied');  // satisfied queued behind work
+  });
+
+  test('latest completion overwrites earlier pending completion', () => {
+    const face = new ClaudeFace();
+    face.setState('reading');
+    face.setState('happy');
+    assert.strictEqual(face.pendingState, 'happy');
+    face.setState('proud'); // more recent completion
+    assert.strictEqual(face.pendingState, 'proud');
+  });
+
+  test('mundane state does not displace pending completion', () => {
+    const face = new ClaudeFace();
+    face.setState('reading');
+    face.setState('satisfied'); // gets buffered
+    assert.strictEqual(face.pendingState, 'satisfied');
+    face.setState('idle');      // should NOT overwrite satisfied
+    assert.strictEqual(face.pendingState, 'satisfied');
   });
 
   test('error still bypasses any state (unchanged behavior)', () => {
@@ -1170,16 +1196,18 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     assert.strictEqual(face.pendingState, 'caffeinated');
   });
 
-  test('executing bypasses happy min display', () => {
+  test('executing bypasses happy min display after 500ms guaranteed window', () => {
     const face = new ClaudeFace();
     face.setState('happy');
+    face.lastStateChange = Date.now() - 600;
     face.setState('executing', 'next command');
     assert.strictEqual(face.state, 'executing');
   });
 
-  test('testing bypasses satisfied min display', () => {
+  test('testing bypasses satisfied min display after 500ms guaranteed window', () => {
     const face = new ClaudeFace();
     face.setState('satisfied');
+    face.lastStateChange = Date.now() - 600;
     face.setState('testing', 'npm test');
     assert.strictEqual(face.state, 'testing');
   });
@@ -1311,22 +1339,23 @@ describe('caffeinated detection', () => {
 });
 
 describe('face.js -- completion states bypass minDisplayUntil (#76)', () => {
-  test('completion state (happy) bypasses minDisplayUntil', () => {
+  test('completion state (happy) bypasses non-work minDisplayUntil', () => {
     const face = new ClaudeFace();
-    face.setState('coding');
+    face.setState('thinking');
     face.minDisplayUntil = Date.now() + 50000;
     face.setState('happy');
     assert.strictEqual(face.state, 'happy',
-      'completion state should bypass minDisplayUntil');
+      'completion state should bypass non-work minDisplayUntil');
   });
 
-  test('completion state (satisfied) bypasses minDisplayUntil', () => {
+  test('completion state (satisfied) queued behind active work -- no bypass', () => {
     const face = new ClaudeFace();
     face.setState('executing');
     face.minDisplayUntil = Date.now() + 50000;
     face.setState('satisfied');
-    assert.strictEqual(face.state, 'satisfied',
-      'satisfied should bypass minDisplayUntil');
+    assert.strictEqual(face.state, 'executing',
+      'satisfied should not bypass active work state');
+    assert.strictEqual(face.pendingState, 'satisfied');
   });
 
   test('non-completion state does NOT bypass minDisplayUntil', () => {
@@ -1338,19 +1367,19 @@ describe('face.js -- completion states bypass minDisplayUntil (#76)', () => {
       'non-completion state should not bypass minDisplayUntil');
   });
 
-  test('pending non-completion does not overwrite pending completion', () => {
+  test('pending completion not overwritten by non-completion state', () => {
     const face = new ClaudeFace();
     face.setState('coding');
     face.minDisplayUntil = Date.now() + 50000;
     // Reading goes to pending
     face.setState('reading');
     assert.strictEqual(face.pendingState, 'reading');
-    // Happy bypasses and applies immediately
+    // Happy is buffered behind work (does not apply immediately)
     face.setState('happy');
-    assert.strictEqual(face.state, 'happy',
-      'happy should apply immediately');
-    assert.strictEqual(face.pendingState, null,
-      'pending should be cleared when state is applied');
+    assert.strictEqual(face.state, 'coding',
+      'happy should not bypass active work state');
+    assert.strictEqual(face.pendingState, 'happy',
+      'happy queued as most recent pending');
   });
 });
 
