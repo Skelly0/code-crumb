@@ -36,21 +36,28 @@ animations.js    Eye and mouth animation functions (full-size and grid)
 particles.js     ParticleSystem class — 12 visual effect styles (incl. stream)
 face.js          ClaudeFace class — main face state machine, rendering, orbital toggle
 grid.js          MiniFace + OrbitalSystem classes — subagent orbital rendering
+accessories.js   Accessory definitions (hats, glasses, ears, etc.) and rendering helpers
 update-state.js  Hook handler — receives editor events via stdin, writes state files
 state-machine.js Pure logic — tool→state mapping (multi-editor), error detection, streaks
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
 setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode|openclaw])
-test.js          Test suite — ~411 tests covering all critical paths (node test.js)
+test.js          Test runner — loads 11 modular test files from tests/ (~719 tests)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Orbital demo — simulates subagent sessions orbiting the main face
 code-crumb.sh   Unix shell wrapper for launch.js
 code-crumb.cmd  Windows batch wrapper for launch.js
 adapters/
+  base-adapter.js    Base adapter class with shared functionality for all adapters
   codex-wrapper.js   Wraps `codex exec --json` for rich tool-level face events
   codex-notify.js    Handles Codex CLI `notify` config events (turn-level)
   opencode-adapter.js  Adapter for OpenCode plugin events (stdin JSON)
   openclaw-adapter.js  Adapter for OpenClaw/Pi agent events (stdin JSON)
+  engmux-adapter.js  Adapter for engmux agent dispatcher events (stdin JSON)
+tests/
+  test-shared.js, test-state-machine.js, test-themes.js, test-animations.js,
+  test-particles.js, test-face.js, test-grid.js, test-accessories.js,
+  test-teams.js, test-launch.js, test-adapters.js
 .claude-plugin/
   plugin.json      Claude Code plugin manifest for marketplace distribution
 hooks/
@@ -77,19 +84,19 @@ State is communicated between the hook handler and renderer via JSON files:
 
 ### State Machine
 
-17 face states: `idle`, `thinking`, `responding`, `reading`, `searching`, `coding`, `executing`, `happy`, `satisfied`, `proud`, `relieved`, `error`, `sleeping`, `waiting`, `testing`, `installing`, `caffeinated`, `subagent`.
+23 face states: `idle`, `thinking`, `responding`, `reading`, `searching`, `coding`, `executing`, `happy`, `satisfied`, `proud`, `relieved`, `error`, `sleeping`, `waiting`, `testing`, `installing`, `caffeinated`, `subagent`, `starting`, `spawning`, `committing`, `reviewing`, `ratelimited`.
 
 States have minimum display durations (1–8 seconds) enforced via a `pendingState` queue to prevent visual flashing.
 
 ### Hook Events
 
-Six hook event types are handled: `PreToolUse`, `PostToolUse`, `Stop`, `Notification`, `TeammateIdle`, `TaskCompleted`. Tool names from all supported editors are mapped to face states via shared regex patterns (e.g., Edit/apply_diff/file_edit → coding, Grep/search_files/codebase_search → searching, Bash/shell/terminal → executing). PostToolUse includes forensic error detection with 50+ regex patterns.
+Eleven hook event types are handled: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `Notification`, `TeammateIdle`, `TaskCompleted`, `SubagentStart`, `SubagentStop`, `SessionStart`, `SessionEnd`. Tool names from all supported editors are mapped to face states via shared regex patterns (e.g., Edit/apply_diff/file_edit → coding, Grep/search_files/codebase_search → searching, Bash/shell/terminal → executing). PostToolUse includes forensic error detection with 50+ regex patterns.
 
 `TeammateIdle` and `TaskCompleted` are agent-teams-specific events (requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`). They write session files with `teamName`, `teammateName`, and `isTeammate: true` fields so team members appear in the orbital display with their designated name and a team-specific accent color.
 
 ### Multi-Editor Tool Mapping
 
-Tool name patterns are defined as shared constants (`EDIT_TOOLS`, `BASH_TOOLS`, `READ_TOOLS`, `SEARCH_TOOLS`, `WEB_TOOLS`, `SUBAGENT_TOOLS`) in `state-machine.js`. Each pattern matches tool names from Claude Code, Codex CLI, OpenCode, and OpenClaw/Pi. The `modelName` field in state files controls the display name (e.g., "claude is thinking" vs "codex is coding" vs "openclaw is reading").
+Tool name patterns are defined as shared constants (`EDIT_TOOLS`, `BASH_TOOLS`, `READ_TOOLS`, `SEARCH_TOOLS`, `WEB_TOOLS`, `SUBAGENT_TOOLS`, `REVIEW_TOOLS`) in `state-machine.js`. Each pattern matches tool names from Claude Code, Codex CLI, OpenCode, and OpenClaw/Pi. The `modelName` field in state files controls the display name (e.g., "claude is thinking" vs "codex is coding" vs "openclaw is reading").
 
 ## Development Commands
 
@@ -107,6 +114,8 @@ npm run launch         # Open renderer + start Claude Code
 npm run launch:codex   # Open renderer + start Codex wrapper
 npm run launch:opencode # Open renderer + start OpenCode
 npm run launch:openclaw # Open renderer + start OpenClaw
+npm run minimal        # Run renderer in minimal mode
+npm run tmux           # Run renderer with tmux support
 ```
 
 To develop: run `npm run demo` in one terminal and `npm start` in another. For orbital testing: `npm start` + `npm run demo:orbital`.
@@ -130,7 +139,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 | `THINKING_TIMEOUT` | 120000ms | renderer.js, grid.js |
 | `SLEEP_TIMEOUT` | 60000ms | renderer.js |
 | `CAFFEINE_THRESHOLD` | 5 calls in 10s | face.js |
-| `STALE_MS` | 120000ms | grid.js (orbital session timeout) |
+| `STALE_MS` | 30000ms | grid.js (orbital session timeout) |
 | `MAX_ORBITALS` | 8 | grid.js (max visible orbital faces) |
 | `ROTATION_SPEED` | 0.007 rad/frame | grid.js (~1 revolution per 60s) |
 
@@ -145,16 +154,19 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 
 ### Automated Tests
 
-Run `npm test` (or `node test.js`). The test suite covers:
+Run `npm test` (or `node test.js`). The test runner loads 11 modular test files from `tests/`. The suite (~719 tests) covers:
 
-- **shared.js**: `safeFilename` edge cases
-- **state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
-- **themes.js**: `lerpColor`/`dimColor`/`breathe` color math, theme completeness (all 18 states), `COMPLETION_LINGER` ordering, thought bubble pools
-- **animations.js**: mouth/eye functions (shape and randomness)
-- **particles.js**: `ParticleSystem` (all 12 styles incl. stream, lifecycle, fadeAll)
-- **face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline, orbital toggle)
-- **grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles)
+- **test-shared.js**: `safeFilename` edge cases
+- **test-state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants incl. `REVIEW_TOOLS`, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
+- **test-themes.js**: `lerpColor`/`dimColor`/`breathe` color math, theme completeness (all 23 states), `COMPLETION_LINGER` ordering, thought bubble pools
+- **test-animations.js**: mouth/eye functions (shape and randomness)
+- **test-particles.js**: `ParticleSystem` (all 12 styles incl. stream, lifecycle, fadeAll)
+- **test-face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline, orbital toggle)
+- **test-grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles)
+- **test-accessories.js**: accessory definitions, rendering, state-specific adornments
 - **test-teams.js**: `hashTeamColor` consistency and RGB output, `MiniFace` team fields, `_assignLabels` with `teammateName`, session schema for `TeammateIdle`/`TaskCompleted`
+- **test-launch.js**: launcher logic, platform detection, editor flag handling
+- **test-adapters.js**: base adapter, engmux adapter, codex/opencode/openclaw adapter behavior
 
 ### Visual Verification
 
@@ -162,7 +174,7 @@ For visual testing, use the demo scripts:
 
 1. Run `npm start` in one terminal
 2. Run `npm run demo` in another terminal
-3. Observe the face cycling through all 18 states
+3. Observe the face cycling through all 23 states
 
 For orbital subagents: `npm start` + `npm run demo:orbital`.
 
