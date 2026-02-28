@@ -816,4 +816,56 @@ describe('grid.js -- MiniFace detail row rendering (#57)', () => {
   });
 });
 
+// -- taskDescription tests ---------------------------------------------------
+
+describe('grid.js -- MiniFace taskDescription', () => {
+  test('stores taskDescription from updateFromFile', () => {
+    const mf = new MiniFace('td-test');
+    mf.updateFromFile({ state: 'coding', detail: 'editing foo.js', taskDescription: 'fix unit tests' });
+    assert.strictEqual(mf.taskDescription, 'fix unit tests');
+  });
+
+  test('taskDescription not cleared by updates without it', () => {
+    const mf = new MiniFace('td-sticky');
+    mf.updateFromFile({ state: 'coding', detail: 'editing foo.js', taskDescription: 'fix unit tests' });
+    mf.updateFromFile({ state: 'searching', detail: 'grep: TODO' });
+    assert.strictEqual(mf.taskDescription, 'fix unit tests',
+      'taskDescription should persist when subsequent update omits it');
+  });
+});
+
+describe('grid.js -- OrbitalSystem _assignLabels taskDescription', () => {
+  test('_assignLabels prefers taskDescription over cwd', () => {
+    const os = new OrbitalSystem();
+    const face = new MiniFace('td-label');
+    face.taskDescription = 'fix tests';
+    face.cwd = '/home/user/project';
+    os.faces.set('td-label', face);
+    os._assignLabels();
+    assert.strictEqual(face.label, 'fix test',
+      'label should be taskDescription truncated to 8 chars');
+  });
+
+  test('teammate name takes priority over taskDescription', () => {
+    const os = new OrbitalSystem();
+    const face = new MiniFace('td-team');
+    face.teammateName = 'reviewer';
+    face.taskDescription = 'fix tests';
+    os.faces.set('td-team', face);
+    os._assignLabels();
+    assert.strictEqual(face.label, 'reviewer',
+      'teammateName should take priority over taskDescription');
+  });
+
+  test('falls back to cwd when no taskDescription', () => {
+    const os = new OrbitalSystem();
+    const face = new MiniFace('td-fallback');
+    face.cwd = '/home/user/my-project';
+    os.faces.set('td-fallback', face);
+    os._assignLabels();
+    assert.strictEqual(face.label, 'my-proje',
+      'label should fall back to cwd basename truncated to 8 chars');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

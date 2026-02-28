@@ -81,6 +81,7 @@ class MiniFace {
     this.isTeammate = false;   // true if part of an agent team
     this.teamColor = null;     // RGB color derived from teamName
     this.gitBranch = null;     // current git branch (if known)
+    this.taskDescription = ''; // sticky task description from SubagentStart
     this.minDisplayUntil = 0;  // Minimum display time to prevent flashing
     this.pendingState = null;  // Buffered state when minDisplayUntil blocks
     this.pendingDetail = null;
@@ -129,6 +130,7 @@ class MiniFace {
     if (data.teammateName) this.teammateName = data.teammateName;
     if (data.isTeammate) this.isTeammate = true;
     if (data.gitBranch) this.gitBranch = data.gitBranch;
+    if (data.taskDescription) this.taskDescription = data.taskDescription;
     if (data.stopped && !this.stopped) {
       this.stopped = true;
       this.stoppedAt = Date.now();
@@ -452,7 +454,9 @@ class OrbitalSystem {
 
       const base = face.cwd ? path.basename(face.cwd) : '';
 
-      if (sorted.length === 1) {
+      if (face.taskDescription) {
+        face.label = face.taskDescription.slice(0, 8);
+      } else if (sorted.length === 1) {
         face.label = base ? base.slice(0, 8) : (face.modelName || 'sub').slice(0, 8);
       } else if (base && cwdCounts[base] === 1) {
         face.label = base.slice(0, 8);

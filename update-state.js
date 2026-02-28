@@ -307,11 +307,11 @@ process.stdin.on('end', () => {
       if (stats.session.subagentCount > (stats.records.mostSubagents || 0)) {
         stats.records.mostSubagents = stats.session.subagentCount;
       }
-      stats.session.activeSubagents.push({ id: subId, description: desc, startedAt: Date.now() });
+      stats.session.activeSubagents.push({ id: subId, description: desc, taskDescription: desc, startedAt: Date.now() });
       writeSessionState(subId, 'spawning', desc, false, {
         sessionId: subId, modelName: data.model || 'haiku', cwd: process.cwd(),
         gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
-        parentSession: sessionId,
+        parentSession: sessionId, taskDescription: desc,
       });
       detail = `conducting ${stats.session.activeSubagents.length}`;
     }
@@ -326,14 +326,14 @@ process.stdin.on('end', () => {
         writeSessionState(finished.id, 'happy', 'done', true, {
           sessionId: finished.id, stopped: true, cwd: process.cwd(),
           gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
-          parentSession: sessionId,
+          parentSession: sessionId, taskDescription: finished.taskDescription || finished.description,
         });
       } else if (stats.session.activeSubagents.length > 0) {
         const finished = stats.session.activeSubagents.shift();
         writeSessionState(finished.id, 'happy', 'done', true, {
           sessionId: finished.id, stopped: true, cwd: process.cwd(),
           gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
-          parentSession: sessionId,
+          parentSession: sessionId, taskDescription: finished.taskDescription || finished.description,
         });
       }
       if (stats.session.activeSubagents.length > 0) {
@@ -441,17 +441,18 @@ process.stdin.on('end', () => {
     // Always write per-session file so parallel Claude Code sessions
     // appear as orbitals. The renderer excludes the main session by ID.
     if (hookEvent !== 'SessionStart') {
-      // Preserve stopped flag from existing session file (same logic as global file)
-      if (!stopped) {
-        try {
-          const existingSession = JSON.parse(fs.readFileSync(
-            path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
-          if (existingSession.stopped) {
-            stopped = true;
-            extra.stopped = true;
-          }
-        } catch {}
-      }
+      // Preserve stopped flag and taskDescription from existing session file
+      try {
+        const existingSession = JSON.parse(fs.readFileSync(
+          path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
+        if (!stopped && existingSession.stopped) {
+          stopped = true;
+          extra.stopped = true;
+        }
+        if (existingSession.taskDescription && !extra.taskDescription) {
+          extra.taskDescription = existingSession.taskDescription;
+        }
+      } catch {}
       writeSessionState(sessionId, state, detail, stopped, extra);
     }
     pruneFrequentFiles(stats.frequentFiles);
