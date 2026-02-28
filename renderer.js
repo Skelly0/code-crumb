@@ -228,7 +228,7 @@ function runUnifiedMode() {
       face.transitionFrame = 0;
       face.lastStateChange = now;
       face.stateDetail = 'wrapping up';
-      face.minDisplayUntil = now; // expire immediately so happy fires next frame
+      face.minDisplayUntil = now + 3000; // respect responding's 3s min display time
       face.pendingState = null;
       face.pendingDetail = '';
       face.particles.fadeAll();
@@ -258,7 +258,7 @@ function runUnifiedMode() {
             face.transitionFrame = 0;
             face.lastStateChange = now;
             face.stateDetail = freshData.detail || 'wrapping up';
-            face.minDisplayUntil = now;
+            face.minDisplayUntil = now + 3000; // respect responding's 3s min display time
             face.pendingState = null;
             face.pendingDetail = '';
             face.particles.fadeAll();
