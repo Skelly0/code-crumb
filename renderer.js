@@ -189,8 +189,10 @@ function runUnifiedMode() {
 
         // If a different session is writing to the state file:
         if (incomingId && mainSessionId && incomingId !== mainSessionId) {
-          // Adopt as new main only if old main session ended or is very stale
-          if (lastStopped || Date.now() - lastMainUpdate > 120000) {
+          // Adopt as new main only if old main session ended, is very stale,
+          // or a new session is explicitly starting (SessionStart hook)
+          if (lastStopped || Date.now() - lastMainUpdate > 120000
+              || stateData.detail === 'session starting') {
             mainSessionId = incomingId;
             lastStopped = false;
           } else {

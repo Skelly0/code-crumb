@@ -42,7 +42,7 @@ state-machine.js Pure logic — tool→state mapping (multi-editor), error detec
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
 setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode|openclaw])
-test.js          Test runner — loads 11 modular test files from tests/ (~719 tests)
+test.js          Test runner — loads 11 modular test files from tests/ (~757 tests)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Orbital demo — simulates subagent sessions orbiting the main face
 code-crumb.sh   Unix shell wrapper for launch.js
@@ -77,7 +77,7 @@ Editor Event (Claude Code / Codex / OpenCode / OpenClaw) → update-state.js or 
 State is communicated between the hook handler and renderer via JSON files:
 
 - `~/.code-crumb-state` — single-mode state (written by update-state.js, watched by renderer.js)
-- `~/.code-crumb-sessions/{session_id}.json` — per-session state for orbital subagents
+- `~/.code-crumb-sessions/{session_id}.json` — per-session state for orbital subagents (includes sticky `taskDescription` field set at SubagentStart)
 - `~/.code-crumb-stats.json` — persistent stats (streaks, records, session counters)
 - `~/.code-crumb-prefs.json` — persisted user preferences (theme, accessories, stats, orbitals toggle)
 - `~/.code-crumb.pid` — renderer process liveness tracking
@@ -93,6 +93,10 @@ States have minimum display durations (1–8 seconds) enforced via a `pendingSta
 Eleven hook event types are handled: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `Notification`, `TeammateIdle`, `TaskCompleted`, `SubagentStart`, `SubagentStop`, `SessionStart`, `SessionEnd`. Tool names from all supported editors are mapped to face states via shared regex patterns (e.g., Edit/apply_diff/file_edit → coding, Grep/search_files/codebase_search → searching, Bash/shell/terminal → executing). PostToolUse includes forensic error detection with 50+ regex patterns.
 
 `TeammateIdle` and `TaskCompleted` are agent-teams-specific events (requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`). They write session files with `teamName`, `teammateName`, and `isTeammate: true` fields so team members appear in the orbital display with their designated name and a team-specific accent color.
+
+### Orbital Label Priority
+
+Each orbital subagent face displays a label (max 8 chars). Priority order: `teammateName` > `taskDescription` > cwd basename > `modelName` > `sub-N`. The `taskDescription` field is set once at `SubagentStart` from the agent's description/prompt and preserved across all subsequent session file writes. The live tool detail (e.g., "edit foo") shows separately below the label.
 
 ### Multi-Editor Tool Mapping
 
@@ -154,7 +158,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 
 ### Automated Tests
 
-Run `npm test` (or `node test.js`). The test runner loads 11 modular test files from `tests/`. The suite (~719 tests) covers:
+Run `npm test` (or `node test.js`). The test runner loads 11 modular test files from `tests/`. The suite (~757 tests) covers:
 
 - **test-shared.js**: `safeFilename` edge cases
 - **test-state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants incl. `REVIEW_TOOLS`, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
@@ -162,7 +166,7 @@ Run `npm test` (or `node test.js`). The test runner loads 11 modular test files 
 - **test-animations.js**: mouth/eye functions (shape and randomness)
 - **test-particles.js**: `ParticleSystem` (all 12 styles incl. stream, lifecycle, fadeAll)
 - **test-face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline, orbital toggle)
-- **test-grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles)
+- **test-grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles, taskDescription label priority, SessionStart adoption)
 - **test-accessories.js**: accessory definitions, rendering, state-specific adornments
 - **test-teams.js**: `hashTeamColor` consistency and RGB output, `MiniFace` team fields, `_assignLabels` with `teammateName`, session schema for `TeammateIdle`/`TaskCompleted`
 - **test-launch.js**: launcher logic, platform detection, editor flag handling

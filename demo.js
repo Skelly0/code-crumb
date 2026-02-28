@@ -22,12 +22,14 @@ function writeState(state, detail = '', extra = {}) {
   }), 'utf8');
 }
 
-function writeSession(id, state, detail, cwd, stopped = false) {
+function writeSession(id, state, detail, cwd, stopped = false, taskDescription) {
   const filename = id.replace(/[^a-zA-Z0-9_-]/g, '_') + '.json';
-  fs.writeFileSync(path.join(SESSIONS_DIR, filename), JSON.stringify({
+  const data = {
     session_id: id, state, detail, timestamp: Date.now(),
     cwd: cwd || process.cwd(), stopped, modelName: 'claude',
-  }), 'utf8');
+  };
+  if (taskDescription) data.taskDescription = taskDescription;
+  fs.writeFileSync(path.join(SESSIONS_DIR, filename), JSON.stringify(data), 'utf8');
 }
 
 function removeSession(id) {
@@ -36,9 +38,9 @@ function removeSession(id) {
 }
 
 const subagents = [
-  { id: 'demo-sub-1', cwd: '/home/user/my-app/src' },
-  { id: 'demo-sub-2', cwd: '/home/user/my-app/tests' },
-  { id: 'demo-sub-3', cwd: '/home/user/api-server' },
+  { id: 'demo-sub-1', cwd: '/home/user/my-app/src', taskDescription: 'fix auth tests' },
+  { id: 'demo-sub-2', cwd: '/home/user/my-app/tests', taskDescription: 'add logging' },
+  { id: 'demo-sub-3', cwd: '/home/user/api-server', taskDescription: 'refactor db' },
 ];
 
 // Simulate a session with incrementing tool calls and streak
@@ -71,30 +73,30 @@ const states = [
   // -- Orbital subagent sequence --
   { state: 'subagent', detail: 'spawning subagent', duration: 3000, label: 'Subagent -- first orbital spawns!',
     orbital: () => {
-      writeSession(subagents[0].id, 'reading', 'reading index.ts', subagents[0].cwd);
+      writeSession(subagents[0].id, 'reading', 'reading index.ts', subagents[0].cwd, false, subagents[0].taskDescription);
     }},
   { state: 'subagent', detail: 'conducting', duration: 3000, label: 'Second orbital -- two subagents now',
     orbital: () => {
-      writeSession(subagents[0].id, 'coding', 'editing App.tsx', subagents[0].cwd);
-      writeSession(subagents[1].id, 'testing', 'npm test', subagents[1].cwd);
+      writeSession(subagents[0].id, 'coding', 'editing App.tsx', subagents[0].cwd, false, subagents[0].taskDescription);
+      writeSession(subagents[1].id, 'testing', 'npm test', subagents[1].cwd, false, subagents[1].taskDescription);
     }},
   { state: 'subagent', detail: 'conducting', duration: 4000, label: 'Third orbital -- full constellation!',
     orbital: () => {
-      writeSession(subagents[2].id, 'searching', 'looking for TODO', subagents[2].cwd);
-      writeSession(subagents[0].id, 'caffeinated', 'hyperdrive!', subagents[0].cwd);
-      writeSession(subagents[1].id, 'coding', 'editing fix.ts', subagents[1].cwd);
+      writeSession(subagents[2].id, 'searching', 'looking for TODO', subagents[2].cwd, false, subagents[2].taskDescription);
+      writeSession(subagents[0].id, 'caffeinated', 'hyperdrive!', subagents[0].cwd, false, subagents[0].taskDescription);
+      writeSession(subagents[1].id, 'coding', 'editing fix.ts', subagents[1].cwd, false, subagents[1].taskDescription);
     }},
   { state: 'subagent', detail: 'conducting', duration: 5000, label: 'Orbitals working -- good time for a screenshot!',
     orbital: () => {
-      writeSession(subagents[0].id, 'executing', 'npm run build', subagents[0].cwd);
-      writeSession(subagents[1].id, 'proud', 'code written', subagents[1].cwd);
-      writeSession(subagents[2].id, 'coding', 'editing handler.ts', subagents[2].cwd);
+      writeSession(subagents[0].id, 'executing', 'npm run build', subagents[0].cwd, false, subagents[0].taskDescription);
+      writeSession(subagents[1].id, 'proud', 'code written', subagents[1].cwd, false, subagents[1].taskDescription);
+      writeSession(subagents[2].id, 'coding', 'editing handler.ts', subagents[2].cwd, false, subagents[2].taskDescription);
     }},
   { state: 'subagent', detail: 'wrapping up', duration: 3000, label: 'Subagents finishing up',
     orbital: () => {
-      writeSession(subagents[0].id, 'happy', 'all done!', subagents[0].cwd, true);
-      writeSession(subagents[1].id, 'happy', 'all done!', subagents[1].cwd, true);
-      writeSession(subagents[2].id, 'happy', 'all done!', subagents[2].cwd, true);
+      writeSession(subagents[0].id, 'happy', 'all done!', subagents[0].cwd, true, subagents[0].taskDescription);
+      writeSession(subagents[1].id, 'happy', 'all done!', subagents[1].cwd, true, subagents[1].taskDescription);
+      writeSession(subagents[2].id, 'happy', 'all done!', subagents[2].cwd, true, subagents[2].taskDescription);
     }},
   { state: 'happy',      detail: 'all done!',             duration: 3000, label: 'Done! -- check out that timeline bar', success: true },
   { state: 'idle',      detail: '',                     duration: 2000, label: 'Back to idle -- the cycle of life' },
