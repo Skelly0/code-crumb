@@ -1171,42 +1171,33 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     assert.strictEqual(face.state, 'installing');
   });
 
-  test('completion state in pending is NOT overwritten by next PreToolUse (Bug 66)', () => {
+  test('completion state bypasses immediately instead of going to pending (Bug 66 + #76)', () => {
     const face = new ClaudeFace();
     face.setState('thinking');
     face.setState('happy');
-    // happy is now pending (thinking hasn't shown long enough)
-    assert.strictEqual(face.pendingState, 'happy');
-    // Next tool use arrives before happy displays
-    face.setState('coding', 'editing file');
-    // happy should NOT be overwritten - it stays pending
-    assert.strictEqual(face.pendingState, 'happy');
-    // state is still thinking (waiting for minDisplayUntil)
-    assert.strictEqual(face.state, 'thinking');
+    // With #76, happy bypasses minDisplayUntil and applies immediately
+    assert.strictEqual(face.state, 'happy',
+      'completion state should apply immediately, not go to pending');
+    assert.strictEqual(face.pendingState, null,
+      'pendingState should be null when completion applies directly');
   });
 
-  test('proud in pending is NOT overwritten by executing (Bug 66)', () => {
+  test('proud bypasses immediately even during thinking (Bug 66 + #76)', () => {
     const face = new ClaudeFace();
     face.setState('thinking');
     face.setState('proud', 'saved file.js');
-    // proud is pending
-    assert.strictEqual(face.pendingState, 'proud');
-    // Next tool use arrives
-    face.setState('executing', 'npm test');
-    // proud should NOT be overwritten
-    assert.strictEqual(face.pendingState, 'proud');
+    // proud bypasses and applies immediately
+    assert.strictEqual(face.state, 'proud',
+      'proud should apply immediately');
   });
 
-  test('satisfied in pending is NOT overwritten by reading (Bug 66)', () => {
+  test('satisfied bypasses immediately even during thinking (Bug 66 + #76)', () => {
     const face = new ClaudeFace();
-    face.setState('thinking');  // Set initial state to establish minDisplayUntil
+    face.setState('thinking');
     face.setState('satisfied', 'read file.js');
-    // satisfied is pending
-    assert.strictEqual(face.pendingState, 'satisfied');
-    // Next tool use arrives
-    face.setState('reading', 'reading another file');
-    // satisfied should NOT be overwritten
-    assert.strictEqual(face.pendingState, 'satisfied');
+    // satisfied bypasses and applies immediately
+    assert.strictEqual(face.state, 'satisfied',
+      'satisfied should apply immediately');
   });
 });
 
@@ -1296,6 +1287,50 @@ describe('caffeinated detection', () => {
   test('no isCaffeinated property (dead code removed)', () => {
     const face = new ClaudeFace();
     assert.strictEqual(face.hasOwnProperty('isCaffeinated'), false);
+  });
+});
+
+describe('face.js -- completion states bypass minDisplayUntil (#76)', () => {
+  test('completion state (happy) bypasses minDisplayUntil', () => {
+    const face = new ClaudeFace();
+    face.setState('coding');
+    face.minDisplayUntil = Date.now() + 50000;
+    face.setState('happy');
+    assert.strictEqual(face.state, 'happy',
+      'completion state should bypass minDisplayUntil');
+  });
+
+  test('completion state (satisfied) bypasses minDisplayUntil', () => {
+    const face = new ClaudeFace();
+    face.setState('executing');
+    face.minDisplayUntil = Date.now() + 50000;
+    face.setState('satisfied');
+    assert.strictEqual(face.state, 'satisfied',
+      'satisfied should bypass minDisplayUntil');
+  });
+
+  test('non-completion state does NOT bypass minDisplayUntil', () => {
+    const face = new ClaudeFace();
+    face.setState('coding');
+    face.minDisplayUntil = Date.now() + 50000;
+    face.setState('reading');
+    assert.strictEqual(face.state, 'coding',
+      'non-completion state should not bypass minDisplayUntil');
+  });
+
+  test('pending non-completion does not overwrite pending completion', () => {
+    const face = new ClaudeFace();
+    face.setState('coding');
+    face.minDisplayUntil = Date.now() + 50000;
+    // Reading goes to pending
+    face.setState('reading');
+    assert.strictEqual(face.pendingState, 'reading');
+    // Happy bypasses and applies immediately
+    face.setState('happy');
+    assert.strictEqual(face.state, 'happy',
+      'happy should apply immediately');
+    assert.strictEqual(face.pendingState, null,
+      'pending should be cleared when state is applied');
   });
 });
 
