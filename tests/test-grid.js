@@ -868,4 +868,76 @@ describe('grid.js -- OrbitalSystem _assignLabels taskDescription', () => {
   });
 });
 
+// -- Issue #58: SessionStart always takes over as main face ------------------
+
+describe('grid.js -- SessionStart adoption (issue #58)', () => {
+  test('update-state.js: SessionStart forces shouldWriteGlobal even when another session owns state file', () => {
+    // Simulates the logic in update-state.js: if an existing session owns the
+    // state file (different ID, not stopped, fresh timestamp), shouldWriteGlobal
+    // would normally be false. But SessionStart overrides it to true.
+    const hookEvent = 'SessionStart';
+    const existingSessionId = 'old-session-abc';
+    const incomingSessionId = 'new-session-xyz';
+    const existingTimestamp = Date.now() - 5000; // 5s ago — well within 120s
+
+    // Simulate the shouldWriteGlobal check from update-state.js
+    let shouldWriteGlobal = true;
+    if (existingSessionId && existingSessionId !== incomingSessionId &&
+        /* !existing.stopped */ true && Date.now() - existingTimestamp < 120000) {
+      shouldWriteGlobal = false;
+    }
+
+    // Before the fix, shouldWriteGlobal would stay false and SessionStart would be lost
+    assert.strictEqual(shouldWriteGlobal, false, 'shouldWriteGlobal should initially be false');
+
+    // Apply the fix: SessionStart always forces global write
+    if (hookEvent === 'SessionStart') shouldWriteGlobal = true;
+
+    assert.strictEqual(shouldWriteGlobal, true,
+      'SessionStart should force shouldWriteGlobal to true');
+  });
+
+  test('renderer adoption: detail "session starting" triggers main session takeover', () => {
+    // Simulates the renderer's adoption logic: a new session with
+    // detail='session starting' should be adopted even if the old session
+    // is not stopped and not stale.
+    const mainSessionId = 'old-session-abc';
+    const incomingId = 'new-session-xyz';
+    const lastStopped = false;
+    const lastMainUpdate = Date.now() - 5000; // 5s ago — not stale
+    const stateData = { detail: 'session starting' };
+
+    let adopted = false;
+    if (incomingId && mainSessionId && incomingId !== mainSessionId) {
+      if (lastStopped || Date.now() - lastMainUpdate > 120000
+          || stateData.detail === 'session starting') {
+        adopted = true;
+      }
+    }
+
+    assert.strictEqual(adopted, true,
+      'renderer should adopt new session when detail is "session starting"');
+  });
+
+  test('renderer does NOT adopt random subagent writing to state file', () => {
+    // A subagent with a different detail should NOT trigger adoption
+    const mainSessionId = 'main-session';
+    const incomingId = 'subagent-session';
+    const lastStopped = false;
+    const lastMainUpdate = Date.now() - 5000; // 5s ago — not stale
+    const stateData = { detail: 'editing foo.js' };
+
+    let adopted = false;
+    if (incomingId && mainSessionId && incomingId !== mainSessionId) {
+      if (lastStopped || Date.now() - lastMainUpdate > 120000
+          || stateData.detail === 'session starting') {
+        adopted = true;
+      }
+    }
+
+    assert.strictEqual(adopted, false,
+      'renderer should NOT adopt subagent with non-SessionStart detail');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

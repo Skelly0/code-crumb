@@ -437,6 +437,9 @@ process.stdin.on('end', () => {
       }
     } catch {}
 
+    // SessionStart always takes over global state — explicit new-session signal
+    if (hookEvent === 'SessionStart') shouldWriteGlobal = true;
+
     if (shouldWriteGlobal) writeState(state, detail, extra);
     // Always write per-session file so parallel Claude Code sessions
     // appear as orbitals. The renderer excludes the main session by ID.
@@ -475,6 +478,9 @@ process.stdin.on('end', () => {
         shouldWriteGlobal = false;
       }
     } catch {}
+
+    // SessionStart always takes over global state — explicit new-session signal
+    if (hookEvent === 'SessionStart') shouldWriteGlobal = true;
 
     const fallbackExtra = { sessionId: fallbackSessionId };
 
