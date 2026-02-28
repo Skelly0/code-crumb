@@ -156,15 +156,14 @@ class ClaudeFace {
       // visual feedback, not flickering noise. Completion states (happy/satisfied/proud/
       // relieved) signal tool success and should appear immediately.
       // Active work states bypass interruptible states (e.g., coding bypasses thinking),
-      // but not if there's a pending completion state - let it display first (Bug 66).
-      const hasPendingCompletion = this.pendingState !== null && COMPLETION_STATES.has(this.pendingState);
+      // even if there's a pending completion state -- work always takes priority (Fix #96).
       const shouldBypass = ACTIVE_WORK_STATES.has(newState) && INTERRUPTIBLE_STATES.has(this.state);
 
       const shouldBuffer = now < this.minDisplayUntil
           && newState !== 'error'
           && newState !== 'ratelimited'
           && !COMPLETION_STATES.has(newState)
-          && (!shouldBypass || hasPendingCompletion);
+          && !shouldBypass;
 
       if (shouldBuffer) {
         // Don't overwrite a pending error or completion state with a non-error/non-completion state

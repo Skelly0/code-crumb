@@ -387,26 +387,6 @@ process.stdin.on('end', () => {
       }
     }
 
-    // Cycle active subagent sessions through rotating states (rate-limited to every 4s)
-    const SUB_STATES = ['thinking','reading','coding','searching','executing','thinking'];
-    const now_cycle = Date.now();
-    const lastCycle = stats.session.lastCycleTime || 0;
-    if (now_cycle - lastCycle > 4000) {
-      stats.session.lastCycleTime = now_cycle;
-      for (const sub of stats.session.activeSubagents) {
-        const age = now_cycle - sub.startedAt;
-        const stateIndex = Math.floor(age / 8000) % SUB_STATES.length;
-        writeSessionState(sub.id, SUB_STATES[stateIndex], sub.description, false, {
-          sessionId: sub.id,
-          modelName: sub.modelName || 'haiku',
-          cwd: process.cwd(),
-          gitBranch: getGitBranch(process.cwd()),
-          isWorktree: getIsWorktree(process.cwd()),
-          parentSession: sessionId,
-        });
-      }
-    }
-
     // Model name: from event data, env var, or default to 'claude'
     const modelName = data.model_name || process.env.CODE_CRUMB_MODEL || 'claude';
 

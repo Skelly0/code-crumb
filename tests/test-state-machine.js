@@ -1120,6 +1120,18 @@ describe('state-machine.js -- classifyToolResult (CONFLICT false positive)', () 
   test('real git merge CONFLICT still triggers error via looksLikeError', () => {
     assert.ok(looksLikeError('CONFLICT (content): Merge conflict in foo.js', stdoutErrorPatterns));
   });
+
+  test('successful git merge does not trigger error (Fix #94)', () => {
+    assert.ok(!looksLikeError('Merge made by the recursive strategy.\n 3 files changed', stdoutErrorPatterns));
+  });
+
+  test('git already up to date does not trigger error (Fix #94)', () => {
+    assert.ok(!looksLikeError('Already up to date.', stdoutErrorPatterns));
+  });
+
+  test('past-tense conflicts resolved does not trigger error (Fix #94)', () => {
+    assert.ok(!looksLikeError('3 conflicts resolved, rebasing continues', stdoutErrorPatterns));
+  });
 });
 
 describe('state-machine.js -- classifyToolResult (git operations)', () => {
