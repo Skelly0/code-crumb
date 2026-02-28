@@ -340,6 +340,12 @@ class MiniFace {
     buf += ansi.to(startRow + 5, startCol);
     buf += `${dc}${' '.repeat(sPad)}${statusStr}${r}`;
 
+    if (this.detail) {
+      const detailStr = this.detail.slice(0, BOX_W);
+      buf += ansi.to(startRow + 6, startCol);
+      buf += `${dc}${detailStr}${r}`;
+    }
+
     return buf;
   }
 }
