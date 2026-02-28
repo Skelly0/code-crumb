@@ -97,7 +97,7 @@ class MiniFace {
       this.minDisplayUntil = now + 1500;
       this.detail = data.detail || '';
     }
-    this.lastUpdate = data.timestamp || Date.now();
+    this.lastUpdate = Date.now();
     if (data.cwd) this.cwd = data.cwd;
     if (data.modelName) this.modelName = data.modelName;
     if (data.parentSession) this.parentSession = data.parentSession;
