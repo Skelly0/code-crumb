@@ -17,7 +17,7 @@ const path = require('path');
 const { STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, QUIT_FLAG_FILE, safeFilename, getGitBranch, getIsWorktree } = require('./shared');
 const {
   toolToState, classifyToolResult, updateStreak, defaultStats,
-  looksLikeRateLimit, EDIT_TOOLS,
+  looksLikeRateLimit, EDIT_TOOLS, SUBAGENT_TOOLS,
   pruneFrequentFiles, topFrequentFiles,
 } = require('./state-machine');
 
@@ -471,6 +471,7 @@ process.stdin.on('end', () => {
         shouldWriteGlobal = false;
       }
     } catch {}
+
     const fallbackExtra = { sessionId: fallbackSessionId };
 
     let fallbackState = 'thinking';
