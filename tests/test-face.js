@@ -6,7 +6,7 @@
 // +================================================================+
 
 const assert = require('assert');
-const { ClaudeFace } = require('../face');
+const { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP } = require('../face');
 const { ParticleSystem } = require('../particles');
 const { themes, PALETTES } = require('../themes');
 const { mouths, eyes } = require('../animations');
@@ -1351,6 +1351,151 @@ describe('face.js -- completion states bypass minDisplayUntil (#76)', () => {
       'happy should apply immediately');
     assert.strictEqual(face.pendingState, null,
       'pending should be cleared when state is applied');
+  });
+});
+
+// -- Timeline compression (_compressTimeline) --------------------------------
+
+describe('_compressTimeline', () => {
+  test('short session with no long gaps returns unchanged times', () => {
+    const face = new ClaudeFace();
+    const base = Date.now() - 10000;
+    face.timeline = [
+      { state: 'idle', at: base },
+      { state: 'coding', at: base + 2000 },
+      { state: 'reading', at: base + 5000 },
+    ];
+    const now = base + 10000;
+    const { entries, displayNow } = face._compressTimeline(now);
+    assert.strictEqual(entries.length, 3);
+    // No compression -- gaps between entries should be preserved
+    assert.strictEqual(entries[1].at - entries[0].at, 2000);
+    assert.strictEqual(entries[2].at - entries[1].at, 3000);
+    assert.strictEqual(displayNow - entries[2].at, now - face.timeline[2].at);
+  });
+
+  test('long sleep gap gets capped to COMPRESS_LOW_CAP', () => {
+    const face = new ClaudeFace();
+    const base = Date.now() - 7200000; // 2 hours ago
+    face.timeline = [
+      { state: 'coding', at: base },
+      { state: 'sleeping', at: base + 60000 },        // sleep starts at 1min
+      { state: 'coding', at: base + 7200000 },         // coding resumes 2hrs later
+    ];
+    const now = base + 7200000 + 60000; // 1min after resuming
+    const { entries, displayNow } = face._compressTimeline(now);
+    assert.strictEqual(entries.length, 3);
+    // The sleeping gap (7200000 - 60000 = 7140000ms) should be capped to 30s
+    const sleepGap = entries[2].at - entries[1].at;
+    assert.strictEqual(sleepGap, COMPRESS_LOW_CAP,
+      'sleeping gap should be capped to COMPRESS_LOW_CAP');
+    // The coding gap before sleep is untouched (60s < 30s cap? no, 60s > 30s but coding isn't low-activity)
+    assert.strictEqual(entries[1].at - entries[0].at, 60000,
+      'active state gap should not be compressed');
+  });
+
+  test('multiple sleep gaps are each independently capped', () => {
+    const face = new ClaudeFace();
+    const base = Date.now() - 14400000;
+    face.timeline = [
+      { state: 'coding', at: base },
+      { state: 'sleeping', at: base + 60000 },
+      { state: 'coding', at: base + 3660000 },           // 1hr sleep
+      { state: 'idle', at: base + 3720000 },
+      { state: 'coding', at: base + 7320000 },            // 1hr idle
+    ];
+    const now = base + 7380000;
+    const { entries, displayNow } = face._compressTimeline(now);
+    // Sleep gap: 3660000 - 60000 = 3600000 -> capped to 30000
+    const sleepGap = entries[2].at - entries[1].at;
+    assert.strictEqual(sleepGap, COMPRESS_LOW_CAP);
+    // Idle gap: 7320000 - 3720000 = 3600000 -> capped to 30000
+    const idleGap = entries[4].at - entries[3].at;
+    assert.strictEqual(idleGap, COMPRESS_LOW_CAP);
+  });
+
+  test('active states are never compressed even with large gaps', () => {
+    const face = new ClaudeFace();
+    const base = Date.now() - 500000;
+    face.timeline = [
+      { state: 'coding', at: base },
+      { state: 'executing', at: base + 300000 },  // 5min of coding
+      { state: 'reading', at: base + 400000 },
+    ];
+    const now = base + 500000;
+    const { entries, displayNow } = face._compressTimeline(now);
+    // All gaps preserved exactly
+    assert.strictEqual(entries[1].at - entries[0].at, 300000);
+    assert.strictEqual(entries[2].at - entries[1].at, 100000);
+    assert.strictEqual(displayNow, now, 'no compression means displayNow === now');
+  });
+
+  test('mixed sequence: idle->coding->sleep->coding shows coding with proper proportion', () => {
+    const face = new ClaudeFace();
+    const base = Date.now() - 7500000;
+    face.timeline = [
+      { state: 'idle', at: base },
+      { state: 'coding', at: base + 120000 },          // 2min idle (> cap)
+      { state: 'sleeping', at: base + 420000 },         // 5min coding
+      { state: 'coding', at: base + 7200000 },          // ~1.9hr sleep
+      { state: 'happy', at: base + 7500000 },           // 5min coding
+    ];
+    const now = base + 7500000;
+    const { entries, displayNow } = face._compressTimeline(now);
+
+    // idle gap: 120000 -> capped to 30000
+    const idleGap = entries[1].at - entries[0].at;
+    assert.strictEqual(idleGap, COMPRESS_LOW_CAP);
+
+    // coding gap: 300000 -> preserved
+    const codingGap1 = entries[2].at - entries[1].at;
+    assert.strictEqual(codingGap1, 300000);
+
+    // sleep gap: 6780000 -> capped to 30000
+    const sleepGap = entries[3].at - entries[2].at;
+    assert.strictEqual(sleepGap, COMPRESS_LOW_CAP);
+
+    // coding gap 2: 300000 -> preserved
+    const codingGap2 = entries[4].at - entries[3].at;
+    assert.strictEqual(codingGap2, 300000);
+
+    // Total compressed duration should be much smaller than original
+    const compressedTotal = displayNow - entries[0].at;
+    const originalTotal = now - base;
+    assert.ok(compressedTotal < originalTotal / 5,
+      `compressed (${compressedTotal}) should be much smaller than original (${originalTotal})`);
+  });
+
+  test('gaps under COMPRESS_LOW_CAP are not compressed', () => {
+    const face = new ClaudeFace();
+    const base = Date.now() - 50000;
+    face.timeline = [
+      { state: 'idle', at: base },
+      { state: 'coding', at: base + 20000 },  // 20s idle, under 30s cap
+    ];
+    const now = base + 50000;
+    const { entries, displayNow } = face._compressTimeline(now);
+    assert.strictEqual(entries[1].at - entries[0].at, 20000,
+      'short idle gap should not be compressed');
+  });
+
+  test('LOW_ACTIVITY_STATES contains expected states', () => {
+    assert.ok(LOW_ACTIVITY_STATES.has('idle'));
+    assert.ok(LOW_ACTIVITY_STATES.has('sleeping'));
+    assert.ok(LOW_ACTIVITY_STATES.has('waiting'));
+    assert.ok(!LOW_ACTIVITY_STATES.has('coding'));
+    assert.ok(!LOW_ACTIVITY_STATES.has('thinking'));
+  });
+
+  test('empty/single-entry timeline returns as-is', () => {
+    const face = new ClaudeFace();
+    face.timeline = [];
+    const { entries: e1 } = face._compressTimeline(Date.now());
+    assert.strictEqual(e1.length, 0);
+
+    face.timeline = [{ state: 'idle', at: Date.now() }];
+    const { entries: e2 } = face._compressTimeline(Date.now());
+    assert.strictEqual(e2.length, 1);
   });
 });
 

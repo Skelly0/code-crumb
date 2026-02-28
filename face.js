@@ -25,6 +25,12 @@ const ACTIVE_WORK_STATES = new Set([
   'executing', 'coding', 'reading', 'searching', 'testing',
   'installing', 'committing', 'reviewing', 'subagent', 'responding',
 ]);
+// Low-activity states used for timeline compression and consecutive-entry capping
+const LOW_ACTIVITY_STATES = new Set(['idle', 'sleeping', 'waiting']);
+
+// Max visual duration (ms) for any single low-activity gap in the timeline bar
+const COMPRESS_LOW_CAP = 30000;
+
 const INTERRUPTIBLE_STATES = new Set([
   'thinking', 'happy', 'satisfied', 'proud', 'relieved',
   'idle', 'sleeping', 'waiting',
@@ -184,9 +190,8 @@ class ClaudeFace {
       this.pendingDetail = '';
 
       // Track timeline (cap consecutive idle/sleeping to prevent bar domination)
-      const LOW_ACTIVITY = new Set(['idle', 'sleeping', 'waiting']);
       const MAX_CONSECUTIVE_LOW = 3;
-      if (LOW_ACTIVITY.has(newState)) {
+      if (LOW_ACTIVITY_STATES.has(newState)) {
         let consecutive = 0;
         for (let i = this.timeline.length - 1; i >= 0; i--) {
           if (this.timeline[i].state === newState) consecutive++;
@@ -621,16 +626,35 @@ class ClaudeFace {
     this.particles.update();
   }
 
-  _buildSparkline(barWidth, now) {
-    if (this.timeline.length < 3) return null;
-    const tlStart = this.timeline[0].at;
-    const totalDur = now - tlStart;
+  _compressTimeline(now) {
+    if (this.timeline.length < 2) {
+      return { entries: this.timeline.slice(), displayNow: now };
+    }
+    const entries = [{ state: this.timeline[0].state, at: this.timeline[0].at }];
+    let offset = 0;
+    for (let i = 1; i < this.timeline.length; i++) {
+      const gap = this.timeline[i].at - this.timeline[i - 1].at;
+      const prevState = this.timeline[i - 1].state;
+      if (LOW_ACTIVITY_STATES.has(prevState) && gap > COMPRESS_LOW_CAP) {
+        offset += gap - COMPRESS_LOW_CAP;
+      }
+      entries.push({ state: this.timeline[i].state, at: this.timeline[i].at - offset });
+    }
+    return { entries, displayNow: now - offset };
+  }
+
+  _buildSparkline(barWidth, now, compressed) {
+    const tl = compressed ? compressed.entries : this.timeline;
+    const effectiveNow = compressed ? compressed.displayNow : now;
+    if (tl.length < 3) return null;
+    const tlStart = tl[0].at;
+    const totalDur = effectiveNow - tlStart;
     if (totalDur < 2000) return null;
 
     const buckets = new Array(barWidth).fill(0);
     const bucketDur = totalDur / barWidth;
-    for (let i = 1; i < this.timeline.length; i++) {
-      const idx = Math.min(barWidth - 1, Math.floor((this.timeline[i].at - tlStart) / bucketDur));
+    for (let i = 1; i < tl.length; i++) {
+      const idx = Math.min(barWidth - 1, Math.floor((tl[i].at - tlStart) / bucketDur));
       if (idx >= 0) buckets[idx]++;
     }
     return buckets;
@@ -893,21 +917,24 @@ class ClaudeFace {
         }
       }
 
-      // Session timeline bar
+      // Session timeline bar (with time-compression for long idle/sleep gaps)
       const tlColors = this.getTimelineColors();
       if (this.timeline.length > 1) {
         const barWidth = Math.min(faceW - 2, 38);
         const now = Date.now();
-        const tlStart = this.timeline[0].at;
-        const totalDur = now - tlStart;
+        const compressed = this._compressTimeline(now);
+        const cTl = compressed.entries;
+        const cNow = compressed.displayNow;
+        const tlStart = cTl[0].at;
+        const totalDur = cNow - tlStart;
 
         if (totalDur > 2000) {
           let bar = '';
           for (let i = 0; i < barWidth; i++) {
             const t = tlStart + (totalDur * i / barWidth);
             let st = 'idle';
-            for (let j = this.timeline.length - 1; j >= 0; j--) {
-              if (this.timeline[j].at <= t) { st = this.timeline[j].state; break; }
+            for (let j = cTl.length - 1; j >= 0; j--) {
+              if (cTl[j].at <= t) { st = cTl[j].state; break; }
             }
             const color = tlColors[st] || tlColors.idle;
             bar += ansi.fg(...color) + '\u2588';
@@ -920,7 +947,9 @@ class ClaudeFace {
       // Activity sparkline (tool call density below timeline)
       {
         const spkWidth = Math.min(faceW - 2, 38);
-        const sparkBuckets = this._buildSparkline(spkWidth, Date.now());
+        const now = Date.now();
+        const compressed = this._compressTimeline(now);
+        const sparkBuckets = this._buildSparkline(spkWidth, now, compressed);
         if (sparkBuckets) {
           const maxCount = Math.max(1, ...sparkBuckets);
           let sparkline = '';
@@ -1018,4 +1047,4 @@ class ClaudeFace {
   }
 }
 
-module.exports = { ClaudeFace };
+module.exports = { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP };
