@@ -233,19 +233,21 @@ function runUnifiedMode() {
       if (face.timeline.length > 200) face.timeline.shift();
     }
 
-    // If we're past minDisplayUntil and in an active state with no stopped signal,
-    // do a fresh file read to catch any stop event missed by fs.watch mtime
+    // If we're past minDisplayUntil and in an active state,
+    // do a fresh file read to catch any stop/start event missed by fs.watch mtime
     // granularity (common on Windows FAT/NTFS with 1-second mtime resolution).
     const freshReadStates = ['thinking', 'executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'responding'];
-    if (!lastStopped && now >= face.minDisplayUntil &&
+    if (now >= face.minDisplayUntil &&
         freshReadStates.includes(face.state) &&
         (face.state === 'thinking' || now - lastMainUpdate > 2000)) {
       try {
         const freshData = readState();
         const freshTs = freshData.timestamp || 0;
-        if (freshData.stopped && freshTs > lastAppliedTimestamp) {
+        // Detect stopped transitions: true->false (session restarted) or false->true (stop)
+        const stoppedNow = freshData.stopped || false;
+        if (stoppedNow !== lastStopped && freshTs > lastAppliedTimestamp) {
           lastAppliedTimestamp = freshTs;
-          lastStopped = true;
+          lastStopped = stoppedNow;
           lastFileState = freshData.state;
           // If the file says responding (or ratelimited), apply it; otherwise
           // we just set lastStopped so the rescue block above fires next frame.
