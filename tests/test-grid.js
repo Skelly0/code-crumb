@@ -733,4 +733,61 @@ describe('grid.js -- lastUpdate uses Date.now() not data.timestamp (#71)', () =>
   });
 });
 
+describe('grid.js -- MiniFace pending state queue (#55)', () => {
+  test('rejected state is buffered as pendingState', () => {
+    const face = new MiniFace('test');
+    face.state = 'coding';
+    face.minDisplayUntil = Date.now() + 5000;
+    face.updateFromFile({ state: 'reading', detail: 'reading bar.js' });
+    assert.strictEqual(face.state, 'coding', 'state should remain locked');
+    assert.strictEqual(face.pendingState, 'reading', 'rejected state should be buffered');
+    assert.strictEqual(face.pendingDetail, 'reading bar.js', 'rejected detail should be buffered');
+  });
+
+  test('pending state flushes when minDisplayUntil expires in tick()', () => {
+    const face = new MiniFace('test');
+    face.state = 'coding';
+    face.pendingState = 'searching';
+    face.pendingDetail = 'grep foo';
+    face.minDisplayUntil = Date.now() - 1;
+    face.lastUpdate = Date.now();
+    face.tick(16);
+    assert.strictEqual(face.state, 'searching', 'pending state should flush');
+    assert.strictEqual(face.detail, 'grep foo', 'pending detail should flush');
+    assert.strictEqual(face.pendingState, null, 'pendingState should clear after flush');
+  });
+
+  test('active work state interrupts interruptible state despite minDisplayUntil', () => {
+    const face = new MiniFace('test');
+    face.state = 'idle';
+    face.minDisplayUntil = Date.now() + 5000;
+    face.updateFromFile({ state: 'coding', detail: 'editing foo.js' });
+    assert.strictEqual(face.state, 'coding',
+      'work state should interrupt idle despite minDisplayUntil');
+  });
+
+  test('work states get shorter minDisplayUntil (~800ms)', () => {
+    const face = new MiniFace('test');
+    face.state = 'idle';
+    face.minDisplayUntil = 0;
+    const before = Date.now();
+    face.updateFromFile({ state: 'coding', detail: 'editing foo.js' });
+    assert.ok(face.minDisplayUntil <= before + 1000,
+      'work state minDisplayUntil should be ~800ms, not 1500ms');
+    assert.ok(face.minDisplayUntil >= before + 600,
+      'work state minDisplayUntil should be at least ~800ms');
+  });
+
+  test('non-work state cannot interrupt locked work state', () => {
+    const face = new MiniFace('test');
+    face.state = 'coding';
+    face.minDisplayUntil = Date.now() + 5000;
+    face.updateFromFile({ state: 'thinking', detail: '' });
+    assert.strictEqual(face.state, 'coding',
+      'thinking should not interrupt locked coding state');
+    assert.strictEqual(face.pendingState, 'thinking',
+      'thinking should be buffered as pending');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
