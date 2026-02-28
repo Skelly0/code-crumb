@@ -60,14 +60,19 @@ function writeStats(stats) {
 // Only writes the global state file if no other active session owns it.
 
 function guardedWriteState(sessionId, state, detail, extra) {
+  let writeExtra = extra;
   try {
     const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     if (existing.sessionId && existing.sessionId !== sessionId &&
         !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
       return; // Another session owns the state file
     }
+    // Preserve model name established by the session owner
+    if (existing.sessionId === sessionId && existing.modelName) {
+      writeExtra = { ...extra, modelName: existing.modelName };
+    }
   } catch {}
-  writeState(state, detail, extra);
+  writeState(state, detail, writeExtra);
 }
 
 // -- Stats initialisation ----------------------------------------------

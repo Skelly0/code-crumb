@@ -259,6 +259,33 @@ describe('face.js -- ClaudeFace modelName', () => {
     face.setStats({ modelName: 'gpt-4.1-mini' });
     assert.strictEqual(face.modelName, 'gpt-4.1-mini');
   });
+
+  test('setStats ignores modelName when CODE_CRUMB_MODEL env var is set', () => {
+    const orig = process.env.CODE_CRUMB_MODEL;
+    try {
+      process.env.CODE_CRUMB_MODEL = 'claude';
+      const face = new ClaudeFace();
+      face.setStats({ modelName: 'opencode' });
+      assert.strictEqual(face.modelName, 'claude',
+        'modelName must not change when CODE_CRUMB_MODEL is set');
+    } finally {
+      if (orig === undefined) delete process.env.CODE_CRUMB_MODEL;
+      else process.env.CODE_CRUMB_MODEL = orig;
+    }
+  });
+
+  test('setStats accepts modelName when CODE_CRUMB_MODEL not set', () => {
+    const orig = process.env.CODE_CRUMB_MODEL;
+    try {
+      delete process.env.CODE_CRUMB_MODEL;
+      const face = new ClaudeFace();
+      face.setStats({ modelName: 'opencode' });
+      assert.strictEqual(face.modelName, 'opencode',
+        'modelName should update when CODE_CRUMB_MODEL is not set');
+    } finally {
+      if (orig !== undefined) process.env.CODE_CRUMB_MODEL = orig;
+    }
+  });
 });
 
 describe('face.js -- ClaudeFace.update', () => {

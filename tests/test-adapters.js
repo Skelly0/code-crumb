@@ -1239,4 +1239,76 @@ describe('update-state.js stopped flag preservation (#98)', () => {
   });
 });
 
+describe('base-adapter guardedWriteState modelName preservation (#78)', () => {
+  const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
+  const sharedMod = require(path.join(__dirname, '..', 'shared'));
+  const STATE_FILE = sharedMod.STATE_FILE;
+
+  test('preserves modelName when same session writes with different model', () => {
+    // Write initial state with claude as model owner
+    const sessionId = 'test-model-' + Date.now();
+    try {
+      fs.writeFileSync(STATE_FILE, JSON.stringify({
+        state: 'thinking', detail: '', timestamp: Date.now(),
+        sessionId, modelName: 'claude',
+      }), 'utf8');
+    } catch { return; }
+
+    // guardedWriteState with same session but modelName: 'opencode'
+    baseAdapter.guardedWriteState(sessionId, 'coding', 'editing file', {
+      sessionId, modelName: 'opencode',
+    });
+
+    try {
+      const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      assert.strictEqual(result.modelName, 'claude',
+        'modelName must be preserved as "claude", not overwritten by "opencode"');
+    } catch (e) {
+      if (e instanceof assert.AssertionError) throw e;
+    }
+  });
+
+  test('allows modelName for new session (no existing file)', () => {
+    // Remove state file to simulate fresh start
+    try { fs.unlinkSync(STATE_FILE); } catch {}
+
+    const sessionId = 'test-model-new-' + Date.now();
+    baseAdapter.guardedWriteState(sessionId, 'thinking', '', {
+      sessionId, modelName: 'opencode',
+    });
+
+    try {
+      const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      assert.strictEqual(result.modelName, 'opencode',
+        'modelName should be written when no existing state file');
+    } catch (e) {
+      if (e instanceof assert.AssertionError) throw e;
+    }
+  });
+
+  test('allows modelName when previous session stopped', () => {
+    const oldSession = 'test-model-old-' + Date.now();
+    const newSession = 'test-model-takeover-' + Date.now();
+    try {
+      fs.writeFileSync(STATE_FILE, JSON.stringify({
+        state: 'happy', detail: 'done', timestamp: Date.now(),
+        sessionId: oldSession, modelName: 'claude', stopped: true,
+      }), 'utf8');
+    } catch { return; }
+
+    // New session takes over — its modelName should stick
+    baseAdapter.guardedWriteState(newSession, 'thinking', '', {
+      sessionId: newSession, modelName: 'opencode',
+    });
+
+    try {
+      const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      assert.strictEqual(result.modelName, 'opencode',
+        'new session should establish its own modelName');
+    } catch (e) {
+      if (e instanceof assert.AssertionError) throw e;
+    }
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

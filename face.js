@@ -263,7 +263,7 @@ class ClaudeFace {
   }
 
   setStats(data) {
-    if (data.modelName) this.modelName = data.modelName;
+    if (data.modelName && !process.env.CODE_CRUMB_MODEL) this.modelName = data.modelName;
     this.toolCallCount = data.toolCalls || 0;
     this.filesEditedCount = data.filesEdited || 0;
     this.sessionStart = data.sessionStart || 0;

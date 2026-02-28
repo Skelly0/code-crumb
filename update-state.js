@@ -430,6 +430,11 @@ process.stdin.on('end', () => {
         stopped = true;
         extra.stopped = true;
       }
+      // Preserve model name — subagents sharing session ID must not overwrite the owner's name
+      if (existing.sessionId === sessionId && existing.modelName &&
+          extra.modelName !== existing.modelName) {
+        extra.modelName = existing.modelName;
+      }
     } catch {}
 
     if (shouldWriteGlobal) writeState(state, detail, extra);
