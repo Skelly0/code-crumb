@@ -55,6 +55,7 @@ const MIN_ROWS_GRID = 9;
 const IDLE_TIMEOUT = 8000;
 const SLEEP_TIMEOUT = 60000;
 const THINKING_TIMEOUT = 120000;
+const BREATHE_STEP = 200;  // Quantize breathe/pulse time to reduce frame-unique output
 
 // -- MiniFace (compact, for grid) ----------------------------------
 class MiniFace {
@@ -249,9 +250,10 @@ class MiniFace {
         return [' \u2726\u2727 \u2727\u2726', ' \u2727\u2726 \u2726\u2727'][h];
       }
       case 'error': {
-        if (Math.random() < 0.12) {
+        const r1 = (this.frame * 2654435761) >>> 0;
+        if ((r1 % 100) < 12) {
           const g = ['\u2593\u2591', '\u2591\u2592', '\u2592\u2593', '\u2588\u2591'];
-          const i = Math.floor(Math.random() * g.length);
+          const i = (r1 >>> 8) % g.length;
           const j = (i + 2) % g.length;
           return ` ${g[i]} ${g[j]}`;
         }
@@ -291,8 +293,11 @@ class MiniFace {
   }
 
   getMouth() {
-    if (this.state === 'error' && Math.random() < 0.08) {
-      return ['\u25e1\u25e0\u25e1', '\u25e0\u25e1\u25e0', '\u2500\u25e1\u2500'][Math.floor(Math.random() * 3)];
+    if (this.state === 'error') {
+      const r1 = (this.frame * 2246822519) >>> 0;
+      if ((r1 % 100) < 8) {
+        return ['\u25e1\u25e0\u25e1', '\u25e0\u25e1\u25e0', '\u2500\u25e1\u2500'][(r1 >>> 8) % 3];
+      }
     }
     return gridMouths[this.state] || '\u25e1\u25e1\u25e1';
   }
@@ -303,7 +308,8 @@ class MiniFace {
     const breathSpeed = this.state === 'sleeping' ? 0.5
       : this.state === 'caffeinated' ? 2.5
       : this.state === 'committing' ? 1.8 : 1;
-    const bc = breathe(theme.border, (globalTime + this.firstSeen % 2000) * breathSpeed);
+    const quantizedTime = Math.floor(globalTime / BREATHE_STEP) * BREATHE_STEP;
+    const bc = breathe(theme.border, (quantizedTime + this.firstSeen % 2000) * breathSpeed);
     const fc = ansi.fg(...bc);
     const ec = ansi.fg(...theme.eye);
     const mc = ansi.fg(...theme.mouth);
@@ -598,7 +604,8 @@ class OrbitalSystem {
         if (row < 1 || row >= (process.stdout.rows || 24) || col < 1 || col >= (process.stdout.columns || 80)) continue;
 
         // Pulse: brighter dots traveling outward (~3s cycle)
-        const pulsePos = (this.time * 0.0004) % 1;
+        const quantizedPulseTime = Math.floor(this.time / BREATHE_STEP) * BREATHE_STEP;
+        const pulsePos = (quantizedPulseTime * 0.0004) % 1;
         const dist = Math.abs(t - pulsePos);
         const bright = dist < 0.08 || Math.abs(t - ((pulsePos + 0.5) % 1)) < 0.08;
 
