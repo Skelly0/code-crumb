@@ -449,7 +449,9 @@ process.stdin.on('end', () => {
     // Always write per-session file so parallel Claude Code sessions
     // appear as orbitals. The renderer excludes the main session by ID.
     if (hookEvent !== 'SessionStart') {
-      // Preserve stopped flag and taskDescription from existing session file
+      // Preserve stopped flag and sticky fields from existing session file
+      // (set once at SubagentStart/TeammateIdle, must survive subsequent hook updates)
+      const STICKY_FIELDS = ['taskDescription', 'parentSession', 'isTeammate', 'teamName', 'teammateName'];
       try {
         const existingSession = JSON.parse(fs.readFileSync(
           path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
@@ -457,8 +459,10 @@ process.stdin.on('end', () => {
           stopped = true;
           extra.stopped = true;
         }
-        if (existingSession.taskDescription && !extra.taskDescription) {
-          extra.taskDescription = existingSession.taskDescription;
+        for (const field of STICKY_FIELDS) {
+          if (existingSession[field] && !extra[field]) {
+            extra[field] = existingSession[field];
+          }
         }
       } catch {}
       writeSessionState(sessionId, state, detail, stopped, extra);

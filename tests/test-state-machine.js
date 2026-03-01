@@ -1702,4 +1702,67 @@ describe('state-machine.js -- looksLikeError (warning+error mixed output)', () =
   });
 });
 
+// -- Sticky field preservation (update-state.js session file logic) --------
+
+describe('state-machine.js -- sticky field preservation', () => {
+  // Mirrors the STICKY_FIELDS loop from update-state.js
+  const STICKY_FIELDS = ['taskDescription', 'parentSession', 'isTeammate', 'teamName', 'teammateName'];
+
+  function preserveStickyFields(existing, extra) {
+    for (const field of STICKY_FIELDS) {
+      if (existing[field] && !extra[field]) {
+        extra[field] = existing[field];
+      }
+    }
+  }
+
+  test('parentSession preserved when extra lacks it', () => {
+    const existing = { parentSession: 'session-main' };
+    const extra = {};
+    preserveStickyFields(existing, extra);
+    assert.strictEqual(extra.parentSession, 'session-main');
+  });
+
+  test('parentSession NOT overridden when extra explicitly sets it', () => {
+    const existing = { parentSession: 'session-old' };
+    const extra = { parentSession: 'session-new' };
+    preserveStickyFields(existing, extra);
+    assert.strictEqual(extra.parentSession, 'session-new');
+  });
+
+  test('isTeammate, teamName, teammateName preserved', () => {
+    const existing = { isTeammate: true, teamName: 'alpha', teammateName: 'scout' };
+    const extra = {};
+    preserveStickyFields(existing, extra);
+    assert.strictEqual(extra.isTeammate, true);
+    assert.strictEqual(extra.teamName, 'alpha');
+    assert.strictEqual(extra.teammateName, 'scout');
+  });
+
+  test('all sticky fields preserved in a single pass', () => {
+    const existing = {
+      taskDescription: 'fix bug',
+      parentSession: 'sess-A',
+      isTeammate: true,
+      teamName: 'beta',
+      teammateName: 'builder',
+    };
+    const extra = {};
+    preserveStickyFields(existing, extra);
+    for (const field of STICKY_FIELDS) {
+      assert.strictEqual(extra[field], existing[field], `${field} should be preserved`);
+    }
+  });
+
+  test('empty/falsy existing values not carried forward', () => {
+    const existing = { parentSession: '', isTeammate: false, teamName: null, taskDescription: undefined };
+    const extra = {};
+    preserveStickyFields(existing, extra);
+    assert.strictEqual(extra.parentSession, undefined, 'empty string should not be carried');
+    assert.strictEqual(extra.isTeammate, undefined, 'false should not be carried');
+    assert.strictEqual(extra.teamName, undefined, 'null should not be carried');
+    assert.strictEqual(extra.taskDescription, undefined, 'undefined should not be carried');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
