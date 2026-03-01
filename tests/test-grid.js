@@ -1112,8 +1112,8 @@ describe('grid.js -- MiniFace row 5 cwd fallback', () => {
 // -- renderSessionList overlay -------------------------------------
 
 describe('grid.js -- renderSessionList', () => {
-  test('returns string for empty Map', () => {
-    const result = renderSessionList(80, 40, new Map(), PALETTES[0].themes);
+  test('returns string for empty array', () => {
+    const result = renderSessionList(80, 40, [], PALETTES[0].themes);
     assert.strictEqual(typeof result, 'string');
     assert.ok(result.includes('no sessions'), 'should show empty message');
   });
@@ -1133,7 +1133,7 @@ describe('grid.js -- renderSessionList', () => {
     f2.cwd = '/home/user/projects/scraper';
     faces.set('sess-2', f2);
 
-    const result = renderSessionList(80, 40, faces, PALETTES[0].themes);
+    const result = renderSessionList(80, 40, [...faces.values()], PALETTES[0].themes);
     assert.strictEqual(typeof result, 'string');
     assert.ok(result.length > 0, 'should produce output');
     assert.ok(result.includes('2 total'), 'should show count');
@@ -1147,7 +1147,7 @@ describe('grid.js -- renderSessionList', () => {
     f.label = 'test';
     faces.set('sess-1', f);
 
-    const result = renderSessionList(30, 40, faces, PALETTES[0].themes);
+    const result = renderSessionList(30, 40, [...faces.values()], PALETTES[0].themes);
     assert.strictEqual(result, '', 'should return empty for narrow terminal');
   });
 
@@ -1160,7 +1160,7 @@ describe('grid.js -- renderSessionList', () => {
     f.cwd = '/tmp/project';
     faces.set('sess-stopped', f);
 
-    const result = renderSessionList(80, 40, faces, PALETTES[0].themes);
+    const result = renderSessionList(80, 40, [...faces.values()], PALETTES[0].themes);
     assert.ok(result.includes('\u2715'), 'stopped session should show ✕ indicator');
   });
 
@@ -1175,20 +1175,20 @@ describe('grid.js -- renderSessionList', () => {
     }
 
     // Very short terminal -- can only fit a few
-    const result = renderSessionList(80, 15, faces, PALETTES[0].themes);
+    const result = renderSessionList(80, 15, [...faces.values()], PALETTES[0].themes);
     assert.ok(result.includes('more'), 'should show overflow indicator');
   });
 });
 
 describe('grid.js -- renderSessionList selection', () => {
   function _makeFaces(n) {
-    const faces = new Map();
+    const faces = [];
     for (let i = 0; i < n; i++) {
       const f = new MiniFace(`sess-${i}`);
       f.state = i === 0 ? 'coding' : 'thinking';
       f.label = `sub-${i}`;
       f.cwd = `/home/user/proj-${i}`;
-      faces.set(`sess-${i}`, f);
+      faces.push(f);
     }
     return faces;
   }
@@ -1204,7 +1204,7 @@ describe('grid.js -- renderSessionList selection', () => {
     const faces = _makeFaces(2);
     const mainInfo = {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
-      label: 'claude', stopped: false, firstSeen: 0,
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
     const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 1);
     assert.ok(result.includes('\u25b8'), 'should show selection marker ▸');
@@ -1214,7 +1214,7 @@ describe('grid.js -- renderSessionList selection', () => {
     const faces = _makeFaces(2);
     const mainInfo = {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
-      label: 'claude', stopped: false, firstSeen: 0,
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
     const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
     assert.ok(result.includes('select'), 'footer should mention select');
@@ -1232,7 +1232,7 @@ describe('grid.js -- renderSessionList selection', () => {
     const faces = _makeFaces(1);
     const mainInfo = {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
-      label: 'claude', stopped: false, firstSeen: 0,
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
     // selectedIndex 99 — way beyond the 2 entries (main + 1 sub)
     const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 99);
@@ -1243,7 +1243,7 @@ describe('grid.js -- renderSessionList selection', () => {
     const faces = _makeFaces(3);
     const mainInfo = {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
-      label: 'claude', stopped: false, firstSeen: 0,
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
     const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
     assert.ok(result.includes('4 total'), 'should count main + 3 subs = 4 total');
@@ -1252,9 +1252,9 @@ describe('grid.js -- renderSessionList selection', () => {
   test('empty map with selectedIndex shows footer but no entries', () => {
     const mainInfo = {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
-      label: 'claude', stopped: false, firstSeen: 0,
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
-    const result = renderSessionList(80, 40, new Map(), PALETTES[0].themes, mainInfo, 0);
+    const result = renderSessionList(80, 40, [], PALETTES[0].themes, mainInfo, 0);
     assert.ok(result.includes('promote'), 'footer shows even with only main');
   });
 
@@ -1262,12 +1262,34 @@ describe('grid.js -- renderSessionList selection', () => {
     const faces = _makeFaces(2);
     const mainInfo = {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
-      label: 'claude', stopped: false, firstSeen: 0,
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
     // Calling without 6th arg should not crash
     const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo);
     assert.strictEqual(typeof result, 'string');
     assert.ok(!result.includes('\u25b8'), 'no selection marker without selectedIndex');
+  });
+
+  test('main session entry shows star indicator', () => {
+    const faces = _makeFaces(1);
+    const mainInfo = {
+      state: 'thinking', detail: 'analyzing', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true,
+    };
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
+    assert.ok(result.includes('\u2605'), 'main session should show ★ indicator');
+  });
+
+  test('subagent entries do not show star indicator', () => {
+    const faces = _makeFaces(1);
+    const mainInfo = {
+      state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true,
+    };
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
+    // Count ★ occurrences — should be exactly 1 (main only)
+    const stars = (result.match(/\u2605/g) || []).length;
+    assert.strictEqual(stars, 1, 'only main session should have ★, not subagents');
   });
 });
 

@@ -878,10 +878,12 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
       const rowTc = isSel ? ansi.fg(...dimColor([240, 250, 255], 1.0)) : tc;
       const rowDc = isSel ? ansi.fg(...dimColor([180, 200, 220], 0.8)) : dc;
 
-      // Row 1: " ▸● statename    label" — dot, state, and label only
+      // Row 1: " ▸● statename    ★ label" — dot, state, and label (★ for main session)
+      const mainTag = face.isMain ? '\u2605 ' : '';
       const row1Prefix = 4; // " ▸● " before stateName
-      const labelGap = Math.max(2, innerW - row1Prefix - stateName.length - label.length);
-      const row1Content = `${stateName}${' '.repeat(labelGap)}${label}`;
+      const fullLabel = mainTag + label;
+      const labelGap = Math.max(2, innerW - row1Prefix - stateName.length - fullLabel.length);
+      const row1Content = `${stateName}${' '.repeat(labelGap)}${fullLabel}`;
       const row1Sliced = row1Content.slice(0, innerW - row1Prefix);
       const r1Pad = Math.max(0, innerW - row1Prefix - row1Sliced.length);
       buf += ansi.to(row, bx) + `${bc}\u2502${r} ${rowTc}${selMarker}${dotC}${dot}${r} ${rowTc}${row1Sliced}${' '.repeat(r1Pad)}${bc}\u2502${r}`;

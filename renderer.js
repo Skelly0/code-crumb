@@ -554,6 +554,7 @@ function runUnifiedMode() {
         label: face.modelName || 'claude',
         stopped: lastStopped,
         firstSeen: 0, // sort first
+        isMain: true,
       };
       try { out += renderSessionList(cols, rows, subSorted, paletteThemes, mainInfo, face.sessionListIndex); } catch {}
     }
