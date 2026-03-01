@@ -132,6 +132,7 @@ class ClaudeFace {
     this.subagentCount = 0;
     this.lastPos = null;
     this._prevBubbleRight = 0;     // Rightmost col of previous frame's thought bubble
+    this._prevHelpBounds = null;   // {bx, by, w, h} of last frame's help overlay
 
     // Minimal mode (--minimal flag: face + status only, no chrome)
     this.minimalMode = false;
@@ -732,6 +733,7 @@ class ClaudeFace {
       buf += ansi.to(by + 1 + i, bx) + `${bc}\u2502${tc}${line}${' '.repeat(Math.max(0, pad))}${bc}\u2502${r}`;
     }
     buf += ansi.to(by + 1 + lines.length, bx) + `${bc}\u2570${'\u2500'.repeat(boxW)}\u256f${r}`;
+    this._prevHelpBounds = { bx, by, w: boxW + 2, h: boxH };
     return buf;
   }
 
@@ -798,6 +800,17 @@ class ClaudeFace {
     gx += this.petWiggle;
 
     let buf = '';
+
+    // Clear previous help overlay if it was just dismissed.
+    // Help box may extend below clearBot on tall terminals, so clear its full rect.
+    if (this._prevHelpBounds && !this.showHelp) {
+      const hb = this._prevHelpBounds;
+      const hClr = ' '.repeat(hb.w);
+      for (let hr = hb.by; hr < hb.by + hb.h; hr++) {
+        buf += ansi.to(hr, hb.bx) + hClr;
+      }
+      this._prevHelpBounds = null;
+    }
 
     // Clear previous frame's particle positions to prevent ghost characters
     // from particles that drifted outside the face clear band.
@@ -882,7 +895,7 @@ class ClaudeFace {
 
     // Detail line
     if (this.stateDetail) {
-      const maxDetailWidth = Math.max(10, cols - startCol - 8);
+      const maxDetailWidth = Math.min(Math.max(10, cols - startCol - 8), 36);
       const detailText = this.stateDetail.length > maxDetailWidth
         ? this.stateDetail.slice(0, maxDetailWidth - 3) + '...'
         : this.stateDetail;

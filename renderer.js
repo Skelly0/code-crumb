@@ -419,6 +419,7 @@ function runUnifiedMode() {
     face.particles.fadeAll(5);
     orbital._prevClearBuf = '';  // Full clear handles it
     prevSessionListClear = '';
+    prevSessionListH = 0;
     process.stdout.write(ansi.clear);
   });
 
@@ -476,6 +477,7 @@ function runUnifiedMode() {
   let lastTime = Date.now();
   let prevFrame = null;
   let prevSessionListClear = '';
+  let prevSessionListH = 0;
   function loop() {
     const now = Date.now();
     const dt = now - lastTime;
@@ -537,6 +539,9 @@ function runUnifiedMode() {
       try {
         out += orbital.render(cols, rows, face.lastPos, paletteThemes);
       } catch {}
+    } else if (orbital._prevClearBuf) {
+      out += orbital._prevClearBuf;
+      orbital._prevClearBuf = '';
     }
 
     // Apply transition dim to face output
@@ -561,18 +566,22 @@ function runUnifiedMode() {
       };
       const slBounds = {};
       try { out += renderSessionList(cols, rows, subSorted, paletteThemes, mainInfo, face.sessionListIndex, slBounds); } catch {}
-      // Build clear buffer for when the overlay is dismissed
+      // Build clear buffer for when the overlay is dismissed or shrinks.
+      // Use max of current and previous height so shrinking clears old rows.
       if (slBounds.bx != null) {
         let clr = '';
+        const clearH = Math.max(slBounds.h, prevSessionListH);
         const clearRow = ' '.repeat(slBounds.w);
-        for (let r = slBounds.by; r < slBounds.by + slBounds.h; r++) {
+        for (let r = slBounds.by; r < slBounds.by + clearH; r++) {
           clr += `\x1b[${r};${slBounds.bx}H${clearRow}`;
         }
         prevSessionListClear = clr;
+        prevSessionListH = slBounds.h;
       }
     } else if (prevSessionListClear) {
       out += prevSessionListClear;
       prevSessionListClear = '';
+      prevSessionListH = 0;
     }
 
     // Update terminal title bar to reflect current state
