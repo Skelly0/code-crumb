@@ -131,6 +131,7 @@ class ClaudeFace {
     this.showOrbitals = true;
     this.subagentCount = 0;
     this.lastPos = null;
+    this._prevBubbleRight = 0;     // Rightmost col of previous frame's thought bubble
 
     // Minimal mode (--minimal flag: face + status only, no chrome)
     this.minimalMode = false;
@@ -798,16 +799,18 @@ class ClaudeFace {
 
     let buf = '';
 
-    // Clear only the face + particle zone to prevent ghost particles
-    // without blanking orbital/session-list regions (which causes flicker)
+    // Clear only the face + particle + thought bubble zone to prevent ghosts
+    // without blanking orbital/session-list regions (which causes flicker).
+    // _prevBubbleRight extends the band to cover last frame's thought bubble.
     const clearBot = Math.min(rows - 1, startRow + 15);
     const bandLeft = Math.max(1, startCol - 6);
-    const bandRight = Math.min(cols, startCol + 36);
+    const bandRight = Math.min(cols, Math.max(startCol + 36, this._prevBubbleRight));
     const bandWidth = bandRight - bandLeft + 1;
     const clearSpaces = ' '.repeat(bandWidth);
     for (let row = 1; row <= clearBot; row++) {
       buf += ansi.to(row, bandLeft) + clearSpaces;
     }
+    this._prevBubbleRight = 0;
     buf += ansi.to(rows, 1) + ansi.clearLine;  // key hints row (full width)
 
     // Face box
@@ -909,6 +912,7 @@ class ClaudeFace {
           buf += ansi.to(startRow + 4, bubbleCol);
           buf += `${bc}\u2570${'\u2500'.repeat(bubbleInner)}\u256f${r}`;
           this.lastPos.bubble = { row: startRow + 2, col: boxRight + 2, w: (bubbleCol - boxRight - 2) + bubbleInner + 2, h: 3 };
+          this._prevBubbleRight = bubbleCol + bubbleInner + 2;
         }
       } else if (startRow >= 5) {
         // Above-face bubble (original position, no accessory conflict)
@@ -926,6 +930,7 @@ class ClaudeFace {
           buf += ansi.to(startRow - 1, bubbleLeft + 2);
           buf += `${bc}\u25cb${r}`;
           this.lastPos.bubble = { row: startRow - 4, col: bubbleLeft, w: bubbleInner + 2, h: 4 };
+          this._prevBubbleRight = bubbleLeft + bubbleInner + 2;
         }
       }
     }
