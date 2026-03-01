@@ -622,7 +622,7 @@ class OrbitalSystem {
   }
 
   _renderSidePanel(cols, rows, mainPos, paletteThemes) {
-    const sorted = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+    const sorted = this.getSortedFaces();
     if (sorted.length === 0) return '';
 
     const SIDE_PAD = 2;
@@ -701,7 +701,7 @@ class OrbitalSystem {
       return this._renderSidePanel(cols, rows, mainPos, paletteThemes);
     }
 
-    const sorted = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+    const sorted = this.getSortedFaces();
     const visible = sorted.slice(0, maxSlots);
     const overflow = sorted.length - visible.length;
     const n = visible.length;
