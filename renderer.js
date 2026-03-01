@@ -418,6 +418,7 @@ function runUnifiedMode() {
     }
     face.particles.fadeAll(5);
     orbital._prevClearBuf = '';  // Full clear handles it
+    prevSessionListClear = '';
     process.stdout.write(ansi.clear);
   });
 
@@ -474,6 +475,7 @@ function runUnifiedMode() {
 
   let lastTime = Date.now();
   let prevFrame = null;
+  let prevSessionListClear = '';
   function loop() {
     const now = Date.now();
     const dt = now - lastTime;
@@ -557,7 +559,20 @@ function runUnifiedMode() {
         firstSeen: 0, // sort first
         isMain: true,
       };
-      try { out += renderSessionList(cols, rows, subSorted, paletteThemes, mainInfo, face.sessionListIndex); } catch {}
+      const slBounds = {};
+      try { out += renderSessionList(cols, rows, subSorted, paletteThemes, mainInfo, face.sessionListIndex, slBounds); } catch {}
+      // Build clear buffer for when the overlay is dismissed
+      if (slBounds.bx != null) {
+        let clr = '';
+        const clearRow = ' '.repeat(slBounds.w);
+        for (let r = slBounds.by; r < slBounds.by + slBounds.h; r++) {
+          clr += `\x1b[${r};${slBounds.bx}H${clearRow}`;
+        }
+        prevSessionListClear = clr;
+      }
+    } else if (prevSessionListClear) {
+      out += prevSessionListClear;
+      prevSessionListClear = '';
     }
 
     // Update terminal title bar to reflect current state

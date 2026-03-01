@@ -863,7 +863,7 @@ function _sessionDot(face, themeMap) {
   return ['\u25cf', theme.border]; // ● colored by state
 }
 
-function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, selectedIndex) {
+function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, selectedIndex, outBounds) {
   const selIdx = typeof selectedIndex === 'number' ? selectedIndex : -1;
   if (cols < MIN_SESSION_LIST_COLS) return '';
   const themeMap = paletteThemes || themes;
@@ -1013,6 +1013,14 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
 
   // Bottom border
   buf += ansi.to(row, bx) + `${bc}\u2570${'\u2500'.repeat(innerW)}\u256f${r}`;
+
+  // Report bounding box so caller can clear on dismiss
+  if (outBounds) {
+    outBounds.bx = bx;
+    outBounds.by = by;
+    outBounds.w = boxW;
+    outBounds.h = row - by + 1;
+  }
 
   return buf;
 }
