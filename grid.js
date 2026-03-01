@@ -56,6 +56,10 @@ const IDLE_TIMEOUT = 8000;
 const SLEEP_TIMEOUT = 60000;
 const THINKING_TIMEOUT = 45000;
 const BREATHE_STEP = 200;  // Quantize breathe/pulse time to reduce frame-unique output
+
+// -- MiniFace (compact, for grid) ----------------------------------
+class MiniFace {
+  constructor(sessionId) {
     this.sessionId = sessionId;
     this.state = 'idle';
     this.detail = '';
