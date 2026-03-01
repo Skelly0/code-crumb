@@ -15,6 +15,16 @@ class ParticleSystem {
     this.particles = [];
     this.width = 40;
     this.height = 14;
+    this._prevClearBuf = '';  // ANSI to clear previous frame's particle positions
+  }
+
+  // Return (and reset) the clear buffer for last frame's rendered positions.
+  // Caller should prepend this BEFORE drawing face content so face chars
+  // overwrite the spaces rather than the other way around.
+  clearPrevious() {
+    const buf = this._prevClearBuf;
+    this._prevClearBuf = '';
+    return buf;
   }
 
   // Rapidly age all particles so they fade out on state change
@@ -212,6 +222,7 @@ class ParticleSystem {
 
   render(offsetRow, offsetCol, accentColor) {
     let out = '';
+    let clearBuf = '';
     for (const p of this.particles) {
       const col = Math.round(p.x) + offsetCol;
       const row = Math.round(p.y) + offsetRow;
@@ -219,8 +230,10 @@ class ParticleSystem {
         const fade = Math.min(1, p.life / (p.maxLife * 0.3));
         const color = dimColor(accentColor, fade);
         out += ansi.to(row, col) + ansi.fg(...color) + p.char + ansi.reset;
+        clearBuf += `\x1b[${row};${col}H `;
       }
     }
+    this._prevClearBuf = clearBuf;
     return out;
   }
 }

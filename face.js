@@ -799,6 +799,11 @@ class ClaudeFace {
 
     let buf = '';
 
+    // Clear previous frame's particle positions to prevent ghost characters
+    // from particles that drifted outside the face clear band.
+    // Must precede the clear band so face content draws on top of the spaces.
+    buf += this.particles.clearPrevious();
+
     // Clear only the face + particle + thought bubble zone to prevent ghosts
     // without blanking orbital/session-list regions (which causes flicker).
     // _prevBubbleRight extends the band to cover last frame's thought bubble.
