@@ -371,7 +371,6 @@ class OrbitalSystem {
     this.rotationSpeed = 0.007;    // ~1 full rotation per 60s at 15fps
     this.frame = 0;
     this.time = 0;
-    this.prevCount = 0;            // Track face count changes for clear
     this.paletteIndex = 0;         // Synced from main face
   }
 
@@ -406,10 +405,21 @@ class OrbitalSystem {
 
     const seenIds = new Set();
 
+    // Build reverse map: safeFilename(faceId) → faceId for protecting existing faces on read failure
+    const fileToFaceId = new Map();
+    for (const id of this.faces.keys()) {
+      fileToFaceId.set(safeFilename(id) + '.json', id);
+    }
+
     for (const file of files) {
       try {
         const raw = fs.readFileSync(path.join(SESSIONS_DIR, file), 'utf8').trim();
-        if (!raw) continue;
+        if (!raw) {
+          // Empty file (mid-write) — protect existing face from deletion
+          const existingId = fileToFaceId.get(file);
+          if (existingId) seenIds.add(existingId);
+          continue;
+        }
         const data = JSON.parse(raw);
         const id = data.session_id || path.basename(file, '.json');
 
@@ -427,6 +437,9 @@ class OrbitalSystem {
         }
         this.faces.get(id).updateFromFile(data);
       } catch {
+        // Parse failure (partial write) — protect existing face from deletion
+        const existingId = fileToFaceId.get(file);
+        if (existingId) seenIds.add(existingId);
         continue;
       }
     }
@@ -713,11 +726,6 @@ class OrbitalSystem {
     }
 
     let buf = '';
-
-    // Full clear when face count changes
-    if (n !== this.prevCount) {
-      this.prevCount = n;
-    }
 
     // Get accent color for connections from the theme
     const themeMap = paletteThemes || themes;

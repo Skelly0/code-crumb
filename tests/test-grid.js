@@ -1330,4 +1330,88 @@ describe('_renderConnections filtering', () => {
   });
 });
 
+// -- loadSessions transient read failure protection --------------------
+
+describe('grid.js -- loadSessions transient read failure protection', () => {
+  test('loadSessions protects existing face when file read returns empty', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    const orbital = new OrbitalSystem();
+
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const filePath = path.join(SESSIONS_DIR, 'flicker-empty.json');
+
+    // First write: valid data so face gets created
+    fs.writeFileSync(filePath, JSON.stringify({
+      session_id: 'flicker-empty',
+      state: 'coding',
+      detail: 'editing file',
+      timestamp: Date.now(),
+    }));
+    orbital.loadSessions('main-id');
+    assert.ok(orbital.faces.has('flicker-empty'), 'face should exist after valid read');
+
+    // Second write: empty file (simulates mid-write on Windows)
+    fs.writeFileSync(filePath, '');
+    orbital.loadSessions('main-id');
+    assert.ok(orbital.faces.has('flicker-empty'),
+      'existing face should survive when file is empty (mid-write)');
+
+    try { fs.unlinkSync(filePath); } catch {}
+  });
+
+  test('loadSessions protects existing face when file parse fails', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    const orbital = new OrbitalSystem();
+
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const filePath = path.join(SESSIONS_DIR, 'flicker-parse.json');
+
+    // First write: valid data so face gets created
+    fs.writeFileSync(filePath, JSON.stringify({
+      session_id: 'flicker-parse',
+      state: 'thinking',
+      detail: '',
+      timestamp: Date.now(),
+    }));
+    orbital.loadSessions('main-id');
+    assert.ok(orbital.faces.has('flicker-parse'), 'face should exist after valid read');
+
+    // Second write: truncated JSON (simulates partial write)
+    fs.writeFileSync(filePath, '{"session_id":"flicker-par');
+    orbital.loadSessions('main-id');
+    assert.ok(orbital.faces.has('flicker-parse'),
+      'existing face should survive when file contains invalid JSON (partial write)');
+
+    try { fs.unlinkSync(filePath); } catch {}
+  });
+
+  test('loadSessions does not create phantom face on read failure', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    const orbital = new OrbitalSystem();
+
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const filePath = path.join(SESSIONS_DIR, 'phantom-test.json');
+
+    // Write an empty file with no pre-existing face
+    fs.writeFileSync(filePath, '');
+    orbital.loadSessions('main-id');
+    assert.ok(!orbital.faces.has('phantom-test'),
+      'should not create a face from an empty file');
+
+    // Write truncated JSON with no pre-existing face
+    fs.writeFileSync(filePath, '{"session_id":"phantom');
+    orbital.loadSessions('main-id');
+    assert.ok(!orbital.faces.has('phantom-test'),
+      'should not create a face from invalid JSON');
+
+    try { fs.unlinkSync(filePath); } catch {}
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
