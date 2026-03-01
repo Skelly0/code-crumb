@@ -112,6 +112,9 @@ class ClaudeFace {
     this.showStats = true;
     this.showHelp = false;
     this.showSessionList = false;
+    this.sessionListIndex = 0;
+    this.sessionListCount = 0;
+    this.sessionListPromote = null;
     this.petTimer = 0;
     this.petWiggle = 0;
     this.petTimes = [];
@@ -435,7 +438,11 @@ class ClaudeFace {
 
   toggleSessionList() {
     this.showSessionList = !this.showSessionList;
-    if (this.showSessionList) this.showHelp = false;
+    if (this.showSessionList) {
+      this.showHelp = false;
+      this.sessionListIndex = 0;
+      this.sessionListPromote = null;
+    }
   }
 
   toggleAccessories() {
@@ -704,6 +711,8 @@ class ClaudeFace {
       ' a      toggle accessories',
       ' o      toggle subagents',
       ' l      session list',
+      '   \u2191\u2193/jk  navigate list',
+      '   enter  promote to main',
       ' h/?    this help',
       ' q      quit',
     ];

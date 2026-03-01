@@ -9,11 +9,11 @@
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, STATE_FILE, SESSIONS_DIR, TEAMS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch, QUIT_FLAG_FILE } = require('./shared');
+const { HOME, STATE_FILE, SESSIONS_DIR, TEAMS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch, QUIT_FLAG_FILE, safeFilename } = require('./shared');
 
 // -- Modules -------------------------------------------------------
 const {
-  ansi, lerpColor, dimColor, breathe,
+  ansi, lerpColor, dimColor, breathe, dimAnsiOutput,
   themes, TIMELINE_COLORS, SPARKLINE_BLOCKS,
   COMPLETION_LINGER,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
@@ -24,6 +24,7 @@ const { mouths, eyes, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { ClaudeFace } = require('./face');
 const { MiniFace, OrbitalSystem, renderSessionList } = require('./grid');
+const { SwapTransition } = require('./transition');
 
 // -- Config --------------------------------------------------------
 const PID_FILE = path.join(HOME, '.code-crumb.pid');
@@ -135,6 +136,7 @@ function runUnifiedMode() {
   const rendererStartTime = Date.now();
   face.setState('starting');
   const orbital = new OrbitalSystem();
+  const swapTransition = new SwapTransition();
 
   // Minimal mode: strip all UI chrome, just face + status line
   if (minimal) {
@@ -171,12 +173,19 @@ function runUnifiedMode() {
       const stat = fs.statSync(STATE_FILE);
       // Every 2s, bypass mtime check to eliminate NTFS 1-second mtime race
       const forceRead = (now - lastForceReadTime > 2000);
-      if (stat.mtimeMs < rendererStartTime) {
-        // File predates this renderer session — ignore stale state, fall through to timeouts
-      } else if (stat.mtimeMs > lastMtime || forceRead) {
+      if (stat.mtimeMs > lastMtime || forceRead) {
         if (forceRead) lastForceReadTime = now;
         lastMtime = stat.mtimeMs;
         const stateData = readState();
+
+        // Use JSON timestamp (ms precision) for staleness instead of
+        // filesystem mtime (NTFS has 1-second granularity, and mtime
+        // never updates if Claude is thinking with no tool calls).
+        // Skip state older than 2 minutes pre-renderer-start — truly stale.
+        const ts = stateData.timestamp || 0;
+        if (ts > 0 && ts < rendererStartTime - 120000) {
+          return;
+        }
 
         // First session we see becomes "main"
         if (!mainSessionId && stateData.sessionId) {
@@ -193,7 +202,10 @@ function runUnifiedMode() {
           // or a new session is explicitly starting (SessionStart hook)
           if (lastStopped || Date.now() - lastMainUpdate > 120000
               || stateData.isSessionStart === true) {
-            mainSessionId = incomingId;
+            if (!swapTransition.active) {
+              swapTransition.start(mainSessionId, incomingId);
+            }
+            // Actual swap happens on the 'swap' frame in the render loop
             lastStopped = false;
           } else {
             return; // Ignore — this is a subagent writing to the state file
@@ -204,7 +216,10 @@ function runUnifiedMode() {
         lastFileState = stateData.state;
         if (stateData.stopped) lastStopped = true;
 
-        const ts = stateData.timestamp || 0;
+        // Don't apply incoming state while a swap transition is animating —
+        // the face should dissolve with its current state until the swap frame.
+        if (swapTransition.active) return;
+
         if (ts > lastAppliedTimestamp) {
           lastAppliedTimestamp = ts;
           // Force-apply stopped state (session ended) — bypass minimum display time
@@ -359,8 +374,25 @@ function runUnifiedMode() {
       }
       // Help dismiss: any key while help is showing closes it
       if (face.showHelp) { face.showHelp = false; return; }
-      // Session list dismiss: any key while list is showing closes it
-      if (face.showSessionList) { face.showSessionList = false; return; }
+      // Session list navigation: arrows/j/k to navigate, Enter to promote, Esc/other to dismiss
+      if (face.showSessionList) {
+        const maxIdx = face.sessionListCount - 1;
+        if (key === '\x1b[A' || key === 'k') {
+          face.sessionListIndex = Math.max(0, face.sessionListIndex - 1);
+        } else if (key === '\x1b[B' || key === 'j') {
+          face.sessionListIndex = Math.min(Math.max(0, maxIdx), face.sessionListIndex + 1);
+        } else if (key === '\r' || key === '\n') {
+          if (face.sessionListIndex > 0) {
+            face.sessionListPromote = face.sessionListIndex;
+          }
+          face.showSessionList = false;
+          face.sessionListIndex = 0;
+        } else {
+          face.showSessionList = false;
+          face.sessionListIndex = 0;
+        }
+        return;
+      }
       if (key === ' ') face.pet();
       else if (key === 't' && !isNoColor()) { face.cycleTheme(); orbital.paletteIndex = face.paletteIndex; persistPrefs(); }
       else if (key === 's') { face.toggleStats(); persistPrefs(); }
@@ -372,9 +404,65 @@ function runUnifiedMode() {
   }
 
   process.stdout.on('resize', () => {
+    // Force-complete swap on resize to avoid ghost artifacts
+    if (swapTransition.active) {
+      _executeSwap();
+      swapTransition.cancel();
+    }
     face.particles.fadeAll(5);
     process.stdout.write(ansi.clear);
   });
+
+  // Execute the actual main↔orbital swap (called on 'swap' frame or forced by resize)
+  function _executeSwap() {
+    const oldId = swapTransition.fromId;
+    const newId = swapTransition.toId;
+    if (!oldId || !newId) return;
+
+    // Write old main's current state as an orbital session file
+    try {
+      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+      const oldData = {
+        session_id: oldId,
+        state: face.state,
+        detail: face.stateDetail,
+        timestamp: Date.now(),
+        modelName: face.modelName || 'claude',
+        cwd: face.cwd,
+        gitBranch: face.gitBranch,
+        stopped: lastStopped,
+      };
+      fs.writeFileSync(
+        path.join(SESSIONS_DIR, safeFilename(oldId) + '.json'),
+        JSON.stringify(oldData), 'utf8'
+      );
+    } catch {}
+
+    // Adopt the new session as main
+    mainSessionId = newId;
+
+    // Read the new main's session file and apply state
+    try {
+      const newFile = path.join(SESSIONS_DIR, safeFilename(newId) + '.json');
+      const newData = JSON.parse(fs.readFileSync(newFile, 'utf8'));
+      face.setState(newData.state || 'idle', newData.detail || '');
+      if (newData.modelName) face.modelName = newData.modelName;
+      if (newData.cwd) face.cwd = newData.cwd;
+      if (newData.gitBranch) face.gitBranch = newData.gitBranch;
+      lastStopped = !!newData.stopped;
+      // Remove promoted session's orbital file
+      try { fs.unlinkSync(newFile); } catch {}
+    } catch {
+      // If session file can't be read, just adopt the ID and read state next cycle
+    }
+
+    // Spawn celebration particles
+    face.particles.spawn(8, 'sparkle');
+    face.particles.spawn(4, 'push');
+
+    // Reload orbital sessions
+    orbital.loadSessions(mainSessionId);
+  }
 
   let lastTime = Date.now();
   let prevFrame = null;
@@ -385,6 +473,31 @@ function runUnifiedMode() {
 
     face.update(dt);
     orbital.update(dt);
+
+    // -- Transition tick --
+    if (swapTransition.active) {
+      const result = swapTransition.tick();
+      if (result.phase === 'dissolve') {
+        // Spawn glitch particles during dissolve
+        if (swapTransition.frame === 1) face.particles.fadeAll();
+        if (swapTransition.frame % 2 === 0) face.particles.spawn(2, 'glitch');
+      } else if (result.phase === 'swap') {
+        _executeSwap();
+      } else if (result.phase === 'materialize') {
+        if (swapTransition.frame % 3 === 0) face.particles.spawn(1, 'stream');
+      }
+    }
+
+    // -- Manual promotion from session list --
+    if (face.sessionListPromote !== null && !swapTransition.active) {
+      const subSorted = [...orbital.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+      const promoteIdx = face.sessionListPromote - 1; // subtract 1 for main at index 0
+      if (promoteIdx >= 0 && promoteIdx < subSorted.length) {
+        const target = subSorted[promoteIdx];
+        swapTransition.start(mainSessionId, target.sessionId);
+      }
+      face.sessionListPromote = null;
+    }
 
     // Periodically reload sessions
     if (orbital.frame % (FPS * 2) === 0) orbital.loadSessions(mainSessionId);
@@ -415,9 +528,17 @@ function runUnifiedMode() {
         out += orbital.render(cols, rows, face.lastPos, paletteThemes);
       } catch {}
     }
-    // Session list overlay (drawn on top of orbital)
+
+    // Apply transition dim to face output
+    if (swapTransition.active) {
+      out = dimAnsiOutput(out, swapTransition.dimFactor());
+    }
+
+    // Session list overlay (drawn on top of orbital, not dimmed)
     if (!minimal && face.showSessionList) {
       const paletteThemes = (PALETTES[face.paletteIndex] || PALETTES[0]).themes;
+      const subSorted = [...orbital.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+      face.sessionListCount = 1 + subSorted.length; // main + orbitals
       const mainInfo = {
         state: face.state,
         detail: face.stateDetail,
@@ -427,7 +548,7 @@ function runUnifiedMode() {
         stopped: lastStopped,
         firstSeen: 0, // sort first
       };
-      try { out += renderSessionList(cols, rows, orbital.faces, paletteThemes, mainInfo); } catch {}
+      try { out += renderSessionList(cols, rows, orbital.faces, paletteThemes, mainInfo, face.sessionListIndex); } catch {}
     }
 
     // Update terminal title bar to reflect current state

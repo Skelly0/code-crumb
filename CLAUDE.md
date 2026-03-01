@@ -13,6 +13,9 @@ Code Crumb is a zero-dependency terminal tamagotchi that visualizes what AI codi
 | `s` | Toggle stats (streak, timeline, sparkline) |
 | `a` | Toggle accessories (hats, ears, etc.) |
 | `o` | Toggle orbital subagents |
+| `l` | Open session list |
+| `↑↓` / `j/k` | Navigate session list |
+| `Enter` | Promote selected orbital to main (dissolve/swap/materialize animation) |
 | `h` / `?` | Toggle help overlay |
 | `q` / Ctrl+C | Quit |
 
@@ -36,13 +39,14 @@ animations.js    Eye and mouth animation functions (full-size and grid)
 particles.js     ParticleSystem class — 12 visual effect styles (incl. stream)
 face.js          ClaudeFace class — main face state machine, rendering, orbital toggle
 grid.js          MiniFace + OrbitalSystem classes — subagent orbital rendering
+transition.js    SwapTransition class — dissolve/swap/materialize animation state machine
 accessories.js   Accessory definitions (hats, glasses, ears, etc.) and rendering helpers
 update-state.js  Hook handler — receives editor events via stdin, writes state files
 state-machine.js Pure logic — tool→state mapping (multi-editor), error detection, streaks
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
 setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode|openclaw])
-test.js          Test runner — loads 11 modular test files from tests/ (~757 tests)
+test.js          Test runner — loads 12 modular test files from tests/ (~956 tests)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Orbital demo — simulates subagent sessions orbiting the main face
 code-crumb.sh   Unix shell wrapper for launch.js
@@ -57,7 +61,7 @@ adapters/
 tests/
   test-shared.js, test-state-machine.js, test-themes.js, test-animations.js,
   test-particles.js, test-face.js, test-grid.js, test-accessories.js,
-  test-teams.js, test-launch.js, test-adapters.js
+  test-teams.js, test-launch.js, test-adapters.js, test-transition.js
 .claude-plugin/
   plugin.json      Claude Code plugin manifest for marketplace distribution
 hooks/
@@ -158,19 +162,20 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 
 ### Automated Tests
 
-Run `npm test` (or `node test.js`). The test runner loads 11 modular test files from `tests/`. The suite (~757 tests) covers:
+Run `npm test` (or `node test.js`). The test runner loads 12 modular test files from `tests/`. The suite (~956 tests) covers:
 
 - **test-shared.js**: `safeFilename` edge cases
 - **test-state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants incl. `REVIEW_TOOLS`, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
-- **test-themes.js**: `lerpColor`/`dimColor`/`breathe` color math, theme completeness (all 23 states), `COMPLETION_LINGER` ordering, thought bubble pools
+- **test-themes.js**: `lerpColor`/`dimColor`/`breathe`/`dimAnsiOutput` color math, theme completeness (all 23 states), `COMPLETION_LINGER` ordering, thought bubble pools
 - **test-animations.js**: mouth/eye functions (shape and randomness)
 - **test-particles.js**: `ParticleSystem` (all 12 styles incl. stream, lifecycle, fadeAll)
 - **test-face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline, orbital toggle)
-- **test-grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles, taskDescription label priority, SessionStart adoption)
+- **test-grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles, taskDescription label priority, SessionStart adoption), `renderSessionList` selection highlight and footer
 - **test-accessories.js**: accessory definitions, rendering, state-specific adornments
 - **test-teams.js**: `hashTeamColor` consistency and RGB output, `MiniFace` team fields, `_assignLabels` with `teammateName`, session schema for `TeammateIdle`/`TaskCompleted`
 - **test-launch.js**: launcher logic, platform detection, editor flag handling
 - **test-adapters.js**: base adapter, engmux adapter, codex/opencode/openclaw adapter behavior
+- **test-transition.js**: `SwapTransition` lifecycle (start/tick/cancel), phase progression (dissolve/swap/materialize/done), `dimFactor` brightness curve, constants
 
 ### Visual Verification
 

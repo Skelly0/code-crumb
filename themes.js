@@ -51,6 +51,21 @@ function breathe(color, time) {
   return dimColor(color, factor);
 }
 
+/**
+ * Post-process an ANSI string to scale all 24-bit RGB foreground colors
+ * by a brightness factor (0..1). Used for dissolve/materialize transitions.
+ */
+function dimAnsiOutput(str, factor) {
+  if (factor >= 1) return str;
+  const f = Math.max(0, Math.min(1, factor));
+  return str.replace(/\x1b\[38;2;(\d+);(\d+);(\d+)m/g, (_, r, g, b) => {
+    const nr = Math.round(Number(r) * f);
+    const ng = Math.round(Number(g) * f);
+    const nb = Math.round(Number(b) * f);
+    return `\x1b[38;2;${nr};${ng};${nb}m`;
+  });
+}
+
 // -- Themes --------------------------------------------------------
 const themes = {
   idle: {
@@ -512,6 +527,7 @@ module.exports = {
   lerpColor,
   dimColor,
   breathe,
+  dimAnsiOutput,
   themes,
   TIMELINE_COLORS,
   SPARKLINE_BLOCKS,

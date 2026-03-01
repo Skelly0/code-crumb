@@ -1180,4 +1180,95 @@ describe('grid.js -- renderSessionList', () => {
   });
 });
 
+describe('grid.js -- renderSessionList selection', () => {
+  function _makeFaces(n) {
+    const faces = new Map();
+    for (let i = 0; i < n; i++) {
+      const f = new MiniFace(`sess-${i}`);
+      f.state = i === 0 ? 'coding' : 'thinking';
+      f.label = `sub-${i}`;
+      f.cwd = `/home/user/proj-${i}`;
+      faces.set(`sess-${i}`, f);
+    }
+    return faces;
+  }
+
+  test('no highlight when selectedIndex is -1 (default)', () => {
+    const faces = _makeFaces(2);
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes);
+    // No selection marker should appear
+    assert.ok(!result.includes('\u25b8'), 'no selection marker without selectedIndex');
+  });
+
+  test('shows selection marker when selectedIndex is set', () => {
+    const faces = _makeFaces(2);
+    const mainInfo = {
+      state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0,
+    };
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 1);
+    assert.ok(result.includes('\u25b8'), 'should show selection marker ▸');
+  });
+
+  test('shows footer hint when selectedIndex >= 0', () => {
+    const faces = _makeFaces(2);
+    const mainInfo = {
+      state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0,
+    };
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
+    assert.ok(result.includes('select'), 'footer should mention select');
+    assert.ok(result.includes('promote'), 'footer should mention promote');
+    assert.ok(result.includes('esc'), 'footer should mention esc');
+  });
+
+  test('no footer hint without selection', () => {
+    const faces = _makeFaces(2);
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes);
+    assert.ok(!result.includes('promote'), 'no footer without selection');
+  });
+
+  test('selectedIndex beyond visible range does not crash', () => {
+    const faces = _makeFaces(1);
+    const mainInfo = {
+      state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0,
+    };
+    // selectedIndex 99 — way beyond the 2 entries (main + 1 sub)
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 99);
+    assert.strictEqual(typeof result, 'string');
+  });
+
+  test('count text reflects main + orbitals', () => {
+    const faces = _makeFaces(3);
+    const mainInfo = {
+      state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0,
+    };
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
+    assert.ok(result.includes('4 total'), 'should count main + 3 subs = 4 total');
+  });
+
+  test('empty map with selectedIndex shows footer but no entries', () => {
+    const mainInfo = {
+      state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0,
+    };
+    const result = renderSessionList(80, 40, new Map(), PALETTES[0].themes, mainInfo, 0);
+    assert.ok(result.includes('promote'), 'footer shows even with only main');
+  });
+
+  test('backward compatible: omitting selectedIndex works', () => {
+    const faces = _makeFaces(2);
+    const mainInfo = {
+      state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0,
+    };
+    // Calling without 6th arg should not crash
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo);
+    assert.strictEqual(typeof result, 'string');
+    assert.ok(!result.includes('\u25b8'), 'no selection marker without selectedIndex');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

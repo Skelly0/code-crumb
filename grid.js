@@ -773,7 +773,8 @@ function _sessionDot(face, themeMap) {
   return ['\u25cf', theme.border]; // ● colored by state
 }
 
-function renderSessionList(cols, rows, faces, paletteThemes, mainInfo) {
+function renderSessionList(cols, rows, faces, paletteThemes, mainInfo, selectedIndex) {
+  const selIdx = typeof selectedIndex === 'number' ? selectedIndex : -1;
   if (cols < MIN_SESSION_LIST_COLS) return '';
   const themeMap = paletteThemes || themes;
   const r = ansi.reset;
@@ -804,6 +805,9 @@ function renderSessionList(cols, rows, faces, paletteThemes, mainInfo) {
     contentRows = visible.length * 3 + (visible.length - 1); // 3 per face + separators
     if (overflow > 0) contentRows += 1;
   }
+  // Add footer hint row when selection is active
+  const hasFooter = selIdx >= 0 && count > 0;
+  if (hasFooter) contentRows += 1;
   const boxH = contentRows + 4; // top border + header + separator + bottom border
 
   // Center the box
@@ -832,19 +836,25 @@ function renderSessionList(cols, rows, faces, paletteThemes, mainInfo) {
   } else {
     for (let i = 0; i < visible.length; i++) {
       const face = visible[i];
+      const isSel = i === selIdx;
       const [dot, dotColor] = _sessionDot(face, themeMap);
       const dotC = ansi.fg(...dotColor);
       const stateTheme = themeMap[face.state] || themeMap.idle;
       const stateName = (stateTheme.status || face.state).slice(0, 12);
       const label = (face.label || '?').slice(0, 14);
 
-      // Row 1: "  ● statename    label" — dot, state, and label only
-      const row1Prefix = 4; // "  ● " before stateName
+      // Selection marker and colors
+      const selMarker = isSel ? '\u25b8' : ' ';
+      const rowTc = isSel ? ansi.fg(...dimColor([240, 250, 255], 1.0)) : tc;
+      const rowDc = isSel ? ansi.fg(...dimColor([180, 200, 220], 0.8)) : dc;
+
+      // Row 1: " ▸● statename    label" — dot, state, and label only
+      const row1Prefix = 4; // " ▸● " before stateName
       const labelGap = Math.max(2, innerW - row1Prefix - stateName.length - label.length);
       const row1Content = `${stateName}${' '.repeat(labelGap)}${label}`;
       const row1Sliced = row1Content.slice(0, innerW - row1Prefix);
       const r1Pad = Math.max(0, innerW - row1Prefix - row1Sliced.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${r}  ${dotC}${dot}${r} ${tc}${row1Sliced}${' '.repeat(r1Pad)}${bc}\u2502${r}`;
+      buf += ansi.to(row, bx) + `${bc}\u2502${r} ${rowTc}${selMarker}${dotC}${dot}${r} ${rowTc}${row1Sliced}${' '.repeat(r1Pad)}${bc}\u2502${r}`;
       row++;
 
       // Row 2: "    ⎇ branch  ~/path" — branch and path share the line
@@ -862,7 +872,7 @@ function renderSessionList(cols, rows, faces, paletteThemes, mainInfo) {
       }
       const row2Full = indent2 + row2Text.slice(0, innerW - indent2.length);
       const r2Pad = Math.max(0, innerW - row2Full.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${row2Full}${' '.repeat(r2Pad)}${bc}\u2502${r}`;
+      buf += ansi.to(row, bx) + `${bc}\u2502${rowDc}${row2Full}${' '.repeat(r2Pad)}${bc}\u2502${r}`;
       row++;
 
       // Row 3: "    detail text" — detail or task description, dimmed
@@ -870,7 +880,7 @@ function renderSessionList(cols, rows, faces, paletteThemes, mainInfo) {
       const detailText = (face.detail || face.taskDescription || 'waiting...').slice(0, innerW - indent3.length);
       const row3Full = indent3 + detailText;
       const r3Pad = Math.max(0, innerW - row3Full.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${row3Full}${' '.repeat(r3Pad)}${bc}\u2502${r}`;
+      buf += ansi.to(row, bx) + `${bc}\u2502${rowDc}${row3Full}${' '.repeat(r3Pad)}${bc}\u2502${r}`;
       row++;
 
       // Separator between entries (not after last)
@@ -887,6 +897,14 @@ function renderSessionList(cols, rows, faces, paletteThemes, mainInfo) {
       buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(oPad)}${overText}${' '.repeat(Math.max(0, innerW - oPad - overText.length))}${bc}\u2502${r}`;
       row++;
     }
+  }
+
+  // Footer hint (when selection is active)
+  if (hasFooter) {
+    const hint = '\u2191\u2193 select  \u23ce promote  esc close';
+    const hPad = Math.max(0, Math.floor((innerW - hint.length) / 2));
+    buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(hPad)}${hint}${' '.repeat(Math.max(0, innerW - hPad - hint.length))}${bc}\u2502${r}`;
+    row++;
   }
 
   // Bottom border

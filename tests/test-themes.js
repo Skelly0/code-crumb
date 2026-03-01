@@ -7,7 +7,7 @@
 
 const assert = require('assert');
 const {
-  lerpColor, dimColor, breathe,
+  lerpColor, dimColor, breathe, dimAnsiOutput,
   themes, COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
   PALETTES, PALETTE_NAMES,
@@ -343,6 +343,37 @@ describe('themes.js -- setNoColor / isNoColor', () => {
 describe('themes.js -- BREATH_PERIOD', () => {
   test('equals 4000', () => {
     assert.strictEqual(BREATH_PERIOD, 4000);
+  });
+});
+
+describe('themes.js -- dimAnsiOutput', () => {
+  test('factor 1.0 preserves original string', () => {
+    const str = '\x1b[38;2;100;200;50mhello\x1b[0m';
+    assert.strictEqual(dimAnsiOutput(str, 1.0), str);
+  });
+
+  test('factor 0.0 zeroes all RGB values', () => {
+    const str = '\x1b[38;2;100;200;50mhello\x1b[0m';
+    const result = dimAnsiOutput(str, 0.0);
+    assert.strictEqual(result, '\x1b[38;2;0;0;0mhello\x1b[0m');
+  });
+
+  test('factor 0.5 halves RGB values', () => {
+    const str = '\x1b[38;2;100;200;50mhello\x1b[0m';
+    const result = dimAnsiOutput(str, 0.5);
+    assert.strictEqual(result, '\x1b[38;2;50;100;25mhello\x1b[0m');
+  });
+
+  test('no ANSI sequences passes through unchanged', () => {
+    const str = 'plain text no colors';
+    assert.strictEqual(dimAnsiOutput(str, 0.5), str);
+  });
+
+  test('multiple color sequences are all dimmed', () => {
+    const str = '\x1b[38;2;200;200;200mfoo\x1b[38;2;100;100;100mbar';
+    const result = dimAnsiOutput(str, 0.5);
+    assert.ok(result.includes('\x1b[38;2;100;100;100m'));
+    assert.ok(result.includes('\x1b[38;2;50;50;50m'));
   });
 });
 

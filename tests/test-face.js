@@ -1840,6 +1840,31 @@ describe('face.js -- toggleSessionList', () => {
     const face = new ClaudeFace();
     assert.strictEqual(face.showSessionList, false);
   });
+
+  test('sessionListIndex initializes to 0', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.sessionListIndex, 0);
+  });
+
+  test('sessionListCount initializes to 0', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.sessionListCount, 0);
+  });
+
+  test('sessionListPromote initializes to null', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.sessionListPromote, null);
+  });
+
+  test('toggleSessionList resets sessionListIndex and sessionListPromote', () => {
+    const face = new ClaudeFace();
+    face.sessionListIndex = 5;
+    face.sessionListPromote = 2;
+    face.toggleSessionList(); // open
+    assert.strictEqual(face.showSessionList, true);
+    assert.strictEqual(face.sessionListIndex, 0);
+    assert.strictEqual(face.sessionListPromote, null);
+  });
 });
 
 module.exports = { passed: () => passed, failed: () => failed };
