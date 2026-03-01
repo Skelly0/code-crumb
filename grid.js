@@ -372,11 +372,23 @@ class OrbitalSystem {
     this.frame = 0;
     this.time = 0;
     this.paletteIndex = 0;         // Synced from main face
+    this._sortedCache = [];        // Cached sorted faces array
+    this._sortedDirty = true;      // Rebuild cache on next getSortedFaces()
+  }
+
+  getSortedFaces() {
+    if (this._sortedDirty) {
+      this._sortedCache = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+      this._sortedDirty = false;
+    }
+    return this._sortedCache;
   }
 
   loadSessions(excludeId) {
     if (!excludeId) return;  // Can't filter main session yet — wait for mainSessionId
     this.mainSessionId = excludeId;
+    const prevSize = this.faces.size;
+    const prevKeys = new Set(this.faces.keys());
     let files;
     try {
       files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'));
@@ -455,6 +467,15 @@ class OrbitalSystem {
     }
 
     this._assignLabels();
+
+    // Only invalidate sorted cache if faces actually changed
+    if (this.faces.size !== prevSize) {
+      this._sortedDirty = true;
+    } else {
+      for (const key of this.faces.keys()) {
+        if (!prevKeys.has(key)) { this._sortedDirty = true; break; }
+      }
+    }
   }
 
   _assignLabels() {
@@ -783,17 +804,16 @@ function _sessionDot(face, themeMap) {
   return ['\u25cf', theme.border]; // ● colored by state
 }
 
-function renderSessionList(cols, rows, faces, paletteThemes, mainInfo, selectedIndex) {
+function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, selectedIndex) {
   const selIdx = typeof selectedIndex === 'number' ? selectedIndex : -1;
   if (cols < MIN_SESSION_LIST_COLS) return '';
   const themeMap = paletteThemes || themes;
   const r = ansi.reset;
 
-  // Build session list: main face first (if provided), then orbital subagents
-  const subSorted = [...faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+  // Build session list: main face first (if provided), then pre-sorted subagents
   const sorted = [];
   if (mainInfo) sorted.push(mainInfo);
-  sorted.push(...subSorted);
+  sorted.push(...sortedFaces);
   const count = sorted.length;
 
   // Box dimensions

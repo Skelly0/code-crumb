@@ -497,7 +497,7 @@ function runUnifiedMode() {
 
     // -- Manual promotion from session list --
     if (face.sessionListPromote !== null && !swapTransition.active) {
-      const subSorted = [...orbital.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+      const subSorted = orbital.getSortedFaces();
       const promoteIdx = face.sessionListPromote - 1; // subtract 1 for main at index 0
       if (promoteIdx >= 0 && promoteIdx < subSorted.length) {
         const target = subSorted[promoteIdx];
@@ -507,7 +507,7 @@ function runUnifiedMode() {
     }
 
     // Periodically reload sessions
-    if (orbital.frame % (FPS * 2) === 0) orbital.loadSessions(mainSessionId);
+    if (orbital.frame % (FPS * 5) === 0) orbital.loadSessions(mainSessionId);
 
     // Periodically rescan team configs (~every 10s)
     if (orbital.frame % (FPS * 10) === 0) activeTeams = scanTeams();
@@ -544,7 +544,7 @@ function runUnifiedMode() {
     // Session list overlay (drawn on top of orbital, not dimmed)
     if (!minimal && face.showSessionList) {
       const paletteThemes = (PALETTES[face.paletteIndex] || PALETTES[0]).themes;
-      const subSorted = [...orbital.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+      const subSorted = orbital.getSortedFaces();
       face.sessionListCount = 1 + subSorted.length; // main + orbitals
       const mainInfo = {
         state: face.state,
@@ -555,7 +555,7 @@ function runUnifiedMode() {
         stopped: lastStopped,
         firstSeen: 0, // sort first
       };
-      try { out += renderSessionList(cols, rows, orbital.faces, paletteThemes, mainInfo, face.sessionListIndex); } catch {}
+      try { out += renderSessionList(cols, rows, subSorted, paletteThemes, mainInfo, face.sessionListIndex); } catch {}
     }
 
     // Update terminal title bar to reflect current state
