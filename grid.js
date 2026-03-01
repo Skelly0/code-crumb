@@ -384,6 +384,7 @@ class OrbitalSystem {
     this.paletteIndex = 0;         // Synced from main face
     this._sortedCache = [];        // Cached sorted faces array
     this._sortedDirty = true;      // Rebuild cache on next getSortedFaces()
+    this._prevClearBuf = '';        // Pre-built buffer to clear previous frame's orbital content
   }
 
   getSortedFaces() {
@@ -525,6 +526,31 @@ class OrbitalSystem {
     }
   }
 
+  _buildClearBuf(facePositions, connDots, overflowInfo, rows, cols) {
+    let clearBuf = '';
+    // Clear mini-face rectangular regions
+    for (const pos of facePositions) {
+      for (let dy = 0; dy < MINI_H; dy++) {
+        const row = pos.row + dy;
+        if (row < 1 || row > rows) continue;
+        const col = Math.max(1, pos.col);
+        const w = Math.min(MINI_W, cols - col + 1);
+        if (w > 0) {
+          clearBuf += `\x1b[${row};${col}H${' '.repeat(w)}`;
+        }
+      }
+    }
+    // Clear connection dots (flat array: [row1, col1, row2, col2, ...])
+    for (let i = 0; i < connDots.length; i += 2) {
+      clearBuf += `\x1b[${connDots[i]};${connDots[i + 1]}H `;
+    }
+    // Clear overflow text
+    if (overflowInfo) {
+      clearBuf += `\x1b[${overflowInfo.row};${overflowInfo.col}H${' '.repeat(overflowInfo.len)}`;
+    }
+    this._prevClearBuf = clearBuf;
+  }
+
   calculateOrbit(cols, rows, mainPos) {
     // Minimum ellipse semi-axes: must clear the main face box + decorations
     // Vertical padding above: accessories/thought bubble need more clearance than bare face
@@ -564,7 +590,7 @@ class OrbitalSystem {
     return { a, b, maxSlots };
   }
 
-  _renderConnections(mainPos, positions, accentColor) {
+  _renderConnections(mainPos, positions, accentColor, outDots) {
     let out = '';
     const r = ansi.reset;
 
@@ -619,6 +645,7 @@ class OrbitalSystem {
           ? ansi.fg(...dimColor(lineColor, 0.7))
           : ansi.fg(...dimColor(lineColor, 0.2));
         out += `\x1b[${row};${col}H${color}\u00b7${r}`;
+        if (outDots) outDots.push(row, col);
       }
     }
     return out;
@@ -653,6 +680,7 @@ class OrbitalSystem {
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
       const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 7);
       const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
+      this._buildClearBuf([], [], { row: textRow, col: textCol, len: text.length }, rows, cols);
       return `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
     }
 
@@ -679,6 +707,9 @@ class OrbitalSystem {
     const overflow = sorted.length - visibleCount;
     let buf = '';
 
+    // Track positions for clearing next frame
+    const sidePositions = [];
+
     // Render a vertical stack of faces centered on the main face
     const renderStack = (faces, col) => {
       if (faces.length === 0) return;
@@ -686,32 +717,43 @@ class OrbitalSystem {
       let startRow = Math.max(1, Math.round(mainPos.centerY - totalH / 2));
       startRow = Math.min(startRow, Math.max(1, rows - totalH));
       for (let i = 0; i < faces.length; i++) {
-        buf += faces[i].render(startRow + i * MINI_H, col, this.time, paletteThemes);
+        const faceRow = startRow + i * MINI_H;
+        sidePositions.push({ row: faceRow, col });
+        buf += faces[i].render(faceRow, col, this.time, paletteThemes);
       }
     };
 
     renderStack(leftFaces, leftCol);
     renderStack(rightFaces, rightCol);
 
+    let overflowInfo = null;
     if (overflow > 0) {
       const text = `+${overflow} more`;
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
       const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 7);
       const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
       buf += `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
+      overflowInfo = { row: textRow, col: textCol, len: text.length };
     }
+
+    this._buildClearBuf(sidePositions, [], overflowInfo, rows, cols);
 
     return buf;
   }
 
   render(cols, rows, mainPos, paletteThemes) {
-    if (this.faces.size === 0) return '';
+    // Clear previous frame's orbital content before drawing new
+    let buf = this._prevClearBuf;
+    this._prevClearBuf = '';
+
+    if (this.faces.size === 0) return buf;
 
     const { a, b, maxSlots } = this.calculateOrbit(cols, rows, mainPos);
 
     // Terminal too small for orbits — use side panel layout
     if (maxSlots === 0) {
-      return this._renderSidePanel(cols, rows, mainPos, paletteThemes);
+      buf += this._renderSidePanel(cols, rows, mainPos, paletteThemes);
+      return buf;
     }
 
     const sorted = this.getSortedFaces();
@@ -759,14 +801,13 @@ class OrbitalSystem {
       positions.push({ col: clampedCol, row: clampedRow, face: visible[i] });
     }
 
-    let buf = '';
-
     // Get accent color for connections from the theme
     const themeMap = paletteThemes || themes;
     const accentColor = (themeMap.subagent || themeMap.idle).accent || [100, 160, 210];
 
-    // Render connection lines
-    buf += this._renderConnections(mainPos, positions, accentColor);
+    // Render connection lines (tracking dot positions for next frame's clear)
+    const connDots = [];
+    buf += this._renderConnections(mainPos, positions, accentColor, connDots);
 
     // Render each mini-face at its orbital position
     for (let i = 0; i < n; i++) {
@@ -777,13 +818,18 @@ class OrbitalSystem {
     }
 
     // Overflow indicator
+    let overflowInfo = null;
     if (overflow > 0) {
       const text = `+${overflow} more`;
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
       const textRow = Math.min(rows - 2, mainPos.row + mainPos.h + 7);
       const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
       buf += `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
+      overflowInfo = { row: textRow, col: textCol, len: text.length };
     }
+
+    // Build clear buffer for next frame (erase these positions before drawing new ones)
+    this._buildClearBuf(positions, connDots, overflowInfo, rows, cols);
 
     return buf;
   }

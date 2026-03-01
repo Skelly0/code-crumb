@@ -417,6 +417,7 @@ function runUnifiedMode() {
       swapTransition.cancel();
     }
     face.particles.fadeAll(5);
+    orbital._prevClearBuf = '';  // Full clear handles it
     process.stdout.write(ansi.clear);
   });
 
@@ -529,7 +530,7 @@ function runUnifiedMode() {
     } catch {
       out = '';
     }
-    if (!minimal && face.showOrbitals && face.lastPos && orbital.faces.size > 0) {
+    if (!minimal && face.showOrbitals && face.lastPos) {
       const paletteThemes = (PALETTES[face.paletteIndex] || PALETTES[0]).themes;
       try {
         out += orbital.render(cols, rows, face.lastPos, paletteThemes);
