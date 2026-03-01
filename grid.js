@@ -377,6 +377,7 @@ class OrbitalSystem {
 
   loadSessions(excludeId) {
     if (!excludeId) return;  // Can't filter main session yet — wait for mainSessionId
+    this.mainSessionId = excludeId;
     let files;
     try {
       files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'));
@@ -522,8 +523,9 @@ class OrbitalSystem {
     const r = ansi.reset;
 
     for (const pos of positions) {
-      // Draw connection lines to synthetic subagents and team members only
-      if (pos.face && !pos.face.parentSession && !pos.face.isTeammate) continue;
+      // Draw connection lines only to direct children (parentSession matches main) and team members
+      const isChild = pos.face && pos.face.parentSession && pos.face.parentSession === this.mainSessionId;
+      if (pos.face && !isChild && !pos.face.isTeammate) continue;
 
       // Team members use their team color; synthetic subagents use the default accent
       const lineColor = (pos.face && pos.face.isTeammate && pos.face.teamColor)

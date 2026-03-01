@@ -1271,4 +1271,63 @@ describe('grid.js -- renderSessionList selection', () => {
   });
 });
 
+// -- _renderConnections filtering -------------------------------------------
+
+describe('_renderConnections filtering', () => {
+  // Helper: build an OrbitalSystem with mainSessionId set
+  function makeOrbital(mainId) {
+    const os = new OrbitalSystem();
+    os.mainSessionId = mainId;
+    os.time = 5000; // non-zero for pulse calculation
+    return os;
+  }
+
+  // mainPos centered in a large terminal so connection dots aren't clipped
+  const mainPos = {
+    col: 10, row: 5, w: 20, h: 10,
+    centerX: 20, centerY: 10,
+  };
+  const accentColor = [100, 200, 255];
+
+  // Position far enough from main (steps >= 4) to generate dots
+  function makePos(face) {
+    return { col: 60, row: 25, face };
+  }
+
+  test('connection drawn for child whose parentSession matches main', () => {
+    const os = makeOrbital('session-A');
+    const pos = makePos({ parentSession: 'session-A', isTeammate: false });
+    const out = os._renderConnections(mainPos, [pos], accentColor);
+    assert.ok(out.includes('\u00b7'), 'should draw dots for matching parentSession');
+  });
+
+  test('no connection for child whose parentSession does NOT match main', () => {
+    const os = makeOrbital('session-A');
+    const pos = makePos({ parentSession: 'session-B', isTeammate: false });
+    const out = os._renderConnections(mainPos, [pos], accentColor);
+    assert.ok(!out.includes('\u00b7'), 'should skip dots when parentSession belongs to another session');
+  });
+
+  test('no connection for session with no parentSession (parallel session)', () => {
+    const os = makeOrbital('session-A');
+    const pos = makePos({ parentSession: null, isTeammate: false });
+    const out = os._renderConnections(mainPos, [pos], accentColor);
+    assert.ok(!out.includes('\u00b7'), 'should skip dots for parallel sessions without parentSession');
+  });
+
+  test('connection drawn for teammate regardless of parentSession', () => {
+    const os = makeOrbital('session-A');
+    const pos = makePos({ parentSession: null, isTeammate: true, teamColor: [255, 100, 50] });
+    const out = os._renderConnections(mainPos, [pos], accentColor);
+    assert.ok(out.includes('\u00b7'), 'teammates always get connection lines');
+  });
+
+  test('connection drawn for teammate with mismatched parentSession', () => {
+    const os = makeOrbital('session-A');
+    const pos = makePos({ parentSession: 'session-X', isTeammate: true, teamColor: [255, 100, 50] });
+    const out = os._renderConnections(mainPos, [pos], accentColor);
+    assert.ok(out.includes('\u00b7'), 'teammates get connections even with unrelated parentSession');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
