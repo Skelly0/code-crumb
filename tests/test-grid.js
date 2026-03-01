@@ -125,7 +125,7 @@ describe('grid.js -- MiniFace tick() timeout logic', () => {
     const face = new MiniFace('test');
     face.state = 'thinking';
     face.stopped = false;
-    face.lastUpdate = Date.now() - 10000; // Past IDLE_TIMEOUT (8s) but not THINKING_TIMEOUT (120s)
+    face.lastUpdate = Date.now() - 10000; // Past IDLE_TIMEOUT (8s) but not THINKING_TIMEOUT (45s)
     face.tick(16);
     assert.strictEqual(face.state, 'thinking');
   });
@@ -714,22 +714,30 @@ describe('grid.js -- completion linger respects sessionActive (#70)', () => {
   });
 });
 
-describe('grid.js -- lastUpdate uses Date.now() not data.timestamp (#71)', () => {
-  test('lastUpdate is set to current time regardless of data.timestamp', () => {
+describe('grid.js -- lastUpdate uses fileMtimeMs or Date.now() (#71)', () => {
+  test('lastUpdate uses fileMtimeMs when provided', () => {
+    const face = new MiniFace('test');
+    const mtime = Date.now() - 20000; // 20s ago
+    face.updateFromFile({ state: 'coding' }, mtime);
+    assert.strictEqual(face.lastUpdate, mtime,
+      'lastUpdate should use fileMtimeMs when provided');
+  });
+
+  test('lastUpdate falls back to Date.now() when fileMtimeMs is omitted', () => {
+    const face = new MiniFace('test');
+    const before = Date.now();
+    face.updateFromFile({ state: 'reading' });
+    assert.ok(face.lastUpdate >= before,
+      'lastUpdate should fall back to Date.now() without fileMtimeMs');
+  });
+
+  test('lastUpdate ignores data.timestamp (not file mtime)', () => {
     const face = new MiniFace('test');
     const staleTimestamp = Date.now() - 300000;
     const before = Date.now();
     face.updateFromFile({ state: 'coding', timestamp: staleTimestamp });
     assert.ok(face.lastUpdate >= before,
-      'lastUpdate should use Date.now(), not stale data.timestamp');
-  });
-
-  test('lastUpdate is set even without data.timestamp', () => {
-    const face = new MiniFace('test');
-    const before = Date.now();
-    face.updateFromFile({ state: 'reading' });
-    assert.ok(face.lastUpdate >= before,
-      'lastUpdate should be set even with no timestamp in data');
+      'lastUpdate should not use data.timestamp');
   });
 });
 
@@ -943,29 +951,29 @@ describe('grid.js -- SessionStart adoption (issue #58)', () => {
 // -- Bug #0: orbital stale timeout (THINKING_TIMEOUT for active faces) -------
 
 describe('grid.js -- isStale() uses THINKING_TIMEOUT for active faces (Bug #0)', () => {
-  test('active face within 120s is not stale', () => {
+  test('active face within 45s is not stale', () => {
     const face = new MiniFace('test');
     face.stopped = false;
     face.state = 'thinking';
-    face.lastUpdate = Date.now() - 60000; // 60s ago — within THINKING_TIMEOUT (120s)
+    face.lastUpdate = Date.now() - 30000; // 30s ago — within THINKING_TIMEOUT (45s)
     assert.ok(!face.isStale(),
-      'active face updated 60s ago should not be stale (was incorrectly true after 30s)');
+      'active face updated 30s ago should not be stale');
   });
 
-  test('active face after 120s is stale', () => {
+  test('active face after 45s is stale', () => {
     const face = new MiniFace('test');
     face.stopped = false;
     face.state = 'thinking';
-    face.lastUpdate = Date.now() - 125000; // 125s ago — past THINKING_TIMEOUT (120s)
+    face.lastUpdate = Date.now() - 50000; // 50s ago — past THINKING_TIMEOUT (45s)
     assert.ok(face.isStale(),
-      'active face updated 125s ago should be stale');
+      'active face updated 50s ago should be stale');
   });
 
-  test('active coding face within 120s is not stale', () => {
+  test('active coding face within 45s is not stale', () => {
     const face = new MiniFace('test');
     face.stopped = false;
     face.state = 'coding';
-    face.lastUpdate = Date.now() - 31000; // 31s ago — was stale under old STALE_MS (30s), not now
+    face.lastUpdate = Date.now() - 31000; // 31s ago — within THINKING_TIMEOUT (45s)
     assert.ok(!face.isStale(),
       'active coding face updated 31s ago should not be stale under THINKING_TIMEOUT');
   });
@@ -1237,6 +1245,8 @@ describe('grid.js -- renderSessionList selection', () => {
     // selectedIndex 99 — way beyond the 2 entries (main + 1 sub)
     const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 99);
     assert.strictEqual(typeof result, 'string');
+    // All 2 entries fit on screen — no phantom above indicator
+    assert.ok(!result.includes('above'), 'no above indicator when all entries fit');
   });
 
   test('count text reflects main + orbitals', () => {
@@ -1290,6 +1300,44 @@ describe('grid.js -- renderSessionList selection', () => {
     // Count ★ occurrences — should be exactly 1 (main only)
     const stars = (result.match(/\u2605/g) || []).length;
     assert.strictEqual(stars, 1, 'only main session should have ★, not subagents');
+  });
+
+  test('scrolls to show selected item beyond maxVisible', () => {
+    // 5 subs + main = 6 sessions; rows=15 → maxVisible = floor((15-6)/4) = 2
+    const faces = _makeFaces(5);
+    const mainInfo = {
+      state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true,
+    };
+    // Select the last session (index 5 in 0-based sorted array)
+    const result = renderSessionList(80, 15, faces, PALETTES[0].themes, mainInfo, 5);
+    // The last sub should be visible and selected
+    assert.ok(result.includes('\u25b8'), 'should show selection marker');
+    assert.ok(result.includes('sub-4'), 'last sub should be visible when scrolled');
+    // "above" indicator should appear since we scrolled past top
+    assert.ok(result.includes('above'), 'should show above indicator when scrolled down');
+  });
+
+  test('no above indicator when selection is at scroll top', () => {
+    const faces = _makeFaces(5);
+    const mainInfo = {
+      state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true,
+    };
+    // Select index 0 — no scrolling needed
+    const result = renderSessionList(80, 15, faces, PALETTES[0].themes, mainInfo, 0);
+    assert.ok(!result.includes('above'), 'no above indicator at top of list');
+  });
+
+  test('more indicator for items below visible window', () => {
+    const faces = _makeFaces(5);
+    const mainInfo = {
+      state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true,
+    };
+    // Select index 0 — items below are hidden
+    const result = renderSessionList(80, 15, faces, PALETTES[0].themes, mainInfo, 0);
+    assert.ok(result.includes('more'), 'should show more indicator for items below');
   });
 });
 

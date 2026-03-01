@@ -54,12 +54,8 @@ const MIN_COLS_GRID = 14;
 const MIN_ROWS_GRID = 9;
 const IDLE_TIMEOUT = 8000;
 const SLEEP_TIMEOUT = 60000;
-const THINKING_TIMEOUT = 120000;
+const THINKING_TIMEOUT = 45000;
 const BREATHE_STEP = 200;  // Quantize breathe/pulse time to reduce frame-unique output
-
-// -- MiniFace (compact, for grid) ----------------------------------
-class MiniFace {
-  constructor(sessionId) {
     this.sessionId = sessionId;
     this.state = 'idle';
     this.detail = '';
@@ -92,7 +88,7 @@ class MiniFace {
     this.SPAWN_MS = 800;          // duration of the spawn animation in ms
   }
 
-  updateFromFile(data) {
+  updateFromFile(data, fileMtimeMs) {
     const newState = data.state || 'idle';
     const now = Date.now();
     if (newState !== this.state) {
@@ -120,7 +116,11 @@ class MiniFace {
       this.minDisplayUntil = now + 1500;
       this.detail = data.detail || '';
     }
-    this.lastUpdate = Date.now();
+    // Use file mtime (when available) so lastUpdate reflects when the hook
+    // handler actually wrote the file, not when the renderer polled it.
+    // This breaks the deadlock where polling refreshed lastUpdate and
+    // prevented isStale() from ever firing on orphaned sessions.
+    this.lastUpdate = fileMtimeMs || Date.now();
     if (data.cwd) this.cwd = data.cwd;
     if (data.modelName) this.modelName = data.modelName;
     if (data.parentSession) this.parentSession = data.parentSession;
@@ -431,7 +431,9 @@ class OrbitalSystem {
 
     for (const file of files) {
       try {
-        const raw = fs.readFileSync(path.join(SESSIONS_DIR, file), 'utf8').trim();
+        const fp = path.join(SESSIONS_DIR, file);
+        const mtimeMs = fs.statSync(fp).mtimeMs;
+        const raw = fs.readFileSync(fp, 'utf8').trim();
         if (!raw) {
           // Empty file (mid-write) — protect existing face from deletion
           const existingId = fileToFaceId.get(file);
@@ -453,7 +455,7 @@ class OrbitalSystem {
           mf.spawnProgress = 0;
           this.faces.set(id, mf);
         }
-        this.faces.get(id).updateFromFile(data);
+        this.faces.get(id).updateFromFile(data, mtimeMs);
       } catch {
         // Parse failure (partial write) — protect existing face from deletion
         const existingId = fileToFaceId.get(file);
@@ -831,16 +833,22 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
 
   // How many sessions can fit? 3 rows per session + separator between
   const maxVisible = Math.max(1, Math.floor((rows - 6) / 4)); // 3 rows + 1 separator
-  const visible = sorted.slice(0, maxVisible);
-  const overflow = count - visible.length;
+  // Scroll: keep selectedIndex inside visible window
+  const scrollOffset = (selIdx >= 0 && count > maxVisible)
+    ? Math.min(Math.max(0, selIdx - (maxVisible - 1)), Math.max(0, count - maxVisible))
+    : 0;
+  const visible = sorted.slice(scrollOffset, scrollOffset + maxVisible);
+  const overflowBelow = count - (scrollOffset + visible.length);
+  const overflowAbove = scrollOffset;
 
   // Calculate total box height
   let contentRows = 0;
   if (count === 0) {
     contentRows = 1; // "no sessions"
   } else {
-    contentRows = visible.length * 3 + (visible.length - 1); // 3 per face + separators
-    if (overflow > 0) contentRows += 1;
+    contentRows = visible.length * 3 + Math.max(0, visible.length - 1); // 3 per face + separators
+    if (overflowAbove > 0) contentRows += 1;
+    if (overflowBelow > 0) contentRows += 1;
   }
   // Add footer hint row when selection is active
   const hasFooter = selIdx >= 0 && count > 0;
@@ -871,9 +879,16 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
     buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(msgPad)}${msg}${' '.repeat(Math.max(0, innerW - msgPad - msg.length))}${bc}\u2502${r}`;
     row++;
   } else {
+    // "Above" scroll indicator
+    if (overflowAbove > 0) {
+      const aboveText = `\u2191${overflowAbove} above`;
+      const aPad = Math.max(0, Math.floor((innerW - aboveText.length) / 2));
+      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(aPad)}${aboveText}${' '.repeat(Math.max(0, innerW - aPad - aboveText.length))}${bc}\u2502${r}`;
+      row++;
+    }
     for (let i = 0; i < visible.length; i++) {
       const face = visible[i];
-      const isSel = i === selIdx;
+      const isSel = i === (selIdx - scrollOffset);
       const [dot, dotColor] = _sessionDot(face, themeMap);
       const dotC = ansi.fg(...dotColor);
       const stateTheme = themeMap[face.state] || themeMap.idle;
@@ -929,9 +944,9 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
       }
     }
 
-    // Overflow indicator
-    if (overflow > 0) {
-      const overText = `+${overflow} more`;
+    // "Below" overflow indicator
+    if (overflowBelow > 0) {
+      const overText = `+${overflowBelow} more`;
       const oPad = Math.max(0, Math.floor((innerW - overText.length) / 2));
       buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(oPad)}${overText}${' '.repeat(Math.max(0, innerW - oPad - overText.length))}${bc}\u2502${r}`;
       row++;
