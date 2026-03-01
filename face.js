@@ -798,11 +798,17 @@ class ClaudeFace {
 
     let buf = '';
 
-    // Clear the full terminal to prevent ghost particles
-    // (float/zzz particles can drift far above the face)
-    for (let row = 1; row <= rows; row++) {
-      buf += ansi.to(row, 1) + ansi.clearLine;
+    // Clear only the face + particle zone to prevent ghost particles
+    // without blanking orbital/session-list regions (which causes flicker)
+    const clearBot = Math.min(rows - 1, startRow + 15);
+    const bandLeft = Math.max(1, startCol - 6);
+    const bandRight = Math.min(cols, startCol + 36);
+    const bandWidth = bandRight - bandLeft + 1;
+    const clearSpaces = ' '.repeat(bandWidth);
+    for (let row = 1; row <= clearBot; row++) {
+      buf += ansi.to(row, bandLeft) + clearSpaces;
     }
+    buf += ansi.to(rows, 1) + ansi.clearLine;  // key hints row (full width)
 
     // Face box
     const inner = faceW - 10;
