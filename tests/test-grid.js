@@ -73,6 +73,20 @@ describe('grid.js -- MiniFace', () => {
     assert.ok(face.stopped);
   });
 
+  test('updateFromFile sets pid from session data', () => {
+    const face = new MiniFace('test');
+    face.updateFromFile({ state: 'coding', pid: 12345 });
+    assert.strictEqual(face.pid, 12345);
+  });
+
+  test('updateFromFile preserves pid when subsequent update omits it', () => {
+    const face = new MiniFace('test');
+    face.updateFromFile({ state: 'coding', pid: 12345 });
+    face.updateFromFile({ state: 'reading' });
+    assert.strictEqual(face.pid, 12345,
+      'pid should persist when subsequent update omits it');
+  });
+
   test('isStale returns false for fresh face', () => {
     const face = new MiniFace('test');
     assert.ok(!face.isStale());
@@ -1091,6 +1105,35 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
     face.stoppedAt = Date.now() - 5000; // 5s ago — within STOPPED_LINGER_MS (10s)
     assert.ok(!face.isStale(),
       'stopped face within 10s should not be stale');
+  });
+
+  test('stopped face with live pid is still stale after STOPPED_LINGER_MS', () => {
+    const face = new MiniFace('test');
+    face.stopped = true;
+    face.stoppedAt = Date.now() - 15000; // 15s ago — past STOPPED_LINGER_MS (10s)
+    face.pid = process.pid; // live process — but stopped takes priority
+    assert.ok(face.isStale(),
+      'stopped flag should take priority over pid liveness');
+  });
+
+  test('active face with negative pid falls back to ORPHAN_TIMEOUT', () => {
+    const face = new MiniFace('test');
+    face.stopped = false;
+    face.state = 'thinking';
+    face.pid = -1; // negative pid — would signal process group on Unix
+    face.lastUpdate = Date.now() - 100000; // 100s ago — past ORPHAN_TIMEOUT (90s)
+    assert.ok(face.isStale(),
+      'negative pid should be treated as no pid');
+  });
+
+  test('active face with pid 1 falls back to ORPHAN_TIMEOUT', () => {
+    const face = new MiniFace('test');
+    face.stopped = false;
+    face.state = 'thinking';
+    face.pid = 1; // PID 1 (init) — always alive, should be rejected
+    face.lastUpdate = Date.now() - 100000; // 100s ago — past ORPHAN_TIMEOUT (90s)
+    assert.ok(face.isStale(),
+      'PID 1 should be rejected to prevent immortal orbitals');
   });
 
   test('completion state face is stale after STOPPED_LINGER_MS (10s)', () => {

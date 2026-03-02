@@ -55,12 +55,14 @@ const MIN_ROWS_GRID = 9;
 const IDLE_TIMEOUT = 8000;
 const SLEEP_TIMEOUT = 60000;
 const THINKING_TIMEOUT = 45000;
-const ORPHAN_TIMEOUT = 90000;  // 90s fallback for sessions without pid
+const ORPHAN_TIMEOUT = 90000;  // 90s fallback for sessions without pid or whose process has exited
 const BREATHE_STEP = 200;  // Quantize breathe/pulse time to reduce frame-unique output
 
+// Signal 0 tests process existence without killing it (works cross-platform in Node.js)
 function isProcessAlive(pid) {
-  if (!pid || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  if (!pid || pid <= 1) return false; // reject 0, negative, and PID 1 (init — always alive)
+  try { process.kill(pid, 0); return true; }
+  catch (err) { return err.code === 'EPERM'; } // EPERM = process exists, different owner
 }
 
 // -- MiniFace (compact, for grid) ----------------------------------
