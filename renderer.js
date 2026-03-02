@@ -190,10 +190,12 @@ function runUnifiedMode() {
           // Don't resurrect dead sessions on fresh renderer start
           if (stateData.stopped) {
             lastStopped = true;
+            lastAppliedTimestamp = ts;
             return;
           }
           // Tighter window: active sessions write every few seconds
           if (ts > 0 && ts < rendererStartTime - 15000) {
+            lastAppliedTimestamp = ts;
             return;
           }
         } else {
