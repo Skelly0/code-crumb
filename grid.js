@@ -950,8 +950,8 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
       const rowTc = isSel ? ansi.fg(...dimColor([240, 250, 255], 1.0)) : tc;
       const rowDc = isSel ? ansi.fg(...dimColor([180, 200, 220], 0.8)) : dc;
 
-      // Row 1: " ▸● statename    ★ label" — dot, state, and label (★ for main session)
-      const mainTag = face.isMain ? '\u2605 ' : '';
+      // Row 1: " ▸● statename    ⊛/★ label" — dot, state, and label (⊛ pinned, ★ main)
+      const mainTag = face.isMain ? (face.isPinned ? '\u229b ' : '\u2605 ') : '';
       const row1Prefix = 4; // " ▸● " before stateName
       const fullLabel = mainTag + label;
       const labelGap = Math.max(2, innerW - row1Prefix - stateName.length - fullLabel.length);
@@ -1003,9 +1003,17 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
     }
   }
 
-  // Footer hint (when selection is active)
+  // Footer hint (when selection is active) — context-sensitive
   if (hasFooter) {
-    const hint = '\u2191\u2193 select  \u23ce promote  esc close';
+    const isPinned = mainInfo && mainInfo.isPinned;
+    let hint;
+    if (selIdx === 0 && isPinned) {
+      hint = '\u2191\u2193 select  \u23ce unpin  esc close';
+    } else if (selIdx > 0) {
+      hint = '\u2191\u2193 select  \u23ce pin+promote  esc close';
+    } else {
+      hint = '\u2191\u2193 select  \u23ce promote  esc close';
+    }
     const hPad = Math.max(0, Math.floor((innerW - hint.length) / 2));
     buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(hPad)}${hint}${' '.repeat(Math.max(0, innerW - hPad - hint.length))}${bc}\u2502${r}`;
     row++;

@@ -714,7 +714,7 @@ class ClaudeFace {
       ' o      toggle subagents',
       ' l      session list',
       '   \u2191\u2193/jk  navigate list',
-      '   enter  promote to main',
+      '   enter  pin/promote',
       ' h/?    this help',
       ' q      quit',
     ];

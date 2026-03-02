@@ -161,6 +161,7 @@ function runUnifiedMode() {
 
   // Main session isolation
   let mainSessionId = null;
+  let pinnedSessionId = null; // Set when user manually promotes — prevents auto-swap
   let lastMainUpdate = 0;
 
   let lastMtime = 0;
@@ -199,6 +200,10 @@ function runUnifiedMode() {
 
         // If a different session is writing to the state file:
         if (incomingId && mainSessionId && incomingId !== mainSessionId) {
+          // Never auto-swap away from a pinned session
+          if (pinnedSessionId && pinnedSessionId === mainSessionId) {
+            return;
+          }
           // Adopt as new main only if old main session ended, is very stale,
           // or a new session is explicitly starting (SessionStart hook)
           if (lastStopped || Date.now() - lastMainUpdate > 120000
@@ -402,7 +407,9 @@ function runUnifiedMode() {
         } else if (key === '\x1b[B' || key === 'j') {
           face.sessionListIndex = Math.min(Math.max(0, maxIdx), face.sessionListIndex + 1);
         } else if (key === '\r' || key === '\n') {
-          if (face.sessionListIndex > 0) {
+          if (face.sessionListIndex === 0 && pinnedSessionId) {
+            pinnedSessionId = null; // Unpin — resume normal auto-swap
+          } else if (face.sessionListIndex > 0) {
             face.sessionListPromote = face.sessionListIndex;
           }
           face.showSessionList = false;
@@ -519,6 +526,7 @@ function runUnifiedMode() {
       const promoteIdx = face.sessionListPromote - 1; // subtract 1 for main at index 0
       if (promoteIdx >= 0 && promoteIdx < subSorted.length) {
         const target = subSorted[promoteIdx];
+        pinnedSessionId = target.sessionId; // Pin the promoted session
         swapTransition.start(mainSessionId, target.sessionId);
       }
       face.sessionListPromote = null;
@@ -576,6 +584,7 @@ function runUnifiedMode() {
         stopped: lastStopped,
         firstSeen: 0, // sort first
         isMain: true,
+        isPinned: !!pinnedSessionId,
       };
       const slBounds = {};
       try { out += renderSessionList(cols, rows, subSorted, paletteThemes, mainInfo, face.sessionListIndex, slBounds); } catch {}

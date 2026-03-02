@@ -1341,6 +1341,78 @@ describe('grid.js -- renderSessionList selection', () => {
   });
 });
 
+// -- renderSessionList pin indicator ----------------------------------------
+
+describe('grid.js -- renderSessionList pin indicator', () => {
+  function _makeFaces(n) {
+    const faces = [];
+    for (let i = 0; i < n; i++) {
+      const f = new MiniFace(`sess-${i}`);
+      f.state = 'thinking';
+      f.label = `sub-${i}`;
+      f.cwd = `/home/user/proj-${i}`;
+      faces.push(f);
+    }
+    return faces;
+  }
+
+  test('shows pin icon when isPinned is true', () => {
+    const faces = _makeFaces(1);
+    const mainInfo = {
+      state: 'coding', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true, isPinned: true,
+    };
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
+    assert.ok(result.includes('\u229b'), 'pinned main should show ⊛ indicator');
+    assert.ok(!result.includes('\u2605'), 'pinned main should not show ★');
+  });
+
+  test('shows star icon when isPinned is false', () => {
+    const faces = _makeFaces(1);
+    const mainInfo = {
+      state: 'coding', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true, isPinned: false,
+    };
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
+    assert.ok(result.includes('\u2605'), 'unpinned main should show ★ indicator');
+    assert.ok(!result.includes('\u229b'), 'unpinned main should not show ⊛');
+  });
+
+  test('footer says unpin when index 0 selected and pinned', () => {
+    const faces = _makeFaces(1);
+    const mainInfo = {
+      state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true, isPinned: true,
+    };
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
+    assert.ok(result.includes('unpin'), 'footer should say unpin when main is pinned and selected');
+    assert.ok(!result.includes('pin+promote'), 'footer should not say pin+promote');
+  });
+
+  test('footer says pin+promote when index > 0 selected', () => {
+    const faces = _makeFaces(2);
+    const mainInfo = {
+      state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true, isPinned: false,
+    };
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 1);
+    assert.ok(result.includes('pin+promote'), 'footer should say pin+promote for orbital selection');
+    assert.ok(!result.includes('unpin'), 'footer should not say unpin');
+  });
+
+  test('footer says promote when index 0 selected and not pinned', () => {
+    const faces = _makeFaces(1);
+    const mainInfo = {
+      state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
+      label: 'claude', stopped: false, firstSeen: 0, isMain: true, isPinned: false,
+    };
+    const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
+    assert.ok(result.includes('promote'), 'footer should say promote');
+    assert.ok(!result.includes('unpin'), 'footer should not say unpin');
+    assert.ok(!result.includes('pin+promote'), 'footer should not say pin+promote');
+  });
+});
+
 // -- _renderConnections filtering -------------------------------------------
 
 describe('_renderConnections filtering', () => {
