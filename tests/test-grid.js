@@ -1024,34 +1024,57 @@ describe('grid.js -- SessionStart adoption (issue #58)', () => {
   });
 });
 
-// -- Bug #0: orbital stale timeout (THINKING_TIMEOUT for active faces) -------
+// -- Bug #0: orbital stale timeout (PID liveness + ORPHAN_TIMEOUT fallback) ---
 
-describe('grid.js -- isStale() uses THINKING_TIMEOUT for active faces (Bug #0)', () => {
-  test('active face within 45s is not stale', () => {
+describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug #0)', () => {
+  test('active face with live pid is never stale regardless of lastUpdate age', () => {
     const face = new MiniFace('test');
     face.stopped = false;
     face.state = 'thinking';
-    face.lastUpdate = Date.now() - 30000; // 30s ago — within THINKING_TIMEOUT (45s)
+    face.pid = process.pid; // current process — definitely alive
+    face.lastUpdate = Date.now() - 200000; // 200s ago — way past any timeout
     assert.ok(!face.isStale(),
-      'active face updated 30s ago should not be stale');
+      'face with live owning process should never be stale');
   });
 
-  test('active face after 45s is stale', () => {
+  test('active face with dead pid and old lastUpdate is stale', () => {
     const face = new MiniFace('test');
     face.stopped = false;
     face.state = 'thinking';
-    face.lastUpdate = Date.now() - 50000; // 50s ago — past THINKING_TIMEOUT (45s)
+    face.pid = 999999; // almost certainly not a real process
+    face.lastUpdate = Date.now() - 100000; // 100s ago — past ORPHAN_TIMEOUT (90s)
     assert.ok(face.isStale(),
-      'active face updated 50s ago should be stale');
+      'face with dead process and old lastUpdate should be stale');
   });
 
-  test('active coding face within 45s is not stale', () => {
+  test('active face with dead pid but recent lastUpdate is not stale', () => {
     const face = new MiniFace('test');
     face.stopped = false;
     face.state = 'coding';
-    face.lastUpdate = Date.now() - 31000; // 31s ago — within THINKING_TIMEOUT (45s)
+    face.pid = 999999; // dead process
+    face.lastUpdate = Date.now() - 60000; // 60s ago — within ORPHAN_TIMEOUT (90s)
     assert.ok(!face.isStale(),
-      'active coding face updated 31s ago should not be stale under THINKING_TIMEOUT');
+      'face with dead process but recent update should not be stale yet');
+  });
+
+  test('active face without pid falls back to ORPHAN_TIMEOUT (90s)', () => {
+    const face = new MiniFace('test');
+    face.stopped = false;
+    face.state = 'thinking';
+    face.pid = 0; // no pid (legacy session file)
+    face.lastUpdate = Date.now() - 60000; // 60s ago — within ORPHAN_TIMEOUT (90s)
+    assert.ok(!face.isStale(),
+      'face without pid updated 60s ago should not be stale under ORPHAN_TIMEOUT');
+  });
+
+  test('active face without pid is stale after ORPHAN_TIMEOUT (90s)', () => {
+    const face = new MiniFace('test');
+    face.stopped = false;
+    face.state = 'thinking';
+    face.pid = 0; // no pid
+    face.lastUpdate = Date.now() - 100000; // 100s ago — past ORPHAN_TIMEOUT (90s)
+    assert.ok(face.isStale(),
+      'face without pid updated 100s ago should be stale');
   });
 
   test('stopped face is stale after STOPPED_LINGER_MS (10s)', () => {
@@ -1106,6 +1129,17 @@ describe('grid.js -- loadSessions mtime purge protects active faces (Bug #0)', (
     assert.ok(
       src.includes('knownFace && !knownFace.stopped && !completionStates.includes(knownFace.state)'),
       'loadSessions mtime purge should check for active in-memory face before deleting file'
+    );
+  });
+
+  test('source code contains PID liveness check in isStale', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(
+      require('path').join(__dirname, '..', 'grid.js'), 'utf8'
+    );
+    assert.ok(
+      src.includes('isProcessAlive(this.pid)'),
+      'isStale should check PID liveness before falling back to timeout'
     );
   });
 

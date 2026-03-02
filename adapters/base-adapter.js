@@ -39,7 +39,9 @@ function writeSessionState(sessionId, state, detail = '', stopped = false, extra
     const filename = safeFilename(sessionId) + '.json';
     const data = JSON.stringify({
       session_id: sessionId, state, detail,
-      timestamp: Date.now(), cwd: process.cwd(), stopped, ...extra,
+      timestamp: Date.now(), cwd: process.cwd(), stopped,
+      pid: process.ppid,
+      ...extra,
     });
     fs.writeFileSync(path.join(SESSIONS_DIR, filename), data, 'utf8');
   } catch {}
