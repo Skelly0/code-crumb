@@ -147,7 +147,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 | `THINKING_TIMEOUT` | 45000ms | renderer.js, grid.js |
 | `SLEEP_TIMEOUT` | 60000ms | renderer.js |
 | `CAFFEINE_THRESHOLD` | 5 calls in 10s | face.js |
-| `STALE_MS` | 30000ms | grid.js (session file mtime purge threshold) |
+| `STALE_MS` | 120000ms | grid.js (session file mtime purge threshold) |
 | `ORPHAN_TIMEOUT` | 90000ms | grid.js (fallback staleness for sessions without PID) |
 | `MAX_ORBITALS` | 8 | grid.js (max visible orbital faces) |
 | `ROTATION_SPEED` | 0.007 rad/frame | grid.js (~1 revolution per 60s) |

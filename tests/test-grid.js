@@ -6,7 +6,7 @@
 // +================================================================+
 
 const assert = require('assert');
-const { MiniFace, OrbitalSystem, renderSessionList } = require('../grid');
+const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, STALE_MS, ORPHAN_TIMEOUT } = require('../grid');
 const { gridMouths, eyes, mouths } = require('../animations');
 const { PALETTES } = require('../themes');
 const { ParticleSystem } = require('../particles');
@@ -1705,6 +1705,99 @@ describe('grid.js -- loadSessions transient read failure protection', () => {
     assert.ok(!orbital.faces.has('phantom-test'),
       'should not create a face from invalid JSON');
 
+    try { fs.unlinkSync(filePath); } catch {}
+  });
+});
+
+// -- Orbital session cleanup regression guards --------------------------
+
+describe('grid.js -- session cleanup uses fileToFaceId and PID check', () => {
+  test('STALE_MS >= ORPHAN_TIMEOUT (regression guard)', () => {
+    assert.ok(STALE_MS >= ORPHAN_TIMEOUT,
+      `STALE_MS (${STALE_MS}) must be >= ORPHAN_TIMEOUT (${ORPHAN_TIMEOUT})`);
+  });
+
+  test('isProcessAlive returns true for own process', () => {
+    assert.strictEqual(isProcessAlive(process.pid), true);
+  });
+
+  test('isProcessAlive returns false for non-existent PID', () => {
+    // PID 999999 is almost certainly not running
+    assert.strictEqual(isProcessAlive(999999), false);
+  });
+
+  test('file deletion uses fileToFaceId reverse map for face lookup', () => {
+    // Structural: loadSessions must use fileToFaceId (not path.basename) to find
+    // the in-memory face protecting a session file. This test verifies that a face
+    // whose session_id differs from its safeFilename is correctly protected.
+    const fs = require('fs');
+    const path = require('path');
+    const { SESSIONS_DIR, safeFilename } = require('../shared');
+    const orbital = new OrbitalSystem();
+
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+
+    // Session ID with characters that safeFilename transforms
+    const sessionId = 'ses:special/chars!here';
+    const filename = safeFilename(sessionId) + '.json';
+    const filePath = path.join(SESSIONS_DIR, filename);
+
+    // Write a valid session file
+    fs.writeFileSync(filePath, JSON.stringify({
+      session_id: sessionId,
+      state: 'thinking',
+      pid: process.pid,
+      timestamp: Date.now(),
+    }));
+
+    // First load: creates the face keyed by session_id
+    orbital.loadSessions('main-id');
+    assert.ok(orbital.faces.has(sessionId), 'face should be created with session_id key');
+
+    // Now make the file stale (backdate mtime far past STALE_MS)
+    const staleTime = new Date(Date.now() - STALE_MS - 5000);
+    fs.utimesSync(filePath, staleTime, staleTime);
+
+    // Second load: deletion loop must use fileToFaceId to find the active face
+    // and protect the file (face is in 'thinking' state, not stopped)
+    orbital.loadSessions('main-id');
+    assert.ok(fs.existsSync(filePath),
+      'stale file should NOT be deleted when an active in-memory face protects it via fileToFaceId');
+
+    // Cleanup
+    try { fs.unlinkSync(filePath); } catch {}
+  });
+
+  test('file deletion checks PID before deleting unprotected files', () => {
+    // Structural: when no in-memory face protects a file, loadSessions must
+    // read the file's pid field and call isProcessAlive before deleting.
+    const fs = require('fs');
+    const path = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    const orbital = new OrbitalSystem();
+
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+
+    const filePath = path.join(SESSIONS_DIR, 'pid-alive-test.json');
+
+    // Write a stale file with OUR pid (still alive) but don't create a face for it
+    fs.writeFileSync(filePath, JSON.stringify({
+      session_id: 'pid-alive-test',
+      state: 'thinking',
+      pid: process.pid,
+      timestamp: Date.now(),
+    }));
+
+    // Backdate the file past STALE_MS
+    const staleTime = new Date(Date.now() - STALE_MS - 5000);
+    fs.utimesSync(filePath, staleTime, staleTime);
+
+    // Load — no in-memory face exists, but PID is alive → file should survive
+    orbital.loadSessions('main-id');
+    assert.ok(fs.existsSync(filePath),
+      'stale file with alive PID should NOT be deleted');
+
+    // Cleanup
     try { fs.unlinkSync(filePath); } catch {}
   });
 });
