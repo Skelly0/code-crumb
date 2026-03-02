@@ -377,4 +377,15 @@ describe('themes.js -- dimAnsiOutput', () => {
   });
 });
 
+// -- Synchronized output sequences ------------------------------------
+describe('ansi sync sequences', () => {
+  test('syncStart contains DEC private mode 2026 set', () => {
+    assert.strictEqual(ansi.syncStart, '\x1b[?2026h');
+  });
+
+  test('syncEnd contains DEC private mode 2026 reset', () => {
+    assert.strictEqual(ansi.syncEnd, '\x1b[?2026l');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

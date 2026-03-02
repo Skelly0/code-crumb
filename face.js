@@ -825,7 +825,8 @@ class ClaudeFace {
     const bandRight = Math.min(cols, Math.max(startCol + 36, this._prevBubbleRight));
     const bandWidth = bandRight - bandLeft + 1;
     const clearSpaces = ' '.repeat(bandWidth);
-    for (let row = 1; row <= clearBot; row++) {
+    const clearTop = Math.max(1, startRow - 5);
+    for (let row = clearTop; row <= clearBot; row++) {
       buf += ansi.to(row, bandLeft) + clearSpaces;
     }
     this._prevBubbleRight = 0;

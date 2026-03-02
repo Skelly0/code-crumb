@@ -26,6 +26,8 @@ const ansi = {
   bg:         (r, g, b) => noColorMode ? '' : `${CSI}48;2;${r};${g};${b}m`,
   clearLine:  `${CSI}2K`,
   clearBelow: `${CSI}J`,
+  syncStart:  `${CSI}?2026h`,
+  syncEnd:    `${CSI}?2026l`,
 };
 
 // -- Color math ----------------------------------------------------

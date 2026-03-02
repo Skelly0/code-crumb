@@ -369,7 +369,7 @@ function runUnifiedMode() {
     writeQuitFlag();
     removePid();
     try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch {}
-    process.stdout.write(ansi.show + ansi.clear + ansi.reset);
+    process.stdout.write(ansi.syncEnd + ansi.show + ansi.clear + ansi.reset);
     process.exit(0);
   }
   process.on('SIGINT', cleanup);
@@ -439,7 +439,7 @@ function runUnifiedMode() {
     face.particles.fadeAll(5);
     orbital._prevClearBuf = '';  // Full clear handles it
     prevSessionListClear = '';
-    process.stdout.write(ansi.clear);
+    process.stdout.write(ansi.syncEnd + ansi.clear);
   });
 
   // Execute the actual main↔orbital swap (called on 'swap' frame or forced by resize)
@@ -610,7 +610,7 @@ function runUnifiedMode() {
       return;
     }
     prevFrame = out;
-    process.stdout.write(_title + ansi.home + out);
+    process.stdout.write(ansi.syncStart + _title + ansi.home + out + ansi.syncEnd);
     setTimeout(loop, FRAME_MS);
   }
 
