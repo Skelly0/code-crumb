@@ -18,7 +18,7 @@ const { STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, QUIT_FLAG_FI
 const {
   toolToState, classifyToolResult, updateStreak, defaultStats,
   looksLikeRateLimit, EDIT_TOOLS, SUBAGENT_TOOLS,
-  pruneFrequentFiles, topFrequentFiles,
+  pruneFrequentFiles, topFrequentFiles, buildSubagentSessionState,
 } = require('./state-machine');
 
 // Event type passed as CLI argument (cross-platform -- no env var tricks)
@@ -51,6 +51,19 @@ function writeSessionState(sessionId, state, detail = '', stopped = false, extra
   } catch {
     // Silently fail
   }
+}
+
+// Write tool state to an active subagent's session file, preserving sticky fields.
+// Pure logic lives in state-machine.js (buildSubagentSessionState); this is the I/O wrapper.
+function _writeSubagentToolState(sub, state, detail, parentSessionId) {
+  try {
+    const fp = path.join(SESSIONS_DIR, safeFilename(sub.id) + '.json');
+    let existing = {};
+    try { existing = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch {}
+    const built = buildSubagentSessionState(existing, sub, parentSessionId, process.cwd());
+    if (!built) return;
+    writeSessionState(sub.id, state, detail, false, built);
+  } catch {}
 }
 
 // Persistent stats (streaks, records, session counters)
@@ -220,6 +233,17 @@ process.stdin.on('end', () => {
           stats.records.mostSubagents = stats.session.subagentCount;
         }
       }
+
+      // Propagate tool state to the most recently started subagent orbital.
+      // Only the latest gets live tool state -- earlier subagents keep their last
+      // known state. This is correct because the parent's tool calls are sequential
+      // and logically belong to the most recent subagent context.
+      if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName)) {
+        const latest = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
+        _writeSubagentToolState(latest, state, detail, sessionId);
+        state = 'subagent';
+        detail = `conducting ${stats.session.activeSubagents.length}`;
+      }
     }
     else if (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure') {
       // PostToolUseFailure is the same as PostToolUse but the tool execution
@@ -237,6 +261,14 @@ process.stdin.on('end', () => {
       }
 
       updateStreak(stats, state === 'error');
+
+      // Propagate tool result state to the most recently started subagent (see PreToolUse comment)
+      if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName)) {
+        const latest = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
+        _writeSubagentToolState(latest, state, detail, sessionId);
+        state = 'subagent';
+        detail = `conducting ${stats.session.activeSubagents.length}`;
+      }
     }
     else if (hookEvent === 'Stop') {
       const lastMsg = data.last_assistant_message || '';
@@ -310,7 +342,7 @@ process.stdin.on('end', () => {
       if (stats.session.subagentCount > (stats.records.mostSubagents || 0)) {
         stats.records.mostSubagents = stats.session.subagentCount;
       }
-      stats.session.activeSubagents.push({ id: subId, description: desc, taskDescription: desc, startedAt: Date.now() });
+      stats.session.activeSubagents.push({ id: subId, description: desc, taskDescription: desc, model: data.model || 'haiku', startedAt: Date.now() });
       writeSessionState(subId, 'spawning', desc, false, {
         sessionId: subId, modelName: data.model || 'haiku', cwd: process.cwd(),
         gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),

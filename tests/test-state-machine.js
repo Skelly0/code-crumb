@@ -31,6 +31,7 @@ const {
   MAX_FREQUENT_FILES,
   pruneFrequentFiles,
   topFrequentFiles,
+  buildSubagentSessionState,
 } = require('../state-machine');
 
 let passed = 0;
@@ -1762,6 +1763,105 @@ describe('state-machine.js -- sticky field preservation', () => {
     assert.strictEqual(extra.isTeammate, undefined, 'false should not be carried');
     assert.strictEqual(extra.teamName, undefined, 'null should not be carried');
     assert.strictEqual(extra.taskDescription, undefined, 'undefined should not be carried');
+  });
+});
+
+// -- Subagent tool state propagation (update-state.js logic) ----------------
+
+describe('state-machine.js -- subagent tool state propagation', () => {
+  test('preserves sticky fields from existing session', () => {
+    const existing = {
+      modelName: 'sonnet',
+      cwd: '/repo',
+      gitBranch: 'main',
+      taskDescription: 'fix bug',
+    };
+    const sub = { id: 'sub-1', model: 'haiku', description: 'search code' };
+    const result = buildSubagentSessionState(existing, sub, 'parent-sess', '/fallback');
+    // state/detail are NOT in the return -- they're passed positionally to writeSessionState
+    assert.strictEqual(result.modelName, 'sonnet'); // preserved from existing
+    assert.strictEqual(result.taskDescription, 'fix bug'); // preserved from existing
+    assert.strictEqual(result.parentSession, 'parent-sess');
+    assert.strictEqual(result.cwd, '/repo');
+  });
+
+  test('returns null for stopped subagent session', () => {
+    const existing = { stopped: true, modelName: 'haiku' };
+    const sub = { id: 'sub-1', model: 'haiku', description: 'task' };
+    const result = buildSubagentSessionState(existing, sub, 'parent', '/cwd');
+    assert.strictEqual(result, null);
+  });
+
+  test('falls back to sub.model when existing has no modelName', () => {
+    const result = buildSubagentSessionState({}, { id: 'sub-1', model: 'sonnet', description: 'task' }, 'parent', '/cwd');
+    assert.strictEqual(result.modelName, 'sonnet');
+  });
+
+  test('falls back to "haiku" when neither existing nor sub has model', () => {
+    const result = buildSubagentSessionState({}, { id: 'sub-1', description: 'task' }, 'parent', '/cwd');
+    assert.strictEqual(result.modelName, 'haiku');
+  });
+
+  test('uses defaultCwd when existing has no cwd', () => {
+    const result = buildSubagentSessionState({}, { id: 'sub-1', description: 'task' }, 'parent', '/my/cwd');
+    assert.strictEqual(result.cwd, '/my/cwd');
+  });
+
+  test('taskDescription fallback: existing > sub.taskDescription > sub.description', () => {
+    // existing.taskDescription wins
+    const r1 = buildSubagentSessionState(
+      { taskDescription: 'from-existing' },
+      { id: 'sub-1', taskDescription: 'from-sub-task', description: 'from-sub-desc' },
+      'p', '/cwd'
+    );
+    assert.strictEqual(r1.taskDescription, 'from-existing');
+
+    // sub.taskDescription next
+    const r2 = buildSubagentSessionState(
+      {},
+      { id: 'sub-1', taskDescription: 'from-sub-task', description: 'from-sub-desc' },
+      'p', '/cwd'
+    );
+    assert.strictEqual(r2.taskDescription, 'from-sub-task');
+
+    // sub.description last
+    const r3 = buildSubagentSessionState(
+      {},
+      { id: 'sub-1', description: 'from-sub-desc' },
+      'p', '/cwd'
+    );
+    assert.strictEqual(r3.taskDescription, 'from-sub-desc');
+  });
+
+  test('non-subagent tools should trigger propagation', () => {
+    const normalTools = ['Edit', 'Read', 'Bash', 'Grep', 'Write', 'Glob'];
+    for (const tool of normalTools) {
+      assert.ok(!SUBAGENT_TOOLS.test(tool), `${tool} should NOT be a subagent tool`);
+    }
+  });
+
+  test('subagent tools should NOT trigger propagation', () => {
+    const subTools = ['Task', 'Subagent', 'spawn_agent', 'delegate', 'codex_agent', 'sessions'];
+    for (const tool of subTools) {
+      assert.ok(SUBAGENT_TOOLS.test(tool), `${tool} SHOULD be a subagent tool`);
+    }
+  });
+
+  test('fresh subagent (empty existing) uses all fallbacks', () => {
+    const sub = { id: 'sub-1', model: 'opus', taskDescription: 'fix tests', description: 'fallback desc' };
+    const result = buildSubagentSessionState({}, sub, 'parent-1', '/default/cwd');
+    assert.strictEqual(result.sessionId, 'sub-1');
+    assert.strictEqual(result.modelName, 'opus');
+    assert.strictEqual(result.cwd, '/default/cwd');
+    assert.strictEqual(result.gitBranch, '');
+    assert.strictEqual(result.taskDescription, 'fix tests');
+    assert.strictEqual(result.parentSession, 'parent-1');
+  });
+
+  test('all output fields are present', () => {
+    const result = buildSubagentSessionState({}, { id: 's1', description: 'd' }, 'p', '/c');
+    const keys = Object.keys(result).sort();
+    assert.deepStrictEqual(keys, ['cwd', 'gitBranch', 'modelName', 'parentSession', 'sessionId', 'taskDescription']);
   });
 });
 
