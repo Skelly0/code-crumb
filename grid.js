@@ -81,6 +81,7 @@ class MiniFace {
     this.teammateName = '';    // agent teams: teammate role/name
     this.isTeammate = false;   // true if part of an agent team
     this.teamColor = null;     // RGB color derived from teamName
+    this.isMainSession = false; // true if independent (no parentSession, not teammate)
     this.gitBranch = null;     // current git branch (if known)
     this.taskDescription = ''; // sticky task description from SubagentStart
     this.minDisplayUntil = 0;  // Minimum display time to prevent flashing
@@ -136,6 +137,9 @@ class MiniFace {
     if (data.isTeammate) this.isTeammate = true;
     if (data.gitBranch) this.gitBranch = data.gitBranch;
     if (data.taskDescription) this.taskDescription = data.taskDescription;
+    // Classify: independent session = no parentSession and not a teammate
+    this.isMainSession = !this.parentSession && !this.isTeammate;
+
     if (data.stopped && !this.stopped) {
       this.stopped = true;
       this.stoppedAt = Date.now();
@@ -513,6 +517,8 @@ class OrbitalSystem {
 
       if (face.taskDescription) {
         face.label = face.taskDescription.slice(0, 8);
+      } else if (face.isMainSession && face.modelName) {
+        face.label = face.modelName.slice(0, 8);
       } else if (sorted.length === 1) {
         face.label = base ? base.slice(0, 8) : (face.modelName || 'sub').slice(0, 8);
       } else if (base && cwdCounts[base] === 1) {
@@ -949,7 +955,9 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
       const rowDc = isSel ? ansi.fg(...dimColor([180, 200, 220], 0.8)) : dc;
 
       // Row 1: " ▸● statename    ⊛/★ label" — dot, state, and label (⊛ pinned, ★ main)
-      const mainTag = face.isMain ? (face.isPinned ? '\u229b ' : '\u2605 ') : '';
+      const mainTag = face.isMain
+        ? (face.isPinned ? '\u229b ' : '\u2605 ')
+        : (face.isMainSession ? '\u2606 ' : '');
       const row1Prefix = 4; // " ▸● " before stateName
       const fullLabel = mainTag + label;
       const labelGap = Math.max(2, innerW - row1Prefix - stateName.length - fullLabel.length);

@@ -876,6 +876,82 @@ describe('grid.js -- OrbitalSystem _assignLabels taskDescription', () => {
   });
 });
 
+// -- isMainSession classification -------------------------------------------
+
+describe('grid.js -- MiniFace isMainSession', () => {
+  test('default isMainSession is false', () => {
+    const face = new MiniFace('test');
+    assert.strictEqual(face.isMainSession, false);
+  });
+
+  test('updateFromFile with no parentSession and no isTeammate sets isMainSession true', () => {
+    const face = new MiniFace('independent');
+    face.updateFromFile({ state: 'coding', modelName: 'claude' });
+    assert.strictEqual(face.isMainSession, true);
+  });
+
+  test('updateFromFile with parentSession set keeps isMainSession false', () => {
+    const face = new MiniFace('child');
+    face.updateFromFile({ state: 'coding', parentSession: 'parent-123' });
+    assert.strictEqual(face.isMainSession, false);
+  });
+
+  test('updateFromFile with isTeammate true keeps isMainSession false', () => {
+    const face = new MiniFace('teammate');
+    face.updateFromFile({ state: 'coding', isTeammate: true, teamName: 'builders' });
+    assert.strictEqual(face.isMainSession, false);
+  });
+});
+
+describe('grid.js -- _assignLabels isMainSession', () => {
+  test('independent main session uses modelName as label', () => {
+    const os = new OrbitalSystem();
+    const face = new MiniFace('ind-1');
+    face.isMainSession = true;
+    face.modelName = 'opencode';
+    face.cwd = '/home/user/project';
+    os.faces.set('ind-1', face);
+    os._assignLabels();
+    assert.strictEqual(face.label, 'opencode',
+      'isMainSession face should use modelName as label');
+  });
+
+  test('taskDescription still takes priority over isMainSession modelName', () => {
+    const os = new OrbitalSystem();
+    const face = new MiniFace('ind-2');
+    face.isMainSession = true;
+    face.modelName = 'claude';
+    face.taskDescription = 'fix bugs';
+    os.faces.set('ind-2', face);
+    os._assignLabels();
+    assert.strictEqual(face.label, 'fix bugs',
+      'taskDescription should still take priority over isMainSession');
+  });
+});
+
+describe('grid.js -- renderSessionList isMainSession indicator', () => {
+  test('orbital with isMainSession gets outline star', () => {
+    const face = new MiniFace('ind-orbital');
+    face.state = 'coding';
+    face.label = 'opencode';
+    face.isMainSession = true;
+    face.cwd = '/home/user/project';
+    const result = renderSessionList(80, 40, [face], PALETTES[0].themes);
+    assert.ok(result.includes('\u2606'), 'should show outline star for isMainSession orbital');
+  });
+
+  test('orbital without isMainSession gets no star', () => {
+    const face = new MiniFace('sub-orbital');
+    face.state = 'coding';
+    face.label = 'sub-1';
+    face.isMainSession = false;
+    face.cwd = '/home/user/project';
+    const result = renderSessionList(80, 40, [face], PALETTES[0].themes);
+    assert.ok(!result.includes('\u2606'), 'should not show outline star for regular subagent');
+    assert.ok(!result.includes('\u2605'), 'should not show filled star for regular subagent');
+  });
+});
+
 // -- Issue #58: SessionStart always takes over as main face ------------------
 
 describe('grid.js -- SessionStart adoption (issue #58)', () => {
