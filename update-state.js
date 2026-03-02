@@ -264,7 +264,7 @@ process.stdin.on('end', () => {
         writeSessionState(sub.id, 'happy', 'done', true, {
           sessionId: sub.id, stopped: true, cwd: process.cwd(),
           gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
-          parentSession: sessionId,
+          parentSession: sessionId, modelName: sub.model || 'haiku',
         });
       }
       stats.session.activeSubagents = [];
@@ -328,6 +328,7 @@ process.stdin.on('end', () => {
             sessionId: finished.id, stopped: true, cwd: process.cwd(),
             gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
             parentSession: sessionId, taskDescription: finished.taskDescription || finished.description,
+            modelName: finished.model || 'haiku',
           });
         }
         // If subId not found in our list, skip — it may belong to another session
@@ -337,6 +338,7 @@ process.stdin.on('end', () => {
           sessionId: finished.id, stopped: true, cwd: process.cwd(),
           gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
           parentSession: sessionId, taskDescription: finished.taskDescription || finished.description,
+          modelName: finished.model || 'haiku',
         });
       }
       if (stats.session.activeSubagents.length > 0) {
@@ -379,7 +381,7 @@ process.stdin.on('end', () => {
         writeSessionState(sub.id, 'happy', 'done', true, {
           sessionId: sub.id, stopped: true, cwd: process.cwd(),
           gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
-          parentSession: sessionId,
+          parentSession: sessionId, modelName: sub.model || 'haiku',
         });
       }
       stats.session.activeSubagents = [];
@@ -491,7 +493,7 @@ process.stdin.on('end', () => {
     // SessionStart always takes over global state — explicit new-session signal
     if (hookEvent === 'SessionStart') shouldWriteGlobal = true;
 
-    const fallbackExtra = { sessionId: fallbackSessionId };
+    const fallbackExtra = { sessionId: fallbackSessionId, modelName: process.env.CODE_CRUMB_MODEL || 'claude' };
 
     let fallbackState = 'thinking';
     let fallbackDetail = '';

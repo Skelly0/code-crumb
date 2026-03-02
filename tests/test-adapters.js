@@ -1088,6 +1088,59 @@ describe('bug fix regressions', () => {
     cleanup(tmp);
   });
 
+  test('update-state.js fallback catch block includes modelName', () => {
+    // Bug: catch-block writes lacked modelName, so a stale wrong modelName
+    // from a previous session could persist until a valid JSON event corrected it.
+    const { tmp, stateFile, env } = makeTempEnv('model-fallback-1');
+    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
+
+    try {
+      execFileSync(NODE, [UPDATE_STATE, 'PreToolUse'], {
+        input: 'not valid json',
+        env,
+        timeout: 10000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.modelName, 'claude',
+      `fallback should include modelName 'claude', got '${state.modelName}'`);
+    cleanup(tmp);
+  });
+
+  test('update-state.js fallback catch block respects CODE_CRUMB_MODEL env', () => {
+    const { tmp, stateFile, env } = makeTempEnv('model-env-1');
+    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
+    env.CODE_CRUMB_MODEL = 'opencode';
+
+    try {
+      execFileSync(NODE, [UPDATE_STATE, 'PreToolUse'], {
+        input: 'not valid json',
+        env,
+        timeout: 10000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.modelName, 'opencode',
+      `fallback should use CODE_CRUMB_MODEL env, got '${state.modelName}'`);
+    cleanup(tmp);
+  });
+
+  test('renderer.js readState returns isSessionStart field', () => {
+    // readState() must propagate isSessionStart so SessionStart events
+    // can trigger immediate session adoption in the render loop.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    assert.ok(src.includes('isSessionStart: data.isSessionStart'),
+      'readState should include isSessionStart field');
+  });
+
   test('update-state.js has no state-mirroring block for orbital faces', () => {
     // Bug: an else-if block mirrored every parent tool call's state directly
     // into the latest subagent session file, making orbital faces flicker

@@ -75,6 +75,7 @@ function guardedWriteState(sessionId, state, detail, extra) {
     // block (same logic for Claude Code hooks) and face.js setStats (env var wins at render).
     if (existing.sessionId === sessionId && existing.modelName) {
       writeExtra = { ...writeExtra, modelName: existing.modelName };
+      extra.modelName = existing.modelName; // Propagate to caller (writeSessionState)
     }
   } catch {}
   writeState(state, detail, writeExtra);

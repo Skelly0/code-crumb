@@ -66,6 +66,7 @@ function readState() {
       isWorktree: data.isWorktree || false,
       gitBranch: data.gitBranch || null,
       commitCount: data.commitCount || 0,
+      isSessionStart: data.isSessionStart || false,
     };
   } catch {
     return { state: 'idle', detail: '' };
