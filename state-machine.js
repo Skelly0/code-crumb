@@ -444,6 +444,23 @@ function defaultStats() {
   };
 }
 
+// -- Subagent Session State (pure logic) ---------------------------------
+
+// Build the state object for writing to a subagent's session file.
+// Preserves sticky fields (modelName, taskDescription, cwd, gitBranch) from
+// the existing session file, falling back to values from the sub entry.
+function buildSubagentSessionState(existing, sub, parentSessionId, defaultCwd) {
+  if (existing.stopped) return null;
+  return {
+    sessionId: sub.id,
+    modelName: existing.modelName || sub.model || 'haiku',
+    cwd: existing.cwd || defaultCwd || '',
+    gitBranch: existing.gitBranch || '',
+    parentSession: parentSessionId,
+    taskDescription: existing.taskDescription || sub.taskDescription || sub.description,
+  };
+}
+
 module.exports = {
   toolToState,
   EDIT_TOOLS,
@@ -470,4 +487,5 @@ module.exports = {
   MAX_FREQUENT_FILES,
   pruneFrequentFiles,
   topFrequentFiles,
+  buildSubagentSessionState,
 };
