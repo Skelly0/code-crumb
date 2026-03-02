@@ -358,6 +358,18 @@ function runUnifiedMode() {
   // Initial team discovery (skipped in minimal mode)
   let activeTeams = minimal ? {} : scanTeams();
 
+  // -- Cleanup (accessible to keypress handler + signal handlers) ----
+  function cleanup() {
+    writeQuitFlag();
+    removePid();
+    try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch {}
+    process.stdout.write(ansi.show + ansi.clear + ansi.reset);
+    process.exit(0);
+  }
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
+  try { process.on('SIGHUP', cleanup); } catch {}
+
   // Raw stdin keypress handling
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
@@ -678,16 +690,8 @@ function main() {
     return;
   }
 
-  function cleanup() {
-    writeQuitFlag();
-    removePid();
-    try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch {}
-    process.stdout.write(ansi.show + ansi.clear + ansi.reset);
-    process.exit(0);
-  }
-  process.on('SIGINT', cleanup);
-  process.on('SIGTERM', cleanup);
-  try { process.on('SIGHUP', cleanup); } catch {}
+  // Signal handlers are registered inside runUnifiedMode() — just
+  // ensure PID cleanup on early exit before we reach that point.
   process.on('exit', removePid);
 
   process.stdout.write(ansi.hide + ansi.clear);
