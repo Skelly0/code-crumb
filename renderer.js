@@ -185,8 +185,22 @@ function runUnifiedMode() {
         // never updates if Claude is thinking with no tool calls).
         // Skip state older than 2 minutes pre-renderer-start — truly stale.
         const ts = stateData.timestamp || 0;
-        if (ts > 0 && ts < rendererStartTime - 120000) {
-          return;
+        const isStartup = (Date.now() - rendererStartTime < 5000);
+        if (isStartup) {
+          // Don't resurrect dead sessions on fresh renderer start
+          if (stateData.stopped) {
+            lastStopped = true;
+            return;
+          }
+          // Tighter window: active sessions write every few seconds
+          if (ts > 0 && ts < rendererStartTime - 15000) {
+            return;
+          }
+        } else {
+          // Normal runtime: 2-minute guard for live session tolerance
+          if (ts > 0 && ts < rendererStartTime - 120000) {
+            return;
+          }
         }
 
         // First session we see becomes "main"

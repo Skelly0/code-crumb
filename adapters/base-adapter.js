@@ -294,6 +294,7 @@ function runStdinAdapter(options) {
     // Update extra with latest counters
     extra.toolCalls = stats.session.toolCalls;
     extra.filesEdited = stats.session.filesEdited.length;
+    if (stopped) extra.stopped = true;
 
     guardedWriteState(sessionId, state, detail, extra);
     writeSessionState(sessionId, state, detail, stopped, extra);
