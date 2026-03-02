@@ -1765,4 +1765,163 @@ describe('state-machine.js -- sticky field preservation', () => {
   });
 });
 
+// -- Subagent tool state propagation (update-state.js logic) ----------------
+
+describe('state-machine.js -- subagent tool state propagation', () => {
+  // Mirrors _writeSubagentToolState from update-state.js — pure logic only
+  function buildSubagentState(existing, sub, state, detail, parentSessionId) {
+    if (existing.stopped) return null; // should not write
+    return {
+      sessionId: sub.id,
+      state,
+      detail,
+      modelName: existing.modelName || sub.model || 'haiku',
+      cwd: existing.cwd || '/default/cwd',
+      gitBranch: existing.gitBranch || '',
+      parentSession: parentSessionId,
+      taskDescription: existing.taskDescription || sub.taskDescription || sub.description,
+    };
+  }
+
+  test('propagates tool state to subagent with preserved sticky fields', () => {
+    const existing = {
+      modelName: 'sonnet',
+      cwd: '/repo',
+      gitBranch: 'main',
+      taskDescription: 'fix bug',
+    };
+    const sub = { id: 'sub-1', model: 'haiku', description: 'search code' };
+    const result = buildSubagentState(existing, sub, 'reading', 'file.js', 'parent-sess');
+    assert.strictEqual(result.state, 'reading');
+    assert.strictEqual(result.detail, 'file.js');
+    assert.strictEqual(result.modelName, 'sonnet'); // preserved from existing
+    assert.strictEqual(result.taskDescription, 'fix bug'); // preserved from existing
+    assert.strictEqual(result.parentSession, 'parent-sess');
+    assert.strictEqual(result.cwd, '/repo');
+  });
+
+  test('does not write to stopped subagent session', () => {
+    const existing = { stopped: true, modelName: 'haiku' };
+    const sub = { id: 'sub-1', model: 'haiku', description: 'task' };
+    const result = buildSubagentState(existing, sub, 'coding', 'edit', 'parent');
+    assert.strictEqual(result, null);
+  });
+
+  test('falls back to sub.model when existing has no modelName', () => {
+    const existing = {};
+    const sub = { id: 'sub-1', model: 'sonnet', description: 'task' };
+    const result = buildSubagentState(existing, sub, 'searching', 'query', 'parent');
+    assert.strictEqual(result.modelName, 'sonnet');
+  });
+
+  test('falls back to "haiku" when neither existing nor sub has model', () => {
+    const existing = {};
+    const sub = { id: 'sub-1', description: 'task' };
+    const result = buildSubagentState(existing, sub, 'executing', 'cmd', 'parent');
+    assert.strictEqual(result.modelName, 'haiku');
+  });
+
+  test('taskDescription fallback: existing > sub.taskDescription > sub.description', () => {
+    // existing.taskDescription wins
+    const r1 = buildSubagentState(
+      { taskDescription: 'from-existing' },
+      { id: 'sub-1', taskDescription: 'from-sub-task', description: 'from-sub-desc' },
+      'coding', 'edit', 'p'
+    );
+    assert.strictEqual(r1.taskDescription, 'from-existing');
+
+    // sub.taskDescription next
+    const r2 = buildSubagentState(
+      {},
+      { id: 'sub-1', taskDescription: 'from-sub-task', description: 'from-sub-desc' },
+      'coding', 'edit', 'p'
+    );
+    assert.strictEqual(r2.taskDescription, 'from-sub-task');
+
+    // sub.description last
+    const r3 = buildSubagentState(
+      {},
+      { id: 'sub-1', description: 'from-sub-desc' },
+      'coding', 'edit', 'p'
+    );
+    assert.strictEqual(r3.taskDescription, 'from-sub-desc');
+  });
+
+  test('non-subagent tools trigger propagation', () => {
+    const normalTools = ['Edit', 'Read', 'Bash', 'Grep', 'Write', 'Glob'];
+    for (const tool of normalTools) {
+      assert.ok(!SUBAGENT_TOOLS.test(tool), `${tool} should NOT be a subagent tool`);
+    }
+  });
+
+  test('subagent tools do NOT trigger propagation', () => {
+    const subTools = ['Task', 'Subagent', 'spawn_agent', 'delegate', 'codex_agent', 'sessions'];
+    for (const tool of subTools) {
+      assert.ok(SUBAGENT_TOOLS.test(tool), `${tool} SHOULD be a subagent tool`);
+    }
+  });
+
+  test('parent state overridden to "subagent" during active subagents', () => {
+    const activeSubagents = [{ id: 'sub-1', description: 'task' }];
+    let state = 'coding';
+    let detail = 'editing file.js';
+
+    if (activeSubagents.length > 0 && !SUBAGENT_TOOLS.test('Edit')) {
+      state = 'subagent';
+      detail = `conducting ${activeSubagents.length}`;
+    }
+
+    assert.strictEqual(state, 'subagent');
+    assert.strictEqual(detail, 'conducting 1');
+  });
+
+  test('multiple subagents: writes to most recently started', () => {
+    const activeSubagents = [
+      { id: 'sub-1', description: 'task 1' },
+      { id: 'sub-2', description: 'task 2' },
+      { id: 'sub-3', description: 'task 3' },
+    ];
+    let state = 'reading';
+    let detail = 'file.js';
+
+    if (activeSubagents.length > 0 && !SUBAGENT_TOOLS.test('Read')) {
+      const latest = activeSubagents[activeSubagents.length - 1];
+      assert.strictEqual(latest.id, 'sub-3');
+      state = 'subagent';
+      detail = `conducting ${activeSubagents.length}`;
+    }
+
+    assert.strictEqual(state, 'subagent');
+    assert.strictEqual(detail, 'conducting 3');
+  });
+
+  test('no propagation when no active subagents', () => {
+    const activeSubagents = [];
+    let state = 'coding';
+    let detail = 'editing file.js';
+
+    if (activeSubagents.length > 0 && !SUBAGENT_TOOLS.test('Edit')) {
+      state = 'subagent';
+      detail = `conducting ${activeSubagents.length}`;
+    }
+
+    assert.strictEqual(state, 'coding');
+    assert.strictEqual(detail, 'editing file.js');
+  });
+
+  test('no propagation for subagent tool calls even with active subagents', () => {
+    const activeSubagents = [{ id: 'sub-1', description: 'task' }];
+    let state = 'subagent';
+    let detail = 'spawning';
+
+    if (activeSubagents.length > 0 && !SUBAGENT_TOOLS.test('Task')) {
+      state = 'overridden';
+      detail = 'should not happen';
+    }
+
+    assert.strictEqual(state, 'subagent');
+    assert.strictEqual(detail, 'spawning');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

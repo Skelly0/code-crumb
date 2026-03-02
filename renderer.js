@@ -545,7 +545,7 @@ function runUnifiedMode() {
     }
 
     // Periodically reload sessions
-    if (orbital.frame % (FPS * 5) === 0) orbital.loadSessions(mainSessionId);
+    if (orbital.frame % (FPS * 2) === 0) orbital.loadSessions(mainSessionId);
 
     // Periodically rescan team configs (~every 10s)
     if (orbital.frame % (FPS * 10) === 0) activeTeams = scanTeams();

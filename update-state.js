@@ -52,6 +52,25 @@ function writeSessionState(sessionId, state, detail = '', stopped = false, extra
   }
 }
 
+// Write tool state to an active subagent's session file, preserving sticky fields.
+// Mirrors the pattern in adapters/codex-wrapper.js (lines 87-98, 135-145).
+function _writeSubagentToolState(sub, state, detail, parentSessionId) {
+  try {
+    const fp = path.join(SESSIONS_DIR, safeFilename(sub.id) + '.json');
+    let existing = {};
+    try { existing = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch {}
+    if (existing.stopped) return;
+    writeSessionState(sub.id, state, detail, false, {
+      sessionId: sub.id,
+      modelName: existing.modelName || sub.model || 'haiku',
+      cwd: existing.cwd || process.cwd(),
+      gitBranch: existing.gitBranch || '',
+      parentSession: parentSessionId,
+      taskDescription: existing.taskDescription || sub.taskDescription || sub.description,
+    });
+  } catch {}
+}
+
 // Persistent stats (streaks, records, session counters)
 function readStats() {
   try {
@@ -219,6 +238,14 @@ process.stdin.on('end', () => {
           stats.records.mostSubagents = stats.session.subagentCount;
         }
       }
+
+      // Propagate tool state to active subagent orbital
+      if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName)) {
+        const latest = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
+        _writeSubagentToolState(latest, state, detail, sessionId);
+        state = 'subagent';
+        detail = `conducting ${stats.session.activeSubagents.length}`;
+      }
     }
     else if (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure') {
       // PostToolUseFailure is the same as PostToolUse but the tool execution
@@ -236,6 +263,14 @@ process.stdin.on('end', () => {
       }
 
       updateStreak(stats, state === 'error');
+
+      // Propagate tool result state to active subagent orbital
+      if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName)) {
+        const latest = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
+        _writeSubagentToolState(latest, state, detail, sessionId);
+        state = 'subagent';
+        detail = `conducting ${stats.session.activeSubagents.length}`;
+      }
     }
     else if (hookEvent === 'Stop') {
       const lastMsg = data.last_assistant_message || '';
