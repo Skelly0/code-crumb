@@ -439,7 +439,6 @@ function runUnifiedMode() {
     face.particles.fadeAll(5);
     orbital._prevClearBuf = '';  // Full clear handles it
     prevSessionListClear = '';
-    prevSessionListH = 0;
     process.stdout.write(ansi.clear);
   });
 
@@ -497,7 +496,6 @@ function runUnifiedMode() {
   let lastTime = Date.now();
   let prevFrame = null;
   let prevSessionListClear = '';
-  let prevSessionListH = 0;
   function loop() {
     const now = Date.now();
     const dt = now - lastTime;
@@ -549,12 +547,12 @@ function runUnifiedMode() {
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
 
-    let out;
+    let out = '';
+    // Pre-clear previous session list footprint so face/orbital redraws overwrite it
+    if (prevSessionListClear) out += prevSessionListClear;
     try {
-      out = face.render();
-    } catch {
-      out = '';
-    }
+      out += face.render();
+    } catch {}
     if (!minimal && face.showOrbitals && face.lastPos) {
       const paletteThemes = (PALETTES[face.paletteIndex] || PALETTES[0]).themes;
       try {
@@ -588,22 +586,18 @@ function runUnifiedMode() {
       };
       const slBounds = {};
       try { out += renderSessionList(cols, rows, subSorted, paletteThemes, mainInfo, face.sessionListIndex, slBounds); } catch {}
-      // Build clear buffer for when the overlay is dismissed or shrinks.
-      // Use max of current and previous height so shrinking clears old rows.
+      // Store current bounds so next frame's pre-clear wipes this footprint
       if (slBounds.bx != null) {
         let clr = '';
-        const clearH = Math.max(slBounds.h, prevSessionListH);
         const clearRow = ' '.repeat(slBounds.w);
-        for (let r = slBounds.by; r < slBounds.by + clearH; r++) {
+        for (let r = slBounds.by; r < slBounds.by + slBounds.h; r++) {
           clr += `\x1b[${r};${slBounds.bx}H${clearRow}`;
         }
         prevSessionListClear = clr;
-        prevSessionListH = slBounds.h;
       }
     } else if (prevSessionListClear) {
-      out += prevSessionListClear;
+      // Pre-clear already ran above; just reset state
       prevSessionListClear = '';
-      prevSessionListH = 0;
     }
 
     // Update terminal title bar to reflect current state

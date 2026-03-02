@@ -343,7 +343,7 @@ class MiniFace {
     const lbl = (this.label || '?').slice(0, BOX_W);
     const lPad = Math.max(0, Math.floor((BOX_W - lbl.length) / 2));
     buf += ansi.to(startRow + 4, startCol);
-    buf += `${lc}${' '.repeat(lPad)}${lbl}${r}`;
+    buf += `${lc}${' '.repeat(lPad)}${lbl}${' '.repeat(BOX_W - lPad - lbl.length)}${r}`;
 
     const cwdBase = this.cwd ? path.basename(this.cwd) : '';
     const statusStr = this.gitBranch
@@ -353,14 +353,12 @@ class MiniFace {
         : (theme.status || '').slice(0, BOX_W);
     const sPad = Math.max(0, Math.floor((BOX_W - statusStr.length) / 2));
     buf += ansi.to(startRow + 5, startCol);
-    buf += `${dc}${' '.repeat(sPad)}${statusStr}${r}`;
+    buf += `${dc}${' '.repeat(sPad)}${statusStr}${' '.repeat(BOX_W - sPad - statusStr.length)}${r}`;
 
-    if (this.detail) {
-      const detailStr = this.detail.slice(0, BOX_W);
-      const dPad = Math.max(0, Math.floor((BOX_W - detailStr.length) / 2));
-      buf += ansi.to(startRow + 6, startCol);
-      buf += `${dc}${' '.repeat(dPad)}${detailStr}${r}`;
-    }
+    const detailStr = (this.detail || '').slice(0, BOX_W);
+    const dPad = Math.max(0, Math.floor((BOX_W - detailStr.length) / 2));
+    buf += ansi.to(startRow + 6, startCol);
+    buf += `${dc}${' '.repeat(dPad)}${detailStr}${' '.repeat(BOX_W - dPad - detailStr.length)}${r}`;
 
     return buf;
   }

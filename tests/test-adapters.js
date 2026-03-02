@@ -980,8 +980,8 @@ describe('bug fix regressions', () => {
   test('renderer.js wraps face.render() in try-catch', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
     // Should have try { out = face.render() } catch
-    assert.ok(src.includes('out = face.render()'));
-    const renderIdx = src.indexOf('out = face.render()');
+    assert.ok(src.includes('out += face.render()'));
+    const renderIdx = src.indexOf('out += face.render()');
     const preceding = src.slice(Math.max(0, renderIdx - 30), renderIdx);
     assert.ok(preceding.includes('try'), 'face.render() should be inside a try block');
   });

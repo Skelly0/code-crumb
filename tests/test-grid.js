@@ -806,13 +806,13 @@ describe('grid.js -- MiniFace detail row rendering (#57)', () => {
     assert.ok(out.includes('foo.js'), 'render output should include detail text');
   });
 
-  test('render omits detail row when detail is empty', () => {
+  test('render writes blank detail row when detail is empty (ghost prevention)', () => {
     const face = new MiniFace('test');
     face.detail = '';
     const out = face.render(1, 1, 0, null);
-    // Row 6 should not be written — no extra ansi.to positioning beyond row 5
+    // Row 6 should always be written (with spaces) to prevent ghost artifacts
     const row6Marker = '\x1b[7;'; // ansi.to(startRow+6=7, col=1) → ESC[7;1H
-    assert.ok(!out.includes(row6Marker), 'row 6 should not be rendered when detail is empty');
+    assert.ok(out.includes(row6Marker), 'row 6 should be rendered even when detail is empty');
   });
 
   test('detail is truncated to BOX_W (8) characters', () => {
