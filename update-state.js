@@ -44,6 +44,7 @@ function writeSessionState(sessionId, state, detail = '', stopped = false, extra
     const data = JSON.stringify({
       session_id: sessionId, state, detail,
       timestamp: Date.now(), cwd: process.cwd(), stopped,
+      pid: process.ppid, // editor PID — hook runs as child, so ppid is the long-lived process
       ...extra,
     });
     fs.writeFileSync(path.join(SESSIONS_DIR, filename), data, 'utf8');
