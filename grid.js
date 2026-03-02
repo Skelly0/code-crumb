@@ -35,6 +35,15 @@ const TEAM_COLORS = [
   [255, 120, 210],  // pink
 ];
 
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function hashTeamColor(teamName) {
   if (!teamName) return TEAM_COLORS[0];
   let h = 0;
@@ -48,7 +57,7 @@ const CELL_W = 12;
 const CELL_H = 7;
 const BOX_W = 8;
 const BOX_INNER = 6;
-const STALE_MS = 30000;
+const STALE_MS = 120000;
 const STOPPED_LINGER_MS = 10000;
 const MIN_COLS_GRID = 14;
 const MIN_ROWS_GRID = 9;
@@ -422,6 +431,14 @@ class OrbitalSystem {
       return;
     }
 
+    // Build reverse map: safeFilename(faceId)+'.json' → faceId
+    // Needed BEFORE file deletion so the deletion loop can correctly find
+    // in-memory faces regardless of safeFilename() transformations.
+    const fileToFaceId = new Map();
+    for (const id of this.faces.keys()) {
+      fileToFaceId.set(safeFilename(id) + '.json', id);
+    }
+
     // Purge orphaned/finished session files — but protect active thinking faces
     const now = Date.now();
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
@@ -429,10 +446,15 @@ class OrbitalSystem {
       try {
         const fp = path.join(SESSIONS_DIR, f);
         if (now - fs.statSync(fp).mtimeMs > STALE_MS) {
-          // Don't delete files for active in-memory faces — they may just be thinking
-          const fileId = path.basename(f, '.json');
-          const knownFace = this.faces.get(fileId);
+          // Use reverse map for correct face lookup (safeFilename may transform the ID)
+          const faceId = fileToFaceId.get(f) || path.basename(f, '.json');
+          const knownFace = this.faces.get(faceId);
           if (knownFace && !knownFace.stopped && !completionStates.includes(knownFace.state)) continue;
+          // No protecting face — check file PID before deleting
+          try {
+            const data = JSON.parse(fs.readFileSync(fp, 'utf8'));
+            if (data.pid && isProcessAlive(data.pid)) continue;
+          } catch {}
           fs.unlinkSync(fp);
         }
       } catch {}
@@ -442,12 +464,6 @@ class OrbitalSystem {
     });
 
     const seenIds = new Set();
-
-    // Build reverse map: safeFilename(faceId) → faceId for protecting existing faces on read failure
-    const fileToFaceId = new Map();
-    for (const id of this.faces.keys()) {
-      fileToFaceId.set(safeFilename(id) + '.json', id);
-    }
 
     for (const file of files) {
       try {
@@ -1052,4 +1068,4 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
   return buf;
 }
 
-module.exports = { MiniFace, OrbitalSystem, hashTeamColor, renderSessionList };
+module.exports = { MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive, STALE_MS, ORPHAN_TIMEOUT };
