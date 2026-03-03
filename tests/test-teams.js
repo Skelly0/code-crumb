@@ -230,4 +230,62 @@ describe('teams -- session schema fields', () => {
   });
 });
 
+// -- Orbital Grouping with Teams -----------------------------------
+
+describe('teams.js -- Orbital grouping with team data', () => {
+  test('_buildGroups clusters teammates by teamName', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('t1'); f1.teamName = 'backend'; f1.teamColor = [255, 120, 120]; f1.isTeammate = true;
+    const f2 = new MiniFace('t2'); f2.teamName = 'backend'; f2.teamColor = [255, 120, 120]; f2.isTeammate = true;
+    const f3 = new MiniFace('t3'); f3.parentSession = 'main';
+    const groups = os._buildGroups([f1, f2, f3]);
+    const teamGroup = groups.find(g => g.key === 'backend');
+    assert.ok(teamGroup, 'should have a backend group');
+    assert.strictEqual(teamGroup.members.length, 2);
+    assert.deepStrictEqual(teamGroup.color, [255, 120, 120]);
+  });
+
+  test('tethers use team color for team groups', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('t1'); f1.teamName = 'ops'; f1.teamColor = [100, 255, 210]; f1.isTeammate = true;
+    const f2 = new MiniFace('t2'); f2.teamName = 'ops'; f2.teamColor = [100, 255, 210]; f2.isTeammate = true;
+    const positions = [
+      { col: 5, row: 2, face: f1 },
+      { col: 60, row: 2, face: f2 },
+    ];
+    const dots = [];
+    const mainPos = { col: 30, row: 15, w: 12, h: 8, centerX: 36, centerY: 19 };
+    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
+    // Tether should exist (team members grouped)
+    assert.ok(result.length > 0, 'should render tethers for team group');
+  });
+
+  test('auras show team name for team groups', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('t1'); f1.teamName = 'frontend'; f1.teamColor = [140, 255, 120];
+    const f2 = new MiniFace('t2'); f2.teamName = 'frontend'; f2.teamColor = [140, 255, 120];
+    const positions = [
+      { col: 10, row: 5, face: f1 },
+      { col: 30, row: 5, face: f2 },
+    ];
+    const dots = [];
+    const result = os._renderGroupAuras(positions, 30, 80, dots);
+    assert.ok(result.includes('frontend'), 'aura should contain team name');
+  });
+
+  test('mixed team and non-team faces form separate groups', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('t1'); f1.teamName = 'backend'; f1.isTeammate = true;
+    const f2 = new MiniFace('t2'); f2.teamName = 'backend'; f2.isTeammate = true;
+    const f3 = new MiniFace('s1'); f3.parentSession = 'main';
+    const f4 = new MiniFace('s2'); f4.parentSession = 'main';
+    const groups = os._buildGroups([f1, f2, f3, f4]);
+    assert.strictEqual(groups.length, 2);
+    const teamGroup = groups.find(g => g.key === 'backend');
+    const subGroup = groups.find(g => g.key === 'main');
+    assert.strictEqual(teamGroup.members.length, 2);
+    assert.strictEqual(subGroup.members.length, 2);
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

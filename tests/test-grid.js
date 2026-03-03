@@ -1902,4 +1902,243 @@ describe('grid.js -- updateFromFile skips redundant updates (Bug #108)', () => {
   });
 });
 
+// -- Orbital Grouping Tests ----------------------------------------
+
+describe('grid.js -- OrbitalSystem._buildGroups', () => {
+  test('groups faces by teamName', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.teamName = 'backend'; f1.teamColor = [255, 120, 120];
+    const f2 = new MiniFace('s2'); f2.teamName = 'backend'; f2.teamColor = [255, 120, 120];
+    const f3 = new MiniFace('s3'); f3.teamName = 'frontend';
+    const groups = os._buildGroups([f1, f2, f3]);
+    assert.strictEqual(groups.length, 2);
+    const backend = groups.find(g => g.key === 'backend');
+    assert.ok(backend);
+    assert.strictEqual(backend.members.length, 2);
+  });
+
+  test('groups faces by parentSession when no teamName', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main-1';
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main-1';
+    const f3 = new MiniFace('s3'); f3.parentSession = 'main-2';
+    const groups = os._buildGroups([f1, f2, f3]);
+    assert.strictEqual(groups.length, 2);
+    const g1 = groups.find(g => g.key === 'main-1');
+    assert.strictEqual(g1.members.length, 2);
+  });
+
+  test('falls back to sessionId for ungrouped faces', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1');
+    const f2 = new MiniFace('s2');
+    const groups = os._buildGroups([f1, f2]);
+    assert.strictEqual(groups.length, 2);
+    assert.strictEqual(groups[0].members.length, 1);
+    assert.strictEqual(groups[1].members.length, 1);
+  });
+
+  test('derives color from team-colored members', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.teamName = 'ops'; f1.teamColor = [100, 200, 255];
+    const f2 = new MiniFace('s2'); f2.teamName = 'ops';
+    const groups = os._buildGroups([f1, f2]);
+    assert.deepStrictEqual(groups[0].color, [100, 200, 255]);
+  });
+
+  test('color is null for non-team groups', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main';
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main';
+    const groups = os._buildGroups([f1, f2]);
+    assert.strictEqual(groups[0].color, null);
+  });
+
+  test('sorts groups by earliest firstSeen', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.teamName = 'late'; f1.firstSeen = 5000;
+    const f2 = new MiniFace('s2'); f2.teamName = 'early'; f2.firstSeen = 1000;
+    const groups = os._buildGroups([f1, f2]);
+    assert.strictEqual(groups[0].key, 'early');
+    assert.strictEqual(groups[1].key, 'late');
+  });
+
+  test('empty input returns empty groups', () => {
+    const os = new OrbitalSystem();
+    assert.strictEqual(os._buildGroups([]).length, 0);
+  });
+});
+
+describe('grid.js -- OrbitalSystem._calculateGroupedAngles', () => {
+  test('single face returns single angle at rotationAngle', () => {
+    const os = new OrbitalSystem();
+    os.rotationAngle = 1.5;
+    const f1 = new MiniFace('s1');
+    const angles = os._calculateGroupedAngles([f1]);
+    assert.strictEqual(angles.size, 1);
+    assert.strictEqual(angles.get(f1), 1.5);
+  });
+
+  test('empty input returns empty map', () => {
+    const os = new OrbitalSystem();
+    assert.strictEqual(os._calculateGroupedAngles([]).size, 0);
+  });
+
+  test('two groups cluster members with intra < inter gaps', () => {
+    const os = new OrbitalSystem();
+    os.rotationAngle = 0;
+    const f1 = new MiniFace('s1'); f1.teamName = 'alpha'; f1.firstSeen = 100;
+    const f2 = new MiniFace('s2'); f2.teamName = 'alpha'; f2.firstSeen = 200;
+    const f3 = new MiniFace('s3'); f3.teamName = 'beta'; f3.firstSeen = 300;
+    const f4 = new MiniFace('s4'); f4.teamName = 'beta'; f4.firstSeen = 400;
+    const angles = os._calculateGroupedAngles([f1, f2, f3, f4]);
+
+    // Within group alpha, the gap should be <= INTRA_GROUP_GAP
+    const intraAlpha = Math.abs(angles.get(f2) - angles.get(f1));
+    assert.ok(intraAlpha <= 0.35 + 0.001, `intra-group gap ${intraAlpha} should be <= 0.35`);
+
+    // The gap between the groups should be larger than the intra-group gap
+    const a2 = angles.get(f2); // last of alpha
+    const b1 = angles.get(f3); // first of beta
+    const interGap = b1 - a2;
+    assert.ok(interGap > intraAlpha, `inter-group gap ${interGap} should exceed intra-group ${intraAlpha}`);
+  });
+
+  test('all ungrouped approximates even spacing', () => {
+    const os = new OrbitalSystem();
+    os.rotationAngle = 0;
+    const faces = [];
+    for (let i = 0; i < 4; i++) {
+      const f = new MiniFace('s' + i);
+      f.firstSeen = i * 100;
+      faces.push(f);
+    }
+    const angles = os._calculateGroupedAngles(faces);
+
+    // Even spacing would be ~PI/2 (1.57). With singletons the gaps should be roughly similar.
+    const vals = faces.map(f => angles.get(f));
+    for (let i = 1; i < vals.length; i++) {
+      const gap = vals[i] - vals[i - 1];
+      assert.ok(gap > 0.3 && gap < 2.5, `gap ${gap} should be roughly even`);
+    }
+  });
+
+  test('returns angle for every visible face', () => {
+    const os = new OrbitalSystem();
+    os.rotationAngle = 0;
+    const faces = [];
+    for (let i = 0; i < 8; i++) {
+      const f = new MiniFace('s' + i);
+      f.parentSession = i < 4 ? 'main-a' : 'main-b';
+      f.firstSeen = i * 100;
+      faces.push(f);
+    }
+    const angles = os._calculateGroupedAngles(faces);
+    assert.strictEqual(angles.size, 8);
+    for (const f of faces) {
+      assert.ok(typeof angles.get(f) === 'number', `face ${f.sessionId} should have an angle`);
+    }
+  });
+});
+
+describe('grid.js -- OrbitalSystem._renderGroupTethers', () => {
+  test('returns empty string for singleton groups', () => {
+    const os = new OrbitalSystem();
+    const positions = [
+      { col: 10, row: 5, face: new MiniFace('s1') },
+      { col: 40, row: 5, face: new MiniFace('s2') },
+    ];
+    const dots = [];
+    const mainPos = { col: 25, row: 10, w: 12, h: 8, centerX: 31, centerY: 14 };
+    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
+    assert.strictEqual(result, '');
+    assert.strictEqual(dots.length, 0);
+  });
+
+  test('produces ANSI output for multi-member groups', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main';
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main';
+    // Space them far apart so tether dots are drawn
+    const positions = [
+      { col: 5, row: 2, face: f1 },
+      { col: 60, row: 2, face: f2 },
+    ];
+    const dots = [];
+    const mainPos = { col: 30, row: 15, w: 12, h: 8, centerX: 36, centerY: 19 };
+    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
+    assert.ok(result.length > 0, 'should produce ANSI output');
+    assert.ok(dots.length > 0, 'should track dot positions');
+  });
+});
+
+describe('grid.js -- OrbitalSystem._renderGroupAuras', () => {
+  test('returns empty string for singleton groups', () => {
+    const os = new OrbitalSystem();
+    const positions = [
+      { col: 10, row: 5, face: new MiniFace('s1') },
+      { col: 40, row: 5, face: new MiniFace('s2') },
+    ];
+    const dots = [];
+    const result = os._renderGroupAuras(positions, 30, 80, dots);
+    assert.strictEqual(result, '');
+    assert.strictEqual(dots.length, 0);
+  });
+
+  test('produces aura line for multi-member groups', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main';
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main';
+    const positions = [
+      { col: 10, row: 5, face: f1 },
+      { col: 25, row: 5, face: f2 },
+    ];
+    const dots = [];
+    const result = os._renderGroupAuras(positions, 30, 80, dots);
+    assert.ok(result.length > 0, 'should produce ANSI output');
+    assert.ok(result.includes('\u2500'), 'should contain horizontal line char');
+    assert.ok(dots.length > 0, 'should track aura positions');
+  });
+
+  test('includes team name label when teamName is set', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.teamName = 'backend'; f1.teamColor = [255, 120, 120];
+    const f2 = new MiniFace('s2'); f2.teamName = 'backend'; f2.teamColor = [255, 120, 120];
+    const positions = [
+      { col: 10, row: 5, face: f1 },
+      { col: 30, row: 5, face: f2 },
+    ];
+    const dots = [];
+    const result = os._renderGroupAuras(positions, 30, 80, dots);
+    assert.ok(result.includes('backend'), 'should contain team name label');
+  });
+
+  test('no label for non-team groups', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main';
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main';
+    const positions = [
+      { col: 10, row: 5, face: f1 },
+      { col: 30, row: 5, face: f2 },
+    ];
+    const dots = [];
+    const result = os._renderGroupAuras(positions, 30, 80, dots);
+    assert.ok(!result.includes('main'), 'should not include parentSession as label');
+  });
+
+  test('skips aura when row exceeds terminal bounds', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main';
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main';
+    // Place faces so aura row (row + MINI_H = 25 + 7 = 32) exceeds terminal height (30)
+    const positions = [
+      { col: 10, row: 25, face: f1 },
+      { col: 30, row: 25, face: f2 },
+    ];
+    const dots = [];
+    const result = os._renderGroupAuras(positions, 30, 80, dots);
+    assert.strictEqual(result, '');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
