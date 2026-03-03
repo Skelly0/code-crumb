@@ -1972,4 +1972,63 @@ describe('state-machine.js -- extractExitCode (ANSI-aware)', () => {
   });
 });
 
+// -- Bug #111: activeSubagents cleanup timeout (Bug D) --
+
+describe('update-state.js -- activeSubagents cleanup uses 10-minute timeout (Bug D)', () => {
+  test('cleanup timeout is 600000ms (10 minutes), not 180000ms (3 minutes)', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(
+      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
+    );
+    assert.ok(
+      src.includes('sub => Date.now() - sub.startedAt < 600000'),
+      'activeSubagents cleanup should use 600000ms (10 min) timeout'
+    );
+    assert.ok(
+      !src.includes('sub => Date.now() - sub.startedAt < 180000'),
+      'activeSubagents cleanup should NOT use 180000ms (3 min) timeout'
+    );
+  });
+});
+
+// -- Bug #111: Fallback SubagentStart creates orbital session file (Bug E) --
+
+describe('update-state.js -- fallback SubagentStart creates orbital (Bug E)', () => {
+  test('fallback SubagentStart path writes a session file', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(
+      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
+    );
+    // The fallback handler for SubagentStart should call writeSessionState
+    // to create the orbital session file even when stdin is malformed
+    assert.ok(
+      src.includes("} else if (hookEvent === 'SubagentStart')"),
+      'update-state.js should have a fallback handler for SubagentStart'
+    );
+    // Verify it calls writeSessionState in that block
+    const subagentStartBlock = src.split("} else if (hookEvent === 'SubagentStart')")[1];
+    assert.ok(subagentStartBlock,
+      'SubagentStart fallback block should exist');
+    // The writeSessionState call should come before the next else-if
+    const blockContent = subagentStartBlock.split('} else if')[0];
+    assert.ok(
+      blockContent.includes('writeSessionState(subId,'),
+      'fallback SubagentStart should call writeSessionState to create orbital file'
+    );
+  });
+
+  test('fallback SubagentStart includes parentSession and taskDescription', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(
+      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
+    );
+    const subagentStartBlock = src.split("} else if (hookEvent === 'SubagentStart')")[1];
+    const blockContent = subagentStartBlock.split('} else if')[0];
+    assert.ok(blockContent.includes('parentSession:'),
+      'fallback SubagentStart should include parentSession in session data');
+    assert.ok(blockContent.includes('taskDescription:'),
+      'fallback SubagentStart should include taskDescription in session data');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

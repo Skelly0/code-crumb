@@ -199,9 +199,9 @@ process.stdin.on('end', () => {
 
     // Initialize subagent tracking for synthetic orbital sessions
     if (!stats.session.activeSubagents) stats.session.activeSubagents = [];
-    // Clean up stale synthetic subagents (older than 3 minutes)
+    // Clean up stale synthetic subagents (older than 10 minutes)
     stats.session.activeSubagents = stats.session.activeSubagents.filter(
-      sub => Date.now() - sub.startedAt < 180000
+      sub => Date.now() - sub.startedAt < 600000
     );
 
     // Clear old milestones (older than 8 seconds)
@@ -547,6 +547,12 @@ process.stdin.on('end', () => {
     } else if (hookEvent === 'SubagentStart') {
       fallbackState = 'subagent';
       fallbackDetail = 'spawning subagent';
+      // Create subagent orbital file even in fallback path
+      const subId = `${fallbackSessionId}-sub-${Date.now()}`;
+      writeSessionState(subId, 'spawning', 'subagent', false, {
+        sessionId: subId, parentSession: fallbackSessionId,
+        modelName: 'haiku', taskDescription: 'subagent',
+      });
     } else if (hookEvent === 'SubagentStop') {
       fallbackState = 'happy';
       fallbackDetail = 'subagent done';

@@ -451,12 +451,17 @@ class OrbitalSystem {
           // Use reverse map for correct face lookup (safeFilename may transform the ID)
           const faceId = fileToFaceId.get(f) || path.basename(f, '.json');
           const knownFace = this.faces.get(faceId);
-          if (knownFace && !knownFace.stopped && !completionStates.includes(knownFace.state)) continue;
+          if (knownFace && !knownFace.stopped) {
+            if (!completionStates.includes(knownFace.state)) continue;  // Active non-completion: always protect
+            if (knownFace.pid && isProcessAlive(knownFace.pid)) continue;  // Completion with live PID: protect
+          }
           // No protecting face — check file PID before deleting
           try {
             const data = JSON.parse(fs.readFileSync(fp, 'utf8'));
             if (data.pid && isProcessAlive(data.pid)) continue;
-          } catch {}
+          } catch {
+            continue; // Parse failure = mid-write race — protect the file
+          }
           fs.unlinkSync(fp);
         }
       } catch {}
@@ -504,6 +509,8 @@ class OrbitalSystem {
 
     for (const [id, face] of this.faces) {
       if (!seenIds.has(id) || face.isStale()) {
+        // File gone but process alive? Keep face — file may reappear on next hook write.
+        if (!seenIds.has(id) && !face.stopped && face.pid && isProcessAlive(face.pid)) continue;
         this.faces.delete(id);
         try {
           const fp = path.join(SESSIONS_DIR, safeFilename(id) + '.json');
