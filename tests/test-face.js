@@ -148,6 +148,13 @@ describe('face.js -- ClaudeFace.setState', () => {
     assert.ok(face.particles.particles.every(p => p.style === 'push'));
   });
 
+  test('spawns fire particles on training', () => {
+    const face = new ClaudeFace();
+    face.setState('training');
+    assert.ok(face.particles.particles.length > 0);
+    assert.ok(face.particles.particles.every(p => p.style === 'fire'));
+  });
+
   test('fades old particles on state change', () => {
     const face = new ClaudeFace();
     face.particles.spawn(10, 'float');

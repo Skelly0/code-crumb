@@ -184,7 +184,7 @@ Run `npm test` (or `node test.js`). The test runner loads 12 modular test files 
 - **test-state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants incl. `REVIEW_TOOLS`, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
 - **test-themes.js**: `lerpColor`/`dimColor`/`breathe`/`dimAnsiOutput` color math, theme completeness (all 24 states), `COMPLETION_LINGER` ordering, thought bubble pools
 - **test-animations.js**: mouth/eye functions (shape and randomness)
-- **test-particles.js**: `ParticleSystem` (all 12 styles incl. stream, lifecycle, fadeAll)
+- **test-particles.js**: `ParticleSystem` (all 15 styles incl. stream, fire, lifecycle, fadeAll)
 - **test-face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline, orbital toggle)
 - **test-grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles, taskDescription label priority, SessionStart adoption, `_buildGroups` grouping/sorting/color, `_calculateGroupedAngles` sector allocation, `_renderGroupTethers` dashed sibling lines, `_renderGroupAuras` underline with labels), `renderSessionList` selection highlight and footer
 - **test-accessories.js**: accessory definitions, rendering, state-specific adornments

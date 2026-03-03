@@ -196,8 +196,28 @@ describe('state-machine.js -- toolToState', () => {
     assert.strictEqual(toolToState('Bash', { command: 'python3 finetune.py --lr 0.001' }).state, 'training');
   });
 
+  test('Bash with nohup train → training', () => {
+    assert.strictEqual(toolToState('Bash', { command: 'nohup python train.py &' }).state, 'training');
+  });
+
   test('Bash with plain python does not → training', () => {
     assert.notStrictEqual(toolToState('Bash', { command: 'python app.py' }).state, 'training');
+  });
+
+  test('torchrun --version does not → training', () => {
+    assert.notStrictEqual(toolToState('Bash', { command: 'torchrun --version' }).state, 'training');
+  });
+
+  test('accelerate config does not → training', () => {
+    assert.notStrictEqual(toolToState('Bash', { command: 'accelerate config' }).state, 'training');
+  });
+
+  test('python train_test_split.py does not → training', () => {
+    assert.notStrictEqual(toolToState('Bash', { command: 'python train_test_split.py' }).state, 'training');
+  });
+
+  test('python eval.py --batch-size does not → training', () => {
+    assert.notStrictEqual(toolToState('Bash', { command: 'python eval.py --batch-size 32' }).state, 'training');
   });
 
   test('Bash with git commit → committing', () => {
