@@ -102,6 +102,16 @@ Eleven hook event types are handled: `PreToolUse`, `PostToolUse`, `PostToolUseFa
 
 Each orbital subagent face displays a label (max 8 chars). Priority order: `teammateName` > `taskDescription` > cwd basename > `modelName` > `sub-N`. The `taskDescription` field is set once at `SubagentStart` from the agent's description/prompt and preserved across all subsequent session file writes. The live tool detail (e.g., "edit foo") shows separately below the label.
 
+### Orbital Grouping
+
+Orbital faces that share a group key (`teamName || parentSession || sessionId`) are visually clustered through three layers:
+
+1. **Cluster positioning** — group members occupy adjacent angular sectors on the ellipse (`INTRA_GROUP_GAP = 0.35 rad`) with larger gaps between groups (`INTER_GROUP_GAP = 0.15 rad`)
+2. **Group tethers** — dim dashed `·` lines chain sequential siblings (A→B, B→C) at `TETHER_BRIGHTNESS = 0.15`; team groups use the team accent color
+3. **Group auras** — dim `─` line beneath each multi-member cluster at `AURA_LINE_BRIGHTNESS = 0.25` with optional centered team name label at `AURA_LABEL_BRIGHTNESS = 0.45`
+
+Singleton groups (one member) get no tethers or auras. When all faces are ungrouped, spacing degrades gracefully to near-even distribution identical to pre-grouping behavior.
+
 ### Multi-Editor Tool Mapping
 
 Tool name patterns are defined as shared constants (`EDIT_TOOLS`, `BASH_TOOLS`, `READ_TOOLS`, `SEARCH_TOOLS`, `WEB_TOOLS`, `SUBAGENT_TOOLS`, `REVIEW_TOOLS`) in `state-machine.js`. Each pattern matches tool names from Claude Code, Codex CLI, OpenCode, and OpenClaw/Pi. The `modelName` field in state files controls the display name (e.g., "claude is thinking" vs "codex is coding" vs "openclaw is reading").
@@ -151,6 +161,11 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 | `ORPHAN_TIMEOUT` | 90000ms | grid.js (fallback staleness for sessions without PID) |
 | `MAX_ORBITALS` | 8 | grid.js (max visible orbital faces) |
 | `ROTATION_SPEED` | 0.007 rad/frame | grid.js (~1 revolution per 60s) |
+| `INTER_GROUP_GAP` | 0.15 rad | grid.js (angular space between group sectors) |
+| `INTRA_GROUP_GAP` | 0.35 rad | grid.js (angular space between faces within a group) |
+| `TETHER_BRIGHTNESS` | 0.15 | grid.js (dim factor for sibling tether dots) |
+| `AURA_LINE_BRIGHTNESS` | 0.25 | grid.js (dim factor for group aura line) |
+| `AURA_LABEL_BRIGHTNESS` | 0.45 | grid.js (dim factor for group name label) |
 
 ## Environment Variables
 
@@ -163,7 +178,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 
 ### Automated Tests
 
-Run `npm test` (or `node test.js`). The test runner loads 12 modular test files from `tests/`. The suite (~956 tests) covers:
+Run `npm test` (or `node test.js`). The test runner loads 12 modular test files from `tests/`. The suite (~1045 tests) covers:
 
 - **test-shared.js**: `safeFilename` edge cases
 - **test-state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants incl. `REVIEW_TOOLS`, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
@@ -171,9 +186,9 @@ Run `npm test` (or `node test.js`). The test runner loads 12 modular test files 
 - **test-animations.js**: mouth/eye functions (shape and randomness)
 - **test-particles.js**: `ParticleSystem` (all 12 styles incl. stream, lifecycle, fadeAll)
 - **test-face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline, orbital toggle)
-- **test-grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles, taskDescription label priority, SessionStart adoption), `renderSessionList` selection highlight and footer
+- **test-grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles, taskDescription label priority, SessionStart adoption, `_buildGroups` grouping/sorting/color, `_calculateGroupedAngles` sector allocation, `_renderGroupTethers` dashed sibling lines, `_renderGroupAuras` underline with labels), `renderSessionList` selection highlight and footer
 - **test-accessories.js**: accessory definitions, rendering, state-specific adornments
-- **test-teams.js**: `hashTeamColor` consistency and RGB output, `MiniFace` team fields, `_assignLabels` with `teammateName`, session schema for `TeammateIdle`/`TaskCompleted`
+- **test-teams.js**: `hashTeamColor` consistency and RGB output, `MiniFace` team fields, `_assignLabels` with `teammateName`, session schema for `TeammateIdle`/`TaskCompleted`, team grouping (clusters by teamName, tethers use team color, auras show team name label, mixed groups separate correctly)
 - **test-launch.js**: launcher logic, platform detection, editor flag handling
 - **test-adapters.js**: base adapter, engmux adapter, codex/opencode/openclaw adapter behavior
 - **test-transition.js**: `SwapTransition` lifecycle (start/tick/cancel), phase progression (dissolve/swap/materialize/done), `dimFactor` brightness curve, constants
