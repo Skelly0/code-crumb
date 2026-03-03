@@ -146,7 +146,7 @@ const stdoutErrorPatterns = [
   /\btest(s)? failed\b/i,
   /\d+\s+fail(ed|ing)\b/i,                          // "3 failed" (jest/pytest/code-crumb), "3 failing" (mocha)
   /^FAIL\b/m,                                        // Go test output
-  /# fail \d+/i,                                     // node --test TAP format
+  /# fail [1-9]\d*/i,                                  // node --test TAP format (excludes "# fail 0")
   /\bfailed with exit code\b/i,
   /\bnpm ERR!/,
   /\bcargo error\b/i,
@@ -187,7 +187,7 @@ const falsePositives = [
   /\b0\s+fail(ed|ing)\b/i,                          // "0 failed" / "0 failing" is success
 ];
 
-// Strip ANSI escape codes (colors, bold, etc.) so regex patterns match through them
+// Strip ANSI SGR sequences (colors, bold, underline, reset) so regex patterns match through styled output
 function stripAnsi(text) {
   return text ? text.replace(/\x1b\[[0-9;]*m/g, '') : '';
 }
@@ -246,7 +246,7 @@ const rateLimitFalsePositives = [
 ];
 
 function looksLikeRateLimit(stdout, stderr) {
-  const combined = (stdout || '') + (stderr || '');
+  const combined = stripAnsi((stdout || '') + (stderr || ''));
   const hit = rateLimitPatterns.some(p => p.test(combined));
   if (!hit) return false;
   return !rateLimitFalsePositives.some(p => p.test(combined));
@@ -262,10 +262,10 @@ function errorDetail(stdout, stderr) {
   if (/segmentation fault/i.test(combined)) return 'segfault!';
   if (/ENOENT/.test(combined)) return 'missing file/path';
   if (/syntax error/i.test(combined)) return 'syntax error';
-  if (/Traceback|at Object\.<anonymous>|Error:/.test(stdout || '')) return 'exception thrown';
   if (/Cannot find module|ModuleNotFound/i.test(combined)) return 'missing module';
+  if (/Traceback|at Object\.<anonymous>|Error:/.test(combined)) return 'exception thrown';
   if (/Compilation failed|build failed/i.test(combined)) return 'build broke';
-  if (/test(s)? failed|\d+\s+failed/i.test(combined)) return 'tests failed';
+  if (/test(s)? failed|\d+\s+fail(ed|ing)|^FAIL\b|# fail [1-9]/im.test(combined)) return 'tests failed';
   if (/npm ERR!/i.test(combined)) return 'npm error';
   return 'something went wrong';
 }
@@ -274,7 +274,7 @@ function errorDetail(stdout, stderr) {
 
 // Detect git merge conflicts in command output
 function isMergeConflict(stdout, stderr) {
-  const combined = (stdout || '') + (stderr || '');
+  const combined = stripAnsi((stdout || '') + (stderr || ''));
   return /\bCONFLICT\s+\(.*\):/.test(combined) ||
          /\bAutomatic merge failed\b/i.test(combined) ||
          /\bfix conflicts and then commit\b/i.test(combined);
@@ -348,8 +348,9 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
 
     if (isTest) {
       // Try to pull test count from stdout
-      const testCount = stdout.match(/(\d+)\s+(?:tests?|specs?)\s+passed/i)
-                       || stdout.match(/(\d+)\s+passing/i);
+      const cleanStdout = stripAnsi(stdout);
+      const testCount = cleanStdout.match(/(\d+)\s+(?:tests?|specs?)\s+passed/i)
+                       || cleanStdout.match(/(\d+)\s+passing/i);
       detail = testCount ? `${testCount[1]} tests passed` : 'tests passed';
     } else if (isBuild) {
       detail = 'build succeeded';
