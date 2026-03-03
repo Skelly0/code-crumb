@@ -21,6 +21,7 @@ const {
   looksLikeRateLimit,
   rateLimitPatterns,
   rateLimitFalsePositives,
+  stripAnsi,
   errorDetail,
   extractExitCode,
   isMergeConflict,
@@ -1862,6 +1863,112 @@ describe('state-machine.js -- subagent tool state propagation', () => {
     const result = buildSubagentSessionState({}, { id: 's1', description: 'd' }, 'p', '/c');
     const keys = Object.keys(result).sort();
     assert.deepStrictEqual(keys, ['cwd', 'gitBranch', 'modelName', 'parentSession', 'sessionId', 'taskDescription']);
+  });
+});
+
+// ================================================================
+// stripAnsi
+// ================================================================
+
+describe('state-machine.js -- stripAnsi', () => {
+  test('strips color codes', () => {
+    assert.strictEqual(stripAnsi('\x1b[31m3 failed\x1b[0m'), '3 failed');
+  });
+
+  test('strips bold/reset codes', () => {
+    assert.strictEqual(stripAnsi('\x1b[1mBOLD\x1b[0m'), 'BOLD');
+  });
+
+  test('strips compound codes (e.g. 38;5;196)', () => {
+    assert.strictEqual(stripAnsi('\x1b[38;5;196mred\x1b[0m'), 'red');
+  });
+
+  test('returns empty string for null/undefined', () => {
+    assert.strictEqual(stripAnsi(null), '');
+    assert.strictEqual(stripAnsi(undefined), '');
+  });
+
+  test('passes through plain text unchanged', () => {
+    assert.strictEqual(stripAnsi('hello world'), 'hello world');
+  });
+});
+
+// ================================================================
+// ANSI-aware error detection (Bug: "3 failed" with ANSI codes)
+// ================================================================
+
+describe('state-machine.js -- looksLikeError (ANSI + numeric failure patterns)', () => {
+  test('"3 failed" detected as error', () => {
+    assert.ok(looksLikeError('3 failed, 42 passed', stdoutErrorPatterns));
+  });
+
+  test('"3 failing" detected as error (mocha format)', () => {
+    assert.ok(looksLikeError('3 failing', stdoutErrorPatterns));
+  });
+
+  test('ANSI-wrapped "3 failed" detected as error', () => {
+    assert.ok(looksLikeError('\x1b[31m3 failed\x1b[0m, 42 passed', stdoutErrorPatterns));
+  });
+
+  test('"FAIL\\t..." (Go test output) detected as error', () => {
+    assert.ok(looksLikeError('FAIL\tgithub.com/pkg/foo\t0.5s', stdoutErrorPatterns));
+  });
+
+  test('"# fail 3" (TAP format) detected as error', () => {
+    assert.ok(looksLikeError('# fail 3', stdoutErrorPatterns));
+  });
+
+  test('"0 failed" is NOT an error (false positive guard)', () => {
+    assert.ok(!looksLikeError('0 failed, 42 passed', stdoutErrorPatterns));
+  });
+
+  test('ANSI-wrapped "0 failed" is NOT an error', () => {
+    assert.ok(!looksLikeError('\x1b[32m0 failed\x1b[0m, 42 passed', stdoutErrorPatterns));
+  });
+});
+
+describe('state-machine.js -- classifyToolResult (ANSI test failure detection)', () => {
+  test('npm test with "3 failed" in stdout → error', () => {
+    const r = classifyToolResult('Bash',
+      { command: 'npm test' },
+      { stdout: '3 failed, 42 passed' },
+      false);
+    assert.strictEqual(r.state, 'error');
+    assert.strictEqual(r.detail, 'tests failed');
+  });
+
+  test('npm test with ANSI "3 failed" in stdout → error', () => {
+    const r = classifyToolResult('Bash',
+      { command: 'npm test' },
+      { stdout: '\x1b[31m3 failed\x1b[0m, 42 passed' },
+      false);
+    assert.strictEqual(r.state, 'error');
+    assert.strictEqual(r.detail, 'tests failed');
+  });
+
+  test('npm test with "0 failed" in stdout → relieved (not error)', () => {
+    const r = classifyToolResult('Bash',
+      { command: 'npm test' },
+      { stdout: '0 failed, 42 passed' },
+      false);
+    assert.strictEqual(r.state, 'relieved');
+    assert.ok(r.detail.includes('tests passed'));
+  });
+});
+
+describe('state-machine.js -- errorDetail (ANSI-aware)', () => {
+  test('ANSI-wrapped "3 failed" → "tests failed"', () => {
+    assert.strictEqual(errorDetail('\x1b[31m3 failed\x1b[0m, 42 passed', ''), 'tests failed');
+  });
+
+  test('ANSI-wrapped "build failed" → "build broke"', () => {
+    assert.strictEqual(errorDetail('\x1b[31mbuild failed\x1b[0m', ''), 'build broke');
+  });
+});
+
+describe('state-machine.js -- extractExitCode (ANSI-aware)', () => {
+  test('ANSI-wrapped "Exit code: 1" → 1', () => {
+    assert.strictEqual(extractExitCode('\x1b[31mExit code: 1\x1b[0m'), 1);
   });
 });
 
