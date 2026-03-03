@@ -144,6 +144,9 @@ const stdoutErrorPatterns = [
   /\bCompilation failed\b/i,
   /\bbuild failed\b/i,
   /\btest(s)? failed\b/i,
+  /\d+\s+fail(ed|ing)\b/i,                          // "3 failed" (jest/pytest/code-crumb), "3 failing" (mocha)
+  /^FAIL\b/m,                                        // Go test output
+  /# fail \d+/i,                                     // node --test TAP format
   /\bfailed with exit code\b/i,
   /\bnpm ERR!/,
   /\bcargo error\b/i,
@@ -181,18 +184,25 @@ const falsePositives = [
   /Merge made by/i,                                 // git merge success ("Merge made by recursive strategy")
   /Already up.to.date/i,                            // git pull/merge when nothing to do
   /conflicts? resolved/i,                           // past-tense resolution, not an active failure
+  /\b0\s+fail(ed|ing)\b/i,                          // "0 failed" / "0 failing" is success
 ];
+
+// Strip ANSI escape codes (colors, bold, etc.) so regex patterns match through them
+function stripAnsi(text) {
+  return text ? text.replace(/\x1b\[[0-9;]*m/g, '') : '';
+}
 
 function looksLikeError(text, patterns) {
   if (!text) return false;
-  const hit = patterns.some(p => p.test(text));
+  const clean = stripAnsi(text);
+  const hit = patterns.some(p => p.test(clean));
   if (!hit) return false;
   // Check it's not a false positive
-  if (!falsePositives.some(p => p.test(text))) return true;
+  if (!falsePositives.some(p => p.test(clean))) return true;
   // If "warning" triggered the false positive, check if explicit error keywords
   // also appear (mixed warning+error output like "2 warnings, 1 error" should detect)
-  if (/warning/i.test(text) && /\berrors?\b/i.test(text)
-      && !/0 errors?\b/i.test(text) && !/no errors?\b/i.test(text) && !/errors?:\s*0\b/i.test(text)) {
+  if (/warning/i.test(clean) && /\berrors?\b/i.test(clean)
+      && !/0 errors?\b/i.test(clean) && !/no errors?\b/i.test(clean) && !/errors?:\s*0\b/i.test(clean)) {
     return true;
   }
   return false;
@@ -202,7 +212,8 @@ function looksLikeError(text, patterns) {
 // appends "Exit code: N" to the output even though it doesn't
 // give us exit_code as a field.
 function extractExitCode(stdout) {
-  const match = stdout.match(/(?:exit code|exited with|exit status|returned)[:=\s]+(\d+)/i);
+  const clean = stripAnsi(stdout);
+  const match = clean.match(/(?:exit code|exited with|exit status|returned)[:=\s]+(\d+)/i);
   return match ? parseInt(match[1], 10) : null;
 }
 
@@ -243,7 +254,7 @@ function looksLikeRateLimit(stdout, stderr) {
 
 // Friendly error detail based on what we found
 function errorDetail(stdout, stderr) {
-  const combined = (stdout || '') + (stderr || '');
+  const combined = stripAnsi((stdout || '') + (stderr || ''));
   if (isMergeConflict(stdout, stderr)) return 'merge conflict!';
   if (/command not found/i.test(combined)) return 'command not found';
   if (/permission denied/i.test(combined)) return 'permission denied';
@@ -478,6 +489,7 @@ module.exports = {
   looksLikeRateLimit,
   rateLimitPatterns,
   rateLimitFalsePositives,
+  stripAnsi,
   errorDetail,
   extractExitCode,
   classifyToolResult,
