@@ -2040,6 +2040,10 @@ describe('state-machine.js -- errorDetail (ANSI-aware)', () => {
   test('TAP "# fail 3" → "tests failed"', () => {
     assert.strictEqual(errorDetail('# fail 3', ''), 'tests failed');
   });
+
+  test('"ModuleNotFoundError: foo" → "missing module" (not "exception thrown")', () => {
+    assert.strictEqual(errorDetail('ModuleNotFoundError: foo', ''), 'missing module');
+  });
 });
 
 describe('state-machine.js -- isMergeConflict (ANSI-aware)', () => {
