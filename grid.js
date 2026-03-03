@@ -35,15 +35,6 @@ const TEAM_COLORS = [
   [255, 120, 210],  // pink
 ];
 
-function isProcessAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function hashTeamColor(teamName) {
   if (!teamName) return TEAM_COLORS[0];
   let h = 0;
@@ -102,6 +93,7 @@ class MiniFace {
     this.gitBranch = null;     // current git branch (if known)
     this.taskDescription = ''; // sticky task description from SubagentStart
     this.pid = 0;              // owning process PID for liveness detection
+    this._lastFileMtime = 0;   // Track file mtime to skip redundant updates
     this.minDisplayUntil = 0;  // Minimum display time to prevent flashing
     this.pendingState = null;  // Buffered state when minDisplayUntil blocks
     this.pendingDetail = null;
@@ -112,6 +104,12 @@ class MiniFace {
   }
 
   updateFromFile(data, fileMtimeMs) {
+    // Stopped faces don't need state updates — they're lingering until pruned
+    if (this.stopped) return;
+    // Skip if file hasn't changed since last read (prevents tick() oscillation)
+    if (fileMtimeMs && fileMtimeMs === this._lastFileMtime) return;
+    this._lastFileMtime = fileMtimeMs || 0;
+
     const newState = data.state || 'idle';
     const now = Date.now();
     if (newState !== this.state) {
@@ -166,14 +164,18 @@ class MiniFace {
   }
 
   isStale() {
-    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
-    if (this.stopped || completionStates.includes(this.state)) {
-      const staleTime = this.stopped ? this.stoppedAt : this.lastUpdate;
-      return Date.now() - staleTime > STOPPED_LINGER_MS;
+    // Stopped faces: use stoppedAt timer regardless of PID
+    if (this.stopped) {
+      return Date.now() - this.stoppedAt > STOPPED_LINGER_MS;
     }
-    // If we know the owning process, check if it's alive
+    // Non-stopped: if owning process is alive, NEVER stale
     if (this.pid && isProcessAlive(this.pid)) return false;
-    // No pid or process dead — fall back to timeout
+    // No pid or dead process: completion states get short timeout
+    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
+    if (completionStates.includes(this.state)) {
+      return Date.now() - this.lastUpdate > STOPPED_LINGER_MS;
+    }
+    // Everything else: orphan timeout
     return Date.now() - this.lastUpdate > ORPHAN_TIMEOUT;
   }
 

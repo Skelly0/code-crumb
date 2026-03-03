@@ -1136,27 +1136,55 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
       'PID 1 should be rejected to prevent immortal orbitals');
   });
 
-  test('completion state face is stale after STOPPED_LINGER_MS (10s)', () => {
+  test('completion state face (no pid) is stale after STOPPED_LINGER_MS (10s)', () => {
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     for (const state of completionStates) {
       const face = new MiniFace('test');
       face.state = state;
       face.stopped = false;
+      face.pid = 0; // no pid — falls through to completion-state timeout
       face.lastUpdate = Date.now() - 15000; // 15s ago — past STOPPED_LINGER_MS (10s)
       assert.ok(face.isStale(),
-        `completion state '${state}' past 10s should be stale`);
+        `completion state '${state}' past 10s (no pid) should be stale`);
     }
   });
 
-  test('completion state face within STOPPED_LINGER_MS is not stale', () => {
+  test('completion state face (no pid) within STOPPED_LINGER_MS is not stale', () => {
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     for (const state of completionStates) {
       const face = new MiniFace('test');
       face.state = state;
       face.stopped = false;
+      face.pid = 0; // no pid
       face.lastUpdate = Date.now() - 5000; // 5s ago — within STOPPED_LINGER_MS (10s)
       assert.ok(!face.isStale(),
-        `completion state '${state}' within 10s should not be stale`);
+        `completion state '${state}' within 10s (no pid) should not be stale`);
+    }
+  });
+
+  test('completion state face with LIVE pid is NOT stale (Bug #108 fix)', () => {
+    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
+    for (const state of completionStates) {
+      const face = new MiniFace('test');
+      face.state = state;
+      face.stopped = false;
+      face.pid = process.pid; // live process — should protect from staleness
+      face.lastUpdate = Date.now() - 200000; // 200s ago — way past any timeout
+      assert.ok(!face.isStale(),
+        `completion state '${state}' with live pid should NEVER be stale`);
+    }
+  });
+
+  test('completion state face with DEAD pid is stale after STOPPED_LINGER_MS', () => {
+    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
+    for (const state of completionStates) {
+      const face = new MiniFace('test');
+      face.state = state;
+      face.stopped = false;
+      face.pid = 999999; // dead process
+      face.lastUpdate = Date.now() - 15000; // 15s ago — past STOPPED_LINGER_MS
+      assert.ok(face.isStale(),
+        `completion state '${state}' with dead pid past 10s should be stale`);
     }
   });
 });
@@ -1799,6 +1827,90 @@ describe('grid.js -- session cleanup uses fileToFaceId and PID check', () => {
 
     // Cleanup
     try { fs.unlinkSync(filePath); } catch {}
+  });
+});
+
+// -- Bug #108: updateFromFile mtime tracking + stopped guard ---
+
+describe('grid.js -- updateFromFile skips redundant updates (Bug #108)', () => {
+  test('updateFromFile skips re-application when mtime is unchanged', () => {
+    const face = new MiniFace('test');
+    const mtime = Date.now() - 5000;
+    face.updateFromFile({ state: 'coding', detail: 'edit foo.js' }, mtime);
+    assert.strictEqual(face.state, 'coding');
+    assert.strictEqual(face.detail, 'edit foo.js');
+
+    // Second call with same mtime — should be skipped entirely
+    face.updateFromFile({ state: 'reading', detail: 'bar.js' }, mtime);
+    assert.strictEqual(face.state, 'coding',
+      'state should not change when mtime is unchanged');
+    assert.strictEqual(face.detail, 'edit foo.js',
+      'detail should not change when mtime is unchanged');
+  });
+
+  test('updateFromFile applies update when mtime changes', () => {
+    const face = new MiniFace('test');
+    const mtime1 = Date.now() - 5000;
+    face.updateFromFile({ state: 'thinking' }, mtime1);
+    assert.strictEqual(face.state, 'thinking');
+
+    // New mtime — should apply (coding can interrupt thinking)
+    face.minDisplayUntil = 0; // bypass display timer for clean test
+    const mtime2 = Date.now() - 3000;
+    face.updateFromFile({ state: 'coding' }, mtime2);
+    assert.strictEqual(face.state, 'coding',
+      'state should update when mtime changes');
+  });
+
+  test('updateFromFile skips when face is stopped', () => {
+    const face = new MiniFace('test');
+    face.updateFromFile({ state: 'coding' }, Date.now());
+    assert.strictEqual(face.state, 'coding');
+
+    // Stop the face
+    face.stopped = true;
+    face.stoppedAt = Date.now();
+
+    // Try to update — should be ignored
+    face.updateFromFile({ state: 'reading', detail: 'new stuff' }, Date.now() + 1000);
+    assert.strictEqual(face.state, 'coding',
+      'stopped face should not accept new state from file');
+  });
+
+  test('updateFromFile applies when mtime is 0 (no mtime available)', () => {
+    const face = new MiniFace('test');
+    face.updateFromFile({ state: 'thinking' }, 0);
+    assert.strictEqual(face.state, 'thinking');
+
+    // Another call with 0 mtime — should still apply (no mtime tracking)
+    face.minDisplayUntil = 0;
+    face.updateFromFile({ state: 'coding' }, 0);
+    assert.strictEqual(face.state, 'coding',
+      'should apply updates when mtime is unavailable (0)');
+  });
+
+  test('lastUpdate is NOT refreshed when mtime dedup skips the update', () => {
+    const face = new MiniFace('test');
+    const mtime = Date.now() - 30000;
+    face.updateFromFile({ state: 'coding' }, mtime);
+    const savedLastUpdate = face.lastUpdate;
+
+    // Second call with same mtime — should be skipped entirely
+    face.updateFromFile({ state: 'reading' }, mtime);
+    assert.strictEqual(face.lastUpdate, savedLastUpdate,
+      'lastUpdate must not be refreshed on a dedup skip — this prevents the staleness deadlock');
+  });
+
+  test('updateFromFile applies when no mtime argument given', () => {
+    const face = new MiniFace('test');
+    face.updateFromFile({ state: 'thinking' });
+    assert.strictEqual(face.state, 'thinking');
+
+    // Another call with undefined mtime
+    face.minDisplayUntil = 0;
+    face.updateFromFile({ state: 'coding' });
+    assert.strictEqual(face.state, 'coding',
+      'should apply updates when mtime is undefined');
   });
 });
 
