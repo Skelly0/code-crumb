@@ -65,6 +65,16 @@ function toolToState(toolName, toolInput) {
       return { state: 'installing', detail: shortCmd || 'installing' };
     }
 
+    // Detect ML training commands
+    if (/\b(python|python3|torchrun|deepspeed|accelerate)\b.*\btrain/i.test(cmd) ||
+        /\b(torchrun|deepspeed|accelerate)\s+/i.test(cmd) ||
+        /\bunsloth\b/i.test(cmd) ||
+        /\b(python|python3)\b.*\b(fine.?tune|finetune)\b/i.test(cmd) ||
+        /\b(python|python3)\b.*(--epochs?|--batch.?size|--learning.?rate|--lr)\b/i.test(cmd) ||
+        /\bnohup\b.*\btrain/i.test(cmd)) {
+      return { state: 'training', detail: shortCmd || 'training model' };
+    }
+
     // Detect git commit / push / tag operations
     if (/\bgit\s+(commit|push|tag)\b/i.test(cmd)) {
       const isPush = /\bgit\s+push\b/i.test(cmd);

@@ -43,7 +43,7 @@ describe('particles.js -- ParticleSystem', () => {
   });
 
   test('all particle styles can be spawned', () => {
-    const styles = ['float', 'sparkle', 'glitch', 'orbit', 'zzz', 'question', 'sweat', 'falling', 'speedline', 'echo', 'stream', 'heart', 'push', 'rain'];
+    const styles = ['float', 'sparkle', 'glitch', 'orbit', 'zzz', 'question', 'sweat', 'falling', 'speedline', 'echo', 'stream', 'heart', 'push', 'rain', 'fire'];
     for (const style of styles) {
       const ps = new ParticleSystem();
       ps.spawn(3, style);
@@ -79,6 +79,16 @@ describe('particles.js -- ParticleSystem', () => {
     for (const p of ps.particles) {
       assert.ok(p.life <= 12);
     }
+  });
+
+  test('fire particles rise from below', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(3, 'fire');
+    assert.strictEqual(ps.particles.length, 3);
+    ps.particles.forEach(p => {
+      assert.ok(p.vy < 0, 'fire particles should rise (negative vy)');
+      assert.strictEqual(p.style, 'fire');
+    });
   });
 
   test('orbit particles move in circles', () => {
@@ -225,7 +235,7 @@ describe('particles.js -- spawn edge cases', () => {
   });
 
   test('spawn count 0 does not crash for any style', () => {
-    const styles = ['float', 'sparkle', 'glitch', 'orbit', 'zzz', 'question', 'sweat', 'falling', 'speedline', 'echo', 'stream', 'heart', 'push', 'rain'];
+    const styles = ['float', 'sparkle', 'glitch', 'orbit', 'zzz', 'question', 'sweat', 'falling', 'speedline', 'echo', 'stream', 'heart', 'push', 'rain', 'fire'];
     for (const style of styles) {
       const ps = new ParticleSystem();
       ps.spawn(0, style);

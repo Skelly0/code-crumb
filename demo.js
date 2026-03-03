@@ -69,6 +69,7 @@ const states = [
   { state: 'sleeping',    detail: '',                      duration: 3500, label: 'Sleeping -- zzz, drifted off' },
   { state: 'waiting',     detail: 'needs input',           duration: 3000, label: 'Waiting -- needs user attention' },
   { state: 'installing',  detail: 'npm install',           duration: 3000, label: 'Installing -- packages raining down' },
+  { state: 'training',    detail: 'torchrun train.py',     duration: 5000, label: 'Training -- the forge burns, embers rise' },
   { state: 'caffeinated', detail: 'hyperdrive mode!',      duration: 3000, label: 'Caffeinated -- wired, vibrating' },
   // -- Orbital subagent sequence --
   { state: 'subagent', detail: 'spawning subagent', duration: 3000, label: 'Subagent -- first orbital spawns!',

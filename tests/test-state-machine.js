@@ -168,6 +168,38 @@ describe('state-machine.js -- toolToState', () => {
     assert.strictEqual(toolToState('Bash', { command: 'apt-get install curl' }).state, 'installing');
   });
 
+  test('Bash with python train.py → training', () => {
+    assert.strictEqual(toolToState('Bash', { command: 'python train.py' }).state, 'training');
+  });
+
+  test('Bash with torchrun → training', () => {
+    assert.strictEqual(toolToState('Bash', { command: 'torchrun --nproc_per_node=4 train.py' }).state, 'training');
+  });
+
+  test('Bash with accelerate launch → training', () => {
+    assert.strictEqual(toolToState('Bash', { command: 'accelerate launch train.py' }).state, 'training');
+  });
+
+  test('Bash with deepspeed → training', () => {
+    assert.strictEqual(toolToState('Bash', { command: 'deepspeed train.py --epochs 10' }).state, 'training');
+  });
+
+  test('Bash with unsloth → training', () => {
+    assert.strictEqual(toolToState('Bash', { command: 'unsloth finetune model' }).state, 'training');
+  });
+
+  test('Bash with --epochs flag → training', () => {
+    assert.strictEqual(toolToState('Bash', { command: 'python main.py --epochs 100 --batch-size 32' }).state, 'training');
+  });
+
+  test('Bash with python finetune → training', () => {
+    assert.strictEqual(toolToState('Bash', { command: 'python3 finetune.py --lr 0.001' }).state, 'training');
+  });
+
+  test('Bash with plain python does not → training', () => {
+    assert.notStrictEqual(toolToState('Bash', { command: 'python app.py' }).state, 'training');
+  });
+
   test('Bash with git commit → committing', () => {
     const r = toolToState('Bash', { command: 'git commit -m "feat: add thing"' });
     assert.strictEqual(r.state, 'committing');

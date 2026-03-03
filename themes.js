@@ -162,6 +162,10 @@ const themes = {
     border: [210,80,50], eye: [255,130,100], mouth: [200,90,80],
     accent: [230,100,70], label: [220,90,65], status: 'rate limited', emoji: '\u00d7',
   },
+  training: {
+    border: [210,140,30], eye: [255,190,60], mouth: [200,150,40],
+    accent: [240,170,50], label: [220,155,35], status: 'training', emoji: '\u25b2',
+  },
 };
 
 
@@ -190,6 +194,7 @@ const TIMELINE_COLORS = {
   committing:  [170, 130, 25],
   reviewing:   [90, 150, 180],
   ratelimited: [190, 60, 40],
+  training:    [180, 120, 20],
 };
 
 
@@ -274,6 +279,12 @@ const STATE_THOUGHTS = {
     'ugh, rate limited', 'are you serious', 'not again...',
     'this is annoying', 'come ON', 'blocked...',
   ],
+  training: [
+    'the weights are shifting...', 'loss decreasing...',
+    'patience is a gradient', 'epoch 42...',
+    'convergence?', 'metamorphosis...',
+    'the forge burns...', 'transmuting data...',
+  ],
 };
 
 // -- Palettes --------------------------------------------------------
@@ -323,6 +334,7 @@ const PALETTES = [
       committing:  [[255,200,0],[255,240,80],[250,210,30],[255,220,50],[255,210,20]],
       reviewing:   [[0,200,255],[100,230,255],[50,215,255],[0,220,255],[0,210,255]],
       ratelimited: [[255,60,50],[255,110,90],[240,70,60],[255,80,70],[255,70,60]],
+      training:    [[255,180,0],[255,220,60],[250,190,30],[255,200,40],[255,190,20]],
     }),
     timelineColors: {
       idle:        [0,120,180],   thinking:  [200,0,160],
@@ -337,7 +349,7 @@ const PALETTES = [
       responding:  [50,160,160],  starting:  [0,120,200],
       spawning:    [20,140,210],
       committing:  [200,160,0],   reviewing: [0,160,200],
-      ratelimited: [200,50,35],
+      ratelimited: [200,50,35],   training:  [200,145,0],
     },
   },
 
@@ -368,6 +380,7 @@ const PALETTES = [
       committing:  [[215,200,145],[235,225,175],[222,210,160],[225,210,160],[220,205,155]],
       reviewing:   [[160,210,230],[200,235,245],[180,225,238],[170,218,235],[165,214,232]],
       ratelimited: [[222,160,155],[236,185,180],[228,170,165],[230,172,165],[226,165,160]],
+      training:    [[218,195,145],[232,215,175],[225,205,160],[225,205,160],[220,200,155]],
     }),
     timelineColors: {
       idle:        [130,155,185], thinking:  [165,140,185],
@@ -382,7 +395,7 @@ const PALETTES = [
       responding:  [115,155,155],  starting: [130,145,185],
       spawning:    [145,158,198],
       committing:  [180,165,115],  reviewing: [130,175,195],
-      ratelimited: [188,125,125],
+      ratelimited: [188,125,125],  training:  [182,160,115],
     },
   },
 
@@ -413,6 +426,7 @@ const PALETTES = [
       committing:  [[185,185,185],[225,225,225],[200,200,200],[205,205,205],[195,195,195]],
       reviewing:   [[155,155,155],[200,200,200],[175,175,175],[165,165,165],[160,160,160]],
       ratelimited: [[215,215,215],[245,245,245],[225,225,225],[230,230,230],[220,220,220]],
+      training:    [[180,180,180],[220,220,220],[195,195,195],[200,200,200],[185,185,185]],
     }),
     timelineColors: {
       idle:        [100,100,100], thinking:  [140,140,140],
@@ -427,7 +441,7 @@ const PALETTES = [
       responding:  [110,110,110],  starting: [115,115,115],
       spawning:    [125,125,125],
       committing:  [155,155,155],  reviewing: [125,125,125],
-      ratelimited: [185,185,185],
+      ratelimited: [185,185,185],  training:  [150,150,150],
     },
   },
 
@@ -458,6 +472,7 @@ const PALETTES = [
       committing:  [[240,185,30],[255,220,90],[245,200,55],[250,205,45],[242,195,35]],
       reviewing:   [[180,140,200],[220,180,240],[200,160,220],[210,150,215],[195,145,208]],
       ratelimited: [[210,55,45],[245,100,90],[220,70,60],[225,65,55],[215,60,50]],
+      training:    [[230,150,20],[255,195,70],[240,170,40],[245,175,35],[235,160,25]],
     }),
     timelineColors: {
       idle:        [170,100,40],  thinking:  [120,50,130],
@@ -471,7 +486,7 @@ const PALETTES = [
       subagent:    [130,60,150],  starting:  [105,70,140],
       spawning:    [120,85,158],
       committing:  [200,155,15],  reviewing: [150,115,170],
-      ratelimited: [180,35,30],
+      ratelimited: [180,35,30],   training:  [195,125,10],
     },
   },
 
@@ -502,6 +517,7 @@ const PALETTES = [
       committing:  [[0,255,100],[100,255,200],[50,255,150],[30,255,130],[20,255,120]],
       reviewing:   [[0,220,255],[100,240,255],[50,230,255],[30,225,255],[20,222,255]],
       ratelimited: [[255,50,0],[255,100,50],[255,70,40],[255,60,30],[255,55,20]],
+      training:    [[255,200,0],[255,255,0],[255,180,0],[255,220,0],[255,210,0]],
     }),
     timelineColors: {
       idle:        [200,200,200], thinking:  [0,220,220],
@@ -516,7 +532,7 @@ const PALETTES = [
       responding:  [0,170,170],   starting:  [170,170,220],
       spawning:    [190,190,235],
       committing:  [0,220,80],    reviewing: [0,185,220],
-      ratelimited: [220,40,0],
+      ratelimited: [220,40,0],    training:  [220,170,0],
     },
   },
 ];
