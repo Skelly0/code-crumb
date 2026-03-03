@@ -1918,6 +1918,26 @@ describe('state-machine.js -- looksLikeError (ANSI + numeric failure patterns)',
     assert.ok(looksLikeError('# fail 3', stdoutErrorPatterns));
   });
 
+  test('"# fail 0" (TAP format, all passed) is NOT an error', () => {
+    assert.ok(!looksLikeError('# fail 0', stdoutErrorPatterns));
+  });
+
+  test('ANSI-wrapped "3 failing" detected as error (mocha)', () => {
+    assert.ok(looksLikeError('\x1b[31m3 failing\x1b[0m', stdoutErrorPatterns));
+  });
+
+  test('ANSI-wrapped "0 failing" is NOT an error', () => {
+    assert.ok(!looksLikeError('\x1b[32m0 failing\x1b[0m', stdoutErrorPatterns));
+  });
+
+  test('ANSI-wrapped Go "FAIL" detected as error', () => {
+    assert.ok(looksLikeError('\x1b[31mFAIL\x1b[0m\tgithub.com/pkg/foo\t0.5s', stdoutErrorPatterns));
+  });
+
+  test('ANSI-wrapped TAP "# fail 3" detected as error', () => {
+    assert.ok(looksLikeError('\x1b[31m# fail 3\x1b[0m', stdoutErrorPatterns));
+  });
+
   test('"0 failed" is NOT an error (false positive guard)', () => {
     assert.ok(!looksLikeError('0 failed, 42 passed', stdoutErrorPatterns));
   });
@@ -1954,6 +1974,42 @@ describe('state-machine.js -- classifyToolResult (ANSI test failure detection)',
     assert.strictEqual(r.state, 'relieved');
     assert.ok(r.detail.includes('tests passed'));
   });
+
+  test('npm test with "3 failing" (mocha) → error with "tests failed"', () => {
+    const r = classifyToolResult('Bash',
+      { command: 'npm test' },
+      { stdout: '3 failing' },
+      false);
+    assert.strictEqual(r.state, 'error');
+    assert.strictEqual(r.detail, 'tests failed');
+  });
+
+  test('Go "FAIL\\t..." in stdout → error with "tests failed"', () => {
+    const r = classifyToolResult('Bash',
+      { command: 'go test ./...' },
+      { stdout: 'FAIL\tgithub.com/pkg/foo\t0.5s' },
+      false);
+    assert.strictEqual(r.state, 'error');
+    assert.strictEqual(r.detail, 'tests failed');
+  });
+
+  test('ANSI-wrapped test count extracted on success path', () => {
+    const r = classifyToolResult('Bash',
+      { command: 'npm test' },
+      { stdout: '\x1b[32m42 tests passed\x1b[0m' },
+      false);
+    assert.strictEqual(r.state, 'relieved');
+    assert.strictEqual(r.detail, '42 tests passed');
+  });
+
+  test('ANSI-wrapped merge conflict detected through classifyToolResult', () => {
+    const r = classifyToolResult('Bash',
+      { command: 'git merge feature' },
+      { stdout: '\x1b[31mCONFLICT (content):\x1b[0m Merge conflict in foo.js' },
+      false);
+    assert.strictEqual(r.state, 'error');
+    assert.strictEqual(r.detail, 'merge conflict!');
+  });
 });
 
 describe('state-machine.js -- errorDetail (ANSI-aware)', () => {
@@ -1963,6 +2019,46 @@ describe('state-machine.js -- errorDetail (ANSI-aware)', () => {
 
   test('ANSI-wrapped "build failed" → "build broke"', () => {
     assert.strictEqual(errorDetail('\x1b[31mbuild failed\x1b[0m', ''), 'build broke');
+  });
+
+  test('ANSI-wrapped "Error:" in stdout → "exception thrown"', () => {
+    assert.strictEqual(errorDetail('\x1b[31mError:\x1b[0m something broke', ''), 'exception thrown');
+  });
+
+  test('"Error:" in stderr also triggers "exception thrown"', () => {
+    assert.strictEqual(errorDetail('', '\x1b[31mError:\x1b[0m stack trace here'), 'exception thrown');
+  });
+
+  test('"3 failing" (mocha) → "tests failed"', () => {
+    assert.strictEqual(errorDetail('3 failing', ''), 'tests failed');
+  });
+
+  test('Go "FAIL\\t..." → "tests failed"', () => {
+    assert.strictEqual(errorDetail('FAIL\tgithub.com/pkg/foo\t0.5s', ''), 'tests failed');
+  });
+
+  test('TAP "# fail 3" → "tests failed"', () => {
+    assert.strictEqual(errorDetail('# fail 3', ''), 'tests failed');
+  });
+});
+
+describe('state-machine.js -- isMergeConflict (ANSI-aware)', () => {
+  test('ANSI-wrapped "CONFLICT (content):" detected', () => {
+    assert.ok(isMergeConflict('\x1b[31mCONFLICT (content):\x1b[0m Merge conflict in foo.js', ''));
+  });
+
+  test('ANSI-wrapped "Automatic merge failed" detected', () => {
+    assert.ok(isMergeConflict('', '\x1b[31mAutomatic merge failed\x1b[0m'));
+  });
+});
+
+describe('state-machine.js -- looksLikeRateLimit (ANSI-aware)', () => {
+  test('ANSI-wrapped "rate limit" detected', () => {
+    assert.ok(looksLikeRateLimit('\x1b[31mrate limit exceeded\x1b[0m', ''));
+  });
+
+  test('ANSI-wrapped "too many requests" detected', () => {
+    assert.ok(looksLikeRateLimit('', '\x1b[31mtoo many requests\x1b[0m'));
   });
 });
 
