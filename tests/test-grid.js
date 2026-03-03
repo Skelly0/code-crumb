@@ -1889,6 +1889,18 @@ describe('grid.js -- updateFromFile skips redundant updates (Bug #108)', () => {
       'should apply updates when mtime is unavailable (0)');
   });
 
+  test('lastUpdate is NOT refreshed when mtime dedup skips the update', () => {
+    const face = new MiniFace('test');
+    const mtime = Date.now() - 30000;
+    face.updateFromFile({ state: 'coding' }, mtime);
+    const savedLastUpdate = face.lastUpdate;
+
+    // Second call with same mtime — should be skipped entirely
+    face.updateFromFile({ state: 'reading' }, mtime);
+    assert.strictEqual(face.lastUpdate, savedLastUpdate,
+      'lastUpdate must not be refreshed on a dedup skip — this prevents the staleness deadlock');
+  });
+
   test('updateFromFile applies when no mtime argument given', () => {
     const face = new MiniFace('test');
     face.updateFromFile({ state: 'thinking' });

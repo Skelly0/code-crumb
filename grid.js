@@ -571,10 +571,14 @@ class OrbitalSystem {
   // -- Orbital Grouping ---------------------------------------------
   // Groups visible orbitals by team/parent for clustered positioning
 
+  _groupKey(face) {
+    return face.teamName || face.parentSession || face.sessionId;
+  }
+
   _buildGroups(visible) {
     const map = new Map();
     for (const face of visible) {
-      const key = face.teamName || face.parentSession || face.sessionId;
+      const key = this._groupKey(face);
       if (!map.has(key)) map.set(key, { key, color: null, members: [] });
       map.get(key).members.push(face);
     }
@@ -755,7 +759,7 @@ class OrbitalSystem {
     // Group positions by group key
     const groupMap = new Map();
     for (const pos of positions) {
-      const key = pos.face.teamName || pos.face.parentSession || pos.face.sessionId;
+      const key = this._groupKey(pos.face);
       if (!groupMap.has(key)) groupMap.set(key, []);
       groupMap.get(key).push(pos);
     }
@@ -772,7 +776,7 @@ class OrbitalSystem {
         const a = members[m];
         const b = members[m + 1];
         const ax = a.col + Math.floor(MINI_W / 2);
-        const ay = a.row + 2; // vertical center of mini-face box
+        const ay = a.row + 2; // mouth row — vertical center of the full mini cell
         const bx = b.col + Math.floor(MINI_W / 2);
         const by = b.row + 2;
 
@@ -823,7 +827,7 @@ class OrbitalSystem {
     // Group positions by group key
     const groupMap = new Map();
     for (const pos of positions) {
-      const key = pos.face.teamName || pos.face.parentSession || pos.face.sessionId;
+      const key = this._groupKey(pos.face);
       if (!groupMap.has(key)) groupMap.set(key, []);
       groupMap.get(key).push(pos);
     }
@@ -995,7 +999,7 @@ class OrbitalSystem {
     const angleMap = this._calculateGroupedAngles(visible);
     const positions = [];
     for (let i = 0; i < n; i++) {
-      const angle = angleMap.get(visible[i]) || (Math.PI * 2 * i / n) + this.rotationAngle;
+      const angle = angleMap.get(visible[i]) ?? ((Math.PI * 2 * i / n) + this.rotationAngle);
       // Startup spawn scale for this face (0 -> 1)
       const face = visible[i];
       const scale = (face.spawning ? Math.max(0.3, face.spawnProgress / face.SPAWN_MS) : 1);
