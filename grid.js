@@ -615,9 +615,15 @@ class OrbitalSystem {
       if (now - r.mtimeMs > STALE_MS) {
         const faceId = fileToFaceId.get(r.file) || path.basename(r.file, '.json');
         const knownFace = this.faces.get(faceId);
-        if (knownFace && !knownFace.stopped && !completionStates.includes(knownFace.state)) {
-          survivingResults.push(r); // Protected — active face
-          continue;
+        if (knownFace && !knownFace.stopped) {
+          if (!completionStates.includes(knownFace.state)) {
+            survivingResults.push(r); // Protected — active non-completion face
+            continue;
+          }
+          if (knownFace.pid && isProcessAlive(knownFace.pid)) {
+            survivingResults.push(r); // Protected — completion with live PID
+            continue;
+          }
         }
         if (r.data && r.data.pid && isProcessAlive(r.data.pid)) {
           survivingResults.push(r); // Protected — process alive
@@ -634,12 +640,7 @@ class OrbitalSystem {
     const seenIds = new Set();
 
     for (const r of survivingResults) {
-      if (r.empty) {
-        const existingId = fileToFaceId.get(r.file);
-        if (existingId) seenIds.add(existingId);
-        continue;
-      }
-      if (r.error) {
+      if (r.empty || r.error) {
         const existingId = fileToFaceId.get(r.file);
         if (existingId) seenIds.add(existingId);
         continue;
@@ -661,6 +662,8 @@ class OrbitalSystem {
     // Remove faces not seen in files or stale in memory
     for (const [id, face] of this.faces) {
       if (!seenIds.has(id) || face.isStale()) {
+        // File gone but process alive? Keep face — file may reappear on next hook write.
+        if (!seenIds.has(id) && !face.stopped && face.pid && isProcessAlive(face.pid)) continue;
         this.faces.delete(id);
         if (face.isStale()) {
           const fp = path.join(SESSIONS_DIR, safeFilename(id) + '.json');

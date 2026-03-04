@@ -2495,4 +2495,80 @@ describe('grid.js -- loadSessionsAsync re-entrancy guard', () => {
   });
 });
 
+// -- _applySessionResults stale file purge --------------------------------
+
+describe('grid.js -- _applySessionResults stale purge', () => {
+  const STALE_MS = 120000;
+
+  test('protects stale file when known face is active non-completion with live PID', () => {
+    const os = new OrbitalSystem();
+    const mf = new MiniFace('sub1');
+    mf.state = 'coding';
+    mf.stopped = false;
+    mf.pid = process.pid; // Live PID so isStale() returns false after apply
+    os.faces.set('sub1', mf);
+    const results = [
+      { file: 'sub1.json', data: { session_id: 'sub1', state: 'coding', pid: process.pid }, mtimeMs: Date.now() - STALE_MS - 1000 },
+    ];
+    os._applySessionResults('main-id', results);
+    assert.ok(os.faces.has('sub1'), 'active non-completion face with live PID should survive stale purge');
+  });
+
+  test('protects stale file when completion-state face has live PID', () => {
+    const os = new OrbitalSystem();
+    const mf = new MiniFace('sub1');
+    mf.state = 'happy';
+    mf.stopped = false;
+    mf.pid = process.pid; // Current process — guaranteed alive
+    os.faces.set('sub1', mf);
+    const results = [
+      { file: 'sub1.json', data: { session_id: 'sub1', state: 'happy' }, mtimeMs: Date.now() - STALE_MS - 1000 },
+    ];
+    os._applySessionResults('main-id', results);
+    assert.ok(os.faces.has('sub1'), 'completion face with live PID should survive stale purge');
+  });
+
+  test('purges stale file when completion-state face has no live PID', () => {
+    const os = new OrbitalSystem();
+    const mf = new MiniFace('sub1');
+    mf.state = 'satisfied';
+    mf.stopped = false;
+    mf.pid = 99999999; // Almost certainly dead PID
+    os.faces.set('sub1', mf);
+    const results = [
+      { file: 'sub1.json', data: { session_id: 'sub1', state: 'satisfied', pid: 99999999 }, mtimeMs: Date.now() - STALE_MS - 1000 },
+    ];
+    os._applySessionResults('main-id', results);
+    // Face should be removed since session file was purged (not in survivingResults)
+    assert.ok(!os.faces.has('sub1'), 'completion face with dead PID should be purged');
+  });
+
+  test('purges stale file with no known face and dead file PID', () => {
+    const os = new OrbitalSystem();
+    const results = [
+      { file: 'orphan.json', data: { session_id: 'orphan', state: 'idle', pid: 99999999 }, mtimeMs: Date.now() - STALE_MS - 1000 },
+    ];
+    os._applySessionResults('main-id', results);
+    assert.ok(!os.faces.has('orphan'), 'stale orphan with dead PID should be purged');
+  });
+
+  test('protects stale file when file data has live PID but no known face', () => {
+    const os = new OrbitalSystem();
+    const results = [
+      { file: 'new-sub.json', data: { session_id: 'new-sub', state: 'thinking', pid: process.pid }, mtimeMs: Date.now() - STALE_MS - 1000 },
+    ];
+    os._applySessionResults('main-id', results);
+    assert.ok(os.faces.has('new-sub'), 'stale file with live PID should survive and create face');
+  });
+
+  test('non-stale file passes through without purge checks', () => {
+    const os = new OrbitalSystem();
+    const results = [
+      { file: 'sub1.json', data: { session_id: 'sub1', state: 'coding' }, mtimeMs: Date.now() },
+    ];
+    os._applySessionResults('main-id', results);
+    assert.ok(os.faces.has('sub1'), 'non-stale file should create face normally');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
