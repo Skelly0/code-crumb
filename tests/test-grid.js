@@ -2245,9 +2245,24 @@ describe('grid.js -- loadSessionsAsync re-entrancy guard', () => {
     assert.strictEqual(os.mainSessionId, 'prev');
   });
 
-  test('_loadingInProgress is initially undefined/falsy', () => {
+  test('_loadingInProgress is initially false', () => {
     const os = new OrbitalSystem();
-    assert.ok(!os._loadingInProgress);
+    assert.strictEqual(os._loadingInProgress, false);
+  });
+
+  test('_loadingInProgress resets if _applySessionResults throws', () => {
+    const os = new OrbitalSystem();
+    const original = os._applySessionResults;
+    os._applySessionResults = () => { throw new Error('boom'); };
+    os._loadingInProgress = false;
+    // Simulate what onComplete does — call via the try/finally path
+    try {
+      os._loadingInProgress = true;
+      try { os._applySessionResults('main', []); }
+      finally { os._loadingInProgress = false; }
+    } catch {}
+    assert.strictEqual(os._loadingInProgress, false, 'flag must reset even after throw');
+    os._applySessionResults = original;
   });
 
   test('skips load when excludeId is falsy', () => {

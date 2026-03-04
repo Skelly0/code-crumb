@@ -418,6 +418,7 @@ class OrbitalSystem {
     this._sortedCache = [];        // Cached sorted faces array
     this._sortedDirty = true;      // Rebuild cache on next getSortedFaces()
     this._prevClearBuf = '';        // Pre-built buffer to clear previous frame's orbital content
+    this._loadingInProgress = false; // Re-entrancy guard for loadSessionsAsync
   }
 
   getSortedFaces() {
@@ -545,8 +546,8 @@ class OrbitalSystem {
       if (err) { this._loadingInProgress = false; return; }
       const files = allFiles.filter(f => f.endsWith('.json'));
       if (files.length === 0) {
-        this._applySessionResults(excludeId, []);
-        this._loadingInProgress = false;
+        try { this._applySessionResults(excludeId, []); }
+        finally { this._loadingInProgress = false; }
         return;
       }
 
@@ -556,8 +557,8 @@ class OrbitalSystem {
 
       const onComplete = () => {
         if (--pending > 0) return;
-        this._applySessionResults(excludeId, results);
-        this._loadingInProgress = false;
+        try { this._applySessionResults(excludeId, results); }
+        finally { this._loadingInProgress = false; }
       };
 
       for (const file of files) {
