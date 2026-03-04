@@ -2141,4 +2141,120 @@ describe('grid.js -- OrbitalSystem._renderGroupAuras', () => {
   });
 });
 
+// -- loadSessionsAsync / _applySessionResults -------------------------
+
+describe('grid.js -- _applySessionResults', () => {
+  test('applies session data to faces map', () => {
+    const os = new OrbitalSystem();
+    const results = [
+      { file: 'sub1.json', data: { session_id: 'sub1', state: 'coding', modelName: 'claude' }, mtimeMs: Date.now() },
+      { file: 'sub2.json', data: { session_id: 'sub2', state: 'reading', modelName: 'codex' }, mtimeMs: Date.now() },
+    ];
+    os._applySessionResults('main-id', results);
+    assert.strictEqual(os.faces.size, 2);
+    assert.strictEqual(os.faces.get('sub1').state, 'coding');
+    assert.strictEqual(os.faces.get('sub2').state, 'reading');
+  });
+
+  test('excludes main session from results', () => {
+    const os = new OrbitalSystem();
+    const results = [
+      { file: 'main.json', data: { session_id: 'main-id', state: 'thinking' }, mtimeMs: Date.now() },
+      { file: 'sub1.json', data: { session_id: 'sub1', state: 'coding' }, mtimeMs: Date.now() },
+    ];
+    os._applySessionResults('main-id', results);
+    assert.strictEqual(os.faces.size, 1);
+    assert.ok(os.faces.has('sub1'));
+    assert.ok(!os.faces.has('main-id'));
+  });
+
+  test('protects existing face on empty file result', () => {
+    const os = new OrbitalSystem();
+    const mf = new MiniFace('sub1');
+    mf.state = 'coding';
+    os.faces.set('sub1', mf);
+    const results = [
+      { file: 'sub1.json', empty: true },
+    ];
+    os._applySessionResults('main-id', results);
+    assert.ok(os.faces.has('sub1'), 'face should survive empty file read');
+  });
+
+  test('protects existing face on error result', () => {
+    const os = new OrbitalSystem();
+    const mf = new MiniFace('sub1');
+    mf.state = 'reading';
+    os.faces.set('sub1', mf);
+    const results = [
+      { file: 'sub1.json', error: true },
+    ];
+    os._applySessionResults('main-id', results);
+    assert.ok(os.faces.has('sub1'), 'face should survive parse error');
+  });
+
+  test('removes faces not seen in results', () => {
+    const os = new OrbitalSystem();
+    const mf = new MiniFace('old-sub');
+    mf.state = 'idle';
+    mf.lastUpdate = Date.now();
+    os.faces.set('old-sub', mf);
+    const results = [
+      { file: 'sub1.json', data: { session_id: 'sub1', state: 'coding' }, mtimeMs: Date.now() },
+    ];
+    os._applySessionResults('main-id', results);
+    assert.ok(!os.faces.has('old-sub'), 'unseen face should be removed');
+    assert.ok(os.faces.has('sub1'));
+  });
+
+  test('marks new faces with spawning animation', () => {
+    const os = new OrbitalSystem();
+    const results = [
+      { file: 'sub1.json', data: { session_id: 'sub1', state: 'thinking' }, mtimeMs: Date.now() },
+    ];
+    os._applySessionResults('main-id', results);
+    const face = os.faces.get('sub1');
+    assert.strictEqual(face.spawning, true);
+    assert.strictEqual(face.spawnProgress, 0);
+  });
+
+  test('invalidates sorted cache when faces change', () => {
+    const os = new OrbitalSystem();
+    os._sortedDirty = false;
+    const results = [
+      { file: 'sub1.json', data: { session_id: 'sub1', state: 'coding' }, mtimeMs: Date.now() },
+    ];
+    os._applySessionResults('main-id', results);
+    assert.strictEqual(os._sortedDirty, true);
+  });
+
+  test('handles empty results array', () => {
+    const os = new OrbitalSystem();
+    os._applySessionResults('main-id', []);
+    assert.strictEqual(os.faces.size, 0);
+  });
+});
+
+describe('grid.js -- loadSessionsAsync re-entrancy guard', () => {
+  test('_loadingInProgress flag prevents concurrent loads', () => {
+    const os = new OrbitalSystem();
+    os._loadingInProgress = true;
+    os.mainSessionId = 'prev';
+    // Should bail out immediately without changing mainSessionId
+    os.loadSessionsAsync('new-id');
+    // mainSessionId should NOT be updated because we bailed out
+    assert.strictEqual(os.mainSessionId, 'prev');
+  });
+
+  test('_loadingInProgress is initially undefined/falsy', () => {
+    const os = new OrbitalSystem();
+    assert.ok(!os._loadingInProgress);
+  });
+
+  test('skips load when excludeId is falsy', () => {
+    const os = new OrbitalSystem();
+    os.loadSessionsAsync(null);
+    assert.ok(!os._loadingInProgress, 'should not set loading flag for null excludeId');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

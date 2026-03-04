@@ -345,13 +345,21 @@ function runUnifiedMode() {
 
   checkState();
 
-  // Watch state file for changes
+  // Watch state file for changes (leading-edge throttle: first event fires
+  // immediately, duplicates within 50ms are suppressed — Windows fs.watch
+  // fires multiple events per write)
+  let stateWatchThrottled = false;
   try {
     const dir = path.dirname(STATE_FILE);
     const basename = path.basename(STATE_FILE);
     fs.watch(dir, (eventType, filename) => {
-      // filename can be null on some platforms (macOS with certain filesystems)
-      if (!filename || filename === basename) checkState();
+      if (!filename || filename === basename) {
+        if (!stateWatchThrottled) {
+          stateWatchThrottled = true;
+          checkState();
+          setTimeout(() => { stateWatchThrottled = false; }, 50);
+        }
+      }
     });
   } catch {}
 
@@ -360,10 +368,9 @@ function runUnifiedMode() {
     let sessionWatchTimer = null;
     try {
       fs.watch(SESSIONS_DIR, () => {
-        checkState();
         if (sessionWatchTimer) clearTimeout(sessionWatchTimer);
         sessionWatchTimer = setTimeout(() => {
-          if (mainSessionId) orbital.loadSessions(mainSessionId);
+          if (mainSessionId) orbital.loadSessionsAsync(mainSessionId);
         }, 80);
       });
     } catch {}
@@ -545,7 +552,7 @@ function runUnifiedMode() {
     }
 
     // Periodically reload sessions
-    if (orbital.frame % (FPS * 2) === 0) orbital.loadSessions(mainSessionId);
+    if (orbital.frame % (FPS * 2) === 0) orbital.loadSessionsAsync(mainSessionId);
 
     // Periodically rescan team configs (~every 10s)
     if (orbital.frame % (FPS * 10) === 0) activeTeams = scanTeams();
