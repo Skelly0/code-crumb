@@ -2571,4 +2571,84 @@ describe('grid.js -- _applySessionResults stale purge', () => {
   });
 });
 
+// -- Bug fix: async face removal PID guard + no file deletion from face cleanup --
+
+describe('grid.js -- async face removal PID guard (Bug #2)', () => {
+  test('_applySessionResults keeps face with live PID when file missing', () => {
+    const os = new OrbitalSystem();
+    const mf = new MiniFace('sub1');
+    mf.state = 'coding';
+    mf.pid = process.pid; // our own PID — guaranteed alive
+    mf.stopped = false;
+    os.faces.set('sub1', mf);
+
+    // Empty results — file not seen, but PID is alive
+    os._applySessionResults('main-id', []);
+    assert.ok(os.faces.has('sub1'), 'face with live PID should survive missing file');
+  });
+
+  test('_applySessionResults removes face with dead PID when file missing', () => {
+    const os = new OrbitalSystem();
+    const mf = new MiniFace('sub1');
+    mf.state = 'coding';
+    mf.pid = 999999; // non-existent PID
+    mf.stopped = false;
+    os.faces.set('sub1', mf);
+
+    os._applySessionResults('main-id', []);
+    assert.ok(!os.faces.has('sub1'), 'face with dead PID should be removed when file missing');
+  });
+
+  test('_applySessionResults removes stopped face even with live PID when file missing', () => {
+    const os = new OrbitalSystem();
+    const mf = new MiniFace('sub1');
+    mf.state = 'happy';
+    mf.pid = process.pid;
+    mf.stopped = true;
+    os.faces.set('sub1', mf);
+
+    os._applySessionResults('main-id', []);
+    assert.ok(!os.faces.has('sub1'), 'stopped face should be removed even with live PID');
+  });
+
+  test('_applySessionResults removes face with no PID when file missing', () => {
+    const os = new OrbitalSystem();
+    const mf = new MiniFace('sub1');
+    mf.state = 'coding';
+    mf.pid = 0;
+    mf.stopped = false;
+    os.faces.set('sub1', mf);
+
+    os._applySessionResults('main-id', []);
+    assert.ok(!os.faces.has('sub1'), 'face with no PID should be removed when file missing');
+  });
+
+  test('_applySessionResults does not delete session files when removing stale faces', () => {
+    // Structural: the face removal loop should NOT contain fs.unlink
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../grid'), 'utf8');
+    // Find the _applySessionResults method and check the face removal section
+    const methodStart = src.indexOf('_applySessionResults(');
+    const methodBody = src.slice(methodStart, src.indexOf('\n  _assignLabels', methodStart));
+    const removalSection = methodBody.slice(methodBody.indexOf('Remove faces not seen'));
+    assert.ok(!removalSection.includes('fs.unlink'), 'face removal loop should not delete files');
+    assert.ok(!removalSection.includes('unlinkSync'), 'face removal loop should not delete files (sync)');
+  });
+});
+
+describe('grid.js -- sync face removal no file deletion (Bug #4)', () => {
+  test('loadSessions face removal does not contain unlinkSync', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../grid'), 'utf8');
+    // Find the sync loadSessions method's face removal section
+    const loadStart = src.indexOf('loadSessions(');
+    const loadEnd = src.indexOf('\n  _assignLabels', loadStart);
+    const loadBody = src.slice(loadStart, loadEnd);
+    // The PID guard line should exist, but no unlinkSync after faces.delete
+    const deleteIdx = loadBody.lastIndexOf('this.faces.delete(id)');
+    const afterDelete = loadBody.slice(deleteIdx, deleteIdx + 200);
+    assert.ok(!afterDelete.includes('unlinkSync'), 'sync face removal should not delete files');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
