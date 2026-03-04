@@ -30,6 +30,10 @@ const mouths = {
   exhale:     () => ' \u25e1 ',
   content:    () => '\u25e1\u25e1 ',
   responding: () => ' \u25e1\u25e1',
+  furnace: () => {
+    const ms = ['\u2237\u2237\u2237', '\u223f\u223f\u223f', '\u2593\u2591\u2593'];
+    return ms[Math.floor(Math.random() * ms.length)];
+  },
 };
 
 // -- Grid mouths (compact for BOX_INNER=6) -------------------------
@@ -57,6 +61,7 @@ const gridMouths = {
   committing:  '\u2550\u2550\u2550',
   reviewing:   '\u2550\u2550\u2550',
   ratelimited: '\u00b7\u00b7\u00b7',
+  training:    '\u2237\u2237\u2237',
 };
 
 // -- Eyes (2-row, full-size face) ----------------------------------
@@ -164,6 +169,15 @@ const eyes = {
   },
 
   tired() { return { left: ['▀▀', '  '], right: ['  ', '▄▄'] }; },
+
+  furnace(theme, frame) {
+    // Flickering embers — slow hypnotic pulse between glyph pairs
+    const phase = Math.floor(frame / 20) % 4;
+    if (phase === 0) return { left: ['\u25c8 ', ' \u25c8'], right: ['\u25c8 ', ' \u25c8'] };
+    if (phase === 1) return { left: ['\u25c9 ', ' \u25c9'], right: ['\u25c9 ', ' \u25c9'] };
+    if (phase === 2) return { left: [' \u25c8', '\u25c8 '], right: [' \u25c8', '\u25c8 '] };
+    return { left: [' \u25c9', '\u25c9 '], right: [' \u25c9', '\u25c9 '] };
+  },
 };
 
 module.exports = { mouths, gridMouths, eyes };

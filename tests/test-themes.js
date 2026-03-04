@@ -110,7 +110,7 @@ describe('themes.js -- themes', () => {
     'idle', 'thinking', 'coding', 'reading', 'searching', 'executing',
     'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
     'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
-    'spawning', 'committing', 'reviewing', 'ratelimited',
+    'spawning', 'committing', 'reviewing', 'ratelimited', 'training',
   ];
 
   test('every state has a theme', () => {
@@ -173,7 +173,7 @@ describe('themes.js -- thought bubbles', () => {
   });
 
   test('STATE_THOUGHTS covers active states', () => {
-    const expected = ['coding', 'reading', 'searching', 'executing', 'testing', 'installing', 'subagent', 'error'];
+    const expected = ['coding', 'reading', 'searching', 'executing', 'testing', 'installing', 'subagent', 'error', 'training'];
     for (const state of expected) {
       assert.ok(STATE_THOUGHTS[state], `missing STATE_THOUGHTS for: ${state}`);
       assert.ok(STATE_THOUGHTS[state].length > 0, `STATE_THOUGHTS.${state} should be non-empty`);
@@ -207,7 +207,7 @@ describe('themes.js -- PALETTES', () => {
     'idle', 'thinking', 'coding', 'reading', 'searching', 'executing',
     'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
     'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
-    'spawning', 'committing', 'reviewing', 'ratelimited',
+    'spawning', 'committing', 'reviewing', 'ratelimited', 'training',
   ];
 
   test('PALETTES has 6 entries', () => {

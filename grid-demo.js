@@ -24,7 +24,7 @@ function writeMainState(state, detail, sessionId) {
   }), 'utf8');
 }
 
-function writeSession(id, state, detail, cwd, stopped = false, taskDescription) {
+function writeSession(id, state, detail, cwd, stopped = false, extra = {}) {
   const filename = id.replace(/[^a-zA-Z0-9_-]/g, '_') + '.json';
   const data = {
     session_id: id,
@@ -35,8 +35,8 @@ function writeSession(id, state, detail, cwd, stopped = false, taskDescription) 
     stopped,
     modelName: 'claude',
     parentSession: mainId,
+    ...extra,
   };
-  if (taskDescription) data.taskDescription = taskDescription;
   fs.writeFileSync(path.join(SESSIONS_DIR, filename), JSON.stringify(data), 'utf8');
 }
 
@@ -46,11 +46,20 @@ function removeSession(id) {
 }
 
 const mainId = 'demo-main';
+
+// Subagents grouped by parentSession (will cluster as siblings)
 const subagents = [
-  { id: 'demo-sub-1', cwd: '/home/user/my-app/src', taskDescription: 'fix auth tests' },
-  { id: 'demo-sub-2', cwd: '/home/user/my-app/tests', taskDescription: 'add logging' },
-  { id: 'demo-sub-3', cwd: '/home/user/api-server', taskDescription: 'refactor db' },
+  { id: 'demo-sub-1', cwd: '/home/user/my-app/src', extra: { taskDescription: 'fix auth' } },
+  { id: 'demo-sub-2', cwd: '/home/user/my-app/tests', extra: { taskDescription: 'add logs' } },
 ];
+
+// Team members (will cluster with team aura label)
+const teammates = [
+  { id: 'demo-team-1', cwd: '/home/user/backend/api', extra: { teamName: 'backend', teammateName: 'alice', isTeammate: true, parentSession: null } },
+  { id: 'demo-team-2', cwd: '/home/user/backend/db', extra: { teamName: 'backend', teammateName: 'bob', isTeammate: true, parentSession: null } },
+];
+
+const allSessions = [...subagents, ...teammates];
 
 // Script: a sequence of { time (ms), actions }
 const script = [
@@ -63,51 +72,61 @@ const script = [
   },
   {
     time: 3000,
-    label: 'Main spawns subagent — first orbital appears',
+    label: 'Subagent cluster: first child spawns',
     actions: () => {
       writeMainState('subagent', 'spawning subagent', mainId);
-      writeSession(subagents[0].id, 'reading', 'reading index.ts', subagents[0].cwd, false, subagents[0].taskDescription);
+      writeSession(subagents[0].id, 'reading', 'reading index.ts', subagents[0].cwd, false, subagents[0].extra);
     },
   },
   {
-    time: 6000,
-    label: 'Second subagent spawns — two orbitals now',
+    time: 5000,
+    label: 'Subagent cluster: second child spawns (siblings cluster together)',
     actions: () => {
-      writeSession(subagents[1].id, 'testing', 'npm test', subagents[1].cwd, false, subagents[1].taskDescription);
-      writeSession(subagents[0].id, 'coding', 'editing App.tsx', subagents[0].cwd, false, subagents[0].taskDescription);
+      writeSession(subagents[1].id, 'testing', 'npm test', subagents[1].cwd, false, subagents[1].extra);
+      writeSession(subagents[0].id, 'coding', 'editing App.tsx', subagents[0].cwd, false, subagents[0].extra);
     },
   },
   {
-    time: 9000,
-    label: 'Third subagent! Full constellation. Sub-2 hits error.',
+    time: 8000,
+    label: 'Team cluster: alice joins (separate group with team aura)',
     actions: () => {
-      writeSession(subagents[2].id, 'searching', 'looking for TODO', subagents[2].cwd, false, subagents[2].taskDescription);
-      writeSession(subagents[1].id, 'error', 'tests failed (exit 1)', subagents[1].cwd, false, subagents[1].taskDescription);
+      writeSession(teammates[0].id, 'reading', 'reviewing routes', teammates[0].cwd, false, teammates[0].extra);
     },
   },
   {
-    time: 12000,
-    label: 'Sub-2 recovers, sub-1 goes caffeinated, sub-3 coding',
+    time: 10000,
+    label: 'Team cluster: bob joins alice (team "backend" clusters together)',
     actions: () => {
-      writeSession(subagents[0].id, 'caffeinated', 'hyperdrive!', subagents[0].cwd, false, subagents[0].taskDescription);
-      writeSession(subagents[1].id, 'coding', 'editing fix.ts', subagents[1].cwd, false, subagents[1].taskDescription);
-      writeSession(subagents[2].id, 'coding', 'editing handler.ts', subagents[2].cwd, false, subagents[2].taskDescription);
+      writeSession(teammates[1].id, 'searching', 'finding schema', teammates[1].cwd, false, teammates[1].extra);
+      writeSession(teammates[0].id, 'coding', 'editing api.ts', teammates[0].cwd, false, teammates[0].extra);
+      writeSession(subagents[1].id, 'error', 'tests failed', subagents[1].cwd, false, subagents[1].extra);
     },
   },
   {
-    time: 15000,
-    label: 'Sub-3 finishes and stops — orbital disappears',
+    time: 13000,
+    label: 'Both clusters active — sub-1 caffeinated, team coding',
     actions: () => {
-      writeSession(subagents[2].id, 'happy', 'all done!', subagents[2].cwd, true, subagents[2].taskDescription);
-      writeSession(subagents[0].id, 'executing', 'npm run build', subagents[0].cwd, false, subagents[0].taskDescription);
+      writeSession(subagents[0].id, 'caffeinated', 'hyperdrive!', subagents[0].cwd, false, subagents[0].extra);
+      writeSession(subagents[1].id, 'coding', 'editing fix.ts', subagents[1].cwd, false, subagents[1].extra);
+      writeSession(teammates[0].id, 'executing', 'npm run lint', teammates[0].cwd, false, teammates[0].extra);
+      writeSession(teammates[1].id, 'coding', 'editing models', teammates[1].cwd, false, teammates[1].extra);
     },
   },
   {
-    time: 18000,
-    label: 'All subagents done — main face goes happy',
+    time: 16000,
+    label: 'Team finishes — subagents still working',
     actions: () => {
-      writeSession(subagents[0].id, 'happy', 'all done!', subagents[0].cwd, true, subagents[0].taskDescription);
-      writeSession(subagents[1].id, 'happy', 'all done!', subagents[1].cwd, true, subagents[1].taskDescription);
+      writeSession(teammates[0].id, 'happy', 'all done!', teammates[0].cwd, true, teammates[0].extra);
+      writeSession(teammates[1].id, 'happy', 'all done!', teammates[1].cwd, true, teammates[1].extra);
+      writeSession(subagents[0].id, 'executing', 'npm run build', subagents[0].cwd, false, subagents[0].extra);
+    },
+  },
+  {
+    time: 19000,
+    label: 'All done — main face goes happy',
+    actions: () => {
+      writeSession(subagents[0].id, 'happy', 'all done!', subagents[0].cwd, true, subagents[0].extra);
+      writeSession(subagents[1].id, 'happy', 'all done!', subagents[1].cwd, true, subagents[1].extra);
       writeMainState('happy', 'all done!', mainId);
     },
   },
@@ -129,7 +148,7 @@ async function runDemo() {
 
   // Clean up demo files
   await new Promise(r => setTimeout(r, 8000));
-  for (const s of subagents) {
+  for (const s of allSessions) {
     removeSession(s.id);
   }
 

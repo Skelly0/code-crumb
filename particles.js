@@ -2,9 +2,9 @@
 
 // +================================================================+
 // |  Particle system -- visual effects for the face renderer        |
-// |  14 particle styles: float, sparkle, glitch, orbit, zzz,       |
+// |  15 particle styles: float, sparkle, glitch, orbit, zzz,       |
 // |  question, sweat, falling, speedline, echo, stream, heart,     |
-// |  push, rain                                                     |
+// |  push, rain, fire                                               |
 // +================================================================+
 
 const { ansi, dimColor } = require('./themes');
@@ -199,6 +199,18 @@ class ParticleSystem {
           life: 40 + Math.random() * 30,
           maxLife: 70,
           char: ['|', '\u2502', '\u2503', ':', '.', '\uff8a', '\uff9a', '\uff76'][Math.floor(Math.random() * 8)],
+          style,
+        });
+      } else if (style === 'fire') {
+        // Embers rising from below — forge/furnace aesthetic
+        this.particles.push({
+          x: this.width / 2 + (Math.random() - 0.5) * 10,
+          y: this.height - 1 - Math.random() * 2,
+          vx: (Math.random() - 0.5) * 0.12,
+          vy: -0.1 - Math.random() * 0.12,
+          life: 40 + Math.random() * 50,
+          maxLife: 90,
+          char: ['\u2022', '\u25cf', '\u00b7', '\u2666', '\u25c6', '*'][Math.floor(Math.random() * 6)],
           style,
         });
       }

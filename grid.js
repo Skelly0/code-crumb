@@ -17,6 +17,7 @@ const { gridMouths } = require('./animations');
 const ACTIVE_WORK_STATES = new Set([
   'executing', 'coding', 'reading', 'searching', 'testing',
   'installing', 'committing', 'reviewing', 'subagent', 'responding',
+  'training',
 ]);
 const INTERRUPTIBLE_STATES = new Set([
   'thinking', 'happy', 'satisfied', 'proud', 'relieved',
@@ -57,6 +58,13 @@ const SLEEP_TIMEOUT = 60000;
 const THINKING_TIMEOUT = 45000;
 const ORPHAN_TIMEOUT = 90000;  // 90s fallback for sessions without pid or whose process has exited
 const BREATHE_STEP = 200;  // Quantize breathe/pulse time to reduce frame-unique output
+
+// -- Orbital Grouping Constants ------------------------------------
+const INTER_GROUP_GAP = 0.15;      // Radians of spacing between group sectors (~8.5 deg)
+const INTRA_GROUP_GAP = 0.35;      // Radians between faces within a group (~20 deg)
+const TETHER_BRIGHTNESS = 0.15;    // Dim factor for sibling tether dots
+const AURA_LINE_BRIGHTNESS = 0.25; // Dim factor for group aura underline
+const AURA_LABEL_BRIGHTNESS = 0.45; // Dim factor for group name label in aura
 
 // Signal 0 tests process existence without killing it (works cross-platform in Node.js)
 function isProcessAlive(pid) {
@@ -568,6 +576,59 @@ class OrbitalSystem {
     }
   }
 
+  // -- Orbital Grouping ---------------------------------------------
+  // Groups visible orbitals by team/parent for clustered positioning
+
+  _buildGroups(visible) {
+    const map = new Map();
+    for (const face of visible) {
+      const key = face.teamName || face.parentSession || face.sessionId;
+      if (!map.has(key)) map.set(key, { key, color: null, members: [] });
+      map.get(key).members.push(face);
+    }
+    const groups = [...map.values()].sort((a, b) =>
+      Math.min(...a.members.map(m => m.firstSeen)) - Math.min(...b.members.map(m => m.firstSeen))
+    );
+    for (const g of groups) {
+      const teamFace = g.members.find(m => m.teamColor);
+      g.color = teamFace ? teamFace.teamColor : null;
+    }
+    return groups;
+  }
+
+  _calculateGroupedAngles(visible) {
+    const n = visible.length;
+    if (n === 0) return new Map();
+    if (n === 1) return new Map([[visible[0], this.rotationAngle]]);
+
+    const groups = this._buildGroups(visible);
+
+    // Weight per group: multi-member groups get more angular space but cluster tighter
+    let totalWeight = 0;
+    for (const g of groups) {
+      g.weight = 1.0 + 0.4 * Math.max(0, g.members.length - 1);
+      totalWeight += g.weight;
+    }
+
+    const totalGaps = groups.length * INTER_GROUP_GAP;
+    const usable = Math.PI * 2 - totalGaps;
+
+    const angles = new Map();
+    let cur = this.rotationAngle;
+
+    for (const g of groups) {
+      const sector = (g.weight / totalWeight) * usable;
+      const spacing = Math.min(INTRA_GROUP_GAP, sector / g.members.length);
+      const start = cur + (sector - spacing * (g.members.length - 1)) / 2;
+
+      for (let i = 0; i < g.members.length; i++) {
+        angles.set(g.members[i], start + i * spacing);
+      }
+      cur += sector + INTER_GROUP_GAP;
+    }
+    return angles;
+  }
+
   _buildClearBuf(facePositions, connDots, overflowInfo, rows, cols) {
     let clearBuf = '';
     // Clear mini-face rectangular regions
@@ -693,6 +754,141 @@ class OrbitalSystem {
     return out;
   }
 
+  _renderGroupTethers(positions, mainPos, accentColor, outDots) {
+    let out = '';
+    const r = ansi.reset;
+    const rows = process.stdout.rows || 24;
+    const cols = process.stdout.columns || 80;
+
+    // Group positions by group key
+    const groupMap = new Map();
+    for (const pos of positions) {
+      const key = pos.face.teamName || pos.face.parentSession || pos.face.sessionId;
+      if (!groupMap.has(key)) groupMap.set(key, []);
+      groupMap.get(key).push(pos);
+    }
+
+    for (const members of groupMap.values()) {
+      if (members.length < 2) continue; // No tether for singletons
+
+      // Use team color or dimmed accent
+      const baseColor = (members[0].face.teamColor) || accentColor;
+      const tetherColor = ansi.fg(...dimColor(baseColor, TETHER_BRIGHTNESS));
+
+      // Draw dashed line between sequential pairs (A→B, B→C, not all permutations)
+      for (let m = 0; m < members.length - 1; m++) {
+        const a = members[m];
+        const b = members[m + 1];
+        const ax = a.col + Math.floor(MINI_W / 2);
+        const ay = a.row + 2; // vertical center of mini-face box
+        const bx = b.col + Math.floor(MINI_W / 2);
+        const by = b.row + 2;
+
+        const dx = bx - ax;
+        const dy = by - ay;
+        const steps = Math.max(Math.abs(dx), Math.abs(dy));
+        if (steps < 3) continue;
+
+        for (let s = 2; s < steps - 1; s++) {
+          // Dashed: every other dot
+          if (s % 2 !== 0) continue;
+
+          const t = s / steps;
+          const col = Math.round(ax + dx * t);
+          const row = Math.round(ay + dy * t);
+
+          if (row < 1 || row >= rows || col < 1 || col >= cols) continue;
+
+          // Skip if inside either face box
+          if (col >= a.col - 1 && col <= a.col + MINI_W + 1 &&
+              row >= a.row - 1 && row <= a.row + MINI_H) continue;
+          if (col >= b.col - 1 && col <= b.col + MINI_W + 1 &&
+              row >= b.row - 1 && row <= b.row + MINI_H) continue;
+
+          // Skip if inside main face area
+          const mainLeft = mainPos.col;
+          const mainRight = mainPos.col + mainPos.w;
+          const mainTop = mainPos.row;
+          const mainBot = mainPos.row + mainPos.h;
+          const rightExclude = mainPos.bubble
+            ? mainPos.bubble.col + mainPos.bubble.w + 2
+            : mainRight + 2;
+          if (col >= mainLeft - 2 && col <= rightExclude &&
+              row >= mainTop - 8 && row <= mainBot + 7) continue;
+
+          out += `\x1b[${row};${col}H${tetherColor}\u00b7${r}`;
+          if (outDots) outDots.push(row, col);
+        }
+      }
+    }
+    return out;
+  }
+
+  _renderGroupAuras(positions, rows, cols, outDots) {
+    let out = '';
+    const r = ansi.reset;
+
+    // Group positions by group key
+    const groupMap = new Map();
+    for (const pos of positions) {
+      const key = pos.face.teamName || pos.face.parentSession || pos.face.sessionId;
+      if (!groupMap.has(key)) groupMap.set(key, []);
+      groupMap.get(key).push(pos);
+    }
+
+    for (const [key, members] of groupMap) {
+      if (members.length < 2) continue; // No aura for singletons
+
+      // Use team color or a neutral dim color
+      const baseColor = members[0].face.teamColor || [140, 170, 200];
+      const lineColor = ansi.fg(...dimColor(baseColor, AURA_LINE_BRIGHTNESS));
+      const labelColor = ansi.fg(...dimColor(baseColor, AURA_LABEL_BRIGHTNESS));
+
+      // Find horizontal extent and bottom row
+      let leftCol = Infinity, rightCol = -Infinity, bottomRow = -Infinity;
+      for (const m of members) {
+        if (m.col < leftCol) leftCol = m.col;
+        if (m.col + MINI_W > rightCol) rightCol = m.col + MINI_W;
+        if (m.row + MINI_H > bottomRow) bottomRow = m.row + MINI_H;
+      }
+
+      const auraRow = bottomRow; // directly below the bottommost face
+      if (auraRow >= rows || auraRow < 1) continue; // off screen
+      leftCol = Math.max(1, leftCol);
+      rightCol = Math.min(cols, rightCol);
+
+      const lineLen = rightCol - leftCol;
+      if (lineLen < 3) continue;
+
+      // Get team name label (only for team groups)
+      const teamName = members[0].face.teamName;
+      const label = teamName ? teamName.slice(0, 12) : '';
+
+      if (label && lineLen > label.length + 4) {
+        const labelStart = leftCol + Math.floor((lineLen - label.length) / 2);
+        const leftSegLen = labelStart - leftCol - 1;
+        const rightSegStart = labelStart + label.length + 1;
+        const rightSegLen = rightCol - rightSegStart;
+
+        if (leftSegLen > 0) {
+          out += `\x1b[${auraRow};${leftCol}H${lineColor}${'\u2500'.repeat(leftSegLen)} ${r}`;
+        }
+        out += `\x1b[${auraRow};${labelStart}H${labelColor}${label}${r}`;
+        if (rightSegLen > 0) {
+          out += `\x1b[${auraRow};${rightSegStart}H${lineColor} ${'\u2500'.repeat(rightSegLen)}${r}`;
+        }
+      } else {
+        out += `\x1b[${auraRow};${leftCol}H${lineColor}${'\u2500'.repeat(lineLen)}${r}`;
+      }
+
+      // Track for clearing
+      for (let c = leftCol; c < rightCol; c++) {
+        if (outDots) outDots.push(auraRow, c);
+      }
+    }
+    return out;
+  }
+
   update(dt) {
     this.time += dt;
     this.frame++;
@@ -803,10 +999,11 @@ class OrbitalSystem {
     const overflow = sorted.length - visible.length;
     const n = visible.length;
 
-    // Calculate orbital positions
+    // Calculate grouped orbital positions (clustered by team/parent)
+    const angleMap = this._calculateGroupedAngles(visible);
     const positions = [];
     for (let i = 0; i < n; i++) {
-      const angle = (Math.PI * 2 * i / n) + this.rotationAngle;
+      const angle = angleMap.get(visible[i]) || (Math.PI * 2 * i / n) + this.rotationAngle;
       // Startup spawn scale for this face (0 -> 1)
       const face = visible[i];
       const scale = (face.spawning ? Math.max(0.3, face.spawnProgress / face.SPAWN_MS) : 1);
@@ -847,8 +1044,11 @@ class OrbitalSystem {
     const themeMap = paletteThemes || themes;
     const accentColor = (themeMap.subagent || themeMap.idle).accent || [100, 160, 210];
 
-    // Render connection lines (tracking dot positions for next frame's clear)
+    // Render group tethers (dimmest layer — background structure between siblings)
     const connDots = [];
+    buf += this._renderGroupTethers(positions, mainPos, accentColor, connDots);
+
+    // Render connection lines to main face (brighter pulsing — active data channels)
     buf += this._renderConnections(mainPos, positions, accentColor, connDots);
 
     // Render each mini-face at its orbital position
@@ -858,6 +1058,9 @@ class OrbitalSystem {
         this.time, paletteThemes
       );
     }
+
+    // Render group auras (dim underline beneath clustered groups)
+    buf += this._renderGroupAuras(positions, rows, cols, connDots);
 
     // Overflow indicator
     let overflowInfo = null;
@@ -1077,4 +1280,8 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
   return buf;
 }
 
-module.exports = { MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive, STALE_MS, ORPHAN_TIMEOUT };
+module.exports = {
+  MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
+  STALE_MS, ORPHAN_TIMEOUT,
+  INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, AURA_LINE_BRIGHTNESS, AURA_LABEL_BRIGHTNESS,
+};
