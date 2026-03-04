@@ -63,8 +63,7 @@ const BREATHE_STEP = 200;  // Quantize breathe/pulse time to reduce frame-unique
 const INTER_GROUP_GAP = 0.15;      // Radians of spacing between group sectors (~8.5 deg)
 const INTRA_GROUP_GAP = 0.35;      // Radians between faces within a group (~20 deg)
 const TETHER_BRIGHTNESS = 0.15;    // Dim factor for sibling tether dots
-const AURA_LINE_BRIGHTNESS = 0.25; // Dim factor for group aura underline
-const AURA_LABEL_BRIGHTNESS = 0.45; // Dim factor for group name label in aura
+const GROUP_LABEL_BRIGHTNESS = 0.45; // Dim factor for floating group label
 
 // Signal 0 tests process existence without killing it (works cross-platform in Node.js)
 function isProcessAlive(pid) {
@@ -736,7 +735,7 @@ class OrbitalSystem {
     return groups;
   }
 
-  _calculateGroupedAngles(visible) {
+  _calculateGroupedAngles(visible, semiMajorA) {
     const n = visible.length;
     if (n === 0) return new Map();
     if (n === 1) return new Map([[visible[0], this.rotationAngle]]);
@@ -753,12 +752,15 @@ class OrbitalSystem {
     const totalGaps = groups.length * INTER_GROUP_GAP;
     const usable = Math.PI * 2 - totalGaps;
 
+    // Pixel-aware minimum: ensure faces don't overlap even on small ellipses
+    const minPixelGap = semiMajorA > 0 ? (MINI_W + 1) / semiMajorA : INTRA_GROUP_GAP;
+
     const angles = new Map();
     let cur = this.rotationAngle;
 
     for (const g of groups) {
       const sector = (g.weight / totalWeight) * usable;
-      const spacing = Math.min(INTRA_GROUP_GAP, sector / g.members.length);
+      const spacing = Math.max(minPixelGap, Math.min(INTRA_GROUP_GAP, sector / g.members.length));
       const start = cur + (sector - spacing * (g.members.length - 1)) / 2;
 
       for (let i = 0; i < g.members.length; i++) {
@@ -767,6 +769,50 @@ class OrbitalSystem {
       cur += sector + INTER_GROUP_GAP;
     }
     return angles;
+  }
+
+  _resolveOverlaps(positions, cols, rows) {
+    const maxIter = 3;
+    for (let iter = 0; iter < maxIter; iter++) {
+      let moved = false;
+      for (let i = 0; i < positions.length; i++) {
+        for (let j = i + 1; j < positions.length; j++) {
+          const a = positions[i];
+          const b = positions[j];
+          // Check bounding box overlap (MINI_W x MINI_H)
+          const overlapX = Math.min(a.col + MINI_W, b.col + MINI_W) - Math.max(a.col, b.col);
+          const overlapY = Math.min(a.row + MINI_H, b.row + MINI_H) - Math.max(a.row, b.row);
+          if (overlapX <= 0 || overlapY <= 0) continue;
+
+          moved = true;
+          // Push apart along axis with less overlap
+          if (overlapX <= overlapY) {
+            // Horizontal push — bias toward face with more room
+            const roomLeft = Math.min(a.col - 1, b.col - 1);
+            const roomRight = Math.min(cols - MINI_W - a.col, cols - MINI_W - b.col);
+            const nudge = Math.ceil(overlapX / 2);
+            if (a.col <= b.col) {
+              a.col = Math.max(1, a.col - nudge);
+              b.col = Math.min(cols - MINI_W, b.col + nudge);
+            } else {
+              b.col = Math.max(1, b.col - nudge);
+              a.col = Math.min(cols - MINI_W, a.col + nudge);
+            }
+          } else {
+            // Vertical push
+            const nudge = Math.ceil(overlapY / 2);
+            if (a.row <= b.row) {
+              a.row = Math.max(1, a.row - nudge);
+              b.row = Math.min(rows - MINI_H, b.row + nudge);
+            } else {
+              b.row = Math.max(1, b.row - nudge);
+              a.row = Math.min(rows - MINI_H, a.row + nudge);
+            }
+          }
+        }
+      }
+      if (!moved) break;
+    }
   }
 
   _buildClearBuf(facePositions, connDots, overflowInfo, rows, cols) {
@@ -871,9 +917,13 @@ class OrbitalSystem {
         if (col >= mainLeft - 2 && col <= rightExclude &&
             row >= mainTop - 8 && row <= mainBot + 7) continue;
 
-        // Skip if inside orbital box
-        if (col >= pos.col - 1 && col <= pos.col + MINI_W + 1 &&
-            row >= pos.row - 1 && row <= pos.row + MINI_H) continue;
+        // Skip if inside ANY orbital face box
+        let hitFace = false;
+        for (const fp of positions) {
+          if (col >= fp.col - 1 && col <= fp.col + MINI_W + 1 &&
+              row >= fp.row - 1 && row <= fp.row + MINI_H) { hitFace = true; break; }
+        }
+        if (hitFace) continue;
 
         // Skip if out of bounds
         if (row < 1 || row >= (process.stdout.rows || 24) || col < 1 || col >= (process.stdout.columns || 80)) continue;
@@ -919,6 +969,10 @@ class OrbitalSystem {
       for (let m = 0; m < members.length - 1; m++) {
         const a = members[m];
         const b = members[m + 1];
+
+        // Skip tether segments where either endpoint is spawning
+        if (a.face.spawning || b.face.spawning) continue;
+
         const ax = a.col + Math.floor(MINI_W / 2);
         const ay = a.row + 2; // vertical center of mini-face box
         const bx = b.col + Math.floor(MINI_W / 2);
@@ -939,11 +993,13 @@ class OrbitalSystem {
 
           if (row < 1 || row >= rows || col < 1 || col >= cols) continue;
 
-          // Skip if inside either face box
-          if (col >= a.col - 1 && col <= a.col + MINI_W + 1 &&
-              row >= a.row - 1 && row <= a.row + MINI_H) continue;
-          if (col >= b.col - 1 && col <= b.col + MINI_W + 1 &&
-              row >= b.row - 1 && row <= b.row + MINI_H) continue;
+          // Skip if inside ANY face bounding box (not just endpoints)
+          let insideFace = false;
+          for (const fp of positions) {
+            if (col >= fp.col - 1 && col <= fp.col + MINI_W + 1 &&
+                row >= fp.row - 1 && row <= fp.row + MINI_H) { insideFace = true; break; }
+          }
+          if (insideFace) continue;
 
           // Skip if inside main face area
           const mainLeft = mainPos.col;
@@ -964,7 +1020,7 @@ class OrbitalSystem {
     return out;
   }
 
-  _renderGroupAuras(positions, rows, cols, outDots) {
+  _renderGroupLabels(positions, rows, cols, outDots, mainPos) {
     let out = '';
     const r = ansi.reset;
 
@@ -976,54 +1032,54 @@ class OrbitalSystem {
       groupMap.get(key).push(pos);
     }
 
+    // Main face exclusion zone (same as tethers)
+    const mainRight = mainPos ? mainPos.col + mainPos.w : 0;
+    const rightExclude = (mainPos && mainPos.bubble)
+      ? mainPos.bubble.col + mainPos.bubble.w + 2
+      : mainRight + 2;
+
     for (const [key, members] of groupMap) {
-      if (members.length < 2) continue; // No aura for singletons
+      if (members.length < 2) continue; // No label for singletons
 
-      // Use team color or a neutral dim color
-      const baseColor = members[0].face.teamColor || [140, 170, 200];
-      const lineColor = ansi.fg(...dimColor(baseColor, AURA_LINE_BRIGHTNESS));
-      const labelColor = ansi.fg(...dimColor(baseColor, AURA_LABEL_BRIGHTNESS));
+      // Filter out spawning faces for extent calculation
+      const stable = members.filter(m => !m.face.spawning);
+      if (stable.length < 2) continue; // Need 2+ non-spawning to show label
 
-      // Find horizontal extent and bottom row
-      let leftCol = Infinity, rightCol = -Infinity, bottomRow = -Infinity;
-      for (const m of members) {
-        if (m.col < leftCol) leftCol = m.col;
-        if (m.col + MINI_W > rightCol) rightCol = m.col + MINI_W;
-        if (m.row + MINI_H > bottomRow) bottomRow = m.row + MINI_H;
-      }
-
-      const auraRow = bottomRow; // directly below the bottommost face
-      if (auraRow >= rows || auraRow < 1) continue; // off screen
-      leftCol = Math.max(1, leftCol);
-      rightCol = Math.min(cols, rightCol);
-
-      const lineLen = rightCol - leftCol;
-      if (lineLen < 3) continue;
-
-      // Get team name label (only for team groups)
+      // Get label text: team name or first member's face label
       const teamName = members[0].face.teamName;
-      const label = teamName ? teamName.slice(0, 12) : '';
+      const label = (teamName ? teamName : (stable[0].face.label || '')).slice(0, 12);
+      if (!label) continue;
 
-      if (label && lineLen > label.length + 4) {
-        const labelStart = leftCol + Math.floor((lineLen - label.length) / 2);
-        const leftSegLen = labelStart - leftCol - 1;
-        const rightSegStart = labelStart + label.length + 1;
-        const rightSegLen = rightCol - rightSegStart;
-
-        if (leftSegLen > 0) {
-          out += `\x1b[${auraRow};${leftCol}H${lineColor}${'\u2500'.repeat(leftSegLen)} ${r}`;
-        }
-        out += `\x1b[${auraRow};${labelStart}H${labelColor}${label}${r}`;
-        if (rightSegLen > 0) {
-          out += `\x1b[${auraRow};${rightSegStart}H${lineColor} ${'\u2500'.repeat(rightSegLen)}${r}`;
-        }
-      } else {
-        out += `\x1b[${auraRow};${leftCol}H${lineColor}${'\u2500'.repeat(lineLen)}${r}`;
+      // Position: below the bottommost stable face, centered horizontally
+      let bottomRow = -Infinity;
+      let sumCol = 0;
+      for (const m of stable) {
+        if (m.row + MINI_H > bottomRow) bottomRow = m.row + MINI_H;
+        sumCol += m.col + MINI_W / 2;
       }
+      const labelRow = bottomRow; // just below group
+      const centroid = sumCol / stable.length;
+      let labelCol = Math.round(centroid - label.length / 2);
+
+      // Clamp to terminal bounds
+      labelCol = Math.max(1, Math.min(cols - label.length, labelCol));
+      if (labelRow < 1 || labelRow >= rows) continue;
+
+      // Skip if label overlaps main face area
+      if (mainPos) {
+        const labelRight = labelCol + label.length;
+        if (labelCol <= rightExclude && labelRight >= mainPos.col - 2 &&
+            labelRow >= mainPos.row - 8 && labelRow <= mainPos.row + mainPos.h + 7) continue;
+      }
+
+      // Render with dimmed color
+      const baseColor = members[0].face.teamColor || [140, 170, 200];
+      const color = ansi.fg(...dimColor(baseColor, GROUP_LABEL_BRIGHTNESS));
+      out += `\x1b[${labelRow};${labelCol}H${color}${label}${r}`;
 
       // Track for clearing
-      for (let c = leftCol; c < rightCol; c++) {
-        if (outDots) outDots.push(auraRow, c);
+      for (let c = labelCol; c < labelCol + label.length; c++) {
+        if (outDots) outDots.push(labelRow, c);
       }
     }
     return out;
@@ -1140,7 +1196,7 @@ class OrbitalSystem {
     const n = visible.length;
 
     // Calculate grouped orbital positions (clustered by team/parent)
-    const angleMap = this._calculateGroupedAngles(visible);
+    const angleMap = this._calculateGroupedAngles(visible, a);
     const positions = [];
     for (let i = 0; i < n; i++) {
       const angle = angleMap.get(visible[i]) || (Math.PI * 2 * i / n) + this.rotationAngle;
@@ -1180,6 +1236,9 @@ class OrbitalSystem {
       positions.push({ col: clampedCol, row: clampedRow, face: visible[i] });
     }
 
+    // Resolve any remaining overlaps between orbital faces
+    this._resolveOverlaps(positions, cols, rows);
+
     // Get accent color for connections from the theme
     const themeMap = paletteThemes || themes;
     const accentColor = (themeMap.subagent || themeMap.idle).accent || [100, 160, 210];
@@ -1199,8 +1258,8 @@ class OrbitalSystem {
       );
     }
 
-    // Render group auras (dim underline beneath clustered groups)
-    buf += this._renderGroupAuras(positions, rows, cols, connDots);
+    // Render floating group labels beneath clustered groups
+    buf += this._renderGroupLabels(positions, rows, cols, connDots, mainPos);
 
     // Overflow indicator
     let overflowInfo = null;
@@ -1423,5 +1482,5 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
   STALE_MS, ORPHAN_TIMEOUT,
-  INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, AURA_LINE_BRIGHTNESS, AURA_LABEL_BRIGHTNESS,
+  INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, GROUP_LABEL_BRIGHTNESS,
 };

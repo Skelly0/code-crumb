@@ -2295,7 +2295,7 @@ describe('grid.js -- OrbitalSystem._renderGroupTethers', () => {
   });
 });
 
-describe('grid.js -- OrbitalSystem._renderGroupAuras', () => {
+describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
   test('returns empty string for singleton groups', () => {
     const os = new OrbitalSystem();
     const positions = [
@@ -2303,27 +2303,28 @@ describe('grid.js -- OrbitalSystem._renderGroupAuras', () => {
       { col: 40, row: 5, face: new MiniFace('s2') },
     ];
     const dots = [];
-    const result = os._renderGroupAuras(positions, 30, 80, dots);
+    const mainPos = { col: 30, row: 15, w: 12, h: 8, centerX: 36, centerY: 19 };
+    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
     assert.strictEqual(result, '');
     assert.strictEqual(dots.length, 0);
   });
 
-  test('produces aura line for multi-member groups', () => {
+  test('produces label text for multi-member groups', () => {
     const os = new OrbitalSystem();
-    const f1 = new MiniFace('s1'); f1.parentSession = 'main';
-    const f2 = new MiniFace('s2'); f2.parentSession = 'main';
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main'; f1.label = 'sub-1';
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main'; f2.label = 'sub-2';
     const positions = [
       { col: 10, row: 5, face: f1 },
       { col: 25, row: 5, face: f2 },
     ];
     const dots = [];
-    const result = os._renderGroupAuras(positions, 30, 80, dots);
+    const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
+    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
     assert.ok(result.length > 0, 'should produce ANSI output');
-    assert.ok(result.includes('\u2500'), 'should contain horizontal line char');
-    assert.ok(dots.length > 0, 'should track aura positions');
+    assert.ok(dots.length > 0, 'should track label positions');
   });
 
-  test('includes team name label when teamName is set', () => {
+  test('team groups show teamName as label', () => {
     const os = new OrbitalSystem();
     const f1 = new MiniFace('s1'); f1.teamName = 'backend'; f1.teamColor = [255, 120, 120];
     const f2 = new MiniFace('s2'); f2.teamName = 'backend'; f2.teamColor = [255, 120, 120];
@@ -2332,35 +2333,200 @@ describe('grid.js -- OrbitalSystem._renderGroupAuras', () => {
       { col: 30, row: 5, face: f2 },
     ];
     const dots = [];
-    const result = os._renderGroupAuras(positions, 30, 80, dots);
+    const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
+    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
     assert.ok(result.includes('backend'), 'should contain team name label');
   });
 
-  test('no label for non-team groups', () => {
+  test('non-team groups show first member face label', () => {
     const os = new OrbitalSystem();
-    const f1 = new MiniFace('s1'); f1.parentSession = 'main';
-    const f2 = new MiniFace('s2'); f2.parentSession = 'main';
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main'; f1.label = 'sub-1';
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main'; f2.label = 'sub-2';
     const positions = [
       { col: 10, row: 5, face: f1 },
       { col: 30, row: 5, face: f2 },
     ];
     const dots = [];
-    const result = os._renderGroupAuras(positions, 30, 80, dots);
-    assert.ok(!result.includes('main'), 'should not include parentSession as label');
+    const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
+    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    assert.ok(result.includes('sub-1'), 'should contain first member label');
   });
 
-  test('skips aura when row exceeds terminal bounds', () => {
+  test('spawning faces excluded from label positioning', () => {
     const os = new OrbitalSystem();
-    const f1 = new MiniFace('s1'); f1.parentSession = 'main';
-    const f2 = new MiniFace('s2'); f2.parentSession = 'main';
-    // Place faces so aura row (row + MINI_H = 25 + 7 = 32) exceeds terminal height (30)
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main'; f1.label = 'sub-1';
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main'; f2.label = 'sub-2'; f2.spawning = true;
     const positions = [
-      { col: 10, row: 25, face: f1 },
-      { col: 30, row: 25, face: f2 },
+      { col: 10, row: 5, face: f1 },
+      { col: 25, row: 5, face: f2 },
     ];
     const dots = [];
-    const result = os._renderGroupAuras(positions, 30, 80, dots);
+    const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
+    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    // Only 1 non-spawning member, so no label (need 2+)
+    assert.strictEqual(result, '', 'should skip label when only 1 non-spawning member');
+  });
+
+  test('all-spawning group produces no label', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main'; f1.spawning = true;
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main'; f2.spawning = true;
+    const positions = [
+      { col: 10, row: 5, face: f1 },
+      { col: 25, row: 5, face: f2 },
+    ];
+    const dots = [];
+    const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
+    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
     assert.strictEqual(result, '');
+  });
+
+  test('label skipped when overlapping main face area', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main'; f1.label = 'sub-1';
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main'; f2.label = 'sub-2';
+    // Place faces directly above main face so label row falls inside exclusion zone
+    const mainPos = { col: 10, row: 14, w: 30, h: 10, centerX: 25, centerY: 19 };
+    const positions = [
+      { col: 10, row: 7, face: f1 },
+      { col: 25, row: 7, face: f2 },
+    ];
+    const dots = [];
+    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    // Label row = 7 + 7 = 14, which is inside mainPos.row-8=6 to mainPos.row+h+7=31
+    assert.strictEqual(result, '', 'should skip label when overlapping main face');
+  });
+
+  test('label clamped to terminal bounds', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main'; f1.label = 'sub-1';
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main'; f2.label = 'sub-2';
+    // Place faces at far right edge
+    const positions = [
+      { col: 70, row: 2, face: f1 },
+      { col: 75, row: 2, face: f2 },
+    ];
+    const dots = [];
+    const mainPos = { col: 30, row: 20, w: 12, h: 8, centerX: 36, centerY: 24 };
+    const result = os._renderGroupLabels(positions, 15, 80, dots, mainPos);
+    // Label should still be within terminal cols
+    if (result.length > 0) {
+      const colMatch = result.match(/\x1b\[(\d+);(\d+)H/);
+      if (colMatch) {
+        const labelCol = parseInt(colMatch[2], 10);
+        assert.ok(labelCol >= 1 && labelCol <= 80, 'label col should be within bounds');
+      }
+    }
+  });
+});
+
+describe('grid.js -- OrbitalSystem._resolveOverlaps', () => {
+  test('separates two horizontally overlapping faces', () => {
+    const os = new OrbitalSystem();
+    const positions = [
+      { col: 10, row: 5, face: new MiniFace('a') },
+      { col: 14, row: 5, face: new MiniFace('b') }, // overlaps: MINI_W=8, 14 < 10+8
+    ];
+    os._resolveOverlaps(positions, 80, 30);
+    const gap = Math.max(positions[0].col + 8, positions[1].col + 8) -
+                Math.min(positions[0].col, positions[1].col);
+    // After resolve, bounding boxes should not overlap
+    const overlapX = Math.min(positions[0].col + 8, positions[1].col + 8) -
+                     Math.max(positions[0].col, positions[1].col);
+    assert.ok(overlapX <= 0, `faces should not overlap horizontally, overlapX=${overlapX}`);
+  });
+
+  test('separates two vertically overlapping faces', () => {
+    const os = new OrbitalSystem();
+    const positions = [
+      { col: 10, row: 5, face: new MiniFace('a') },
+      { col: 10, row: 8, face: new MiniFace('b') }, // overlaps: MINI_H=7, 8 < 5+7
+    ];
+    os._resolveOverlaps(positions, 80, 30);
+    const overlapY = Math.min(positions[0].row + 7, positions[1].row + 7) -
+                     Math.max(positions[0].row, positions[1].row);
+    assert.ok(overlapY <= 0, `faces should not overlap vertically, overlapY=${overlapY}`);
+  });
+
+  test('leaves non-overlapping faces untouched', () => {
+    const os = new OrbitalSystem();
+    const positions = [
+      { col: 10, row: 5, face: new MiniFace('a') },
+      { col: 30, row: 5, face: new MiniFace('b') },
+    ];
+    os._resolveOverlaps(positions, 80, 30);
+    assert.strictEqual(positions[0].col, 10);
+    assert.strictEqual(positions[1].col, 30);
+  });
+
+  test('keeps faces within terminal bounds after nudging', () => {
+    const os = new OrbitalSystem();
+    const positions = [
+      { col: 2, row: 2, face: new MiniFace('a') },
+      { col: 4, row: 2, face: new MiniFace('b') },
+    ];
+    os._resolveOverlaps(positions, 80, 30);
+    for (const p of positions) {
+      assert.ok(p.col >= 1, `col ${p.col} should be >= 1`);
+      assert.ok(p.row >= 1, `row ${p.row} should be >= 1`);
+      assert.ok(p.col <= 80 - 8, `col ${p.col} should be <= cols - MINI_W`);
+      assert.ok(p.row <= 30 - 7, `row ${p.row} should be <= rows - MINI_H`);
+    }
+  });
+});
+
+describe('grid.js -- _calculateGroupedAngles pixel-aware spacing', () => {
+  test('pixel-aware minimum prevents sub-MINI_W gaps on small ellipses', () => {
+    const os = new OrbitalSystem();
+    os.rotationAngle = 0;
+    const f1 = new MiniFace('a'); f1.parentSession = 'main';
+    const f2 = new MiniFace('b'); f2.parentSession = 'main';
+    const visible = [f1, f2];
+    // Small semi-major axis (14px) — without pixel fix, 0.35 rad * 14 ≈ 5px < MINI_W (8)
+    const angles = os._calculateGroupedAngles(visible, 14);
+    const a1 = angles.get(f1);
+    const a2 = angles.get(f2);
+    const angularDiff = Math.abs(a2 - a1);
+    const pixelDiff = angularDiff * 14; // approximate arc distance
+    assert.ok(pixelDiff >= 8, `pixel gap ${pixelDiff.toFixed(1)} should be >= MINI_W (8)`);
+  });
+});
+
+describe('grid.js -- _renderGroupTethers extended checks', () => {
+  test('tether dots skip ALL face bounding boxes, not just endpoints', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('a'); f1.parentSession = 'main';
+    const f2 = new MiniFace('b'); f2.parentSession = 'main';
+    const fMiddle = new MiniFace('c'); // sits between a and b
+    const positions = [
+      { col: 5, row: 2, face: f1 },
+      { col: 60, row: 2, face: f2 },
+      { col: 30, row: 2, face: fMiddle }, // middle face that tether A→B could cross
+    ];
+    const dots = [];
+    const mainPos = { col: 30, row: 20, w: 12, h: 8, centerX: 36, centerY: 24 };
+    os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
+    // No dot should be inside fMiddle's bounding box (col 30-38, row 1-9)
+    for (let i = 0; i < dots.length; i += 2) {
+      const dRow = dots[i], dCol = dots[i + 1];
+      const insideMiddle = dCol >= 29 && dCol <= 39 && dRow >= 1 && dRow <= 9;
+      assert.ok(!insideMiddle,
+        `tether dot at (${dRow},${dCol}) should not overlap middle face`);
+    }
+  });
+
+  test('spawning faces skip tether segments', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('a'); f1.parentSession = 'main';
+    const f2 = new MiniFace('b'); f2.parentSession = 'main'; f2.spawning = true;
+    const positions = [
+      { col: 5, row: 2, face: f1 },
+      { col: 60, row: 2, face: f2 },
+    ];
+    const dots = [];
+    const mainPos = { col: 30, row: 20, w: 12, h: 8, centerX: 36, centerY: 24 };
+    os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
+    assert.strictEqual(dots.length, 0, 'no tether dots when one endpoint is spawning');
   });
 });
 
