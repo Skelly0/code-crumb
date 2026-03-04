@@ -419,6 +419,7 @@ class OrbitalSystem {
     this._sortedCache = [];        // Cached sorted faces array
     this._sortedDirty = true;      // Rebuild cache on next getSortedFaces()
     this._prevClearBuf = '';        // Pre-built buffer to clear previous frame's orbital content
+    this._loadingInProgress = false; // Re-entrancy guard for loadSessionsAsync
   }
 
   getSortedFaces() {
@@ -530,6 +531,146 @@ class OrbitalSystem {
     this._assignLabels();
 
     // Only invalidate sorted cache if faces actually changed
+    if (this.faces.size !== prevSize) {
+      this._sortedDirty = true;
+    } else {
+      for (const key of this.faces.keys()) {
+        if (!prevKeys.has(key)) { this._sortedDirty = true; break; }
+      }
+    }
+  }
+
+  // -- Async session loading (non-blocking event loop) ----------------
+  // Reads session files using callback-based fs APIs so stdin events
+  // (keypresses) can be processed between I/O operations.
+
+  loadSessionsAsync(excludeId) {
+    if (!excludeId) return;
+    if (this._loadingInProgress) return; // Re-entrancy guard
+    this._loadingInProgress = true;
+    this.mainSessionId = excludeId;
+
+    fs.readdir(SESSIONS_DIR, (err, allFiles) => {
+      if (err) { this._loadingInProgress = false; return; }
+      const files = allFiles.filter(f => f.endsWith('.json'));
+      if (files.length === 0) {
+        try { this._applySessionResults(excludeId, []); }
+        finally { this._loadingInProgress = false; }
+        return;
+      }
+
+      // Read all files concurrently (non-blocking)
+      const results = [];    // { file, data, mtimeMs } or { file, empty: true } or { file, error: true }
+      let pending = files.length;
+
+      const onComplete = () => {
+        if (--pending > 0) return;
+        try { this._applySessionResults(excludeId, results); }
+        finally { this._loadingInProgress = false; }
+      };
+
+      for (const file of files) {
+        const fp = path.join(SESSIONS_DIR, file);
+        fs.stat(fp, (statErr, stats) => {
+          if (statErr) { results.push({ file, error: true }); onComplete(); return; }
+          fs.readFile(fp, 'utf8', (readErr, raw) => {
+            if (readErr) { results.push({ file, error: true }); onComplete(); return; }
+            const trimmed = (raw || '').trim();
+            if (!trimmed) {
+              results.push({ file, empty: true });
+              onComplete();
+              return;
+            }
+            try {
+              const data = JSON.parse(trimmed);
+              results.push({ file, data, mtimeMs: stats.mtimeMs });
+            } catch {
+              results.push({ file, error: true });
+            }
+            onComplete();
+          });
+        });
+      }
+    });
+  }
+
+  _applySessionResults(excludeId, results) {
+    const prevSize = this.faces.size;
+    const prevKeys = new Set(this.faces.keys());
+
+    // Build reverse map: safeFilename(faceId)+'.json' → faceId
+    const fileToFaceId = new Map();
+    for (const id of this.faces.keys()) {
+      fileToFaceId.set(safeFilename(id) + '.json', id);
+    }
+
+    // Purge stale session files (async unlink — fire and forget)
+    const now = Date.now();
+    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
+    const survivingResults = [];
+
+    for (const r of results) {
+      if (r.error || r.empty) { survivingResults.push(r); continue; }
+
+      if (now - r.mtimeMs > STALE_MS) {
+        const faceId = fileToFaceId.get(r.file) || path.basename(r.file, '.json');
+        const knownFace = this.faces.get(faceId);
+        if (knownFace && !knownFace.stopped && !completionStates.includes(knownFace.state)) {
+          survivingResults.push(r); // Protected — active face
+          continue;
+        }
+        if (r.data && r.data.pid && isProcessAlive(r.data.pid)) {
+          survivingResults.push(r); // Protected — process alive
+          continue;
+        }
+        // Stale and unprotected — delete asynchronously
+        fs.unlink(path.join(SESSIONS_DIR, r.file), () => {});
+        continue;
+      }
+      survivingResults.push(r);
+    }
+
+    // Apply session data to faces map
+    const seenIds = new Set();
+
+    for (const r of survivingResults) {
+      if (r.empty) {
+        const existingId = fileToFaceId.get(r.file);
+        if (existingId) seenIds.add(existingId);
+        continue;
+      }
+      if (r.error) {
+        const existingId = fileToFaceId.get(r.file);
+        if (existingId) seenIds.add(existingId);
+        continue;
+      }
+
+      const id = r.data.session_id || path.basename(r.file, '.json');
+      if (excludeId && id === excludeId) continue;
+      seenIds.add(id);
+
+      if (!this.faces.has(id)) {
+        const mf = new MiniFace(id);
+        mf.spawning = true;
+        mf.spawnProgress = 0;
+        this.faces.set(id, mf);
+      }
+      this.faces.get(id).updateFromFile(r.data, r.mtimeMs);
+    }
+
+    // Remove faces not seen in files or stale in memory
+    for (const [id, face] of this.faces) {
+      if (!seenIds.has(id) || face.isStale()) {
+        this.faces.delete(id);
+        if (face.isStale()) {
+          const fp = path.join(SESSIONS_DIR, safeFilename(id) + '.json');
+          fs.unlink(fp, () => {}); // Async cleanup
+        }
+      }
+    }
+
+    this._assignLabels();
+
     if (this.faces.size !== prevSize) {
       this._sortedDirty = true;
     } else {
