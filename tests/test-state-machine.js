@@ -2183,4 +2183,102 @@ describe('update-state.js -- fallback SubagentStart creates orbital (Bug E)', ()
   });
 });
 
+// -- Bug fix: Stop no longer kills background subagents (Bug #1) --
+
+describe('update-state.js -- Stop handler does not kill active subagents (Bug #1)', () => {
+  test('Stop handler does not write stopped:true to subagent sessions', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(
+      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
+    );
+    // Find the Stop handler block
+    const stopBlock = src.split("hookEvent === 'Stop'")[1];
+    const stopContent = stopBlock.split("else if (hookEvent ===")[0];
+    // Should NOT contain the bulk subagent cleanup loop
+    assert.ok(
+      !stopContent.includes("for (const sub of stats.session.activeSubagents)"),
+      'Stop handler must not iterate activeSubagents to write stopped sessions'
+    );
+    assert.ok(
+      !stopContent.includes("stats.session.activeSubagents = []"),
+      'Stop handler must not clear activeSubagents array'
+    );
+  });
+
+  test('SessionEnd handler still cleans up active subagents', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(
+      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
+    );
+    // Find the SessionEnd handler block
+    const sessionEndBlock = src.split("hookEvent === 'SessionEnd'")[1];
+    const sessionEndContent = sessionEndBlock.split("else {")[0];
+    assert.ok(
+      sessionEndContent.includes("for (const sub of stats.session.activeSubagents)"),
+      'SessionEnd handler must iterate activeSubagents to clean up'
+    );
+    assert.ok(
+      sessionEndContent.includes("stats.session.activeSubagents = []"),
+      'SessionEnd handler must clear activeSubagents array'
+    );
+  });
+});
+
+// -- Bug fix: mtime touch for earlier subagents (Bug #3) --
+
+describe('update-state.js -- touch earlier subagent files (Bug #3)', () => {
+  test('_touchEarlierSubagents helper exists', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(
+      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
+    );
+    assert.ok(
+      src.includes('function _touchEarlierSubagents('),
+      'should define _touchEarlierSubagents helper'
+    );
+  });
+
+  test('PreToolUse calls _touchEarlierSubagents after _writeSubagentToolState', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(
+      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
+    );
+    // Find PreToolUse block
+    const preBlock = src.split("hookEvent === 'PreToolUse'")[1];
+    const preContent = preBlock.split("hookEvent === 'PostToolUse'")[0];
+    const writeIdx = preContent.indexOf('_writeSubagentToolState(latest');
+    const touchIdx = preContent.indexOf('_touchEarlierSubagents(');
+    assert.ok(writeIdx >= 0, 'PreToolUse should call _writeSubagentToolState');
+    assert.ok(touchIdx >= 0, 'PreToolUse should call _touchEarlierSubagents');
+    assert.ok(touchIdx > writeIdx, '_touchEarlierSubagents should come after _writeSubagentToolState');
+  });
+
+  test('PostToolUse calls _touchEarlierSubagents after _writeSubagentToolState', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(
+      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
+    );
+    // Find PostToolUse block
+    const postBlock = src.split("hookEvent === 'PostToolUse'")[1];
+    const postContent = postBlock.split("hookEvent === 'Stop'")[0];
+    const writeIdx = postContent.indexOf('_writeSubagentToolState(latest');
+    const touchIdx = postContent.indexOf('_touchEarlierSubagents(');
+    assert.ok(writeIdx >= 0, 'PostToolUse should call _writeSubagentToolState');
+    assert.ok(touchIdx >= 0, 'PostToolUse should call _touchEarlierSubagents');
+    assert.ok(touchIdx > writeIdx, '_touchEarlierSubagents should come after _writeSubagentToolState');
+  });
+
+  test('_touchEarlierSubagents uses fs.utimesSync', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(
+      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
+    );
+    const helperStart = src.indexOf('function _touchEarlierSubagents(');
+    const helperEnd = src.indexOf('\n\n', helperStart);
+    const helperBody = src.slice(helperStart, helperEnd);
+    assert.ok(helperBody.includes('fs.utimesSync'), 'should use fs.utimesSync to refresh mtime');
+    assert.ok(helperBody.includes('length - 1'), 'should iterate up to length - 1 (skip latest)');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

@@ -66,6 +66,18 @@ function _writeSubagentToolState(sub, state, detail, parentSessionId) {
   } catch {}
 }
 
+// Touch (refresh mtime on) all active subagent files except the latest, to prevent
+// staleness purging while the parent is still actively dispatching tool calls.
+function _touchEarlierSubagents(activeSubagents) {
+  for (let i = 0; i < activeSubagents.length - 1; i++) {
+    try {
+      const fp = path.join(SESSIONS_DIR, safeFilename(activeSubagents[i].id) + '.json');
+      const now = new Date();
+      fs.utimesSync(fp, now, now);
+    } catch {}
+  }
+}
+
 // Persistent stats (streaks, records, session counters)
 function readStats() {
   try {
@@ -241,6 +253,7 @@ process.stdin.on('end', () => {
       if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName)) {
         const latest = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
         _writeSubagentToolState(latest, state, detail, sessionId);
+        _touchEarlierSubagents(stats.session.activeSubagents);
         state = 'subagent';
         detail = `conducting ${stats.session.activeSubagents.length}`;
       }
@@ -266,6 +279,7 @@ process.stdin.on('end', () => {
       if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName)) {
         const latest = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
         _writeSubagentToolState(latest, state, detail, sessionId);
+        _touchEarlierSubagents(stats.session.activeSubagents);
         state = 'subagent';
         detail = `conducting ${stats.session.activeSubagents.length}`;
       }
@@ -292,15 +306,9 @@ process.stdin.on('end', () => {
         stats.records.mostFilesEdited = stats.session.filesEdited.length;
       }
 
-      // Clean up synthetic subagent sessions — main turn ended
-      for (const sub of stats.session.activeSubagents) {
-        writeSessionState(sub.id, 'happy', 'done', true, {
-          sessionId: sub.id, stopped: true, cwd: process.cwd(),
-          gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
-          parentSession: sessionId, modelName: sub.model || 'haiku',
-        });
-      }
-      stats.session.activeSubagents = [];
+      // Don't clean up synthetic subagent sessions here — background subagents
+      // may still be running after the parent's turn ends. SessionEnd handles
+      // final cleanup; SubagentStop handles individual foreground agents.
     }
     else if (hookEvent === 'Notification') {
       state = 'waiting';

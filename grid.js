@@ -521,10 +521,8 @@ class OrbitalSystem {
         // File gone but process alive? Keep face — file may reappear on next hook write.
         if (!seenIds.has(id) && !face.stopped && face.pid && isProcessAlive(face.pid)) continue;
         this.faces.delete(id);
-        try {
-          const fp = path.join(SESSIONS_DIR, safeFilename(id) + '.json');
-          if (face.isStale() && fs.existsSync(fp)) fs.unlinkSync(fp);
-        } catch {}
+        // Don't delete session files here — the dedicated file stale purge above
+        // handles cleanup with proper PID and face-state protection.
       }
     }
 
@@ -665,10 +663,8 @@ class OrbitalSystem {
         // File gone but process alive? Keep face — file may reappear on next hook write.
         if (!seenIds.has(id) && !face.stopped && face.pid && isProcessAlive(face.pid)) continue;
         this.faces.delete(id);
-        if (face.isStale()) {
-          const fp = path.join(SESSIONS_DIR, safeFilename(id) + '.json');
-          fs.unlink(fp, () => {}); // Async cleanup
-        }
+        // Don't delete session files here — the dedicated file stale purge above
+        // handles cleanup with proper PID and face-state protection.
       }
     }
 
