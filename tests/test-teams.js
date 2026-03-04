@@ -260,7 +260,7 @@ describe('teams.js -- Orbital grouping with team data', () => {
     assert.ok(result.length > 0, 'should render tethers for team group');
   });
 
-  test('auras show team name for team groups', () => {
+  test('group labels show team name for team groups', () => {
     const os = new OrbitalSystem();
     const f1 = new MiniFace('t1'); f1.teamName = 'frontend'; f1.teamColor = [140, 255, 120];
     const f2 = new MiniFace('t2'); f2.teamName = 'frontend'; f2.teamColor = [140, 255, 120];
@@ -269,8 +269,9 @@ describe('teams.js -- Orbital grouping with team data', () => {
       { col: 30, row: 5, face: f2 },
     ];
     const dots = [];
-    const result = os._renderGroupAuras(positions, 30, 80, dots);
-    assert.ok(result.includes('frontend'), 'aura should contain team name');
+    const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
+    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    assert.ok(result.includes('frontend'), 'group label should contain team name');
   });
 
   test('mixed team and non-team faces form separate groups', () => {
