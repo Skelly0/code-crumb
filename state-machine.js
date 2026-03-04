@@ -65,6 +65,15 @@ function toolToState(toolName, toolInput) {
       return { state: 'installing', detail: shortCmd || 'installing' };
     }
 
+    // Detect ML training commands (must come after install detection)
+    if (/\b(python|python3|torchrun|deepspeed|accelerate)\b.*\btrain\b/i.test(cmd) ||
+        /\bunsloth\b/i.test(cmd) ||
+        /\b(python|python3)\b.*\b(fine.?tune|finetune)\b/i.test(cmd) ||
+        /\b(python|python3)\b.*(--epochs?|--learning.?rate|--lr)\b/i.test(cmd) ||
+        /\bnohup\b.*\btrain\b/i.test(cmd)) {
+      return { state: 'training', detail: shortCmd || 'training model' };
+    }
+
     // Detect git commit / push / tag operations
     if (/\bgit\s+(commit|push|tag)\b/i.test(cmd)) {
       const isPush = /\bgit\s+push\b/i.test(cmd);

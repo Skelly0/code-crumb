@@ -24,6 +24,7 @@ const { getAccessory } = require('./accessories');
 const ACTIVE_WORK_STATES = new Set([
   'executing', 'coding', 'reading', 'searching', 'testing',
   'installing', 'committing', 'reviewing', 'subagent', 'responding',
+  'training',
 ]);
 // Low-activity states used for timeline compression and consecutive-entry capping
 const LOW_ACTIVITY_STATES = new Set(['idle', 'sleeping', 'waiting']);
@@ -158,6 +159,7 @@ class ClaudeFace {
       searching: 4000, executing: 4000, testing: 4000, installing: 4000,
       caffeinated: 2500, subagent: 4000, waiting: 1500, sleeping: 1000,
       starting: 1500, spawning: 4000, committing: 3500, reviewing: 3500, ratelimited: 5000,
+      training: 5000,
     };
     return times[state] || 1000;
   }
@@ -257,6 +259,8 @@ class ClaudeFace {
       } else if (newState === 'ratelimited') {
         this.particles.spawn(8, 'glitch');
         this.glitchIntensity = 1.0;
+      } else if (newState === 'training') {
+        this.particles.spawn(8, 'fire');
       }
     } else {
       this.lastStateChange = Date.now();
@@ -508,6 +512,7 @@ class ClaudeFace {
       case 'committing':  return eyes.focused(theme, frame);
       case 'reviewing':   return eyes.narrowed(theme, frame);
       case 'ratelimited': return eyes.cross(theme, frame);
+      case 'training':    return eyes.furnace(theme, frame);
       default:            return eyes.open(theme, frame);
     }
   }
@@ -543,6 +548,7 @@ class ClaudeFace {
       case 'committing':  return mouths.determined();
       case 'reviewing':   return mouths.neutral();
       case 'ratelimited': return mouths.frown();
+      case 'training':    return mouths.furnace();
       default:          return mouths.smile();
     }
   }

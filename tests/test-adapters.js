@@ -1181,6 +1181,10 @@ describe('update-state.js stopped flag preservation (#98)', () => {
   const SESSIONS_DIR = sharedMod.SESSIONS_DIR;
   const safeFilename = sharedMod.safeFilename;
 
+  // Save and restore state file (integration tests write to the real file)
+  let savedStoppedState;
+  try { savedStoppedState = fs.readFileSync(STATE_FILE, 'utf8'); } catch { savedStoppedState = null; }
+
   test('source: global state file read preserves stopped flag for same session', () => {
     const src = fs.readFileSync(updateStatePath, 'utf8');
     assert.ok(
@@ -1290,12 +1294,21 @@ describe('update-state.js stopped flag preservation (#98)', () => {
       try { fs.unlinkSync(sessionFile); } catch {}
     }
   });
+
+  test('cleanup: restore original state file after stopped flag tests', () => {
+    if (savedStoppedState !== null) fs.writeFileSync(STATE_FILE, savedStoppedState, 'utf8');
+    else try { fs.unlinkSync(STATE_FILE); } catch {}
+  });
 });
 
 describe('base-adapter guardedWriteState modelName preservation (#78)', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
   const sharedMod = require(path.join(__dirname, '..', 'shared'));
   const STATE_FILE = sharedMod.STATE_FILE;
+
+  // Save and restore state file (tests write to the real file)
+  let savedModelState;
+  try { savedModelState = fs.readFileSync(STATE_FILE, 'utf8'); } catch { savedModelState = null; }
 
   test('preserves modelName when same session writes with different model', () => {
     // Write initial state with claude as model owner
@@ -1361,6 +1374,11 @@ describe('base-adapter guardedWriteState modelName preservation (#78)', () => {
     } catch (e) {
       if (e instanceof assert.AssertionError) throw e;
     }
+  });
+
+  test('cleanup: restore original state file after modelName tests', () => {
+    if (savedModelState !== null) fs.writeFileSync(STATE_FILE, savedModelState, 'utf8');
+    else try { fs.unlinkSync(STATE_FILE); } catch {}
   });
 });
 

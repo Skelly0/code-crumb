@@ -80,6 +80,10 @@ describe('face.js -- ClaudeFace._getMinDisplayMs', () => {
     assert.strictEqual(face._getMinDisplayMs('committing'), 3500);
   });
 
+  test('training min display is 5000', () => {
+    assert.strictEqual(face._getMinDisplayMs('training'), 5000);
+  });
+
   test('unknown state → 1000ms default', () => {
     assert.strictEqual(face._getMinDisplayMs('nonexistent'), 1000);
   });
@@ -142,6 +146,13 @@ describe('face.js -- ClaudeFace.setState', () => {
     face.setState('committing', 'committing changes');
     assert.ok(face.particles.particles.length > 0);
     assert.ok(face.particles.particles.every(p => p.style === 'push'));
+  });
+
+  test('spawns fire particles on training', () => {
+    const face = new ClaudeFace();
+    face.setState('training');
+    assert.ok(face.particles.particles.length > 0);
+    assert.ok(face.particles.particles.every(p => p.style === 'fire'));
   });
 
   test('fades old particles on state change', () => {
@@ -358,7 +369,7 @@ describe('face.js -- ClaudeFace.getEyes', () => {
       'idle', 'thinking', 'coding', 'reading', 'searching',
       'executing', 'happy', 'satisfied', 'proud', 'relieved',
       'error', 'sleeping', 'waiting', 'testing', 'installing',
-      'caffeinated', 'subagent',
+      'caffeinated', 'subagent', 'training',
     ];
     for (const state of states) {
       const face = new ClaudeFace();
@@ -386,7 +397,7 @@ describe('face.js -- ClaudeFace.getMouth', () => {
       'idle', 'thinking', 'coding', 'reading', 'searching',
       'executing', 'happy', 'satisfied', 'proud', 'relieved',
       'error', 'sleeping', 'waiting', 'testing', 'installing',
-      'caffeinated', 'subagent',
+      'caffeinated', 'subagent', 'training',
     ];
     for (const state of states) {
       const face = new ClaudeFace();

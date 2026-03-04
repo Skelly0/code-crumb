@@ -17,6 +17,7 @@ const { gridMouths } = require('./animations');
 const ACTIVE_WORK_STATES = new Set([
   'executing', 'coding', 'reading', 'searching', 'testing',
   'installing', 'committing', 'reviewing', 'subagent', 'responding',
+  'training',
 ]);
 const INTERRUPTIBLE_STATES = new Set([
   'thinking', 'happy', 'satisfied', 'proud', 'relieved',

@@ -60,7 +60,7 @@ describe('animations.js -- eyes', () => {
   });
 
   test('animated eye functions return correct shape', () => {
-    const animated = ['sparkle', 'spin', 'sleeping', 'waiting', 'intense', 'vibrate', 'pleased'];
+    const animated = ['sparkle', 'spin', 'sleeping', 'waiting', 'intense', 'vibrate', 'pleased', 'furnace'];
     for (const name of animated) {
       const result = eyes[name]({}, 0);
       assert.ok(result.left, `eyes.${name}() missing left`);
@@ -85,7 +85,7 @@ describe('animations.js -- gridMouths', () => {
     'idle', 'thinking', 'coding', 'reading', 'searching', 'executing',
     'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
     'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
-    'committing',
+    'committing', 'training',
   ];
 
   test('every state has a grid mouth', () => {
@@ -141,8 +141,14 @@ describe('animations.js -- eye frame variance', () => {
     assert.notDeepStrictEqual(a, b, 'responding should alternate');
   });
 
+  test('furnace differs between frame 0 and frame 20', () => {
+    const a = eyes.furnace({}, 0);
+    const b = eyes.furnace({}, 20);
+    assert.notDeepStrictEqual(a, b, 'furnace should pulse between phases');
+  });
+
   test('all animated eye functions still return valid shape at various frames', () => {
-    const animated = ['sparkle', 'spin', 'sleeping', 'waiting', 'intense', 'vibrate', 'pleased', 'conducting', 'responding'];
+    const animated = ['sparkle', 'spin', 'sleeping', 'waiting', 'intense', 'vibrate', 'pleased', 'conducting', 'responding', 'furnace'];
     for (const name of animated) {
       for (const f of [0, 1, 10, 30, 60, 100, 150]) {
         const result = eyes[name](theme, f);
@@ -161,7 +167,7 @@ describe('animations.js -- gridMouths count', () => {
       'idle', 'thinking', 'coding', 'reading', 'searching', 'executing',
       'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
       'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
-      'committing', 'responding', 'starting', 'spawning', 'reviewing', 'ratelimited',
+      'committing', 'responding', 'starting', 'spawning', 'reviewing', 'ratelimited', 'training',
     ];
     for (const state of expectedStates) {
       assert.ok(typeof gridMouths[state] === 'string', `missing gridMouth for: ${state}`);
@@ -170,7 +176,7 @@ describe('animations.js -- gridMouths count', () => {
 
   test('gridMouths count matches actual keys', () => {
     const keys = Object.keys(gridMouths);
-    assert.ok(keys.length >= 23, `expected at least 23 gridMouths, got ${keys.length}`);
+    assert.ok(keys.length >= 24, `expected at least 24 gridMouths, got ${keys.length}`);
   });
 });
 
