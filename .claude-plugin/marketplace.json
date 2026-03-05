@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "code-crumb",
-      "source": "./.claude-plugin",
+      "source": ".",
       "description": "Terminal tamagotchi that visualizes AI coding assistant activity as an animated ASCII face"
     }
   ]
