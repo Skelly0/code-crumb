@@ -166,6 +166,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 | `INTRA_GROUP_GAP` | 0.35 rad | grid.js (angular space between faces within a group) |
 | `TETHER_BRIGHTNESS` | 0.15 | grid.js (dim factor for sibling tether dots) |
 | `GROUP_LABEL_BRIGHTNESS` | 0.45 | grid.js (dim factor for floating group label) |
+| `MAX_SEGMENT_BLOCKS` | 5 | face.js (max visual blocks per state segment in timeline) |
 
 ## Environment Variables
 
