@@ -6,7 +6,7 @@
 // +================================================================+
 
 const assert = require('assert');
-const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, STALE_MS, ORPHAN_TIMEOUT } = require('../grid');
+const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS } = require('../grid');
 const { gridMouths, eyes, mouths } = require('../animations');
 const { PALETTES } = require('../themes');
 const { ParticleSystem } = require('../particles');
@@ -2814,6 +2814,104 @@ describe('grid.js -- sync face removal no file deletion (Bug #4)', () => {
     const deleteIdx = loadBody.lastIndexOf('this.faces.delete(id)');
     const afterDelete = loadBody.slice(deleteIdx, deleteIdx + 200);
     assert.ok(!afterDelete.includes('unlinkSync'), 'sync face removal should not delete files');
+  });
+});
+
+describe('grid.js -- MiniFace orbital offset lerping', () => {
+  test('setTargetOffset snaps on first call', () => {
+    const face = new MiniFace('lerp-snap');
+    face.setTargetOffset(1.0);
+    assert.strictEqual(face.orbitalOffset, 1.0);
+    assert.strictEqual(face.targetOffset, 1.0);
+    assert.strictEqual(face._lerpElapsed, REPOSITION_MS);
+  });
+
+  test('setTargetOffset snaps during spawning', () => {
+    const face = new MiniFace('lerp-spawn');
+    face.spawning = true;
+    face.setTargetOffset(1.0);
+    assert.strictEqual(face.orbitalOffset, 1.0);
+    assert.strictEqual(face.targetOffset, 1.0);
+    assert.strictEqual(face._lerpElapsed, REPOSITION_MS);
+  });
+
+  test('setTargetOffset starts lerp on change', () => {
+    const face = new MiniFace('lerp-change');
+    face.setTargetOffset(1.0); // snap initial
+    face.setTargetOffset(2.0); // should start lerp
+    assert.strictEqual(face._lerpElapsed, 0);
+    assert.strictEqual(face._lerpStartOffset, 1.0);
+    assert.strictEqual(face.targetOffset, 2.0);
+  });
+
+  test('dead zone ignores tiny changes', () => {
+    const face = new MiniFace('lerp-deadzone');
+    face.setTargetOffset(1.0);
+    face.setTargetOffset(1.001); // 0.001 < 0.005 threshold
+    assert.strictEqual(face.targetOffset, 1.0);
+  });
+
+  test('tick advances lerp', () => {
+    const face = new MiniFace('lerp-tick');
+    face.setTargetOffset(0.0); // snap initial
+    face.setTargetOffset(1.0); // start lerp
+    face.tick(200); // halfway through 400ms
+    assert.ok(face.orbitalOffset > 0.0, 'should have moved from start');
+    assert.ok(face.orbitalOffset < 1.0, 'should not have reached target yet');
+  });
+
+  test('tick completes at REPOSITION_MS', () => {
+    const face = new MiniFace('lerp-complete');
+    face.setTargetOffset(0.0);
+    face.setTargetOffset(1.0);
+    face.tick(REPOSITION_MS);
+    assert.strictEqual(face.orbitalOffset, face.targetOffset);
+  });
+
+  test('ease-out: past halfway at t=0.5', () => {
+    const face = new MiniFace('lerp-easeout');
+    face.setTargetOffset(0.0);
+    face.setTargetOffset(1.0);
+    face.tick(REPOSITION_MS / 2); // t=0.5
+    // cubic ease-out at t=0.5: 1 - (0.5)^3 = 0.875 -- well past 0.5
+    assert.ok(face.orbitalOffset > 0.5, `expected > 0.5 but got ${face.orbitalOffset}`);
+  });
+
+  test('shortest path wraps correctly', () => {
+    const face = new MiniFace('lerp-wrap');
+    face.setTargetOffset(3.0);
+    face.setTargetOffset(-3.0); // should wrap through PI, not the long way
+    face.tick(REPOSITION_MS);
+    // After completion, should be at the target
+    const diff = Math.abs(face.orbitalOffset - (-3.0));
+    assert.ok(diff < 0.001, `expected close to -3.0, got ${face.orbitalOffset}`);
+  });
+
+  test('_shortestAngleDist correctness', () => {
+    const face = new MiniFace('lerp-dist');
+    // 0 to PI => PI
+    const d1 = face._shortestAngleDist(0, Math.PI);
+    assert.ok(Math.abs(d1 - Math.PI) < 0.001, `0->PI expected PI, got ${d1}`);
+    // 0 to -PI => wraps (either direction is PI, implementation may return -PI or PI)
+    const d2 = face._shortestAngleDist(0, -Math.PI);
+    assert.ok(Math.abs(Math.abs(d2) - Math.PI) < 0.001, `0->-PI expected |PI|, got ${d2}`);
+    // 3.0 to -3.0: should wrap through PI (~0.28 rad), not the long way (~6.0 rad)
+    const d3 = face._shortestAngleDist(3.0, -3.0);
+    const expected = -3.0 - 3.0 + Math.PI * 2; // ~0.283
+    assert.ok(Math.abs(d3 - expected) < 0.001, `3.0->-3.0 expected ~${expected.toFixed(3)}, got ${d3}`);
+  });
+
+  test('rapid target changes restart from current position', () => {
+    const face = new MiniFace('lerp-rapid');
+    face.setTargetOffset(0.0);
+    face.setTargetOffset(2.0); // start lerp 0 -> 2
+    face.tick(200); // halfway, orbitalOffset is between 0 and 2
+    const midOffset = face.orbitalOffset;
+    assert.ok(midOffset > 0.0 && midOffset < 2.0, 'should be mid-lerp');
+    face.setTargetOffset(0.5); // redirect mid-lerp
+    assert.strictEqual(face._lerpStartOffset, midOffset, 'lerp should restart from current position');
+    assert.strictEqual(face.targetOffset, 0.5);
+    assert.strictEqual(face._lerpElapsed, 0);
   });
 });
 

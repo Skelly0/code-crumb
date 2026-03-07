@@ -64,6 +64,7 @@ const INTER_GROUP_GAP = 0.15;      // Radians of spacing between group sectors (
 const INTRA_GROUP_GAP = 0.35;      // Radians between faces within a group (~20 deg)
 const TETHER_BRIGHTNESS = 0.15;    // Dim factor for sibling tether dots
 const GROUP_LABEL_BRIGHTNESS = 0.45; // Dim factor for floating group label
+const REPOSITION_MS = 400;         // Duration of orbital reposition animation in ms
 
 // Signal 0 tests process existence without killing it (works cross-platform in Node.js)
 function isProcessAlive(pid) {
@@ -108,6 +109,12 @@ class MiniFace {
     this.spawning = false;      // true while this mini-face is entering the orbit
     this.spawnProgress = 0;       // ms elapsed since spawn began
     this.SPAWN_MS = 800;          // duration of the spawn animation in ms
+    // Smooth orbital repositioning state
+    this.orbitalOffset = null;      // Current rendered offset from rotationAngle (null = uninitialized)
+    this.targetOffset = null;       // Target offset from _calculateGroupedAngles
+    this._lerpStartOffset = 0;     // Offset when lerp began
+    this._lerpElapsed = 0;         // ms elapsed in current lerp
+    this.REPOSITION_MS = REPOSITION_MS;
   }
 
   updateFromFile(data, fileMtimeMs) {
@@ -219,6 +226,16 @@ class MiniFace {
       }
     }
 
+    // Advance orbital offset lerp
+    if (this._lerpElapsed < this.REPOSITION_MS && this.targetOffset !== null && this.orbitalOffset !== null) {
+      this._lerpElapsed += dt;
+      const rawT = Math.min(1, this._lerpElapsed / this.REPOSITION_MS);
+      const t = 1 - (1 - rawT) * (1 - rawT) * (1 - rawT); // cubic ease-out
+      const dist = this._shortestAngleDist(this._lerpStartOffset, this.targetOffset);
+      this.orbitalOffset = this._lerpStartOffset + dist * t;
+      if (rawT >= 1) this.orbitalOffset = this.targetOffset; // snap at completion
+    }
+
     // --- Flush pending state when minDisplayUntil expires ---
     const now = Date.now();
     if (this.pendingState && now >= this.minDisplayUntil) {
@@ -262,6 +279,29 @@ class MiniFace {
       this.state = 'sleeping';
       this.minDisplayUntil = now + 1500;
     }
+  }
+
+  _shortestAngleDist(from, to) {
+    let d = to - from;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    return d;
+  }
+
+  setTargetOffset(offset) {
+    // First assignment or spawning: snap immediately
+    if (this.orbitalOffset === null || this.spawning) {
+      this.orbitalOffset = offset;
+      this.targetOffset = offset;
+      this._lerpElapsed = this.REPOSITION_MS;
+      return;
+    }
+    // Dead zone: ignore sub-pixel changes (0.005 rad ~ 0.15px at typical radius)
+    if (Math.abs(this._shortestAngleDist(this.targetOffset, offset)) < 0.005) return;
+    // Start lerp from current position
+    this._lerpStartOffset = this.orbitalOffset;
+    this.targetOffset = offset;
+    this._lerpElapsed = 0;
   }
 
   getEyes() {
@@ -1197,11 +1237,17 @@ class OrbitalSystem {
 
     // Calculate grouped orbital positions (clustered by team/parent)
     const angleMap = this._calculateGroupedAngles(visible, a);
+    // Feed target offsets for smooth lerping
+    for (const [face, absAngle] of angleMap) {
+      face.setTargetOffset(absAngle - this.rotationAngle);
+    }
     const positions = [];
     for (let i = 0; i < n; i++) {
-      const angle = angleMap.get(visible[i]) || (Math.PI * 2 * i / n) + this.rotationAngle;
-      // Startup spawn scale for this face (0 -> 1)
       const face = visible[i];
+      const angle = (face.orbitalOffset !== null)
+        ? this.rotationAngle + face.orbitalOffset
+        : (angleMap.get(face) || (Math.PI * 2 * i / n) + this.rotationAngle);
+      // Startup spawn scale for this face (0 -> 1)
       const scale = (face.spawning ? Math.max(0.3, face.spawnProgress / face.SPAWN_MS) : 1);
       const col = Math.round(mainPos.centerX + Math.cos(angle) * a * scale - MINI_W / 2);
       // Shift orbit center down to account for stats/indicator rows below the face box,
@@ -1481,6 +1527,6 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
 
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
-  STALE_MS, ORPHAN_TIMEOUT,
+  STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS,
   INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, GROUP_LABEL_BRIGHTNESS,
 };
