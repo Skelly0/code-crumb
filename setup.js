@@ -237,17 +237,20 @@ function setupOpenCode() {
     function send(payload) {
       try {
         execSync(\`node "\${adapter}"\`,
-          { input: JSON.stringify(payload), timeout: 200, stdio: ['pipe','ignore','ignore'] });
+          { input: JSON.stringify(payload), timeout: 200, stdio: ['pipe','ignore','ignore'],
+            env: { ...process.env, CLAUDE_SESSION_ID: payload.session_id || '' } });
       } catch {}
     }
 
     export const CodeCrumbPlugin = async ({ project, client, $, directory, worktree }) => {
       let lastMessageContent = '';
       let toolsCalledThisTurn = false;
+      let sessionId = '';
       return {
         'session.created': async (input, output) => {
           toolsCalledThisTurn = false;
-          send({ type: 'session.created', session_id: input.sessionId });
+          sessionId = input.sessionId || '';
+          send({ type: 'session.created', session_id: sessionId });
         },
         'message.part.updated': async (input, output) => {
           const content = input.part?.content || '';
@@ -255,11 +258,12 @@ function setupOpenCode() {
           if (content !== lastMessageContent) {
             lastMessageContent = content;
             const isThinking = role === 'assistant' && !toolsCalledThisTurn && content.length > 0;
-            const thinkingText = isThinking 
+            const thinkingText = isThinking
               ? (content.split(' ').slice(0, 3).join(' ') || 'analyzing')
               : '';
-            send({ 
-              type: 'message.part.updated', 
+            send({
+              type: 'message.part.updated',
+              session_id: sessionId,
               content: content.substring(0, 500),
               role,
               is_thinking: isThinking,
@@ -270,17 +274,17 @@ function setupOpenCode() {
         },
         'tool.execute.before': async (input, output) => {
           toolsCalledThisTurn = true;
-          send({ type: 'tool.execute.before', input: { tool: input.tool, args: input.args } });
+          send({ type: 'tool.execute.before', session_id: sessionId, input: { tool: input.tool, args: input.args } });
         },
         'tool.execute.after': async (input, output) => {
-          send({ type: 'tool.execute.after', input: { tool: input.tool, args: input.args }, output });
+          send({ type: 'tool.execute.after', session_id: sessionId, input: { tool: input.tool, args: input.args }, output });
         },
         'session.idle': async (input, output) => {
           toolsCalledThisTurn = false;
-          send({ type: 'session.idle' });
+          send({ type: 'session.idle', session_id: sessionId });
         },
         'session.error': async (input, output) => {
-          send({ type: 'session.error', output: { error: input.error || 'Session error' } });
+          send({ type: 'session.error', session_id: sessionId, output: { error: input.error || 'Session error' } });
         },
       };
     };

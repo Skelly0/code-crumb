@@ -417,6 +417,86 @@ describe('adapters -- opencode-adapter', () => {
   });
 });
 
+// -- opencode session_id consolidation (phantom orbital fix) ----------
+
+describe('adapters -- opencode session_id consolidation', () => {
+  const ADAPTER = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+
+  test('multiple events with same session_id produce one session file', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('oc-consolidate-1');
+    // Simulate a typical OpenCode sequence: session.created, tool before, tool after
+    runStdinAdapter(ADAPTER, {
+      type: 'session.created', session_id: 'oc-consolidate-1',
+    }, env);
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.before', session_id: 'oc-consolidate-1',
+      input: { tool: 'file_edit', args: {} },
+    }, env);
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.after', session_id: 'oc-consolidate-1',
+      input: { tool: 'file_edit', args: {} }, output: {},
+    }, env);
+    const files = fs.readdirSync(sessionsDir);
+    assert.strictEqual(files.length, 1,
+      `expected 1 session file, got ${files.length}: ${files.join(', ')}`);
+    cleanup(tmp);
+  });
+
+  test('normaliseEvent extracts session_id into sessionId field', () => {
+    const { normaliseEvent } = require(path.join(ADAPTERS_DIR, 'opencode-adapter.js'));
+    const norm = normaliseEvent({
+      type: 'tool.execute.before',
+      session_id: 'oc-norm-test',
+      input: { tool: 'shell', args: {} },
+    });
+    assert.strictEqual(norm.sessionId, 'oc-norm-test',
+      'normaliseEvent should extract session_id as sessionId');
+  });
+
+  test('normaliseEvent returns empty sessionId when session_id missing', () => {
+    const { normaliseEvent } = require(path.join(ADAPTERS_DIR, 'opencode-adapter.js'));
+    const norm = normaliseEvent({
+      type: 'tool.execute.before',
+      input: { tool: 'shell', args: {} },
+    });
+    assert.strictEqual(norm.sessionId, '',
+      'normaliseEvent should return empty string when no session_id');
+  });
+
+  test('different session_ids produce separate session files', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('oc-separate-a');
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.before', session_id: 'oc-separate-a',
+      input: { tool: 'shell', args: {} },
+    }, env);
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.before', session_id: 'oc-separate-b',
+      input: { tool: 'file_edit', args: {} },
+    }, env);
+    const files = fs.readdirSync(sessionsDir);
+    assert.strictEqual(files.length, 2,
+      `different session_ids should produce 2 files, got ${files.length}`);
+    cleanup(tmp);
+  });
+
+  test('CLAUDE_SESSION_ID env var used as fallback when session_id missing', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('oc-env-fallback');
+    // Send events without session_id in payload -- env var should be used
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.before',
+      input: { tool: 'shell', args: {} },
+    }, env);
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.after',
+      input: { tool: 'shell', args: {} }, output: {},
+    }, env);
+    const files = fs.readdirSync(sessionsDir);
+    assert.strictEqual(files.length, 1,
+      `env fallback should consolidate to 1 session file, got ${files.length}`);
+    cleanup(tmp);
+  });
+});
+
 // -- openclaw-adapter.js ---------------------------------------------
 
 describe('adapters -- openclaw-adapter', () => {
