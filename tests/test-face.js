@@ -1219,13 +1219,6 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     assert.strictEqual(face.stateDetail, 'command failed');
   });
 
-  test('ratelimited still bypasses any state (unchanged behavior)', () => {
-    const face = new ClaudeFace();
-    face.setState('coding', 'editing');
-    face.setState('ratelimited', 'rate limited');
-    assert.strictEqual(face.state, 'ratelimited');
-  });
-
   test('caffeinated does NOT bypass thinking (not an active work state)', () => {
     const face = new ClaudeFace();
     face.setState('thinking');
@@ -1332,16 +1325,6 @@ describe('caffeinated detection', () => {
     face.minDisplayUntil = 0;
     face.update(16);
     assert.strictEqual(face.state, 'responding');
-  });
-
-  test('caffeinated does NOT trigger on ratelimited', () => {
-    const face = new ClaudeFace();
-    pumpStates(face, 6);
-    face.minDisplayUntil = 0;
-    face.setState('ratelimited');
-    face.minDisplayUntil = 0;
-    face.update(16);
-    assert.strictEqual(face.state, 'ratelimited');
   });
 
   test('caffeinated does NOT trigger on waiting', () => {

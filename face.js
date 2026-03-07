@@ -20,7 +20,7 @@ const { getAccessory } = require('./accessories');
 
 // Active tool states that represent real work happening NOW.
 // These bypass the min display time of passive/thinking/completion states,
-// mirroring how 'error' and 'ratelimited' already bypass.
+// mirroring how 'error' already bypasses.
 const ACTIVE_WORK_STATES = new Set([
   'executing', 'coding', 'reading', 'searching', 'testing',
   'installing', 'committing', 'reviewing', 'subagent', 'responding',
@@ -158,7 +158,7 @@ class ClaudeFace {
       error: 4000, coding: 6000, thinking: 2500, responding: 3000, reading: 4000,
       searching: 4000, executing: 4000, testing: 4000, installing: 4000,
       caffeinated: 2500, subagent: 4000, waiting: 1500, sleeping: 1000,
-      starting: 1500, spawning: 4000, committing: 3500, reviewing: 3500, ratelimited: 5000,
+      starting: 1500, spawning: 4000, committing: 3500, reviewing: 3500,
       training: 5000,
     };
     return times[state] || 1000;
@@ -188,7 +188,6 @@ class ClaudeFace {
 
       const shouldBuffer = now < this.minDisplayUntil
           && newState !== 'error'
-          && newState !== 'ratelimited'
           && (!COMPLETION_STATES.has(newState) || isCompletionDuringWork)
           && !shouldBypass;
 
@@ -256,9 +255,6 @@ class ClaudeFace {
         this.particles.spawn(6, 'speedline');
       } else if (newState === 'committing') {
         this.particles.spawn(14, 'push');
-      } else if (newState === 'ratelimited') {
-        this.particles.spawn(8, 'glitch');
-        this.glitchIntensity = 1.0;
       } else if (newState === 'training') {
         this.particles.spawn(8, 'fire');
       }
@@ -511,7 +507,6 @@ class ClaudeFace {
       case 'starting':    return eyes.spin(theme, Math.floor(frame / 4));
       case 'committing':  return eyes.focused(theme, frame);
       case 'reviewing':   return eyes.narrowed(theme, frame);
-      case 'ratelimited': return eyes.cross(theme, frame);
       case 'training':    return eyes.furnace(theme, frame);
       default:            return eyes.open(theme, frame);
     }
@@ -547,7 +542,6 @@ class ClaudeFace {
       case 'starting':    return mouths.dots();
       case 'committing':  return mouths.determined();
       case 'reviewing':   return mouths.neutral();
-      case 'ratelimited': return mouths.frown();
       case 'training':    return mouths.furnace();
       default:          return mouths.smile();
     }
@@ -599,7 +593,7 @@ class ClaudeFace {
     // Continuous particle spawning per state
     if (this.state === 'thinking' && this.frame % 15 === 0) this.particles.spawn(1, 'orbit');
     if (this.state === 'idle' && this.frame % 40 === 0) this.particles.spawn(1, 'float');
-    if ((this.state === 'error' || this.state === 'ratelimited') && this.glitchIntensity > 0.1 && this.frame % 5 === 0) this.particles.spawn(1, 'glitch');
+    if (this.state === 'error' && this.glitchIntensity > 0.1 && this.frame % 5 === 0) this.particles.spawn(1, 'glitch');
     if (this.state === 'happy' && this.frame % 20 === 0) this.particles.spawn(2, 'sparkle');
     if (this.state === 'proud' && this.frame % 30 === 0) this.particles.spawn(1, 'sparkle');
     if (this.state === 'satisfied' && this.frame % 50 === 0) this.particles.spawn(1, 'float');
@@ -626,7 +620,7 @@ class ClaudeFace {
         this.state !== 'proud' && this.state !== 'relieved' &&
         this.state !== 'error' && this.state !== 'caffeinated' &&
         this.state !== 'committing' && this.state !== 'responding' &&
-        this.state !== 'ratelimited' && this.state !== 'waiting') {
+        this.state !== 'waiting') {
       this.setState('caffeinated', this.stateDetail || 'hyperdrive!');
     } else if (this.state === 'caffeinated' && recentChanges.length < CAFFEINE_THRESHOLD - 1) {
       this.setState(this.prevState || 'idle');
