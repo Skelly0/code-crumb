@@ -32,6 +32,9 @@ const LOW_ACTIVITY_STATES = new Set(['idle', 'sleeping', 'waiting']);
 // Max visual duration (ms) for any single low-activity gap in the timeline bar
 const COMPRESS_LOW_CAP = 30000;
 
+// Max consecutive blocks any single state segment can occupy in the timeline bar
+const MAX_SEGMENT_BLOCKS = 5;
+
 const INTERRUPTIBLE_STATES = new Set([
   'thinking', 'happy', 'satisfied', 'proud', 'relieved',
   'idle', 'sleeping', 'waiting',
@@ -675,11 +678,11 @@ class ClaudeFace {
     this.particles.update();
   }
 
-  _compressTimeline(now) {
+  _compressTimeline(now, barWidth = 38) {
     if (this.timeline.length < 2) {
       return { entries: this.timeline.slice(), displayNow: now };
     }
-    const entries = [{ state: this.timeline[0].state, at: this.timeline[0].at }];
+    let entries = [{ state: this.timeline[0].state, at: this.timeline[0].at }];
     let offset = 0;
     for (let i = 1; i < this.timeline.length; i++) {
       const gap = this.timeline[i].at - this.timeline[i - 1].at;
@@ -689,7 +692,62 @@ class ClaudeFace {
       }
       entries.push({ state: this.timeline[i].state, at: this.timeline[i].at - offset });
     }
-    return { entries, displayNow: now - offset };
+    let displayNow = now - offset;
+
+    // Pass 2: cap any segment to MAX_SEGMENT_BLOCKS visual blocks.
+    // Uses block-allocation: iteratively identify over-cap segments, then
+    // redistribute remaining bar space proportionally among uncapped ones.
+    if (entries.length >= 3) {
+      const totalDur = displayNow - entries[0].at;
+      if (totalDur > 0) {
+        const durations = [];
+        for (let i = 0; i < entries.length; i++) {
+          const end = (i < entries.length - 1) ? entries[i + 1].at : displayNow;
+          durations.push(end - entries[i].at);
+        }
+
+        const capped = new Array(durations.length).fill(false);
+        let cappedBlocks = 0, uncappedDur = 0;
+        for (let iter = 0; iter < durations.length; iter++) {
+          cappedBlocks = 0; uncappedDur = 0;
+          for (let i = 0; i < durations.length; i++) {
+            if (capped[i]) cappedBlocks += MAX_SEGMENT_BLOCKS;
+            else uncappedDur += durations[i];
+          }
+          const remaining = barWidth - cappedBlocks;
+          if (remaining <= 0 || uncappedDur <= 0) break;
+
+          let anyNew = false;
+          for (let i = 0; i < durations.length; i++) {
+            if (!capped[i] && (durations[i] / uncappedDur) * remaining > MAX_SEGMENT_BLOCKS) {
+              capped[i] = true;
+              anyNew = true;
+            }
+          }
+          if (!anyNew) break;
+        }
+
+        const remaining = barWidth - cappedBlocks;
+
+        if (remaining > 0 && uncappedDur > 0 && capped.some(c => c)) {
+          const msPerBlock = uncappedDur / remaining;
+          const base = entries[0].at;
+          const newEntries = [{ state: entries[0].state, at: base }];
+          let cursor = base;
+          for (let i = 0; i < durations.length - 1; i++) {
+            cursor += capped[i] ? MAX_SEGMENT_BLOCKS * msPerBlock : durations[i];
+            newEntries.push({ state: entries[i + 1].state, at: cursor });
+          }
+          cursor += capped[durations.length - 1]
+            ? MAX_SEGMENT_BLOCKS * msPerBlock
+            : durations[durations.length - 1];
+          displayNow = cursor;
+          entries = newEntries;
+        }
+      }
+    }
+
+    return { entries, displayNow };
   }
 
   _buildSparkline(barWidth, now, compressed) {
@@ -1000,9 +1058,9 @@ class ClaudeFace {
       // Session timeline bar (with time-compression for long idle/sleep gaps)
       const tlColors = this.getTimelineColors();
       const now = Date.now();
-      const compressed = this._compressTimeline(now); // computed once, shared with sparkline
+      const barWidth = Math.min(faceW - 2, 38);
+      const compressed = this._compressTimeline(now, barWidth); // computed once, shared with sparkline
       if (this.timeline.length > 1) {
-        const barWidth = Math.min(faceW - 2, 38);
         const cTl = compressed.entries;
         const cNow = compressed.displayNow;
         const tlStart = cTl[0].at;
@@ -1125,4 +1183,4 @@ class ClaudeFace {
   }
 }
 
-module.exports = { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP };
+module.exports = { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS };

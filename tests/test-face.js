@@ -6,7 +6,7 @@
 // +================================================================+
 
 const assert = require('assert');
-const { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP } = require('../face');
+const { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS } = require('../face');
 const { ParticleSystem } = require('../particles');
 const { themes, PALETTES } = require('../themes');
 const { mouths, eyes } = require('../animations');
@@ -1875,6 +1875,161 @@ describe('face.js -- toggleSessionList', () => {
     assert.strictEqual(face.showSessionList, true);
     assert.strictEqual(face.sessionListIndex, 0);
     assert.strictEqual(face.sessionListPromote, null);
+  });
+});
+
+// -- _compressTimeline segment capping (pass 2) ---
+
+describe('_compressTimeline segment capping', () => {
+  test('dominant segment among many short ones gets capped to MAX_SEGMENT_BLOCKS', () => {
+    const face = new ClaudeFace();
+    const base = 100000;
+    // Many short active segments + one huge sleep — realistic timeline
+    face.timeline = [
+      { state: 'coding', at: base },
+      { state: 'reading', at: base + 2000 },
+      { state: 'coding', at: base + 3000 },
+      { state: 'sleeping', at: base + 5000 },   // 60s sleep
+      { state: 'coding', at: base + 65000 },
+      { state: 'executing', at: base + 66000 },
+      { state: 'coding', at: base + 67000 },
+      { state: 'testing', at: base + 68000 },
+    ];
+    const now = base + 69000;
+    const { entries, displayNow } = face._compressTimeline(now, 38);
+    // Find the sleeping segment and verify it occupies exactly MAX_SEGMENT_BLOCKS
+    const sleepIdx = entries.findIndex(e => e.state === 'sleeping');
+    const sleepDur = entries[sleepIdx + 1].at - entries[sleepIdx].at;
+    const totalDur = displayNow - entries[0].at;
+    const sleepBlocks = (sleepDur / totalDur) * 38;
+    assert.ok(sleepBlocks <= MAX_SEGMENT_BLOCKS + 0.01,
+      `sleeping occupies ${sleepBlocks.toFixed(1)} blocks, expected <= ${MAX_SEGMENT_BLOCKS}`);
+  });
+
+  test('barWidth parameter scales the cap correctly', () => {
+    const face = new ClaudeFace();
+    const base = 100000;
+    // 8+ entries so redistribution has room (barWidth/MAX ≈ 8 segments needed)
+    face.timeline = [
+      { state: 'coding', at: base },
+      { state: 'reading', at: base + 1000 },
+      { state: 'executing', at: base + 2000 },
+      { state: 'sleeping', at: base + 3000 },   // dominant segment
+      { state: 'coding', at: base + 80000 },
+      { state: 'testing', at: base + 81000 },
+      { state: 'reading', at: base + 82000 },
+      { state: 'executing', at: base + 83000 },
+      { state: 'coding', at: base + 84000 },
+    ];
+    const now = base + 85000;
+    const r20 = face._compressTimeline(now, 20);
+    const r38 = face._compressTimeline(now, 38);
+    const sleepIdx20 = r20.entries.findIndex(e => e.state === 'sleeping');
+    const sleepDur20 = r20.entries[sleepIdx20 + 1].at - r20.entries[sleepIdx20].at;
+    const total20 = r20.displayNow - r20.entries[0].at;
+    const sleepIdx38 = r38.entries.findIndex(e => e.state === 'sleeping');
+    const sleepDur38 = r38.entries[sleepIdx38 + 1].at - r38.entries[sleepIdx38].at;
+    const total38 = r38.displayNow - r38.entries[0].at;
+    assert.ok((sleepDur20 / total20) * 20 <= MAX_SEGMENT_BLOCKS + 0.01,
+      'barWidth=20: sleep blocks should be capped');
+    assert.ok((sleepDur38 / total38) * 38 <= MAX_SEGMENT_BLOCKS + 0.01,
+      'barWidth=38: sleep blocks should be capped');
+  });
+
+  test('fewer than 3 entries skips capping', () => {
+    const face = new ClaudeFace();
+    const base = 100000;
+    face.timeline = [
+      { state: 'coding', at: base },
+      { state: 'sleeping', at: base + 1000 },
+    ];
+    const now = base + 200000;
+    const { entries, displayNow } = face._compressTimeline(now, 38);
+    assert.strictEqual(entries.length, 2);
+    // Sleeping is low-activity, so pass 1 compression applies
+    assert.ok(displayNow <= now);
+  });
+
+  test('all segments equally large — no capping applied (guard fires)', () => {
+    const face = new ClaudeFace();
+    const base = 100000;
+    // 3 equal segments — all exceed cap, but all would be capped → no change
+    face.timeline = [
+      { state: 'coding', at: base },
+      { state: 'executing', at: base + 50000 },
+      { state: 'testing', at: base + 100000 },
+    ];
+    const now = base + 150000;
+    const { entries } = face._compressTimeline(now, 38);
+    assert.strictEqual(entries.length, 3);
+    // Segments should be preserved (all capped = no redistribution possible)
+    const dur0 = entries[1].at - entries[0].at;
+    const dur1 = entries[2].at - entries[1].at;
+    assert.strictEqual(dur0, 50000);
+    assert.strictEqual(dur1, 50000);
+  });
+
+  test('trailing segment (last state to displayNow) is also capped', () => {
+    const face = new ClaudeFace();
+    const base = 100000;
+    // 8 entries, huge trailing sleep
+    face.timeline = [
+      { state: 'coding', at: base },
+      { state: 'reading', at: base + 1000 },
+      { state: 'executing', at: base + 2000 },
+      { state: 'coding', at: base + 3000 },
+      { state: 'testing', at: base + 4000 },
+      { state: 'reading', at: base + 5000 },
+      { state: 'executing', at: base + 6000 },
+      { state: 'sleeping', at: base + 7000 },
+    ];
+    const now = base + 100000;  // 93s trailing sleep
+    const { entries, displayNow } = face._compressTimeline(now, 38);
+    const trailDur = displayNow - entries[entries.length - 1].at;
+    const totalDur = displayNow - entries[0].at;
+    const trailBlocks = (trailDur / totalDur) * 38;
+    assert.ok(trailBlocks <= MAX_SEGMENT_BLOCKS + 0.01,
+      `trailing segment occupies ${trailBlocks.toFixed(1)} blocks, expected <= ${MAX_SEGMENT_BLOCKS}`);
+  });
+
+  test('pass 2 interacts correctly with pass 1 low-activity compression', () => {
+    const face = new ClaudeFace();
+    const base = 100000;
+    face.timeline = [
+      { state: 'coding', at: base },
+      { state: 'reading', at: base + 1000 },
+      { state: 'idle', at: base + 2000 },
+      { state: 'coding', at: base + 120000 },  // 118s idle gap → capped to 30s by pass 1
+      { state: 'executing', at: base + 121000 },
+      { state: 'testing', at: base + 122000 },
+    ];
+    const now = base + 123000;
+    const { entries } = face._compressTimeline(now, 38);
+    assert.strictEqual(entries.length, 6);
+    // Pass 1 should have compressed the idle gap
+    const idleIdx = entries.findIndex(e => e.state === 'idle');
+    const idleGap = entries[idleIdx + 1].at - entries[idleIdx].at;
+    assert.ok(idleGap <= COMPRESS_LOW_CAP + 1,
+      `idle gap ${idleGap} should be compressed by pass 1`);
+  });
+
+  test('barWidth smaller than MAX_SEGMENT_BLOCKS effectively disables capping', () => {
+    const face = new ClaudeFace();
+    const base = 100000;
+    face.timeline = [
+      { state: 'coding', at: base },
+      { state: 'reading', at: base + 1000 },
+      { state: 'sleeping', at: base + 2000 },
+      { state: 'coding', at: base + 100000 },
+    ];
+    const now = base + 101000;
+    // barWidth=3: each segment gets at most 3 blocks, MAX=5 can never trigger
+    const { entries } = face._compressTimeline(now, 3);
+    assert.strictEqual(entries.length, 4);
+  });
+
+  test('MAX_SEGMENT_BLOCKS is exported and equals 5', () => {
+    assert.strictEqual(MAX_SEGMENT_BLOCKS, 5);
   });
 });
 
