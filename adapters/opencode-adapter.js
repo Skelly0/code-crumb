@@ -57,7 +57,9 @@ function normaliseEvent(data) {
   const isError = data.output?.error || data.error || data.is_error || false;
   const stderr = data.output?.error || '';
 
-  return { event, toolName, toolInput, toolOutput, isError, stderr };
+  const sessionId = data.session_id || '';
+
+  return { event, toolName, toolInput, toolOutput, isError, stderr, sessionId };
 }
 
 // -- Custom event mapping -----------------------------------------------
