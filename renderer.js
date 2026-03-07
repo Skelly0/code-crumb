@@ -292,9 +292,9 @@ function runUnifiedMode() {
           lastAppliedTimestamp = freshTs;
           lastStopped = stoppedNow;
           lastFileState = freshData.state;
-          // If the file says responding (or ratelimited), apply it; otherwise
+          // If the file says responding, apply it; otherwise
           // we just set lastStopped so the rescue block above fires next frame.
-          if (freshData.state === 'responding' || freshData.state === 'ratelimited') {
+          if (freshData.state === 'responding') {
             face.prevState = face.state;
             face.state = freshData.state;
             face.transitionFrame = 0;

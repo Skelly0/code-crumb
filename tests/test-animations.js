@@ -167,7 +167,7 @@ describe('animations.js -- gridMouths count', () => {
       'idle', 'thinking', 'coding', 'reading', 'searching', 'executing',
       'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
       'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
-      'committing', 'responding', 'starting', 'spawning', 'reviewing', 'ratelimited', 'training',
+      'committing', 'responding', 'starting', 'spawning', 'reviewing', 'training',
     ];
     for (const state of expectedStates) {
       assert.ok(typeof gridMouths[state] === 'string', `missing gridMouth for: ${state}`);
@@ -176,7 +176,7 @@ describe('animations.js -- gridMouths count', () => {
 
   test('gridMouths count matches actual keys', () => {
     const keys = Object.keys(gridMouths);
-    assert.ok(keys.length >= 24, `expected at least 24 gridMouths, got ${keys.length}`);
+    assert.ok(keys.length >= 23, `expected at least 23 gridMouths, got ${keys.length}`);
   });
 });
 

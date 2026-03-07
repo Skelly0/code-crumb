@@ -60,7 +60,6 @@ const gridMouths = {
   spawning:    '\u00b7\u00b7\u00b7',
   committing:  '\u2550\u2550\u2550',
   reviewing:   '\u2550\u2550\u2550',
-  ratelimited: '\u00b7\u00b7\u00b7',
   training:    '\u2237\u2237\u2237',
 };
 

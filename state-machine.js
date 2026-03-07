@@ -226,41 +226,6 @@ function extractExitCode(stdout) {
   return match ? parseInt(match[1], 10) : null;
 }
 
-// Detect rate limit / usage limit / quota errors in tool output
-const rateLimitPatterns = [
-  /\brate.?limit/i,
-  /\busage.?limit/i,
-  /\btoo many requests\b/i,
-  /\b429\b.*\b(error|status|rejected|failed)\b/i,   // 429 with error context
-  /\b(error|status|http)\b.*\b429\b/i,               // error context before 429
-  /\bquota.?exceeded\b/i,
-  /\b(at|over)\s+capacity\b/i,                        // only "at capacity" / "over capacity"
-  /\b(server|model|system)\s+(is\s+)?overloaded\b/i,  // only server/model/system overloaded
-  /\bretry.?after\s+\d/i,                             // only "retry after" followed by a number
-  /\bthrottled\b/i,                                    // only past tense (the event, not the function)
-  /\bconcurrency.?limit/i,
-];
-
-// False positive guards for rate limit detection
-const rateLimitFalsePositives = [
-  /\bthrottle\s*[=(]/i,                                // throttle( — function call
-  /\bthrottle\.js\b/i,                                 // filename
-  /useThrottle/i,                                      // React hook
-  /import.*throttle/i,                                 // import statement
-  /require.*throttle/i,                                // require() call
-  /\boverload(ed|ing)?\s+(function|method|operator)/i, // language overloading
-  /\boperator\s+overload/i,                            // operator overloading
-  /\bcapacity\s*(plan|test|check|monitor|report)/i,    // capacity planning
-  /\b(disk|memory|storage)\s+capacity\b/i,             // hardware capacity
-];
-
-function looksLikeRateLimit(stdout, stderr) {
-  const combined = stripAnsi((stdout || '') + (stderr || ''));
-  const hit = rateLimitPatterns.some(p => p.test(combined));
-  if (!hit) return false;
-  return !rateLimitFalsePositives.some(p => p.test(combined));
-}
-
 // Friendly error detail based on what we found
 function errorDetail(stdout, stderr) {
   const combined = stripAnsi((stdout || '') + (stderr || ''));
@@ -301,26 +266,18 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
   let diffInfo = null;
 
   // Decision tree -- in order of confidence
-  // Rate limit is a refinement of error detection -- only checked when there's
-  // already an error signal, to avoid false positives from file contents / search results
-  const isRateLimited = looksLikeRateLimit(stdout, stderr);
-
   if (isError) {
-    if (isRateLimited) { state = 'ratelimited'; detail = 'usage limit'; }
-    else { state = 'error'; detail = errorDetail(stdout, stderr); }
+    state = 'error'; detail = errorDetail(stdout, stderr);
   } else if (toolResponse?.interrupted) {
     state = 'error';
     detail = 'interrupted';
   } else if (inferredExit !== null && inferredExit !== 0) {
-    if (isRateLimited) { state = 'ratelimited'; detail = 'usage limit'; }
-    else { state = 'error'; detail = errorDetail(stdout, stderr) || `exit ${inferredExit}`; }
+    state = 'error'; detail = errorDetail(stdout, stderr) || `exit ${inferredExit}`;
   } else if (!READ_TOOLS.test(toolName) && !SEARCH_TOOLS.test(toolName) && !WEB_TOOLS.test(toolName) && looksLikeError(stderr, stderrErrorPatterns)) {
-    if (isRateLimited) { state = 'ratelimited'; detail = 'usage limit'; }
-    else { state = 'error'; detail = errorDetail(stdout, stderr); }
+    state = 'error'; detail = errorDetail(stdout, stderr);
   } else if (BASH_TOOLS.test(toolName) && looksLikeError(stdout, stdoutErrorPatterns)) {
     // Only check stdout patterns for shell commands -- other tools have structured output
-    if (isRateLimited) { state = 'ratelimited'; detail = 'usage limit'; }
-    else { state = 'error'; detail = errorDetail(stdout, stderr); }
+    state = 'error'; detail = errorDetail(stdout, stderr);
   } else if (EDIT_TOOLS.test(toolName)) {
     state = 'proud';
     const fp = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
@@ -496,9 +453,6 @@ module.exports = {
   falsePositives,
   isMergeConflict,
   looksLikeError,
-  looksLikeRateLimit,
-  rateLimitPatterns,
-  rateLimitFalsePositives,
   stripAnsi,
   errorDetail,
   extractExitCode,

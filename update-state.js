@@ -17,7 +17,7 @@ const path = require('path');
 const { STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, QUIT_FLAG_FILE, safeFilename, getGitBranch, getIsWorktree } = require('./shared');
 const {
   toolToState, classifyToolResult, updateStreak, defaultStats,
-  looksLikeRateLimit, EDIT_TOOLS, SUBAGENT_TOOLS,
+  EDIT_TOOLS, SUBAGENT_TOOLS,
   pruneFrequentFiles, topFrequentFiles, buildSubagentSessionState,
 } = require('./state-machine');
 
@@ -286,13 +286,8 @@ process.stdin.on('end', () => {
     }
     else if (hookEvent === 'Stop') {
       const lastMsg = data.last_assistant_message || '';
-      if (looksLikeRateLimit(lastMsg, '')) {
-        state = 'ratelimited';
-        detail = 'usage limit';
-      } else {
-        state = 'responding';
-        detail = 'wrapping up';
-      }
+      state = 'responding';
+      detail = 'wrapping up';
       stopped = true;
 
       // Update session records

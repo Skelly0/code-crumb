@@ -88,7 +88,7 @@ State is communicated between the hook handler and renderer via JSON files:
 
 ### State Machine
 
-24 face states: `idle`, `thinking`, `responding`, `reading`, `searching`, `coding`, `executing`, `happy`, `satisfied`, `proud`, `relieved`, `error`, `sleeping`, `waiting`, `testing`, `installing`, `caffeinated`, `subagent`, `starting`, `spawning`, `committing`, `reviewing`, `ratelimited`, `training`.
+23 face states: `idle`, `thinking`, `responding`, `reading`, `searching`, `coding`, `executing`, `happy`, `satisfied`, `proud`, `relieved`, `error`, `sleeping`, `waiting`, `testing`, `installing`, `caffeinated`, `subagent`, `starting`, `spawning`, `committing`, `reviewing`, `training`.
 
 States have minimum display durations (1–8 seconds) enforced via a `pendingState` queue to prevent visual flashing.
 
@@ -183,7 +183,7 @@ Run `npm test` (or `node test.js`). The test runner loads 12 modular test files 
 
 - **test-shared.js**: `safeFilename` edge cases
 - **test-state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants incl. `REVIEW_TOOLS`, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
-- **test-themes.js**: `lerpColor`/`dimColor`/`breathe`/`dimAnsiOutput` color math, theme completeness (all 24 states), `COMPLETION_LINGER` ordering, thought bubble pools
+- **test-themes.js**: `lerpColor`/`dimColor`/`breathe`/`dimAnsiOutput` color math, theme completeness (all 23 states), `COMPLETION_LINGER` ordering, thought bubble pools
 - **test-animations.js**: mouth/eye functions (shape and randomness)
 - **test-particles.js**: `ParticleSystem` (all 15 styles incl. stream, fire, lifecycle, fadeAll)
 - **test-face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline, orbital toggle)
@@ -200,7 +200,7 @@ For visual testing, use the demo scripts:
 
 1. Run `npm start` in one terminal
 2. Run `npm run demo` in another terminal
-3. Observe the face cycling through all 24 states
+3. Observe the face cycling through all 23 states
 
 For orbital subagents: `npm start` + `npm run demo:orbital`.
 
