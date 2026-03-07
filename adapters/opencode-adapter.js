@@ -16,6 +16,7 @@
 // |  Event Schema from OpenCode plugins:                            |
 // |    {                                                             |
 // |      "type": "tool.execute.before"|"tool.execute.after"|...    |
+// |      "session_id": "...",                                       |
 // |      "input": { "tool": "...", "args": {...} },                |
 // |      "output": {...}                                            |
 // |    }                                                             |

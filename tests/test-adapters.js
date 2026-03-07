@@ -463,6 +463,22 @@ describe('adapters -- opencode session_id consolidation', () => {
       'normaliseEvent should return empty string when no session_id');
   });
 
+  test('different session_ids produce separate session files', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('oc-separate-a');
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.before', session_id: 'oc-separate-a',
+      input: { tool: 'shell', args: {} },
+    }, env);
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.before', session_id: 'oc-separate-b',
+      input: { tool: 'file_edit', args: {} },
+    }, env);
+    const files = fs.readdirSync(sessionsDir);
+    assert.strictEqual(files.length, 2,
+      `different session_ids should produce 2 files, got ${files.length}`);
+    cleanup(tmp);
+  });
+
   test('CLAUDE_SESSION_ID env var used as fallback when session_id missing', () => {
     const { tmp, sessionsDir, env } = makeTempEnv('oc-env-fallback');
     // Send events without session_id in payload -- env var should be used
