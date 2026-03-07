@@ -707,8 +707,9 @@ class ClaudeFace {
         }
 
         const capped = new Array(durations.length).fill(false);
+        let cappedBlocks = 0, uncappedDur = 0;
         for (let iter = 0; iter < durations.length; iter++) {
-          let cappedBlocks = 0, uncappedDur = 0;
+          cappedBlocks = 0; uncappedDur = 0;
           for (let i = 0; i < durations.length; i++) {
             if (capped[i]) cappedBlocks += MAX_SEGMENT_BLOCKS;
             else uncappedDur += durations[i];
@@ -726,12 +727,6 @@ class ClaudeFace {
           if (!anyNew) break;
         }
 
-        // Rebuild only if some (not all) segments are capped
-        let cappedBlocks = 0, uncappedDur = 0;
-        for (let i = 0; i < durations.length; i++) {
-          if (capped[i]) cappedBlocks += MAX_SEGMENT_BLOCKS;
-          else uncappedDur += durations[i];
-        }
         const remaining = barWidth - cappedBlocks;
 
         if (remaining > 0 && uncappedDur > 0 && capped.some(c => c)) {
