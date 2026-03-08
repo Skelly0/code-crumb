@@ -1060,6 +1060,39 @@ class OrbitalSystem {
     return out;
   }
 
+  _getGroupLabel(members, stable) {
+    const DEFAULT_BRANCHES = new Set(['main', 'master', 'develop', 'dev']);
+
+    // Team groups: always use teamName
+    const teamName = members[0].face.teamName;
+    if (teamName) return teamName.slice(0, 12);
+
+    // Priority 1: shared non-default git branch
+    const branches = stable.map(m => m.face.gitBranch).filter(Boolean);
+    if (branches.length === stable.length && branches.length > 0) {
+      const first = branches[0];
+      if (!DEFAULT_BRANCHES.has(first) && branches.every(b => b === first)) {
+        return first.slice(0, 12);
+      }
+    }
+
+    // Priority 2: shared cwd basename
+    const cwds = stable.map(m => m.face.cwd ? path.basename(m.face.cwd) : '').filter(Boolean);
+    if (cwds.length === stable.length && cwds.length > 0) {
+      const first = cwds[0];
+      if (cwds.every(c => c === first)) {
+        return first.slice(0, 12);
+      }
+    }
+
+    // Priority 3: first member's taskDescription
+    const desc = stable[0].face.taskDescription;
+    if (desc) return desc.slice(0, 12);
+
+    // Priority 4: first member's face label
+    return (stable[0].face.label || '').slice(0, 12);
+  }
+
   _renderGroupLabels(positions, rows, cols, outDots, mainPos) {
     let out = '';
     const r = ansi.reset;
@@ -1085,9 +1118,8 @@ class OrbitalSystem {
       const stable = members.filter(m => !m.face.spawning);
       if (stable.length < 2) continue; // Need 2+ non-spawning to show label
 
-      // Get label text: team name or first member's face label
-      const teamName = members[0].face.teamName;
-      const label = (teamName ? teamName : (stable[0].face.label || '')).slice(0, 12);
+      // Get label text via priority chain
+      const label = this._getGroupLabel(members, stable);
       if (!label) continue;
 
       // Position: below the bottommost stable face, centered horizontally

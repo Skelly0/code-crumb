@@ -2295,6 +2295,104 @@ describe('grid.js -- OrbitalSystem._renderGroupTethers', () => {
   });
 });
 
+describe('grid.js -- OrbitalSystem._getGroupLabel', () => {
+  const mkPos = (face) => ({ col: 10, row: 5, face });
+
+  test('team groups return teamName', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.teamName = 'backend'; f1.label = 'sub-1';
+    const f2 = new MiniFace('s2'); f2.teamName = 'backend'; f2.label = 'sub-2';
+    const members = [mkPos(f1), mkPos(f2)];
+    const stable = members;
+    assert.strictEqual(os._getGroupLabel(members, stable), 'backend');
+  });
+
+  test('shared non-default branch used as label', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.gitBranch = 'feat/auth'; f1.label = 'sub-1';
+    const f2 = new MiniFace('s2'); f2.gitBranch = 'feat/auth'; f2.label = 'sub-2';
+    const members = [mkPos(f1), mkPos(f2)];
+    assert.strictEqual(os._getGroupLabel(members, members), 'feat/auth');
+  });
+
+  test('default branches (main/master/develop/dev) fall through', () => {
+    const os = new OrbitalSystem();
+    for (const br of ['main', 'master', 'develop', 'dev']) {
+      const f1 = new MiniFace('s1'); f1.gitBranch = br; f1.label = 'sub-1';
+      const f2 = new MiniFace('s2'); f2.gitBranch = br; f2.label = 'sub-2';
+      const members = [mkPos(f1), mkPos(f2)];
+      assert.strictEqual(os._getGroupLabel(members, members), 'sub-1',
+        `branch '${br}' should fall through to face label`);
+    }
+  });
+
+  test('mixed branches fall through to cwd', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.gitBranch = 'feat/a'; f1.cwd = '/home/user/myapp';
+    const f2 = new MiniFace('s2'); f2.gitBranch = 'feat/b'; f2.cwd = '/home/user/myapp';
+    const members = [mkPos(f1), mkPos(f2)];
+    assert.strictEqual(os._getGroupLabel(members, members), 'myapp');
+  });
+
+  test('missing branches fall through to shared cwd', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.cwd = '/projects/cool-app'; f1.label = 'sub-1';
+    const f2 = new MiniFace('s2'); f2.cwd = '/projects/cool-app'; f2.label = 'sub-2';
+    const members = [mkPos(f1), mkPos(f2)];
+    assert.strictEqual(os._getGroupLabel(members, members), 'cool-app');
+  });
+
+  test('mixed cwds fall through to taskDescription', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.cwd = '/a'; f1.taskDescription = 'fix modal';
+    const f2 = new MiniFace('s2'); f2.cwd = '/b'; f2.label = 'sub-2';
+    const members = [mkPos(f1), mkPos(f2)];
+    assert.strictEqual(os._getGroupLabel(members, members), 'fix modal');
+  });
+
+  test('taskDescription used when no shared branch or cwd', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.taskDescription = 'add tests'; f1.label = 'sub-1';
+    const f2 = new MiniFace('s2'); f2.label = 'sub-2';
+    const members = [mkPos(f1), mkPos(f2)];
+    assert.strictEqual(os._getGroupLabel(members, members), 'add tests');
+  });
+
+  test('falls back to face.label when nothing else available', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.label = 'haiku';
+    const f2 = new MiniFace('s2'); f2.label = 'sub-2';
+    const members = [mkPos(f1), mkPos(f2)];
+    assert.strictEqual(os._getGroupLabel(members, members), 'haiku');
+  });
+
+  test('label truncated to 12 chars', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.gitBranch = 'feature/very-long-branch-name';
+    const f2 = new MiniFace('s2'); f2.gitBranch = 'feature/very-long-branch-name';
+    const members = [mkPos(f1), mkPos(f2)];
+    const label = os._getGroupLabel(members, members);
+    assert.ok(label.length <= 12, `label "${label}" should be max 12 chars`);
+  });
+
+  test('teamName truncated to 12 chars', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.teamName = 'infrastructure-team';
+    const f2 = new MiniFace('s2'); f2.teamName = 'infrastructure-team';
+    const members = [mkPos(f1), mkPos(f2)];
+    const label = os._getGroupLabel(members, members);
+    assert.ok(label.length <= 12, `team label "${label}" should be max 12 chars`);
+  });
+
+  test('empty string when no data at all', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.label = '';
+    const f2 = new MiniFace('s2'); f2.label = '';
+    const members = [mkPos(f1), mkPos(f2)];
+    assert.strictEqual(os._getGroupLabel(members, members), '');
+  });
+});
+
 describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
   test('returns empty string for singleton groups', () => {
     const os = new OrbitalSystem();
@@ -2350,6 +2448,35 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
     const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
     assert.ok(result.includes('sub-1'), 'should contain first member label');
+  });
+
+  test('shared branch renders as group label instead of face label', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main'; f1.label = 'sub-1'; f1.gitBranch = 'feat/auth';
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main'; f2.label = 'sub-2'; f2.gitBranch = 'feat/auth';
+    const positions = [
+      { col: 10, row: 5, face: f1 },
+      { col: 30, row: 5, face: f2 },
+    ];
+    const dots = [];
+    const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
+    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    assert.ok(result.includes('feat/auth'), 'should show branch instead of sub-1');
+    assert.ok(!result.includes('sub-1'), 'should not contain fallback label');
+  });
+
+  test('shared cwd renders as group label when branches differ', () => {
+    const os = new OrbitalSystem();
+    const f1 = new MiniFace('s1'); f1.parentSession = 'main'; f1.label = 'sub-1'; f1.cwd = '/home/user/myapp';
+    const f2 = new MiniFace('s2'); f2.parentSession = 'main'; f2.label = 'sub-2'; f2.cwd = '/home/user/myapp';
+    const positions = [
+      { col: 10, row: 5, face: f1 },
+      { col: 30, row: 5, face: f2 },
+    ];
+    const dots = [];
+    const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
+    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    assert.ok(result.includes('myapp'), 'should show cwd basename');
   });
 
   test('spawning faces excluded from label positioning', () => {
