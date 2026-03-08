@@ -100,7 +100,9 @@ Eleven hook event types are handled: `PreToolUse`, `PostToolUse`, `PostToolUseFa
 
 ### Orbital Label Priority
 
-Each orbital subagent face displays a label (max 8 chars). Priority order: `teammateName` > `taskDescription` > cwd basename > `modelName` > `sub-N`. The `taskDescription` field is set once at `SubagentStart` from the agent's description/prompt and preserved across all subsequent session file writes. The live tool detail (e.g., "edit foo") shows separately below the label.
+Each orbital subagent face displays a per-face label (max 8 chars). Priority order: `teammateName` > `taskDescription` > cwd basename > `modelName` > `sub-N`. The `taskDescription` field is set once at `SubagentStart` from the agent's description/prompt and preserved across all subsequent session file writes. The live tool detail (e.g., "edit foo") shows separately below the label.
+
+Floating group labels (max 12 chars) use a separate priority chain via `_getGroupLabel`: `teamName` > shared non-default git branch > shared cwd basename > first member's `taskDescription` > first member's face label. Default branches (`main`, `master`, `develop`, `dev`) are excluded from the branch tier.
 
 ### Orbital Grouping
 
@@ -108,7 +110,7 @@ Orbital faces that share a group key (`teamName || parentSession || sessionId`) 
 
 1. **Cluster positioning** — group members occupy adjacent angular sectors on the ellipse (`INTRA_GROUP_GAP = 0.35 rad`) with larger gaps between groups (`INTER_GROUP_GAP = 0.15 rad`). Pixel-aware minimum spacing ensures faces don't overlap even on small ellipses.
 2. **Group tethers** — dim dashed `·` lines chain sequential siblings (A→B, B→C) at `TETHER_BRIGHTNESS = 0.15`; team groups use the team accent color. Tether dots skip ALL face bounding boxes (not just endpoints). Spawning faces are excluded from tether segments.
-3. **Floating group labels** — short label text positioned below each multi-member cluster at `GROUP_LABEL_BRIGHTNESS = 0.45`. Team groups show the team name; non-team groups show the first member's face label. Spawning faces are excluded from label extent calculation. Labels skip the main face exclusion zone.
+3. **Floating group labels** — short label text positioned below each multi-member cluster at `GROUP_LABEL_BRIGHTNESS = 0.45`. Team groups show the team name; non-team groups select via priority chain: shared git branch > shared cwd basename > first member's taskDescription > first member's face label (see Orbital Label Priority). Spawning faces are excluded from label extent calculation. Labels skip the main face exclusion zone.
 4. **Overlap resolver** — post-position iterative nudge pass (max 3 iterations) that detects bounding box collisions between orbital faces and pushes them apart, re-clamping to terminal bounds.
 
 Singleton groups (one member) get no tethers or labels. When all faces are ungrouped, spacing degrades gracefully to near-even distribution identical to pre-grouping behavior.
@@ -187,7 +189,7 @@ Run `npm test` (or `node test.js`). The test runner loads 12 modular test files 
 - **test-animations.js**: mouth/eye functions (shape and randomness)
 - **test-particles.js**: `ParticleSystem` (all 15 styles incl. stream, fire, lifecycle, fadeAll)
 - **test-face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline, orbital toggle)
-- **test-grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles, taskDescription label priority, SessionStart adoption, `_buildGroups` grouping/sorting/color, `_calculateGroupedAngles` sector allocation with pixel-aware spacing, `_renderGroupTethers` dashed sibling lines with all-positions check and spawning exclusion, `_renderGroupLabels` floating labels for team/non-team groups, `_resolveOverlaps` bounding box collision resolver), `renderSessionList` selection highlight and footer
+- **test-grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles, taskDescription label priority, SessionStart adoption, `_buildGroups` grouping/sorting/color, `_calculateGroupedAngles` sector allocation with pixel-aware spacing, `_renderGroupTethers` dashed sibling lines with all-positions check and spawning exclusion, `_getGroupLabel` 4-tier priority chain (branch/cwd/taskDescription/label fallback, default branch exclusion, truncation), `_renderGroupLabels` floating labels for team/non-team groups, `_resolveOverlaps` bounding box collision resolver), `renderSessionList` selection highlight and footer
 - **test-accessories.js**: accessory definitions, rendering, state-specific adornments
 - **test-teams.js**: `hashTeamColor` consistency and RGB output, `MiniFace` team fields, `_assignLabels` with `teammateName`, session schema for `TeammateIdle`/`TaskCompleted`, team grouping (clusters by teamName, tethers use team color, auras show team name label, mixed groups separate correctly)
 - **test-launch.js**: launcher logic, platform detection, editor flag handling
