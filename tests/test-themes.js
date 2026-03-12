@@ -388,4 +388,191 @@ describe('ansi sync sequences', () => {
   });
 });
 
+// -- New test sections --------------------------------------------------
+
+describe('themes.js -- breathe timing', () => {
+  test('brightest at BREATH_PERIOD/4 (peak of sin)', () => {
+    const color = [100, 200, 50];
+    const peak = breathe(color, BREATH_PERIOD / 4);
+    // At BREATH_PERIOD/4, sin(2*PI*t/PERIOD) = sin(PI/2) = 1, factor = 0.65 + 1*0.35 = 1.0
+    assert.deepStrictEqual(peak, [100, 200, 50]);
+  });
+
+  test('dimmest at 3*BREATH_PERIOD/4 (trough of sin)', () => {
+    const color = [100, 200, 50];
+    const trough = breathe(color, 3 * BREATH_PERIOD / 4);
+    // At 3*BREATH_PERIOD/4, sin(3*PI/2) = -1, factor = 0.65 + 0*0.35 = 0.65
+    assert.deepStrictEqual(trough, dimColor(color, 0.65));
+  });
+
+  test('breathe(color, 0) equals breathe(color, BREATH_PERIOD) (periodicity)', () => {
+    const color = [100, 200, 50];
+    const atZero = breathe(color, 0);
+    const atPeriod = breathe(color, BREATH_PERIOD);
+    assert.deepStrictEqual(atZero, atPeriod);
+  });
+});
+
+describe('themes.js -- dimAnsiOutput edge cases', () => {
+  test('empty string returns empty string', () => {
+    assert.strictEqual(dimAnsiOutput('', 0.5), '');
+  });
+
+  test('background color sequences are NOT modified', () => {
+    const str = '\x1b[48;2;100;200;50mhello\x1b[0m';
+    const result = dimAnsiOutput(str, 0.5);
+    // Background sequences (48;2;...) should remain unchanged
+    assert.ok(result.includes('\x1b[48;2;100;200;50m'), 'background sequence should not be modified');
+  });
+
+  test('factor clamped above 1 behaves like 1', () => {
+    const str = '\x1b[38;2;100;200;50mhello\x1b[0m';
+    const result = dimAnsiOutput(str, 5.0);
+    assert.strictEqual(result, dimAnsiOutput(str, 1.0));
+  });
+
+  test('factor clamped below 0 behaves like 0', () => {
+    const str = '\x1b[38;2;100;200;50mhello\x1b[0m';
+    const result = dimAnsiOutput(str, -3.0);
+    assert.strictEqual(result, dimAnsiOutput(str, 0.0));
+  });
+});
+
+describe('themes.js -- palette color ranges', () => {
+  test('all palette theme color values are within [0, 255]', () => {
+    const colorKeys = ['border', 'eye', 'mouth', 'accent', 'label'];
+    for (const palette of PALETTES) {
+      for (const state of Object.keys(palette.themes)) {
+        const theme = palette.themes[state];
+        for (const key of colorKeys) {
+          if (!Array.isArray(theme[key])) continue;
+          for (let i = 0; i < theme[key].length; i++) {
+            const v = theme[key][i];
+            assert.ok(v >= 0 && v <= 255,
+              `${palette.name}.${state}.${key}[${i}] = ${v} is out of [0, 255] range`);
+          }
+        }
+      }
+    }
+  });
+
+  test('all palette timeline color values are within [0, 255]', () => {
+    for (const palette of PALETTES) {
+      for (const state of Object.keys(palette.timelineColors)) {
+        const c = palette.timelineColors[state];
+        for (let i = 0; i < c.length; i++) {
+          assert.ok(c[i] >= 0 && c[i] <= 255,
+            `${palette.name} timelineColor ${state}[${i}] = ${c[i]} is out of range`);
+        }
+      }
+    }
+  });
+});
+
+describe('themes.js -- ansi.bg returns empty in noColor', () => {
+  const savedNoColor = isNoColor();
+
+  test('ansi.bg returns empty string when noColor active', () => {
+    setNoColor(true);
+    assert.strictEqual(ansi.bg(255, 0, 0), '');
+    setNoColor(false);
+  });
+
+  test('ansi.bold returns empty string when noColor active', () => {
+    setNoColor(true);
+    assert.strictEqual(ansi.bold, '');
+    setNoColor(false);
+  });
+
+  test('ansi.dim returns empty string when noColor active', () => {
+    setNoColor(true);
+    assert.strictEqual(ansi.dim, '');
+    setNoColor(false);
+  });
+
+  // Restore
+  setNoColor(savedNoColor);
+});
+
+describe('themes.js -- palette timeline completeness', () => {
+  const ALL_23_STATES = [
+    'idle', 'thinking', 'responding', 'coding', 'reading', 'searching', 'executing',
+    'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
+    'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
+    'starting', 'spawning', 'committing', 'reviewing', 'training',
+  ];
+
+  test('every palette has responding in themes', () => {
+    for (const palette of PALETTES) {
+      assert.ok(palette.themes['responding'],
+        `${palette.name}: missing theme for responding`);
+    }
+  });
+
+  test('every palette has starting in themes', () => {
+    for (const palette of PALETTES) {
+      assert.ok(palette.themes['starting'],
+        `${palette.name}: missing theme for starting`);
+    }
+  });
+
+  test('every palette has responding in timelineColors', () => {
+    for (const palette of PALETTES) {
+      assert.ok(palette.timelineColors['responding'],
+        `${palette.name}: missing timelineColor for responding`);
+    }
+  });
+
+  test('every palette has starting in timelineColors', () => {
+    for (const palette of PALETTES) {
+      assert.ok(palette.timelineColors['starting'],
+        `${palette.name}: missing timelineColor for starting`);
+    }
+  });
+
+  test('every palette has all 23 states in both themes and timelineColors', () => {
+    for (const palette of PALETTES) {
+      for (const state of ALL_23_STATES) {
+        assert.ok(palette.themes[state],
+          `${palette.name}: missing theme for state: ${state}`);
+        assert.ok(palette.timelineColors[state],
+          `${palette.name}: missing timelineColor for state: ${state}`);
+      }
+    }
+  });
+});
+
+describe('themes.js -- themes have all 23 states', () => {
+  const ALL_23_STATES = [
+    'idle', 'thinking', 'responding', 'coding', 'reading', 'searching', 'executing',
+    'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
+    'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
+    'starting', 'spawning', 'committing', 'reviewing', 'training',
+  ];
+
+  test('default themes object has all 23 states', () => {
+    for (const state of ALL_23_STATES) {
+      assert.ok(themes[state], `default themes missing state: ${state}`);
+    }
+  });
+
+  test('TIMELINE_COLORS has all 23 states', () => {
+    for (const state of ALL_23_STATES) {
+      assert.ok(TIMELINE_COLORS[state], `TIMELINE_COLORS missing state: ${state}`);
+    }
+  });
+
+  test('all 23 states have correct color shape in default themes', () => {
+    for (const state of ALL_23_STATES) {
+      const theme = themes[state];
+      for (const key of ['border', 'eye', 'mouth', 'accent', 'label']) {
+        assert.ok(Array.isArray(theme[key]), `${state}.${key} should be an array`);
+        assert.strictEqual(theme[key].length, 3, `${state}.${key} should have 3 elements`);
+      }
+      assert.ok(typeof theme.status === 'string', `${state}.status should be a string`);
+      assert.ok(typeof theme.emoji === 'string', `${state}.emoji should be a string`);
+    }
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

@@ -1827,4 +1827,133 @@ describe('bug fix structural tests', () => {
   });
 });
 
+// -- Base adapter structure -------------------------------------------
+
+describe('adapters -- base-adapter structure', () => {
+  test('requiring base-adapter does not throw', () => {
+    assert.doesNotThrow(() => require(path.join(ADAPTERS_DIR, 'base-adapter.js')));
+  });
+
+  test('base-adapter exports an object with expected functions', () => {
+    const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter.js'));
+    assert.strictEqual(typeof baseAdapter, 'object', 'module should export an object');
+    assert.strictEqual(typeof baseAdapter.writeState, 'function', 'writeState should be a function');
+    assert.strictEqual(typeof baseAdapter.writeSessionState, 'function', 'writeSessionState should be a function');
+    assert.strictEqual(typeof baseAdapter.readStats, 'function', 'readStats should be a function');
+    assert.strictEqual(typeof baseAdapter.writeStats, 'function', 'writeStats should be a function');
+  });
+
+  test('base-adapter exports guardedWriteState', () => {
+    const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter.js'));
+    assert.strictEqual(typeof baseAdapter.guardedWriteState, 'function');
+  });
+
+  test('base-adapter exports initSession', () => {
+    const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter.js'));
+    assert.strictEqual(typeof baseAdapter.initSession, 'function');
+  });
+
+  test('base-adapter exports buildExtra', () => {
+    const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter.js'));
+    assert.strictEqual(typeof baseAdapter.buildExtra, 'function');
+  });
+
+  test('base-adapter exports processStdinEvent', () => {
+    const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter.js'));
+    assert.strictEqual(typeof baseAdapter.processStdinEvent, 'function');
+  });
+
+  test('base-adapter exports processJsonlStream', () => {
+    const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter.js'));
+    assert.strictEqual(typeof baseAdapter.processJsonlStream, 'function');
+  });
+
+  test('base-adapter exports runStdinAdapter', () => {
+    const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter.js'));
+    assert.strictEqual(typeof baseAdapter.runStdinAdapter, 'function');
+  });
+
+  test('base-adapter exports handleToolStart and handleToolEnd', () => {
+    const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter.js'));
+    assert.strictEqual(typeof baseAdapter.handleToolStart, 'function');
+    assert.strictEqual(typeof baseAdapter.handleToolEnd, 'function');
+  });
+
+  test('base-adapter exports trackEditedFile', () => {
+    const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter.js'));
+    assert.strictEqual(typeof baseAdapter.trackEditedFile, 'function');
+  });
+});
+
+// -- engmux adapter structure -----------------------------------------
+
+describe('adapters -- engmux adapter structure', () => {
+  test('engmux-adapter.js file can be read without error', () => {
+    const adapterPath = path.join(ADAPTERS_DIR, 'engmux-adapter.js');
+    assert.ok(fs.existsSync(adapterPath), 'engmux-adapter.js should exist');
+    assert.doesNotThrow(() => fs.readFileSync(adapterPath, 'utf8'));
+  });
+
+  test('engmux-adapter.js is a valid Node.js script', () => {
+    const adapterPath = path.join(ADAPTERS_DIR, 'engmux-adapter.js');
+    const src = fs.readFileSync(adapterPath, 'utf8');
+    assert.ok(src.includes("'use strict'"), 'should use strict mode');
+    assert.ok(src.includes("require('./base-adapter')"), 'should require base-adapter');
+  });
+
+  test('engmux-adapter.js uses writeSessionState from base-adapter', () => {
+    const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'engmux-adapter.js'), 'utf8');
+    assert.ok(src.includes('writeSessionState'), 'should use writeSessionState');
+  });
+});
+
+// -- codex-wrapper structure ------------------------------------------
+
+describe('adapters -- codex-wrapper structure', () => {
+  test('codex-wrapper.js file exists and is readable', () => {
+    const adapterPath = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
+    assert.ok(fs.existsSync(adapterPath), 'codex-wrapper.js should exist');
+    assert.doesNotThrow(() => fs.readFileSync(adapterPath, 'utf8'));
+  });
+
+  test('codex-wrapper.js is a valid Node.js script', () => {
+    const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'codex-wrapper.js'), 'utf8');
+    assert.ok(src.includes("'use strict'"), 'should use strict mode');
+    assert.ok(src.includes("require('./base-adapter')"), 'should require base-adapter');
+  });
+
+  test('codex-wrapper.js imports expected base-adapter functions', () => {
+    const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'codex-wrapper.js'), 'utf8');
+    assert.ok(src.includes('writeSessionState'), 'should import writeSessionState');
+    assert.ok(src.includes('readStats'), 'should import readStats');
+    assert.ok(src.includes('writeStats'), 'should import writeStats');
+    assert.ok(src.includes('guardedWriteState'), 'should import guardedWriteState');
+    assert.ok(src.includes('initSession'), 'should import initSession');
+    assert.ok(src.includes('buildExtra'), 'should import buildExtra');
+    assert.ok(src.includes('handleToolStart'), 'should import handleToolStart');
+    assert.ok(src.includes('handleToolEnd'), 'should import handleToolEnd');
+    assert.ok(src.includes('processJsonlStream'), 'should import processJsonlStream');
+  });
+});
+
+// -- adapter files all exist ------------------------------------------
+
+describe('adapters -- adapter files all exist', () => {
+  const adapterFiles = [
+    'base-adapter.js',
+    'codex-wrapper.js',
+    'codex-notify.js',
+    'opencode-adapter.js',
+    'openclaw-adapter.js',
+    'engmux-adapter.js',
+  ];
+
+  for (const file of adapterFiles) {
+    test(`${file} exists in adapters directory`, () => {
+      const fullPath = path.join(ADAPTERS_DIR, file);
+      assert.ok(fs.existsSync(fullPath), `${file} should exist at ${fullPath}`);
+    });
+  }
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

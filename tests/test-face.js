@@ -2016,4 +2016,213 @@ describe('_compressTimeline segment capping', () => {
   });
 });
 
+// -- New test sections -----------------------------------------------
+
+describe('face.js -- ClaudeFace.pet()', () => {
+  test('pet() sets petTimer > 0', () => {
+    const face = new ClaudeFace();
+    face.petTimer = 0;
+    face.pet();
+    assert.ok(face.petTimer > 0, `expected petTimer > 0, got ${face.petTimer}`);
+  });
+
+  test('pet() sets petWiggle > 0 after update', () => {
+    const face = new ClaudeFace();
+    face.pet();
+    // petWiggle is set during update() based on petTimer
+    face.update(66);
+    assert.ok(face.petWiggle !== 0, `expected petWiggle !== 0, got ${face.petWiggle}`);
+  });
+
+  test('pet() spawns sparkle particles', () => {
+    const face = new ClaudeFace();
+    const before = face.particles.particles.length;
+    face.pet();
+    const after = face.particles.particles.length;
+    assert.ok(after > before, `expected particles to increase from ${before}, got ${after}`);
+  });
+
+  test('pet() adds to petTimes array', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.petTimes.length, 0);
+    face.pet();
+    assert.ok(face.petTimes.length > 0, 'expected petTimes to have entries');
+  });
+});
+
+describe('face.js -- ClaudeFace toggle methods', () => {
+  test('cycleTheme() increments paletteIndex', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.paletteIndex, 0);
+    face.cycleTheme();
+    assert.strictEqual(face.paletteIndex, 1);
+  });
+
+  test('toggleStats() flips showStats', () => {
+    const face = new ClaudeFace();
+    const before = face.showStats;
+    face.toggleStats();
+    assert.strictEqual(face.showStats, !before);
+  });
+
+  test('toggleAccessories() flips accessoriesEnabled', () => {
+    const face = new ClaudeFace();
+    const before = face.accessoriesEnabled;
+    face.toggleAccessories();
+    assert.strictEqual(face.accessoriesEnabled, !before);
+  });
+
+  test('toggleOrbitals() flips showOrbitals', () => {
+    const face = new ClaudeFace();
+    const before = face.showOrbitals;
+    face.toggleOrbitals();
+    assert.strictEqual(face.showOrbitals, !before);
+  });
+
+  test('toggleHelp() flips showHelp', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.showHelp, false);
+    face.toggleHelp();
+    assert.strictEqual(face.showHelp, true);
+  });
+
+  test('toggleSessionList() flips showSessionList', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual(face.showSessionList, false);
+    face.toggleSessionList();
+    assert.strictEqual(face.showSessionList, true);
+  });
+});
+
+describe('face.js -- ClaudeFace.update()', () => {
+  test('update() increments frame', () => {
+    const face = new ClaudeFace();
+    const before = face.frame;
+    face.update(66);
+    assert.strictEqual(face.frame, before + 1);
+  });
+
+  test('update() increments time by dt', () => {
+    const face = new ClaudeFace();
+    const before = face.time;
+    face.update(66);
+    assert.strictEqual(face.time, before + 66);
+  });
+
+  test('update() decrements petTimer toward 0', () => {
+    const face = new ClaudeFace();
+    face.petTimer = 5;
+    face.update(66);
+    assert.strictEqual(face.petTimer, 4);
+  });
+
+  test('update() flushes pendingState after minDisplayUntil', () => {
+    const face = new ClaudeFace();
+    face.setState('coding');
+    // Force minDisplayUntil into the past so pending will flush
+    face.minDisplayUntil = Date.now() - 1;
+    face.pendingState = 'reading';
+    face.pendingDetail = 'test.js';
+    face.update(66);
+    assert.strictEqual(face.state, 'reading');
+  });
+});
+
+describe('face.js -- ClaudeFace setState error bypass', () => {
+  test('error always bypasses min display time', () => {
+    const face = new ClaudeFace();
+    face.setState('coding');
+    // coding has a 6000ms min display time, but error should bypass it
+    face.setState('error');
+    assert.strictEqual(face.state, 'error');
+  });
+});
+
+describe('face.js -- ClaudeFace active work bypass', () => {
+  test('active work states bypass interruptible states', () => {
+    const interruptible = ['idle', 'thinking', 'happy', 'satisfied', 'proud', 'relieved', 'sleeping', 'waiting'];
+    const workStates = ['coding', 'reading', 'executing', 'searching', 'testing'];
+    for (const inter of interruptible) {
+      for (const work of workStates) {
+        const face = new ClaudeFace();
+        face.state = inter;
+        face.lastStateChange = Date.now() - 10000; // ensure completion min show has passed
+        face.minDisplayUntil = Date.now() + 60000; // far in the future
+        face.setState(work);
+        assert.strictEqual(face.state, work,
+          `expected ${work} to bypass ${inter}, but state is ${face.state}`);
+      }
+    }
+  });
+});
+
+describe('face.js -- ClaudeFace completion buffering', () => {
+  test('completion states are buffered during active work states', () => {
+    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
+    for (const comp of completionStates) {
+      const face = new ClaudeFace();
+      face.setState('coding');
+      // coding is active work with min display time still active
+      face.setState(comp);
+      // completion should be buffered, not immediately applied
+      assert.strictEqual(face.state, 'coding',
+        `expected coding to remain during ${comp} buffering, but state is ${face.state}`);
+      assert.strictEqual(face.pendingState, comp,
+        `expected ${comp} to be pending, but pendingState is ${face.pendingState}`);
+    }
+  });
+});
+
+describe('face.js -- LOW_ACTIVITY_STATES', () => {
+  test('contains idle, sleeping, waiting', () => {
+    assert.ok(LOW_ACTIVITY_STATES.has('idle'));
+    assert.ok(LOW_ACTIVITY_STATES.has('sleeping'));
+    assert.ok(LOW_ACTIVITY_STATES.has('waiting'));
+  });
+
+  test('does not contain coding or thinking', () => {
+    assert.ok(!LOW_ACTIVITY_STATES.has('coding'));
+    assert.ok(!LOW_ACTIVITY_STATES.has('thinking'));
+  });
+});
+
+describe('face.js -- COMPRESS_LOW_CAP and MAX_SEGMENT_BLOCKS', () => {
+  test('COMPRESS_LOW_CAP is a positive number', () => {
+    assert.strictEqual(typeof COMPRESS_LOW_CAP, 'number');
+    assert.ok(COMPRESS_LOW_CAP > 0, `expected positive, got ${COMPRESS_LOW_CAP}`);
+  });
+
+  test('MAX_SEGMENT_BLOCKS is a positive number', () => {
+    assert.strictEqual(typeof MAX_SEGMENT_BLOCKS, 'number');
+    assert.ok(MAX_SEGMENT_BLOCKS > 0, `expected positive, got ${MAX_SEGMENT_BLOCKS}`);
+  });
+});
+
+describe('face.js -- ClaudeFace._nextBlink()', () => {
+  test('returns a number between BLINK_MIN (2500) and BLINK_MAX (6000)', () => {
+    const face = new ClaudeFace();
+    for (let i = 0; i < 100; i++) {
+      const val = face._nextBlink();
+      assert.ok(val >= 2500, `expected >= 2500, got ${val}`);
+      assert.ok(val <= 6000, `expected <= 6000, got ${val}`);
+    }
+  });
+});
+
+describe('face.js -- ClaudeFace sparkline capping', () => {
+  test('sparkline (timeline) is initialized and grows as update() runs', () => {
+    const face = new ClaudeFace();
+    // timeline starts with one entry [{state:'idle', at:...}]
+    assert.ok(Array.isArray(face.timeline));
+    assert.strictEqual(face.timeline.length, 1);
+    // After state changes, timeline grows
+    face.minDisplayUntil = 0;
+    face.setState('coding');
+    assert.ok(face.timeline.length > 1, `expected timeline to grow, got length ${face.timeline.length}`);
+    face.minDisplayUntil = 0;
+    face.setState('reading');
+    assert.ok(face.timeline.length > 2, `expected timeline to grow further, got length ${face.timeline.length}`);
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

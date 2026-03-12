@@ -244,4 +244,290 @@ describe('particles.js -- spawn edge cases', () => {
   });
 });
 
+describe('particles.js -- clearPrevious()', () => {
+  test('returns empty string on a fresh ParticleSystem', () => {
+    const ps = new ParticleSystem();
+    assert.strictEqual(ps.clearPrevious(), '');
+  });
+
+  test('returns non-empty string after render()', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(5, 'float');
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      ps.render(0, 0, [255, 255, 255]);
+      const clear = ps.clearPrevious();
+      assert.ok(clear.length > 0, 'clearPrevious should return non-empty after render');
+    } finally {
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+
+  test('second consecutive call returns empty (buffer consumed)', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(5, 'float');
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      ps.render(0, 0, [255, 255, 255]);
+      ps.clearPrevious(); // first call consumes buffer
+      const second = ps.clearPrevious();
+      assert.strictEqual(second, '', 'second clearPrevious should return empty');
+    } finally {
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+});
+
+describe('particles.js -- render()', () => {
+  test('render returns a string', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(3, 'sparkle');
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      const output = ps.render(0, 0, [255, 255, 255]);
+      assert.strictEqual(typeof output, 'string');
+    } finally {
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+
+  test('render output contains ANSI escape sequences', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(5, 'float');
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      const output = ps.render(0, 0, [255, 255, 255]);
+      assert.ok(output.includes('\x1b['), 'output should contain ANSI escape sequences');
+    } finally {
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+
+  test('_prevClearBuf is set after render', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(5, 'float');
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      ps.render(0, 0, [255, 255, 255]);
+      assert.ok(ps._prevClearBuf.length > 0, '_prevClearBuf should be set after render');
+    } finally {
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+});
+
+describe('particles.js -- render boundary clipping', () => {
+  test('out-of-bounds particles are not rendered', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(1, 'float');
+    // Force particle far out of bounds
+    ps.particles[0].x = -10;
+    ps.particles[0].y = -10;
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      const output = ps.render(0, 0, [255, 255, 255]);
+      // The particle is at col=-10, row=-10, which is < 1, so it should be clipped
+      assert.strictEqual(output, '', 'out-of-bounds particle should produce empty output');
+      assert.strictEqual(ps._prevClearBuf, '', 'clearBuf should be empty for clipped particles');
+    } finally {
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+
+  test('particle beyond terminal columns is clipped', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(1, 'float');
+    ps.particles[0].x = 200;
+    ps.particles[0].y = 5;
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      const output = ps.render(0, 0, [255, 255, 255]);
+      assert.strictEqual(output, '', 'particle beyond columns should be clipped');
+    } finally {
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+
+  test('particle beyond terminal rows is clipped', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(1, 'float');
+    ps.particles[0].x = 5;
+    ps.particles[0].y = 200;
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      const output = ps.render(0, 0, [255, 255, 255]);
+      assert.strictEqual(output, '', 'particle beyond rows should be clipped');
+    } finally {
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+});
+
+describe('particles.js -- width/height properties', () => {
+  test('default width is 40', () => {
+    const ps = new ParticleSystem();
+    assert.strictEqual(ps.width, 40);
+  });
+
+  test('default height is 14', () => {
+    const ps = new ParticleSystem();
+    assert.strictEqual(ps.height, 14);
+  });
+
+  test('setting width changes the value', () => {
+    const ps = new ParticleSystem();
+    ps.width = 60;
+    assert.strictEqual(ps.width, 60);
+  });
+
+  test('setting height changes the value', () => {
+    const ps = new ParticleSystem();
+    ps.height = 20;
+    assert.strictEqual(ps.height, 20);
+  });
+});
+
+describe('particles.js -- multiple fadeAll calls', () => {
+  test('fadeAll(10) then fadeAll(5) caps all lives at 5', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(5, 'float');
+    ps.fadeAll(10);
+    for (const p of ps.particles) {
+      assert.ok(p.life <= 10, 'after fadeAll(10) life should be <= 10');
+    }
+    ps.fadeAll(5);
+    for (const p of ps.particles) {
+      assert.ok(p.life <= 5, 'after fadeAll(5) life should be <= 5');
+    }
+  });
+
+  test('fadeAll(100) after fadeAll(5) does not increase life', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(5, 'float');
+    ps.fadeAll(5);
+    const livesBefore = ps.particles.map(p => p.life);
+    ps.fadeAll(100);
+    for (let i = 0; i < ps.particles.length; i++) {
+      assert.strictEqual(ps.particles[i].life, livesBefore[i],
+        'fadeAll with higher value should not increase life');
+    }
+  });
+});
+
+describe('particles.js -- unknown style is silently ignored', () => {
+  test('spawn with unknown style adds 0 particles', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(3, 'nonexistent_style');
+    assert.strictEqual(ps.particles.length, 0,
+      'unknown style should not add any particles');
+  });
+
+  test('spawn with another unknown style adds 0 particles', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(5, 'totally_fake');
+    assert.strictEqual(ps.particles.length, 0);
+  });
+});
+
+describe('particles.js -- particle maxLife property', () => {
+  test('all styles have positive maxLife', () => {
+    const styles = ['float', 'sparkle', 'glitch', 'orbit', 'zzz', 'question', 'sweat', 'falling', 'speedline', 'echo', 'stream', 'heart', 'push', 'rain', 'fire'];
+    for (const style of styles) {
+      const ps = new ParticleSystem();
+      ps.spawn(1, style);
+      const p = ps.particles[0];
+      assert.ok(typeof p.maxLife === 'number', `maxLife should be a number for style: ${style}`);
+      assert.ok(p.maxLife > 0, `maxLife should be positive for style: ${style}, got ${p.maxLife}`);
+    }
+  });
+
+  test('maxLife is greater than or equal to initial life for all styles', () => {
+    const styles = ['float', 'sparkle', 'glitch', 'orbit', 'zzz', 'question', 'sweat', 'falling', 'speedline', 'echo', 'stream', 'heart', 'push', 'rain', 'fire'];
+    for (const style of styles) {
+      const ps = new ParticleSystem();
+      ps.spawn(1, style);
+      const p = ps.particles[0];
+      assert.ok(p.maxLife >= p.life,
+        `maxLife (${p.maxLife}) should be >= life (${p.life}) for style: ${style}`);
+    }
+  });
+});
+
+describe('particles.js -- push style', () => {
+  test('push particles have non-zero radial velocities', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(10, 'push');
+    for (const p of ps.particles) {
+      assert.ok(p.vx !== 0 || p.vy !== 0,
+        'push particles should have non-zero velocity');
+    }
+  });
+
+  test('push particles use push-specific chars', () => {
+    const pushChars = ['\u2191', '\u25c7', '\u25c6', '\u00b7', '\u25b7', '\u2197'];
+    const ps = new ParticleSystem();
+    ps.spawn(20, 'push');
+    for (const p of ps.particles) {
+      assert.ok(pushChars.includes(p.char),
+        `push particle char '${p.char}' should be one of the push-specific chars`);
+    }
+  });
+
+  test('push particles have style set to push', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(3, 'push');
+    for (const p of ps.particles) {
+      assert.strictEqual(p.style, 'push');
+    }
+  });
+
+  test('push particles radiate from center', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(1, 'push');
+    const p = ps.particles[0];
+    const cx = ps.width / 2;
+    const cy = ps.height / 2;
+    // Velocity should point away from center (same sign as displacement from center)
+    const dx = p.x - cx;
+    const dy = p.y - cy;
+    // vx and dx should share the same sign (or be very close to 0)
+    if (Math.abs(dx) > 0.5) {
+      assert.ok(Math.sign(p.vx) === Math.sign(dx),
+        'vx should point away from center');
+    }
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
