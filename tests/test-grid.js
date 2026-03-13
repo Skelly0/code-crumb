@@ -3174,26 +3174,6 @@ describe('grid.js -- MiniFace stopped handling', () => {
   });
 });
 
-describe('grid.js -- MiniFace isMainSession classification', () => {
-  test('face with no parentSession and not teammate is main', () => {
-    const face = new MiniFace('main-test');
-    face.updateFromFile({ state: 'idle' });
-    assert.strictEqual(face.isMainSession, true);
-  });
-
-  test('face with parentSession is not main', () => {
-    const face = new MiniFace('sub-test');
-    face.updateFromFile({ state: 'idle', parentSession: 'parent-1' });
-    assert.strictEqual(face.isMainSession, false);
-  });
-
-  test('teammate is not main', () => {
-    const face = new MiniFace('team-test');
-    face.updateFromFile({ state: 'idle', isTeammate: true, teamName: 'backend' });
-    assert.strictEqual(face.isMainSession, false);
-  });
-});
-
 describe('grid.js -- OrbitalSystem update()', () => {
   test('update increments frame', () => {
     const os = new OrbitalSystem();

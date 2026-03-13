@@ -470,28 +470,32 @@ describe('themes.js -- palette color ranges', () => {
 });
 
 describe('themes.js -- ansi.bg returns empty in noColor', () => {
-  const savedNoColor = isNoColor();
-
   test('ansi.bg returns empty string when noColor active', () => {
     setNoColor(true);
-    assert.strictEqual(ansi.bg(255, 0, 0), '');
-    setNoColor(false);
+    try {
+      assert.strictEqual(ansi.bg(255, 0, 0), '');
+    } finally {
+      setNoColor(false);
+    }
   });
 
   test('ansi.bold returns empty string when noColor active', () => {
     setNoColor(true);
-    assert.strictEqual(ansi.bold, '');
-    setNoColor(false);
+    try {
+      assert.strictEqual(ansi.bold, '');
+    } finally {
+      setNoColor(false);
+    }
   });
 
   test('ansi.dim returns empty string when noColor active', () => {
     setNoColor(true);
-    assert.strictEqual(ansi.dim, '');
-    setNoColor(false);
+    try {
+      assert.strictEqual(ansi.dim, '');
+    } finally {
+      setNoColor(false);
+    }
   });
-
-  // Restore
-  setNoColor(savedNoColor);
 });
 
 describe('themes.js -- palette timeline completeness', () => {

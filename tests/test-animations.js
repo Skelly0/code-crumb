@@ -361,8 +361,12 @@ describe('animations.js -- gridMouths all 23 states', () => {
     }
   });
 
-  test('exactly 23 states are covered', () => {
-    assert.strictEqual(ALL_23_STATES.length, 23, 'should test exactly 23 states');
+  test('gridMouths covers at least all 23 states', () => {
+    const keys = Object.keys(gridMouths);
+    assert.ok(keys.length >= 23, `expected gridMouths to have >= 23 keys, got ${keys.length}`);
+    for (const state of ALL_23_STATES) {
+      assert.ok(keys.includes(state), `gridMouths missing key: ${state}`);
+    }
   });
 });
 
