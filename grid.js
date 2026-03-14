@@ -8,7 +8,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { SESSIONS_DIR, safeFilename } = require('./shared');
+const { HOME, SESSIONS_DIR, safeFilename } = require('./shared');
 const { ansi, breathe, dimColor, themes, COMPLETION_LINGER, PALETTES, PALETTE_NAMES } = require('./themes');
 const { gridMouths } = require('./animations');
 
@@ -23,6 +23,8 @@ const INTERRUPTIBLE_STATES = new Set([
   'thinking', 'happy', 'satisfied', 'proud', 'relieved',
   'idle', 'sleeping', 'waiting',
 ]);
+const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
+const HOME_FWD = HOME.replace(/\\/g, '/');  // Forward-slash-normalized HOME for path display
 
 // Predefined team accent colors — assigned consistently by hashing the team name
 const TEAM_COLORS = [
@@ -81,6 +83,7 @@ class MiniFace {
     this.detail = '';
     this.label = '';
     this.cwd = '';
+    this._cwdBasename = '';
     this.modelName = '';
     this.lastUpdate = Date.now();
     this.firstSeen = Date.now();
@@ -115,6 +118,15 @@ class MiniFace {
     this._lerpStartOffset = 0;     // Offset when lerp began
     this._lerpElapsed = 0;         // ms elapsed in current lerp
     this.REPOSITION_MS = REPOSITION_MS;
+    this._cwdForBasename = '';  // tracks which cwd value _cwdBasename was computed from
+  }
+
+  get cwdBasename() {
+    if (this.cwd !== this._cwdForBasename) {
+      this._cwdBasename = this.cwd ? path.basename(this.cwd) : '';
+      this._cwdForBasename = this.cwd;
+    }
+    return this._cwdBasename;
   }
 
   updateFromFile(data, fileMtimeMs) {
@@ -185,8 +197,7 @@ class MiniFace {
     // Non-stopped: if owning process is alive, NEVER stale
     if (this.pid && isProcessAlive(this.pid)) return false;
     // No pid or dead process: completion states get short timeout
-    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
-    if (completionStates.includes(this.state)) {
+    if (COMPLETION_STATES.has(this.state)) {
       return Date.now() - this.lastUpdate > STOPPED_LINGER_MS;
     }
     // Everything else: orphan timeout
@@ -257,7 +268,6 @@ class MiniFace {
       this.minDisplayUntil = now + 1500;
     }
 
-    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     const completionLinger = COMPLETION_LINGER[this.state];
     const sessionActive = !this.stopped;
 
@@ -268,7 +278,7 @@ class MiniFace {
                elapsed > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT)) {
       this.state = 'idle';
       this.minDisplayUntil = now + 1500;
-    } else if (!completionStates.includes(this.state) &&
+    } else if (!COMPLETION_STATES.has(this.state) &&
                this.state !== 'idle' && this.state !== 'sleeping' &&
                this.state !== 'waiting' && this.state !== 'thinking' &&
                elapsed > IDLE_TIMEOUT) {
@@ -420,7 +430,7 @@ class MiniFace {
     buf += ansi.to(startRow + 4, startCol);
     buf += `${lc}${' '.repeat(lPad)}${lbl}${' '.repeat(BOX_W - lPad - lbl.length)}${r}`;
 
-    const cwdBase = this.cwd ? path.basename(this.cwd) : '';
+    const cwdBase = this.cwdBasename;
     const statusStr = this.gitBranch
       ? ('\u2387 ' + this.gitBranch).slice(0, BOX_W)   // ⎇ branchname
       : cwdBase
@@ -459,6 +469,9 @@ class OrbitalSystem {
     this._sortedDirty = true;      // Rebuild cache on next getSortedFaces()
     this._prevClearBuf = '';        // Pre-built buffer to clear previous frame's orbital content
     this._loadingInProgress = false; // Re-entrancy guard for loadSessionsAsync
+    this._connDots = [];             // Reusable array for connection dot positions (avoids per-frame alloc)
+    this._groupsCache = null;        // Cached _buildGroups result
+    this._groupsDirty = true;        // Flag to invalidate groups cache
   }
 
   getSortedFaces() {
@@ -491,7 +504,6 @@ class OrbitalSystem {
 
     // Purge orphaned/finished session files — but protect active thinking faces
     const now = Date.now();
-    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     for (const f of files) {
       try {
         const fp = path.join(SESSIONS_DIR, f);
@@ -500,7 +512,7 @@ class OrbitalSystem {
           const faceId = fileToFaceId.get(f) || path.basename(f, '.json');
           const knownFace = this.faces.get(faceId);
           if (knownFace && !knownFace.stopped) {
-            if (!completionStates.includes(knownFace.state)) continue;  // Active non-completion: always protect
+            if (!COMPLETION_STATES.has(knownFace.state)) continue;  // Active non-completion: always protect
             if (knownFace.pid && isProcessAlive(knownFace.pid)) continue;  // Completion with live PID: protect
           }
           // No protecting face — check file PID before deleting
@@ -570,9 +582,10 @@ class OrbitalSystem {
     // Only invalidate sorted cache if faces actually changed
     if (this.faces.size !== prevSize) {
       this._sortedDirty = true;
+      this._groupsDirty = true;
     } else {
       for (const key of this.faces.keys()) {
-        if (!prevKeys.has(key)) { this._sortedDirty = true; break; }
+        if (!prevKeys.has(key)) { this._sortedDirty = true; this._groupsDirty = true; break; }
       }
     }
   }
@@ -643,7 +656,6 @@ class OrbitalSystem {
 
     // Purge stale session files (async unlink — fire and forget)
     const now = Date.now();
-    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     const survivingResults = [];
 
     for (const r of results) {
@@ -653,7 +665,7 @@ class OrbitalSystem {
         const faceId = fileToFaceId.get(r.file) || path.basename(r.file, '.json');
         const knownFace = this.faces.get(faceId);
         if (knownFace && !knownFace.stopped) {
-          if (!completionStates.includes(knownFace.state)) {
+          if (!COMPLETION_STATES.has(knownFace.state)) {
             survivingResults.push(r); // Protected — active non-completion face
             continue;
           }
@@ -711,9 +723,10 @@ class OrbitalSystem {
 
     if (this.faces.size !== prevSize) {
       this._sortedDirty = true;
+      this._groupsDirty = true;
     } else {
       for (const key of this.faces.keys()) {
-        if (!prevKeys.has(key)) { this._sortedDirty = true; break; }
+        if (!prevKeys.has(key)) { this._sortedDirty = true; this._groupsDirty = true; break; }
       }
     }
   }
@@ -724,7 +737,7 @@ class OrbitalSystem {
 
     const cwdCounts = {};
     for (const face of sorted) {
-      const base = face.cwd ? path.basename(face.cwd) : '';
+      const base = face.cwdBasename;
       cwdCounts[base] = (cwdCounts[base] || 0) + 1;
     }
 
@@ -738,7 +751,7 @@ class OrbitalSystem {
         continue;
       }
 
-      const base = face.cwd ? path.basename(face.cwd) : '';
+      const base = face.cwdBasename;
 
       if (face.taskDescription) {
         face.label = face.taskDescription.slice(0, 8);
@@ -759,6 +772,7 @@ class OrbitalSystem {
   // Groups visible orbitals by team/parent for clustered positioning
 
   _buildGroups(visible) {
+    if (!this._groupsDirty && this._groupsCache) return this._groupsCache;
     const map = new Map();
     for (const face of visible) {
       const key = face.teamName || face.parentSession || face.sessionId;
@@ -772,6 +786,8 @@ class OrbitalSystem {
       const teamFace = g.members.find(m => m.teamColor);
       g.color = teamFace ? teamFace.teamColor : null;
     }
+    this._groupsCache = groups;
+    this._groupsDirty = false;
     return groups;
   }
 
@@ -827,9 +843,7 @@ class OrbitalSystem {
           moved = true;
           // Push apart along axis with less overlap
           if (overlapX <= overlapY) {
-            // Horizontal push — bias toward face with more room
-            const roomLeft = Math.min(a.col - 1, b.col - 1);
-            const roomRight = Math.min(cols - MINI_W - a.col, cols - MINI_W - b.col);
+            // Horizontal push
             const nudge = Math.ceil(overlapX / 2);
             if (a.col <= b.col) {
               a.col = Math.max(1, a.col - nudge);
@@ -1077,7 +1091,7 @@ class OrbitalSystem {
     }
 
     // Priority 2: shared cwd basename
-    const cwds = stable.map(m => m.face.cwd ? path.basename(m.face.cwd) : '').filter(Boolean);
+    const cwds = stable.map(m => m.face.cwdBasename || '').filter(Boolean);
     if (cwds.length === stable.length && cwds.length > 0) {
       const first = cwds[0];
       if (cwds.every(c => c === first)) {
@@ -1322,7 +1336,8 @@ class OrbitalSystem {
     const accentColor = (themeMap.subagent || themeMap.idle).accent || [100, 160, 210];
 
     // Render group tethers (dimmest layer — background structure between siblings)
-    const connDots = [];
+    this._connDots.length = 0;
+    const connDots = this._connDots;
     buf += this._renderGroupTethers(positions, mainPos, accentColor, connDots);
 
     // Render connection lines to main face (brighter pulsing — active data channels)
@@ -1368,8 +1383,7 @@ function _truncatePath(fullPath, maxLen) {
   // Normalize to forward slashes
   const p = fullPath.replace(/\\/g, '/');
   // Replace home dir with ~
-  const home = (process.env.USERPROFILE || process.env.HOME || '').replace(/\\/g, '/');
-  const display = home && p.startsWith(home) ? '~' + p.slice(home.length) : p;
+  const display = HOME_FWD && p.startsWith(HOME_FWD) ? '~' + p.slice(HOME_FWD.length) : p;
   if (display.length <= maxLen) return display;
   // Show .../<last two segments>
   const parts = display.split('/');

@@ -1199,7 +1199,7 @@ describe('grid.js -- loadSessions mtime purge protects active faces (Bug #0)', (
     // The fix skips deleting session files for active (non-stopped, non-completion) in-memory faces
     assert.ok(
       src.includes('if (knownFace && !knownFace.stopped)') &&
-      src.includes('if (!completionStates.includes(knownFace.state)) continue;'),
+      src.includes('COMPLETION_STATES.has(knownFace.state)'),
       'loadSessions mtime purge should check for active in-memory face before deleting file'
     );
   });

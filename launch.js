@@ -170,7 +170,6 @@ if (require.main === module) {
 
   const child = spawn(editorCmd, editorCmdArgs, {
     stdio: 'inherit',
-    shell: true,
   });
 
   child.on('error', (err) => {

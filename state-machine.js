@@ -31,15 +31,17 @@ const SUBAGENT_TOOLS = /^(task|subagent|spawn_agent|delegate|codex_agent|session
 const REVIEW_TOOLS = /^(diff|review|compare|patch)$/i;
 
 function toolToState(toolName, toolInput) {
+  let result;
+
   // Writing/editing code
   if (EDIT_TOOLS.test(toolName)) {
     const filePath = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
     const shortPath = filePath ? path.basename(filePath) : '';
-    return { state: 'coding', detail: shortPath ? `editing ${shortPath}` : 'writing code' };
+    result = { state: 'coding', detail: shortPath ? `editing ${shortPath}` : 'writing code' };
   }
 
   // Running commands
-  if (BASH_TOOLS.test(toolName)) {
+  else if (BASH_TOOLS.test(toolName)) {
     const cmd = toolInput?.command || toolInput?.cmd || toolInput?.input || '';
     const shortCmd = cmd.length > 40 ? cmd.slice(0, 37) + '...' : cmd;
 
@@ -50,11 +52,11 @@ function toolToState(toolName, toolInput) {
         /\b(pytest|nosetests)\b/i.test(cmd) ||
         /\bnode\s+(--test|test)\b/i.test(cmd) ||
         /\b(make|gradle|mvn|php\s+artisan)\s+test\b/i.test(cmd)) {
-      return { state: 'testing', detail: shortCmd || 'running tests' };
+      result = { state: 'testing', detail: shortCmd || 'running tests' };
     }
 
     // Detect install commands
-    if (/\b(npm|yarn|pnpm|bun)\s+(install|i|add)\b/i.test(cmd) ||
+    else if (/\b(npm|yarn|pnpm|bun)\s+(install|i|add)\b/i.test(cmd) ||
         /\b(pip|pip3)\s+(install|-r)\b/i.test(cmd) ||
         /\b(cargo\s+build|cargo\s+add)\b/i.test(cmd) ||
         /\b(apt|apt-get|apk)\s+(install|add)\b/i.test(cmd) ||
@@ -62,71 +64,81 @@ function toolToState(toolName, toolInput) {
         /\b(go\s+get|go\s+install)\b/i.test(cmd) ||
         /\b(composer\s+require|composer\s+install)\b/i.test(cmd) ||
         /\b(dotnet\s+add|dotnet\s+restore)\b/i.test(cmd)) {
-      return { state: 'installing', detail: shortCmd || 'installing' };
+      result = { state: 'installing', detail: shortCmd || 'installing' };
     }
 
     // Detect ML training commands (must come after install detection)
-    if (/\b(python|python3|torchrun|deepspeed|accelerate)\b.*\btrain\b/i.test(cmd) ||
+    else if (/\b(python|python3|torchrun|deepspeed|accelerate)\b.*\btrain\b/i.test(cmd) ||
         /\bunsloth\b/i.test(cmd) ||
         /\b(python|python3)\b.*\b(fine.?tune|finetune)\b/i.test(cmd) ||
         /\b(python|python3)\b.*(--epochs?|--learning.?rate|--lr)\b/i.test(cmd) ||
         /\bnohup\b.*\btrain\b/i.test(cmd)) {
-      return { state: 'training', detail: shortCmd || 'training model' };
+      result = { state: 'training', detail: shortCmd || 'training model' };
     }
 
     // Detect git commit / push / tag operations
-    if (/\bgit\s+(commit|push|tag)\b/i.test(cmd)) {
+    else if (/\bgit\s+(commit|push|tag)\b/i.test(cmd)) {
       const isPush = /\bgit\s+push\b/i.test(cmd);
       const isTag  = /\bgit\s+tag\b/i.test(cmd);
       const detail = isPush ? 'pushing to remote' : isTag ? 'tagging release' : 'committing changes';
-      return { state: 'committing', detail: shortCmd || detail };
+      result = { state: 'committing', detail: shortCmd || detail };
     }
 
-    return { state: 'executing', detail: shortCmd || 'running command' };
+    else {
+      result = { state: 'executing', detail: shortCmd || 'running command' };
+    }
   }
 
   // Reviewing / diffing code
-  if (REVIEW_TOOLS.test(toolName)) {
-    return { state: 'reviewing', detail: toolName || 'reviewing' };
+  else if (REVIEW_TOOLS.test(toolName)) {
+    result = { state: 'reviewing', detail: toolName || 'reviewing' };
   }
 
   // Reading files
-  if (READ_TOOLS.test(toolName)) {
+  else if (READ_TOOLS.test(toolName)) {
     const filePath = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
     const shortPath = filePath ? path.basename(filePath) : '';
-    return { state: 'reading', detail: shortPath ? `reading ${shortPath}` : 'reading' };
+    result = { state: 'reading', detail: shortPath ? `reading ${shortPath}` : 'reading' };
   }
 
   // Searching
-  if (SEARCH_TOOLS.test(toolName)) {
+  else if (SEARCH_TOOLS.test(toolName)) {
     const pattern = toolInput?.pattern || toolInput?.query || toolInput?.search_term || '';
-    return { state: 'searching', detail: pattern ? `looking for "${pattern}"` : 'searching' };
+    result = { state: 'searching', detail: pattern ? `looking for "${pattern}"` : 'searching' };
   }
 
   // Web/fetch
-  if (WEB_TOOLS.test(toolName)) {
+  else if (WEB_TOOLS.test(toolName)) {
     const query = toolInput?.query || toolInput?.url || '';
     const shortQuery = query.length > 30 ? query.slice(0, 27) + '...' : query;
-    return { state: 'searching', detail: shortQuery ? `searching "${shortQuery}"` : 'searching the web' };
+    result = { state: 'searching', detail: shortQuery ? `searching "${shortQuery}"` : 'searching the web' };
   }
 
   // Task/subagent
-  if (SUBAGENT_TOOLS.test(toolName)) {
+  else if (SUBAGENT_TOOLS.test(toolName)) {
     const desc = toolInput?.description || toolInput?.prompt || '';
     const shortDesc = desc.length > 30 ? desc.slice(0, 27) + '...' : desc;
-    return { state: 'subagent', detail: shortDesc || 'spawning subagent' };
+    result = { state: 'subagent', detail: shortDesc || 'spawning subagent' };
   }
 
   // MCP tools
-  if (/^mcp__/.test(toolName)) {
+  else if (/^mcp__/.test(toolName)) {
     const parts = toolName.split('__');
     const server = parts[1] || 'external';
     const tool = parts[2] || '';
-    return { state: 'executing', detail: `${server}: ${tool}` };
+    result = { state: 'executing', detail: `${server}: ${tool}` };
   }
 
   // Default
-  return { state: 'thinking', detail: toolName || '' };
+  else {
+    result = { state: 'thinking', detail: toolName || '' };
+  }
+
+  // Strip ANSI escape sequences from detail before returning
+  if (result.detail) {
+    result.detail = stripAnsi(result.detail);
+  }
+  return result;
 }
 
 // -- Error Detection -------------------------------------------------
@@ -196,9 +208,10 @@ const falsePositives = [
   /\b0\s+fail(ed|ing)\b/i,                          // "0 failed" / "0 failing" is success
 ];
 
-// Strip ANSI SGR sequences (colors, bold, underline, reset) so regex patterns match through styled output
+// Strip ANSI escape sequences (SGR colors/bold/underline, CSI controls, OSC hyperlinks/titles)
+// so regex patterns match through styled output and detail strings are clean for rendering.
 function stripAnsi(text) {
-  return text ? text.replace(/\x1b\[[0-9;]*m/g, '') : '';
+  return text ? text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '') : '';
 }
 
 function looksLikeError(text, patterns) {
@@ -346,6 +359,8 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
     detail = 'step complete';
   }
 
+  // Strip ANSI escape sequences from detail before returning
+  if (detail) detail = stripAnsi(detail);
   return { state, detail, diffInfo };
 }
 

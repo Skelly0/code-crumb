@@ -110,6 +110,8 @@ class ClaudeFace {
 
     // Timeline
     this.timeline = [{ state: 'idle', at: Date.now() }];
+    this._timelineDirty = true;
+    this._cachedCompressedTimeline = null;
 
     // Interactive keypresses
     this.paletteIndex = 0;
@@ -225,11 +227,16 @@ class ClaudeFace {
         }
         if (consecutive < MAX_CONSECUTIVE_LOW) {
           this.timeline.push({ state: newState, at: Date.now() });
+          this._timelineDirty = true;
         }
       } else {
         this.timeline.push({ state: newState, at: Date.now() });
+        this._timelineDirty = true;
       }
-      if (this.timeline.length > 200) this.timeline.shift();
+      if (this.timeline.length > 200) {
+        this.timeline.shift();
+        this._timelineDirty = true;
+      }
 
       // Fade out old particles quickly on state change
       this.particles.fadeAll();
@@ -269,6 +276,26 @@ class ClaudeFace {
     // Immediately show new activity in thought bubble
     this.thoughtTimer = 0;
     this._updateThought();
+  }
+
+  /**
+   * Bypass buffering/anti-flicker logic and force a state change immediately.
+   * Runs ALL standard side effects (particles, timeline, pending clear).
+   * Use this instead of directly mutating face fields from renderer.js.
+   */
+  forceState(state, detail = '') {
+    this.prevState = this.state;
+    this.state = state;
+    this.transitionFrame = 0;
+    this.lastStateChange = Date.now();
+    this.stateDetail = detail;
+    this.minDisplayUntil = Date.now() + (this._getMinDisplayMs(state) || 1000);
+    this.pendingState = null;
+    this.pendingDetail = '';
+    this.particles.fadeAll();
+    this.timeline.push({ state, at: Date.now() });
+    this._timelineDirty = true;
+    if (this.timeline.length > 200) this.timeline.shift();
   }
 
   setStats(data) {
@@ -616,8 +643,12 @@ class ClaudeFace {
     // Excludes completion, idle, error, and post-stop states to prevent oscillation
     // (responding + caffeinated would feed stateChangeTimes indefinitely).
     const now = Date.now();
-    const recentChanges = this.stateChangeTimes.filter(t => now - t < CAFFEINE_WINDOW);
-    if (recentChanges.length >= CAFFEINE_THRESHOLD &&
+    let recentCount = 0;
+    for (let i = this.stateChangeTimes.length - 1; i >= 0; i--) {
+      if (now - this.stateChangeTimes[i] < CAFFEINE_WINDOW) recentCount++;
+      else break; // times are in order, no need to check further
+    }
+    if (recentCount >= CAFFEINE_THRESHOLD &&
         this.state !== 'idle' && this.state !== 'sleeping' &&
         this.state !== 'happy' && this.state !== 'satisfied' &&
         this.state !== 'proud' && this.state !== 'relieved' &&
@@ -625,7 +656,7 @@ class ClaudeFace {
         this.state !== 'committing' && this.state !== 'responding' &&
         this.state !== 'waiting') {
       this.setState('caffeinated', this.stateDetail || 'hyperdrive!');
-    } else if (this.state === 'caffeinated' && recentChanges.length < CAFFEINE_THRESHOLD - 1) {
+    } else if (this.state === 'caffeinated' && recentCount < CAFFEINE_THRESHOLD - 1) {
       this.setState(this.prevState || 'idle');
     }
 
@@ -673,6 +704,12 @@ class ClaudeFace {
   }
 
   _compressTimeline(now, barWidth = 38) {
+    if (!this._timelineDirty && this._cachedCompressedTimeline
+        && this._cachedCompressedTimeline.barWidth === barWidth) {
+      // Timeline hasn't changed -- update displayNow to reflect current time offset
+      const cached = this._cachedCompressedTimeline;
+      return { entries: cached.entries, displayNow: now - cached.offsetFromNow };
+    }
     if (this.timeline.length < 2) {
       return { entries: this.timeline.slice(), displayNow: now };
     }
@@ -740,6 +777,10 @@ class ClaudeFace {
         }
       }
     }
+
+    // Cache the compressed result; store offset so displayNow can be recomputed
+    this._cachedCompressedTimeline = { entries, offsetFromNow: now - displayNow, barWidth };
+    this._timelineDirty = false;
 
     return { entries, displayNow };
   }
@@ -829,8 +870,10 @@ class ClaudeFace {
     const startCol = Math.max(1, Math.floor((cols - faceW) / 2) + 1);
     const startRow = Math.max(7, Math.floor((rows - totalH) / 2) + 4);
 
-    // Store position for orbital system (bubble bounds added during thought bubble render)
+    // Cache accessory lookup for this frame (called in 3 places)
     const activeAccessory = this.accessoriesEnabled ? getAccessory(this.state) : null;
+
+    // Store position for orbital system (bubble bounds added during thought bubble render)
     this.lastPos = {
       row: startRow, col: startCol,
       w: faceW, h: faceH,
@@ -925,9 +968,9 @@ class ClaudeFace {
     buf += `${fc}    \u2570${'\u2500'.repeat(inner)}\u256f${r}`;
 
     // Accessories (above face box, rendered before thought bubble so bubble takes priority)
-    if (this.accessoriesEnabled && !this.minimalMode) {
-      const accessory = getAccessory(this.state);
-      if (accessory) {
+    if (activeAccessory && !this.minimalMode) {
+      {
+        const accessory = activeAccessory;
         const ac = ansi.fg(...dimColor(breathe(theme.accent, breathTime), 0.85));
         const lines = accessory.lines;
         for (let i = 0; i < lines.length; i++) {
@@ -967,7 +1010,7 @@ class ClaudeFace {
     if (this.thoughtText && !this.minimalMode) {
       const bc = ansi.fg(...dimColor(theme.accent, 0.5));
       const tc = `${ansi.italic}${ansi.fg(...dimColor(theme.label, 0.7))}`;
-      const hasAccessory = this.accessoriesEnabled && getAccessory(this.state);
+      const hasAccessory = !!activeAccessory;
 
       if (hasAccessory) {
         // Right-side bubble to avoid overlapping accessories above the face
