@@ -1544,6 +1544,7 @@ describe('_compressTimeline', () => {
     assert.strictEqual(e1.length, 0);
 
     face.timeline = [{ state: 'idle', at: Date.now() }];
+    face._timelineDirty = true;
     const { entries: e2 } = face._compressTimeline(Date.now());
     assert.strictEqual(e2.length, 1);
   });

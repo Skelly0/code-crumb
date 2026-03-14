@@ -37,6 +37,7 @@ const SLEEP_TIMEOUT = 60000;
 // -- Hoisted sets for checkState() hot path (avoid per-call allocation) --
 const RESCUE_EXCLUDE = new Set(['idle', 'sleeping', 'responding', 'starting', 'happy', 'satisfied', 'proud', 'relieved']);
 const FRESH_READ_STATES = new Set(['thinking', 'executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'responding', 'happy', 'satisfied', 'proud', 'relieved']);
+const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
 
 // ===================================================================
 // SHARED RUNTIME
@@ -278,6 +279,7 @@ function runUnifiedMode() {
       face.pendingDetail = '';
       face.particles.fadeAll();
       face.timeline.push({ state: 'responding', at: now });
+      face._timelineDirty = true;
       if (face.timeline.length > 200) face.timeline.shift();
     }
 
@@ -309,6 +311,7 @@ function runUnifiedMode() {
             face.pendingDetail = '';
             face.particles.fadeAll();
             face.timeline.push({ state: freshData.state, at: now });
+            face._timelineDirty = true;
             if (face.timeline.length > 200) face.timeline.shift();
           }
         }
@@ -318,7 +321,6 @@ function runUnifiedMode() {
     // Don't apply timeouts if minimum display time hasn't passed
     if (now < face.minDisplayUntil) return;
 
-    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     const completionLinger = COMPLETION_LINGER[face.state];
     // Session is active until Stop hook fires (writes stopped: true)
     const sessionActive = !lastStopped;
@@ -334,7 +336,7 @@ function runUnifiedMode() {
     } else if (face.state === 'thinking' &&
                now - face.lastStateChange > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT)) {
       face.setState('idle');
-    } else if (!completionStates.includes(face.state) &&
+    } else if (!COMPLETION_STATES.has(face.state) &&
                face.state !== 'idle' && face.state !== 'sleeping' &&
                face.state !== 'thinking' &&
                face.state !== 'starting' &&
@@ -365,7 +367,9 @@ function runUnifiedMode() {
         }
       }
     });
-    stateWatcher.on('error', () => {});
+    stateWatcher.on('error', (err) => {
+      try { process.stderr.write(`[code-crumb] state watcher error: ${err.code || err.message}\n`); } catch {}
+    });
   } catch {}
 
   // Watch sessions directory for subagent changes (skipped in minimal mode)
@@ -378,7 +382,9 @@ function runUnifiedMode() {
           if (mainSessionId) orbital.loadSessionsAsync(mainSessionId);
         }, 80);
       });
-      sessionWatcher.on('error', () => {});
+      sessionWatcher.on('error', (err) => {
+        try { process.stderr.write(`[code-crumb] session watcher error: ${err.code || err.message}\n`); } catch {}
+      });
     } catch {}
   }
 

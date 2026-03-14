@@ -2089,6 +2089,51 @@ describe('state-machine.js -- stripAnsi', () => {
   test('string without ANSI codes passes through unchanged', () => {
     assert.strictEqual(stripAnsi('hello world'), 'hello world');
   });
+
+  test('strips CSI cursor movement sequences', () => {
+    assert.strictEqual(stripAnsi('\x1b[2Jcleared'), 'cleared');
+    assert.strictEqual(stripAnsi('\x1b[Hmoved'), 'moved');
+    assert.strictEqual(stripAnsi('\x1b[Krest of line'), 'rest of line');
+  });
+
+  test('strips CSI scroll and erase sequences', () => {
+    assert.strictEqual(stripAnsi('\x1b[2Jfoo\x1b[Sbar'), 'foobar');
+  });
+
+  test('strips OSC hyperlinks', () => {
+    assert.strictEqual(
+      stripAnsi('\x1b]8;;https://example.com\x07link\x1b]8;;\x07'),
+      'link'
+    );
+  });
+
+  test('strips OSC title sequences', () => {
+    assert.strictEqual(stripAnsi('\x1b]0;My Title\x07content'), 'content');
+  });
+
+  test('strips mixed CSI and SGR sequences', () => {
+    assert.strictEqual(
+      stripAnsi('\x1b[2J\x1b[H\x1b[31mred text\x1b[0m'),
+      'red text'
+    );
+  });
+});
+
+// -- toolToState ANSI stripping tests ------------------------------------
+
+describe('state-machine.js -- toolToState ANSI stripping', () => {
+  test('strips ANSI from bash command detail', () => {
+    const result = toolToState('Bash', { command: '\x1b[32mnpm install\x1b[0m' });
+    assert.strictEqual(result.state, 'executing');
+    assert.ok(!result.detail.includes('\x1b'), 'detail should not contain ANSI escapes');
+    assert.ok(result.detail.includes('npm install'), 'detail should contain clean command text');
+  });
+
+  test('strips ANSI from file path detail', () => {
+    const result = toolToState('Edit', { file_path: '\x1b[1m/foo/bar.js\x1b[0m' });
+    assert.strictEqual(result.state, 'coding');
+    assert.ok(!result.detail.includes('\x1b'), 'detail should not contain ANSI escapes');
+  });
 });
 
 // -- extractExitCode tests -------------------------------------------

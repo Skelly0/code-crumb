@@ -3218,8 +3218,8 @@ describe('grid.js -- constants', () => {
     assert.strictEqual(ORPHAN_TIMEOUT, 90000);
   });
 
-  test('REPOSITION_MS is 400', () => {
-    assert.strictEqual(REPOSITION_MS, 400);
+  test('REPOSITION_MS is 2000', () => {
+    assert.strictEqual(REPOSITION_MS, 2000);
   });
 });
 

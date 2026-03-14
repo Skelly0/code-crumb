@@ -181,7 +181,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 
 ### Automated Tests
 
-Run `npm test` (or `node test.js`). The test runner loads 12 modular test files from `tests/`. The suite (~1045 tests) covers:
+Run `npm test` (or `node test.js`). The test runner loads 12 modular test files from `tests/`. The suite (~1393 tests) covers:
 
 - **test-shared.js**: `safeFilename` edge cases
 - **test-state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants incl. `REVIEW_TOOLS`, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization

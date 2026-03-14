@@ -66,7 +66,7 @@ const INTER_GROUP_GAP = 0.15;      // Radians of spacing between group sectors (
 const INTRA_GROUP_GAP = 0.35;      // Radians between faces within a group (~20 deg)
 const TETHER_BRIGHTNESS = 0.15;    // Dim factor for sibling tether dots
 const GROUP_LABEL_BRIGHTNESS = 0.45; // Dim factor for floating group label
-const REPOSITION_MS = 400;         // Duration of orbital reposition animation in ms
+const REPOSITION_MS = 2000;        // Duration of orbital reposition animation in ms
 
 // Signal 0 tests process existence without killing it (works cross-platform in Node.js)
 function isProcessAlive(pid) {
@@ -579,13 +579,14 @@ class OrbitalSystem {
 
     this._assignLabels();
 
+    // Always invalidate groups (face properties like teamName may change via updateFromFile)
+    this._groupsDirty = true;
     // Only invalidate sorted cache if faces actually changed
     if (this.faces.size !== prevSize) {
       this._sortedDirty = true;
-      this._groupsDirty = true;
     } else {
       for (const key of this.faces.keys()) {
-        if (!prevKeys.has(key)) { this._sortedDirty = true; this._groupsDirty = true; break; }
+        if (!prevKeys.has(key)) { this._sortedDirty = true; break; }
       }
     }
   }
@@ -721,12 +722,13 @@ class OrbitalSystem {
 
     this._assignLabels();
 
+    // Always invalidate groups (face properties like teamName may change via updateFromFile)
+    this._groupsDirty = true;
     if (this.faces.size !== prevSize) {
       this._sortedDirty = true;
-      this._groupsDirty = true;
     } else {
       for (const key of this.faces.keys()) {
-        if (!prevKeys.has(key)) { this._sortedDirty = true; this._groupsDirty = true; break; }
+        if (!prevKeys.has(key)) { this._sortedDirty = true; break; }
       }
     }
   }

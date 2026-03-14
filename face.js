@@ -278,26 +278,6 @@ class ClaudeFace {
     this._updateThought();
   }
 
-  /**
-   * Bypass buffering/anti-flicker logic and force a state change immediately.
-   * Runs ALL standard side effects (particles, timeline, pending clear).
-   * Use this instead of directly mutating face fields from renderer.js.
-   */
-  forceState(state, detail = '') {
-    this.prevState = this.state;
-    this.state = state;
-    this.transitionFrame = 0;
-    this.lastStateChange = Date.now();
-    this.stateDetail = detail;
-    this.minDisplayUntil = Date.now() + (this._getMinDisplayMs(state) || 1000);
-    this.pendingState = null;
-    this.pendingDetail = '';
-    this.particles.fadeAll();
-    this.timeline.push({ state, at: Date.now() });
-    this._timelineDirty = true;
-    if (this.timeline.length > 200) this.timeline.shift();
-  }
-
   setStats(data) {
     // modelName priority: CODE_CRUMB_MODEL env var > state file value.
     // Lower layers (update-state.js guard, base-adapter.js guardedWriteState) preserve
@@ -711,7 +691,10 @@ class ClaudeFace {
       return { entries: cached.entries, displayNow: now - cached.offsetFromNow };
     }
     if (this.timeline.length < 2) {
-      return { entries: this.timeline.slice(), displayNow: now };
+      const result = { entries: this.timeline.slice(), displayNow: now };
+      this._cachedCompressedTimeline = { entries: result.entries, offsetFromNow: 0, barWidth };
+      this._timelineDirty = false;
+      return result;
     }
     let entries = [{ state: this.timeline[0].state, at: this.timeline[0].at }];
     let offset = 0;
@@ -969,17 +952,14 @@ class ClaudeFace {
 
     // Accessories (above face box, rendered before thought bubble so bubble takes priority)
     if (activeAccessory && !this.minimalMode) {
-      {
-        const accessory = activeAccessory;
-        const ac = ansi.fg(...dimColor(breathe(theme.accent, breathTime), 0.85));
-        const lines = accessory.lines;
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
-          const lineRow = startRow - lines.length + i;
-          const lineCol = Math.max(1, startCol + Math.ceil((faceW - line.length) / 2) + gx);
-          if (lineRow >= 1) {
-            buf += ansi.to(lineRow, lineCol) + `${ac}${line}${r}`;
-          }
+      const ac = ansi.fg(...dimColor(breathe(theme.accent, breathTime), 0.85));
+      const lines = activeAccessory.lines;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const lineRow = startRow - lines.length + i;
+        const lineCol = Math.max(1, startCol + Math.ceil((faceW - line.length) / 2) + gx);
+        if (lineRow >= 1) {
+          buf += ansi.to(lineRow, lineCol) + `${ac}${line}${r}`;
         }
       }
     }

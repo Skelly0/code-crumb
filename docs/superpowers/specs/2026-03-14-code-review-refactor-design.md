@@ -1,8 +1,9 @@
 # Code Crumb — Full Code Review & Refactor Spec
 
 **Date:** 2026-03-14
-**Baseline:** 1386 tests passing, main branch clean
+**Baseline:** 1386 tests passing, main branch clean (post-fix: ~1393 tests)
 **Review method:** 6 parallel agents analyzing architecture, quality, errors, performance, tests, and security
+**Status:** Phase 1 + partial Phase 2 completed in PR #124; follow-up fixes in current branch
 
 ---
 
@@ -14,20 +15,15 @@ The codebase is fundamentally sound — well-tested, zero-dependency, with consi
 
 ## Critical / Must-Fix
 
-### C1: `eyes.star()` called but not defined — runtime crash
-- **File:** `face.js:508`, `animations.js`
-- `getEyes()` for the `caffeinated` state calls `eyes.star(theme, frame)` when `frame % 30 < 5`. No `star` function exists in `animations.js`. This is a latent crash hidden in a rarely-hit branch.
-- **Fix:** Add `eyes.star()` to `animations.js` or replace the call with an existing function like `eyes.wide()`.
+### ~~C1: `eyes.star()` called but not defined — runtime crash~~ (FALSE POSITIVE)
+- **Status:** `eyes.star()` exists at `animations.js:160` and has test coverage. The reviewing agent missed it.
+- ~~**Fix:** Add `eyes.star()` to `animations.js` or replace the call with an existing function like `eyes.wide()`.~~
 
-### C2: `shell: true` with pass-through argv — command injection
-- **File:** `launch.js:173`, `codex-wrapper.js:199`
-- Both spawn child processes with `shell: true` and pass `process.argv` through. Shell metacharacters in arguments get interpreted.
-- **Fix:** Remove `shell: true` from both spawns. Array-based spawn is sufficient.
+### C2: `shell: true` with pass-through argv — command injection ✅ DONE (#124)
+- **Fix:** Removed `shell: true` from both spawns.
 
-### C3: `fs.watch` has no error listener — crash on directory deletion
-- **File:** `renderer.js:352-376`
-- Two `fs.watch()` calls with no error handler. Deleting `~/.code-crumb-sessions` while the renderer is running throws an uncaught exception and crashes it.
-- **Fix:** Add `.on('error', () => {})` to both watchers.
+### C3: `fs.watch` has no error listener — crash on directory deletion ✅ DONE (#124 + follow-up)
+- **Fix:** Added `.on('error', ...)` with stderr logging to both watchers.
 
 ---
 
@@ -109,10 +105,10 @@ Near-identical implementations of: `writeState`, `writeSessionState`, `readStats
 
 ## Medium Priority — Code Quality
 
-### Q1: Dead code cleanup
-- Remove `eyes.echo()`, `mouths.ooh()`, `mouths.calm()` from animations.js
-- Remove unused `roomLeft`/`roomRight` in `grid.js:_resolveOverlaps`
-- Differentiate `eyes.wide()` from `eyes.open()` or alias them
+### Q1: Dead code cleanup ✅ DONE (#124)
+- ~~Remove `eyes.echo()`, `mouths.ooh()`, `mouths.calm()` from animations.js~~ ✅
+- ~~Remove unused `roomLeft`/`roomRight` in `grid.js:_resolveOverlaps`~~ ✅
+- ~~Differentiate `eyes.wide()` from `eyes.open()` or alias them~~ ✅ (aliased with comment)
 
 ### Q2: `spawn()` in particles.js — 180-line else-if chain
 - Replace with a `PARTICLE_CONFIGS` lookup table keyed by style.
@@ -186,7 +182,7 @@ Near-identical implementations of: `writeState`, `writeSessionState`, `readStats
 - `renderer.js` re-exports for tests → direct imports instead
 - `process.stdout` injection into `ClaudeFace.render(cols, rows)`
 - `orbital._prevClearBuf` → `orbital.clearCache()` method
-- `getAccessory` called 3x per frame → cache in local var
+- ~~`getAccessory` called 3x per frame → cache in local var~~ ✅ DONE
 - `scanTeams` synchronous in render loop → async
 - PID guard TOCTOU → exclusive file lock
 - EPERM false positive on PID check → secondary liveness signal
@@ -196,16 +192,20 @@ Near-identical implementations of: `writeState`, `writeSessionState`, `readStats
 
 ## Proposed Refactor Phases
 
-### Phase 1: Critical fixes (no architecture changes)
-- C1: Fix `eyes.star()` crash
-- C2: Remove `shell: true` from spawns
-- C3: Add `fs.watch` error handlers
-- S1: File permission modes
+### Phase 1: Critical fixes (no architecture changes) ✅ DONE
+- ~~C1: Fix `eyes.star()` crash~~ — false positive, already exists
+- C2: Remove `shell: true` from spawns ✅
+- C3: Add `fs.watch` error handlers ✅
+- S1: File permission modes ✅
+- S2: Stdin truncation cap ✅
+- S3: ANSI stripping on detail strings ✅
 
-### Phase 2: Performance wins (low-risk, high-impact)
-- P3: Cache `readState()` result
-- P4: Hoist all hot-path allocations to module constants
-- P1: Pass `dimFactor` into render instead of post-processing
+### Phase 2: Performance wins (low-risk, high-impact) — partially done
+- P3: Cache `readState()` result ✅
+- P4: Hoist all hot-path allocations to module constants ✅ (incl. renderer.js COMPLETION_STATES)
+- P4: `_compressTimeline` caching ✅
+- P4: `_buildGroups` caching ✅ (with proper dirty-flag invalidation)
+- P1: Pass `dimFactor` into render instead of post-processing — remaining
 
 ### Phase 3: Code deduplication
 - A4: `update-state.js` imports from `base-adapter.js`
@@ -215,7 +215,7 @@ Near-identical implementations of: `writeState`, `writeSessionState`, `readStats
 ### Phase 4: File splits (biggest structural change)
 - A1: Split `grid.js` → `mini-face.js` + `orbital-system.js` + `session-list.js`
 - A2: Extract timeline/sparkline from `face.js`
-- A3: Extract `checkState`/`_executeSwap`, add `forceState()`
+- A3: Extract `checkState`/`_executeSwap` (note: `forceState()` was prototyped but removed as dead code — renderer rescue blocks work correctly with direct field mutation + `_timelineDirty` flag)
 
 ### Phase 5: Test coverage & quality
 - T1: Add tests for zero-coverage functions
