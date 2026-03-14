@@ -14,6 +14,7 @@ const {
   SEARCH_TOOLS,
   WEB_TOOLS,
   SUBAGENT_TOOLS,
+  REVIEW_TOOLS,
   stdoutErrorPatterns,
   stderrErrorPatterns,
   falsePositives,
@@ -2062,6 +2063,319 @@ describe('update-state.js -- touch earlier subagent files (Bug #3)', () => {
     const helperBody = src.slice(helperStart, helperEnd);
     assert.ok(helperBody.includes('fs.utimesSync'), 'should use fs.utimesSync to refresh mtime');
     assert.ok(helperBody.includes('length - 1'), 'should iterate up to length - 1 (skip latest)');
+  });
+});
+
+// -- stripAnsi tests ------------------------------------------------
+
+describe('state-machine.js -- stripAnsi', () => {
+  test('strips color codes', () => {
+    assert.strictEqual(stripAnsi('\x1b[31mred\x1b[0m'), 'red');
+  });
+
+  test('strips bold', () => {
+    assert.strictEqual(stripAnsi('\x1b[1mbold\x1b[0m'), 'bold');
+  });
+
+  test('empty string returns empty', () => {
+    assert.strictEqual(stripAnsi(''), '');
+  });
+
+  test('null/undefined returns empty', () => {
+    assert.strictEqual(stripAnsi(null), '');
+    assert.strictEqual(stripAnsi(undefined), '');
+  });
+
+  test('string without ANSI codes passes through unchanged', () => {
+    assert.strictEqual(stripAnsi('hello world'), 'hello world');
+  });
+});
+
+// -- extractExitCode tests -------------------------------------------
+
+describe('state-machine.js -- extractExitCode', () => {
+  test('Exit code: 1 returns 1', () => {
+    assert.strictEqual(extractExitCode('Exit code: 1'), 1);
+  });
+
+  test('Exit code: 0 returns 0', () => {
+    assert.strictEqual(extractExitCode('Exit code: 0'), 0);
+  });
+
+  test('exited with 127 returns 127', () => {
+    assert.strictEqual(extractExitCode('exited with 127'), 127);
+  });
+
+  test('exit status: 2 returns 2', () => {
+    assert.strictEqual(extractExitCode('exit status: 2'), 2);
+  });
+
+  test('returned 42 returns 42', () => {
+    assert.strictEqual(extractExitCode('returned 42'), 42);
+  });
+
+  test('string with no exit code returns null', () => {
+    assert.strictEqual(extractExitCode('everything is fine'), null);
+  });
+
+  test('empty string returns null', () => {
+    assert.strictEqual(extractExitCode(''), null);
+  });
+
+  test('with ANSI codes strips them first', () => {
+    assert.strictEqual(extractExitCode('\x1b[31mExit code: 1\x1b[0m'), 1);
+  });
+});
+
+// -- isMergeConflict tests -------------------------------------------
+
+describe('state-machine.js -- isMergeConflict', () => {
+  test('CONFLICT (content) returns true', () => {
+    assert.strictEqual(isMergeConflict('CONFLICT (content): merge conflict in foo.txt', ''), true);
+  });
+
+  test('Automatic merge failed returns true', () => {
+    assert.strictEqual(isMergeConflict('Automatic merge failed', ''), true);
+  });
+
+  test('fix conflicts and then commit returns true', () => {
+    assert.strictEqual(isMergeConflict('fix conflicts and then commit', ''), true);
+  });
+
+  test('no conflict text returns false', () => {
+    assert.strictEqual(isMergeConflict('All clear, no conflicts', ''), false);
+  });
+
+  test('empty strings return false', () => {
+    assert.strictEqual(isMergeConflict('', ''), false);
+  });
+
+  test('null values do not throw', () => {
+    assert.strictEqual(isMergeConflict(null, null), false);
+  });
+});
+
+// -- errorDetail tests -----------------------------------------------
+
+describe('state-machine.js -- errorDetail', () => {
+  test('command not found', () => {
+    assert.strictEqual(errorDetail('command not found', ''), 'command not found');
+  });
+
+  test('Permission denied', () => {
+    assert.strictEqual(errorDetail('Permission denied', ''), 'permission denied');
+  });
+
+  test('No such file or directory', () => {
+    assert.strictEqual(errorDetail('No such file or directory', ''), 'file not found');
+  });
+
+  test('Segmentation fault', () => {
+    assert.strictEqual(errorDetail('Segmentation fault', ''), 'segfault!');
+  });
+
+  test('ENOENT', () => {
+    assert.strictEqual(errorDetail('ENOENT: no such file', ''), 'missing file/path');
+  });
+
+  test('syntax error in output', () => {
+    assert.strictEqual(errorDetail('line 5: syntax error near unexpected token', ''), 'syntax error');
+  });
+
+  test('Cannot find module', () => {
+    assert.strictEqual(errorDetail('Cannot find module X', ''), 'missing module');
+  });
+
+  test('Traceback (most recent call last)', () => {
+    assert.strictEqual(errorDetail('Traceback (most recent call last)', ''), 'exception thrown');
+  });
+
+  test('tests failed', () => {
+    assert.strictEqual(errorDetail('3 tests failed', ''), 'tests failed');
+  });
+
+  test('npm ERR!', () => {
+    assert.strictEqual(errorDetail('npm ERR!', ''), 'npm error');
+  });
+
+  test('Compilation failed', () => {
+    assert.strictEqual(errorDetail('Compilation failed', ''), 'build broke');
+  });
+
+  test('unknown error falls back to something went wrong', () => {
+    assert.strictEqual(errorDetail('kaboom', ''), 'something went wrong');
+  });
+
+  test('merge conflict detected', () => {
+    assert.strictEqual(errorDetail('CONFLICT (content): merge conflict in foo.txt', ''), 'merge conflict!');
+  });
+});
+
+// -- pruneFrequentFiles tests ----------------------------------------
+
+describe('state-machine.js -- pruneFrequentFiles', () => {
+  test('returns same object if <= MAX_FREQUENT_FILES entries', () => {
+    const files = { 'a.js': 5, 'b.js': 3 };
+    const result = pruneFrequentFiles(files);
+    assert.deepStrictEqual(result, { 'a.js': 5, 'b.js': 3 });
+  });
+
+  test('prunes entries with count < 2', () => {
+    const files = {};
+    for (let i = 0; i < MAX_FREQUENT_FILES + 5; i++) {
+      files[`file${i}.js`] = i < 5 ? 1 : 10;
+    }
+    const result = pruneFrequentFiles(files);
+    // Single-touch files (count 1) should be removed
+    for (let i = 0; i < 5; i++) {
+      assert.strictEqual(result[`file${i}.js`], undefined);
+    }
+  });
+
+  test('keeps top MAX_FREQUENT_FILES by count when exceeded', () => {
+    const files = {};
+    for (let i = 0; i < MAX_FREQUENT_FILES + 10; i++) {
+      files[`file${i}.js`] = i + 2; // all >= 2
+    }
+    const result = pruneFrequentFiles(files);
+    assert.ok(Object.keys(result).length <= MAX_FREQUENT_FILES);
+  });
+
+  test('null input returns null', () => {
+    assert.strictEqual(pruneFrequentFiles(null), null);
+  });
+
+  test('empty object returns empty', () => {
+    const result = pruneFrequentFiles({});
+    assert.deepStrictEqual(result, {});
+  });
+});
+
+// -- topFrequentFiles tests ------------------------------------------
+
+describe('state-machine.js -- topFrequentFiles', () => {
+  test('returns only entries with count >= 3', () => {
+    const files = { 'a.js': 5, 'b.js': 2, 'c.js': 3, 'd.js': 1 };
+    const result = topFrequentFiles(files);
+    assert.deepStrictEqual(result, { 'a.js': 5, 'c.js': 3 });
+  });
+
+  test('limits to 10 by default', () => {
+    const files = {};
+    for (let i = 0; i < 20; i++) {
+      files[`file${i}.js`] = i + 3;
+    }
+    const result = topFrequentFiles(files);
+    assert.strictEqual(Object.keys(result).length, 10);
+  });
+
+  test('custom limit works', () => {
+    const files = {};
+    for (let i = 0; i < 10; i++) {
+      files[`file${i}.js`] = i + 3;
+    }
+    const result = topFrequentFiles(files, 3);
+    assert.strictEqual(Object.keys(result).length, 3);
+  });
+
+  test('null input returns empty object', () => {
+    assert.deepStrictEqual(topFrequentFiles(null), {});
+  });
+
+  test('empty input returns empty object', () => {
+    assert.deepStrictEqual(topFrequentFiles({}), {});
+  });
+});
+
+// -- buildSubagentSessionState tests ---------------------------------
+
+describe('state-machine.js -- buildSubagentSessionState', () => {
+  test('returns null when existing.stopped is true', () => {
+    const result = buildSubagentSessionState({ stopped: true }, { id: 's1' }, 'parent1', '/tmp');
+    assert.strictEqual(result, null);
+  });
+
+  test('preserves existing modelName over sub.model', () => {
+    const result = buildSubagentSessionState(
+      { modelName: 'sonnet' }, { id: 's1', model: 'haiku' }, 'parent1', '/tmp'
+    );
+    assert.strictEqual(result.modelName, 'sonnet');
+  });
+
+  test('falls back to sub.model when existing.modelName is empty', () => {
+    const result = buildSubagentSessionState(
+      { modelName: '' }, { id: 's1', model: 'opus' }, 'parent1', '/tmp'
+    );
+    assert.strictEqual(result.modelName, 'opus');
+  });
+
+  test('preserves existing.taskDescription over sub.taskDescription', () => {
+    const result = buildSubagentSessionState(
+      { taskDescription: 'fix bug' }, { id: 's1', taskDescription: 'new task' }, 'parent1', '/tmp'
+    );
+    assert.strictEqual(result.taskDescription, 'fix bug');
+  });
+
+  test('sets parentSession', () => {
+    const result = buildSubagentSessionState(
+      {}, { id: 's1' }, 'parent1', '/tmp'
+    );
+    assert.strictEqual(result.parentSession, 'parent1');
+  });
+
+  test('default model is haiku', () => {
+    const result = buildSubagentSessionState(
+      {}, { id: 's1' }, 'parent1', '/tmp'
+    );
+    assert.strictEqual(result.modelName, 'haiku');
+  });
+});
+
+// -- REVIEW_TOOLS tests ----------------------------------------------
+
+describe('state-machine.js -- REVIEW_TOOLS', () => {
+  test('diff matches REVIEW_TOOLS', () => {
+    assert.ok(REVIEW_TOOLS.test('diff'));
+  });
+
+  test('review matches REVIEW_TOOLS', () => {
+    assert.ok(REVIEW_TOOLS.test('review'));
+  });
+
+  test('compare matches REVIEW_TOOLS', () => {
+    assert.ok(REVIEW_TOOLS.test('compare'));
+  });
+
+  test('edit does NOT match REVIEW_TOOLS', () => {
+    assert.ok(!REVIEW_TOOLS.test('edit'));
+  });
+
+  test('bash does NOT match REVIEW_TOOLS', () => {
+    assert.ok(!REVIEW_TOOLS.test('bash'));
+  });
+});
+
+// -- toolToState MCP tools tests -------------------------------------
+
+describe('state-machine.js -- toolToState MCP tools', () => {
+  test('mcp__server__tool maps to executing with detail', () => {
+    const r = toolToState('mcp__server__tool', {});
+    assert.strictEqual(r.state, 'executing');
+    assert.strictEqual(r.detail, 'server: tool');
+  });
+
+  test('mcp__github__create_pr maps to executing', () => {
+    const r = toolToState('mcp__github__create_pr', {});
+    assert.strictEqual(r.state, 'executing');
+  });
+});
+
+// -- toolToState unknown tool tests ----------------------------------
+
+describe('state-machine.js -- toolToState unknown tool', () => {
+  test('SomeRandomTool maps to thinking state', () => {
+    const r = toolToState('SomeRandomTool', {});
+    assert.strictEqual(r.state, 'thinking');
   });
 });
 

@@ -209,4 +209,92 @@ describe('shared.js -- getIsWorktree', () => {
   });
 });
 
+describe('shared.js -- path constants', () => {
+  const { HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PID_FILE, QUIT_FLAG_FILE, TEAMS_DIR, TMUX_FILE } = require('../shared');
+
+  test('HOME is a non-empty string', () => {
+    assert.ok(typeof HOME === 'string' && HOME.length > 0);
+  });
+
+  test('STATE_FILE is a non-empty string', () => {
+    assert.ok(typeof STATE_FILE === 'string' && STATE_FILE.length > 0);
+  });
+
+  test('SESSIONS_DIR is a non-empty string', () => {
+    assert.ok(typeof SESSIONS_DIR === 'string' && SESSIONS_DIR.length > 0);
+  });
+
+  test('STATS_FILE is a non-empty string', () => {
+    assert.ok(typeof STATS_FILE === 'string' && STATS_FILE.length > 0);
+  });
+
+  test('PID_FILE is a non-empty string', () => {
+    assert.ok(typeof PID_FILE === 'string' && PID_FILE.length > 0);
+  });
+
+  test('QUIT_FLAG_FILE is a non-empty string', () => {
+    assert.ok(typeof QUIT_FLAG_FILE === 'string' && QUIT_FLAG_FILE.length > 0);
+  });
+
+  test('TEAMS_DIR is a non-empty string', () => {
+    assert.ok(typeof TEAMS_DIR === 'string' && TEAMS_DIR.length > 0);
+  });
+
+  test('TMUX_FILE is a non-empty string', () => {
+    assert.ok(typeof TMUX_FILE === 'string' && TMUX_FILE.length > 0);
+  });
+});
+
+describe('shared.js -- safeFilename all special chars', () => {
+  test('tabs are replaced with underscore', () => {
+    assert.ok(!safeFilename('a\tb').includes('\t'));
+    assert.strictEqual(safeFilename('a\tb'), 'a_b');
+  });
+
+  test('newlines are replaced with underscore', () => {
+    assert.ok(!safeFilename('a\nb').includes('\n'));
+    assert.strictEqual(safeFilename('a\nb'), 'a_b');
+  });
+
+  test('forward slashes are replaced with underscore', () => {
+    assert.strictEqual(safeFilename('a/b'), 'a_b');
+  });
+
+  test('backslashes are replaced with underscore', () => {
+    assert.strictEqual(safeFilename('a\\b'), 'a_b');
+  });
+
+  test('colons are replaced with underscore', () => {
+    assert.strictEqual(safeFilename('a:b'), 'a_b');
+  });
+
+  test('question marks are replaced with underscore', () => {
+    assert.strictEqual(safeFilename('a?b'), 'a_b');
+  });
+
+  test('asterisks are replaced with underscore', () => {
+    assert.strictEqual(safeFilename('a*b'), 'a_b');
+  });
+
+  test('quotes are replaced with underscore', () => {
+    assert.strictEqual(safeFilename('a"b'), 'a_b');
+    assert.strictEqual(safeFilename("a'b"), 'a_b');
+  });
+});
+
+describe('shared.js -- getGitBranch walks up parent directories', () => {
+  test('finds .git/HEAD in parent directory from subdir', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'code-crumb-walk-'));
+    const subDir = path.join(tmpDir, 'child', 'grandchild');
+    try {
+      fs.mkdirSync(subDir, { recursive: true });
+      fs.mkdirSync(path.join(tmpDir, '.git'));
+      fs.writeFileSync(path.join(tmpDir, '.git', 'HEAD'), 'ref: refs/heads/walk-test\n', 'utf8');
+      assert.strictEqual(getGitBranch(subDir), 'walk-test');
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    }
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

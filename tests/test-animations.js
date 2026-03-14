@@ -200,4 +200,170 @@ describe('animations.js -- mouth output consistency', () => {
   });
 });
 
+describe('animations.js -- sleeping eye special frame', () => {
+  test('sleeping returns blink form when frame % 150 > 145', () => {
+    const result = eyes.sleeping({}, 146);
+    // blink form: left ['  ', '▄▄'], right ['  ', '▄▄']
+    assert.deepStrictEqual(result.left[0], '  ', 'sleeping blink left[0] should be empty');
+    assert.ok(result.left[1] !== '──', 'sleeping blink left[1] should not be closed line');
+  });
+
+  test('sleeping returns normal closed form at frame 100', () => {
+    const result = eyes.sleeping({}, 100);
+    // normal closed form: left ['  ', '──'], right ['  ', '──']
+    assert.deepStrictEqual(result.left[0], '  ', 'sleeping normal left[0] should be empty');
+    assert.deepStrictEqual(result.right[0], '  ', 'sleeping normal right[0] should be empty');
+  });
+
+  test('sleeping blink and normal forms differ', () => {
+    const blink = eyes.sleeping({}, 146);
+    const normal = eyes.sleeping({}, 100);
+    assert.notDeepStrictEqual(blink, normal, 'blink form should differ from normal closed form');
+  });
+});
+
+describe('animations.js -- intense eye special frame', () => {
+  test('intense returns shifted form when frame % 25 < 2', () => {
+    const result = eyes.intense({}, 0);
+    // shifted form: left and right differ asymmetrically
+    assert.notDeepStrictEqual(result.left, result.right, 'intense shifted form should have asymmetric eyes');
+  });
+
+  test('intense returns normal form at frame 5', () => {
+    const result = eyes.intense({}, 5);
+    // normal form: both eyes are ██/██
+    assert.deepStrictEqual(result.left, result.right, 'intense normal form should have symmetric eyes');
+  });
+
+  test('intense shifted and normal forms differ', () => {
+    const shifted = eyes.intense({}, 0);
+    const normal = eyes.intense({}, 5);
+    assert.notDeepStrictEqual(shifted, normal, 'shifted and normal forms should differ');
+  });
+});
+
+describe('animations.js -- conducting eye 6-phase cycle', () => {
+  const theme = {};
+
+  test('phase 0 (frame 0) returns open eyes', () => {
+    const result = eyes.conducting(theme, 0);
+    const expected = eyes.open();
+    assert.deepStrictEqual(result, expected, 'phase 0 should return open');
+  });
+
+  test('phase 1 (frame 30) returns lookLeft eyes', () => {
+    const result = eyes.conducting(theme, 30);
+    const expected = eyes.lookLeft();
+    assert.deepStrictEqual(result, expected, 'phase 1 should return lookLeft');
+  });
+
+  test('phase 2 (frame 60) returns open eyes', () => {
+    const result = eyes.conducting(theme, 60);
+    const expected = eyes.open();
+    assert.deepStrictEqual(result, expected, 'phase 2 should return open');
+  });
+
+  test('phase 3 (frame 90) returns lookRight eyes', () => {
+    const result = eyes.conducting(theme, 90);
+    const expected = eyes.lookRight();
+    assert.deepStrictEqual(result, expected, 'phase 3 should return lookRight');
+  });
+
+  test('phase 4 (frame 120) returns open eyes', () => {
+    const result = eyes.conducting(theme, 120);
+    const expected = eyes.open();
+    assert.deepStrictEqual(result, expected, 'phase 4 should return open');
+  });
+
+  test('phase 5 (frame 150) returns focused eyes', () => {
+    const result = eyes.conducting(theme, 150);
+    const expected = eyes.focused();
+    assert.deepStrictEqual(result, expected, 'phase 5 should return focused');
+  });
+});
+
+describe('animations.js -- star eye frame variance', () => {
+  test('star differs between frame 0 and frame 1', () => {
+    const a = eyes.star({}, 0);
+    const b = eyes.star({}, 1);
+    assert.notDeepStrictEqual(a, b, 'star should change between frames');
+  });
+
+  test('star always returns {left: [2], right: [2]} shape', () => {
+    for (const f of [0, 1, 2, 3, 10, 50]) {
+      const result = eyes.star({}, f);
+      assert.ok(result.left, `star(f=${f}) missing left`);
+      assert.ok(result.right, `star(f=${f}) missing right`);
+      assert.strictEqual(result.left.length, 2, `star(f=${f}).left should have 2 rows`);
+      assert.strictEqual(result.right.length, 2, `star(f=${f}).right should have 2 rows`);
+    }
+  });
+});
+
+describe('animations.js -- wink/heart/tired static eyes', () => {
+  test('wink returns valid {left:[2], right:[2]} shape', () => {
+    const result = eyes.wink();
+    assert.strictEqual(result.left.length, 2, 'wink left should have 2 rows');
+    assert.strictEqual(result.right.length, 2, 'wink right should have 2 rows');
+  });
+
+  test('wink is deterministic', () => {
+    const a = eyes.wink();
+    const b = eyes.wink();
+    assert.deepStrictEqual(a, b, 'wink should return same output each call');
+  });
+
+  test('heart returns valid {left:[2], right:[2]} shape', () => {
+    const result = eyes.heart();
+    assert.strictEqual(result.left.length, 2, 'heart left should have 2 rows');
+    assert.strictEqual(result.right.length, 2, 'heart right should have 2 rows');
+  });
+
+  test('heart is deterministic', () => {
+    const a = eyes.heart();
+    const b = eyes.heart();
+    assert.deepStrictEqual(a, b, 'heart should return same output each call');
+  });
+
+  test('tired returns valid {left:[2], right:[2]} shape', () => {
+    const result = eyes.tired();
+    assert.strictEqual(result.left.length, 2, 'tired left should have 2 rows');
+    assert.strictEqual(result.right.length, 2, 'tired right should have 2 rows');
+  });
+
+  test('tired is deterministic', () => {
+    const a = eyes.tired();
+    const b = eyes.tired();
+    assert.deepStrictEqual(a, b, 'tired should return same output each call');
+  });
+});
+
+describe('animations.js -- furnace mouth randomness', () => {
+  test('furnace mouth returns varying results', () => {
+    const results = new Set();
+    for (let i = 0; i < 20; i++) results.add(mouths.furnace());
+    assert.ok(results.size > 1, 'furnace mouth should have randomness');
+  });
+});
+
+describe('animations.js -- gridMouths all 23 states', () => {
+  const ALL_23_STATES = [
+    'idle', 'thinking', 'coding', 'reading', 'searching', 'executing',
+    'happy', 'satisfied', 'proud', 'relieved', 'error', 'sleeping',
+    'waiting', 'testing', 'installing', 'caffeinated', 'subagent',
+    'responding', 'starting', 'spawning', 'committing', 'reviewing', 'training',
+  ];
+
+  test('every one of the 23 states has a string gridMouth', () => {
+    for (const state of ALL_23_STATES) {
+      assert.ok(typeof gridMouths[state] === 'string', `gridMouths.${state} should be a string`);
+      assert.ok(gridMouths[state].length > 0, `gridMouths.${state} should be non-empty`);
+    }
+  });
+
+  test('exactly 23 states are covered', () => {
+    assert.strictEqual(ALL_23_STATES.length, 23, 'should test exactly 23 states');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

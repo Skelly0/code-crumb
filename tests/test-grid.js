@@ -3042,4 +3042,259 @@ describe('grid.js -- MiniFace orbital offset lerping', () => {
   });
 });
 
+describe('grid.js -- MiniFace.tick()', () => {
+  test('tick increments frame and time', () => {
+    const face = new MiniFace('tick-test');
+    assert.strictEqual(face.frame, 0);
+    assert.strictEqual(face.time, 0);
+    face.tick(66);
+    assert.strictEqual(face.frame, 1);
+    assert.strictEqual(face.time, 66);
+  });
+});
+
+describe('grid.js -- MiniFace.isStale with completion state', () => {
+  test('completion state with old lastUpdate is stale', () => {
+    const face = new MiniFace('stale-test');
+    face.state = 'happy';
+    face.lastUpdate = Date.now() - (STALE_MS + 1000);
+    assert.strictEqual(face.isStale(), true);
+  });
+});
+
+describe('grid.js -- MiniFace spawning state', () => {
+  test('spawning defaults to false', () => {
+    const face = new MiniFace('spawn-test');
+    assert.strictEqual(face.spawning, false);
+    assert.strictEqual(face.spawnProgress, 0);
+  });
+
+  test('spawning can be set to true', () => {
+    const face = new MiniFace('spawn-test-2');
+    face.spawning = true;
+    face.spawnProgress = 0;
+    assert.strictEqual(face.spawning, true);
+    assert.strictEqual(face.spawnProgress, 0);
+  });
+});
+
+describe('grid.js -- MiniFace.updateFromFile with pending state buffering', () => {
+  test('buffers state when minDisplayUntil has not passed', () => {
+    const face = new MiniFace('buffer-test');
+    // First update sets state to coding
+    face.updateFromFile({ state: 'coding', detail: 'edit foo' }, Date.now());
+    assert.strictEqual(face.state, 'coding');
+    // Immediately update to reading — should be buffered because min display hasn't elapsed
+    face.updateFromFile({ state: 'reading', detail: 'bar.js' }, Date.now() + 1);
+    // reading should be pending since coding min display hasn't expired
+    assert.strictEqual(face.pendingState, 'reading');
+    assert.strictEqual(face.pendingDetail, 'bar.js');
+  });
+});
+
+describe('grid.js -- OrbitalSystem constructor', () => {
+  test('faces starts as empty map', () => {
+    const sys = new OrbitalSystem();
+    assert.ok(sys.faces instanceof Map);
+    assert.strictEqual(sys.faces.size, 0);
+  });
+});
+
+describe('grid.js -- isProcessAlive edge cases', () => {
+  test('isProcessAlive(0) returns false', () => {
+    assert.strictEqual(isProcessAlive(0), false);
+  });
+
+  test('isProcessAlive(-1) returns false', () => {
+    assert.strictEqual(isProcessAlive(-1), false);
+  });
+
+  test('isProcessAlive(1) returns false (PID 1 is rejected)', () => {
+    assert.strictEqual(isProcessAlive(1), false);
+  });
+
+  test('isProcessAlive(process.pid) returns true', () => {
+    assert.strictEqual(isProcessAlive(process.pid), true);
+  });
+
+  test('isProcessAlive(null) returns false', () => {
+    assert.strictEqual(isProcessAlive(null), false);
+  });
+
+  test('isProcessAlive(undefined) returns false', () => {
+    assert.strictEqual(isProcessAlive(undefined), false);
+  });
+});
+
+describe('grid.js -- MiniFace field persistence', () => {
+  test('cwd persists when subsequent update omits it', () => {
+    const face = new MiniFace('persist-cwd');
+    face.updateFromFile({ state: 'coding', cwd: '/home/user/project' });
+    face.updateFromFile({ state: 'reading' });
+    assert.strictEqual(face.cwd, '/home/user/project');
+  });
+
+  test('gitBranch persists when subsequent update omits it', () => {
+    const face = new MiniFace('persist-branch');
+    face.updateFromFile({ state: 'coding', gitBranch: 'feature/xyz' });
+    face.updateFromFile({ state: 'reading' });
+    assert.strictEqual(face.gitBranch, 'feature/xyz');
+  });
+
+  test('taskDescription persists when subsequent update omits it', () => {
+    const face = new MiniFace('persist-task');
+    face.updateFromFile({ state: 'coding', taskDescription: 'fix bugs' });
+    face.updateFromFile({ state: 'reading' });
+    assert.strictEqual(face.taskDescription, 'fix bugs');
+  });
+
+  test('parentSession persists when subsequent update omits it', () => {
+    const face = new MiniFace('persist-parent');
+    face.updateFromFile({ state: 'coding', parentSession: 'parent-123' });
+    face.updateFromFile({ state: 'reading' });
+    assert.strictEqual(face.parentSession, 'parent-123');
+  });
+});
+
+describe('grid.js -- MiniFace stopped handling', () => {
+  test('stopped face ignores subsequent state updates', () => {
+    const face = new MiniFace('stopped-test');
+    face.updateFromFile({ state: 'happy', stopped: true });
+    assert.ok(face.stopped);
+    face.updateFromFile({ state: 'coding' });
+    assert.strictEqual(face.state, 'happy');
+  });
+
+  test('stoppedAt is set when stopped becomes true', () => {
+    const face = new MiniFace('stopped-at');
+    const before = Date.now();
+    face.updateFromFile({ state: 'happy', stopped: true });
+    assert.ok(face.stoppedAt >= before);
+    assert.ok(face.stoppedAt <= Date.now());
+  });
+});
+
+describe('grid.js -- MiniFace isMainSession classification', () => {
+  test('face with no parentSession and not teammate is main', () => {
+    const face = new MiniFace('main-test');
+    face.updateFromFile({ state: 'idle' });
+    assert.strictEqual(face.isMainSession, true);
+  });
+
+  test('face with parentSession is not main', () => {
+    const face = new MiniFace('sub-test');
+    face.updateFromFile({ state: 'idle', parentSession: 'parent-1' });
+    assert.strictEqual(face.isMainSession, false);
+  });
+
+  test('teammate is not main', () => {
+    const face = new MiniFace('team-test');
+    face.updateFromFile({ state: 'idle', isTeammate: true, teamName: 'backend' });
+    assert.strictEqual(face.isMainSession, false);
+  });
+});
+
+describe('grid.js -- OrbitalSystem update()', () => {
+  test('update increments frame', () => {
+    const os = new OrbitalSystem();
+    os.update(66, 0);
+    assert.strictEqual(os.frame, 1);
+  });
+
+  test('update advances rotationAngle', () => {
+    const os = new OrbitalSystem();
+    const before = os.rotationAngle;
+    os.update(66, 0);
+    assert.ok(os.rotationAngle > before);
+  });
+});
+
+describe('grid.js -- constants', () => {
+  test('STALE_MS is 120000', () => {
+    assert.strictEqual(STALE_MS, 120000);
+  });
+
+  test('ORPHAN_TIMEOUT is 90000', () => {
+    assert.strictEqual(ORPHAN_TIMEOUT, 90000);
+  });
+
+  test('REPOSITION_MS is 400', () => {
+    assert.strictEqual(REPOSITION_MS, 400);
+  });
+});
+
+describe('grid.js -- MiniFace orbital offset defaults', () => {
+  test('orbitalOffset defaults to null', () => {
+    const face = new MiniFace('offset-test');
+    assert.strictEqual(face.orbitalOffset, null);
+  });
+
+  test('targetOffset defaults to null', () => {
+    const face = new MiniFace('offset-test');
+    assert.strictEqual(face.targetOffset, null);
+  });
+
+  test('REPOSITION_MS matches constant', () => {
+    const face = new MiniFace('offset-test');
+    assert.strictEqual(face.REPOSITION_MS, REPOSITION_MS);
+  });
+});
+
+describe('grid.js -- MiniFace tick flushes pending', () => {
+  test('pending state is flushed after minDisplayUntil expires', () => {
+    const face = new MiniFace('tick-flush');
+    face.updateFromFile({ state: 'coding', detail: 'edit a.js' });
+    face.minDisplayUntil = Date.now() - 1;
+    face.pendingState = 'reading';
+    face.pendingDetail = 'b.js';
+    face.tick(66);
+    assert.strictEqual(face.state, 'reading');
+    assert.strictEqual(face.detail, 'b.js');
+  });
+
+  test('pending state is NOT flushed before minDisplayUntil', () => {
+    const face = new MiniFace('tick-no-flush');
+    face.updateFromFile({ state: 'coding', detail: 'edit a.js' });
+    face.pendingState = 'satisfied';
+    face.pendingDetail = 'done';
+    face.tick(66);
+    assert.strictEqual(face.state, 'coding');
+  });
+});
+
+describe('grid.js -- MiniFace error bypass', () => {
+  test('error state always bypasses min display time', () => {
+    const face = new MiniFace('error-bypass');
+    face.updateFromFile({ state: 'coding', detail: 'edit a.js' });
+    // coding has min display time still active
+    face.updateFromFile({ state: 'error', detail: 'oops' });
+    assert.strictEqual(face.state, 'error');
+  });
+
+  test('spawning state always bypasses min display time', () => {
+    const face = new MiniFace('spawning-bypass');
+    face.updateFromFile({ state: 'coding', detail: 'edit a.js' });
+    face.updateFromFile({ state: 'spawning' });
+    assert.strictEqual(face.state, 'spawning');
+  });
+});
+
+describe('grid.js -- MiniFace active work interrupts interruptible', () => {
+  test('coding can interrupt satisfied', () => {
+    const face = new MiniFace('interrupt-test');
+    face.state = 'satisfied';
+    face.minDisplayUntil = Date.now() + 60000;
+    face.updateFromFile({ state: 'coding', detail: 'foo.js' });
+    assert.strictEqual(face.state, 'coding');
+  });
+
+  test('reading can interrupt idle', () => {
+    const face = new MiniFace('interrupt-test2');
+    face.state = 'idle';
+    face.minDisplayUntil = Date.now() + 60000;
+    face.updateFromFile({ state: 'reading', detail: 'bar.js' });
+    assert.strictEqual(face.state, 'reading');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

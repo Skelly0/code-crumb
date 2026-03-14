@@ -274,4 +274,49 @@ describe('transition.js -- constants', () => {
   });
 });
 
+describe('transition.js -- restart after completion', () => {
+  test('start() after completion resets to dissolve phase', () => {
+    const t = new SwapTransition();
+    t.start('a', 'b');
+    for (let i = 0; i <= TOTAL_FRAMES; i++) t.tick(); // tick to completion
+    assert.strictEqual(t.active, false);
+    t.start('c', 'd');
+    assert.strictEqual(t.active, true);
+    assert.strictEqual(t.phase, 'dissolve');
+    assert.strictEqual(t.frame, 0);
+    assert.strictEqual(t.fromId, 'c');
+    assert.strictEqual(t.toId, 'd');
+  });
+});
+
+describe('transition.js -- dimFactor monotonicity during dissolve', () => {
+  test('dimFactor decreases monotonically during dissolve phase', () => {
+    const t = new SwapTransition();
+    t.start('a', 'b');
+    let prev = t.dimFactor();
+    for (let i = 0; i < DISSOLVE_FRAMES; i++) {
+      t.tick();
+      const cur = t.dimFactor();
+      assert.ok(cur <= prev, `dimFactor should decrease: frame ${i}, prev=${prev}, cur=${cur}`);
+      prev = cur;
+    }
+  });
+});
+
+describe('transition.js -- dimFactor monotonicity during materialize', () => {
+  test('dimFactor increases monotonically during materialize phase', () => {
+    const t = new SwapTransition();
+    t.start('a', 'b');
+    // Skip through dissolve + swap
+    for (let i = 0; i <= DISSOLVE_FRAMES; i++) t.tick();
+    let prev = t.dimFactor();
+    for (let i = 0; i < MATERIALIZE_FRAMES; i++) {
+      t.tick();
+      const cur = t.dimFactor();
+      assert.ok(cur >= prev, `dimFactor should increase: frame ${i}, prev=${prev}, cur=${cur}`);
+      prev = cur;
+    }
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

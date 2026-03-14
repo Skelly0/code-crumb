@@ -346,4 +346,48 @@ describe('launch.js -- parseArgs + resolveEditor integration', () => {
   });
 });
 
+describe('launch.js -- parseArgs with --version flag', () => {
+  test('--version is passed through as editorArgs', () => {
+    const { editorName, editorArgs } = parseArgs(['--version']);
+    assert.strictEqual(editorName, 'claude');
+    assert.deepStrictEqual(editorArgs, ['--version']);
+  });
+});
+
+describe('launch.js -- WINDOW_TITLE', () => {
+  test('WINDOW_TITLE is a non-empty string', () => {
+    assert.ok(typeof WINDOW_TITLE === 'string');
+    assert.ok(WINDOW_TITLE.length > 0);
+  });
+});
+
+describe('launch.js -- buildRendererCommands returns array', () => {
+  const rendererArgs = ['/path/to/renderer.js'];
+  const title = 'Code Crumb';
+
+  test('win32 returns an object with cmd and args properties', () => {
+    const cmds = buildRendererCommands('win32', rendererArgs, title);
+    for (const key of Object.keys(cmds)) {
+      assert.ok(typeof cmds[key].cmd === 'string', `${key} should have a cmd string`);
+      assert.ok(Array.isArray(cmds[key].args), `${key} should have an args array`);
+    }
+  });
+
+  test('darwin returns an object with cmd and args properties', () => {
+    const cmds = buildRendererCommands('darwin', rendererArgs, title);
+    for (const key of Object.keys(cmds)) {
+      assert.ok(typeof cmds[key].cmd === 'string', `${key} should have a cmd string`);
+      assert.ok(Array.isArray(cmds[key].args), `${key} should have an args array`);
+    }
+  });
+
+  test('linux returns an object with cmd and args properties', () => {
+    const cmds = buildRendererCommands('linux', rendererArgs, title);
+    for (const key of Object.keys(cmds)) {
+      assert.ok(typeof cmds[key].cmd === 'string', `${key} should have a cmd string`);
+      assert.ok(Array.isArray(cmds[key].args), `${key} should have an args array`);
+    }
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

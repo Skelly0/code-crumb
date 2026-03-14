@@ -142,4 +142,42 @@ describe('accessories.js -- getAccessory', () => {
   });
 });
 
+describe('accessories.js -- all 13 accessory types', () => {
+  test('ACCESSORIES has exactly 13 entries', () => {
+    const keys = Object.keys(ACCESSORIES);
+    assert.strictEqual(keys.length, 13, `expected 13 accessories, got ${keys.length}: ${keys.join(', ')}`);
+  });
+
+  test('ACCESSORIES contains all expected keys', () => {
+    const expected = ['hardhat', 'glasses', 'wizardhat', 'catears', 'partyhat', 'nightcap',
+      'detective', 'shades', 'crown', 'antenna', 'goggles', 'caution', 'gitpush'];
+    for (const name of expected) {
+      assert.ok(ACCESSORIES[name], `ACCESSORIES should contain "${name}"`);
+    }
+  });
+});
+
+describe('accessories.js -- STATE_ACCESSORIES completeness', () => {
+  test('STATE_ACCESSORIES has exactly 12 mapped states', () => {
+    const keys = Object.keys(STATE_ACCESSORIES);
+    assert.strictEqual(keys.length, 12, `expected 12 state mappings, got ${keys.length}: ${keys.join(', ')}`);
+  });
+
+  test('STATE_ACCESSORIES maps the expected 12 states', () => {
+    const expected = ['installing', 'thinking', 'coding', 'happy', 'sleeping', 'searching',
+      'caffeinated', 'proud', 'subagent', 'testing', 'error', 'committing'];
+    for (const state of expected) {
+      assert.ok(STATE_ACCESSORIES[state] !== undefined, `STATE_ACCESSORIES should map "${state}"`);
+    }
+  });
+});
+
+describe('accessories.js -- getAccessory returns same reference', () => {
+  test('getAccessory returns the same object reference for same state', () => {
+    const a = getAccessory('installing');
+    const b = getAccessory('installing');
+    assert.strictEqual(a, b, 'should return same object reference');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

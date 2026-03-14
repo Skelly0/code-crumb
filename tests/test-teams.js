@@ -289,4 +289,142 @@ describe('teams.js -- Orbital grouping with team data', () => {
   });
 });
 
+// -- hashTeamColor boundary values -----------------------------------
+
+describe('teams -- hashTeamColor boundary values', () => {
+  test('all returned color components are in [0, 255] range', () => {
+    const names = ['alpha', 'beta', 'gamma', '', 'test-team', '0', 'zzzzzz'];
+    for (const name of names) {
+      const color = hashTeamColor(name);
+      for (const c of color) {
+        assert.ok(c >= 0 && c <= 255, `component ${c} for "${name}" should be in [0, 255]`);
+      }
+    }
+  });
+
+  test('handles very long team name (100 chars)', () => {
+    const longName = 'a'.repeat(100);
+    const color = hashTeamColor(longName);
+    assert.ok(Array.isArray(color), 'should return an array');
+    assert.strictEqual(color.length, 3, 'should have 3 components');
+    for (const c of color) {
+      assert.ok(c >= 0 && c <= 255, `component ${c} should be in [0, 255]`);
+    }
+  });
+
+  test('handles special characters in team name', () => {
+    const specialNames = ['team!@#$%', 'über-team', '日本語チーム', 'team\nnewline', 'team\ttab'];
+    for (const name of specialNames) {
+      const color = hashTeamColor(name);
+      assert.ok(Array.isArray(color), `should return array for "${name}"`);
+      assert.strictEqual(color.length, 3, `should have 3 components for "${name}"`);
+      for (const c of color) {
+        assert.ok(c >= 0 && c <= 255, `component ${c} for "${name}" should be in [0, 255]`);
+      }
+    }
+  });
+});
+
+// -- MiniFace.updateFromFile gitBranch --------------------------------
+
+describe('teams -- MiniFace.updateFromFile gitBranch', () => {
+  test('sets gitBranch from data', () => {
+    const face = new MiniFace('s1');
+    face.updateFromFile({ state: 'coding', gitBranch: 'feature/xyz' });
+    assert.strictEqual(face.gitBranch, 'feature/xyz');
+  });
+
+  test('gitBranch persists when subsequent updates omit it', () => {
+    const face = new MiniFace('s1');
+    face.updateFromFile({ state: 'coding', gitBranch: 'feature/xyz' });
+    face.updateFromFile({ state: 'reading' });
+    assert.strictEqual(face.gitBranch, 'feature/xyz');
+  });
+});
+
+// -- MiniFace.updateFromFile taskDescription --------------------------
+
+describe('teams -- MiniFace.updateFromFile taskDescription', () => {
+  test('sets taskDescription from data', () => {
+    const face = new MiniFace('s1');
+    face.updateFromFile({ state: 'thinking', taskDescription: 'fix auth bug' });
+    assert.strictEqual(face.taskDescription, 'fix auth bug');
+  });
+
+  test('taskDescription is sticky (persists when omitted in subsequent updates)', () => {
+    const face = new MiniFace('s1');
+    face.updateFromFile({ state: 'thinking', taskDescription: 'fix auth bug' });
+    face.updateFromFile({ state: 'coding' });
+    assert.strictEqual(face.taskDescription, 'fix auth bug');
+  });
+});
+
+// -- MiniFace isMainSession classification ----------------------------
+
+describe('teams -- MiniFace isMainSession classification', () => {
+  test('face with no parentSession and isTeammate=false has isMainSession=true', () => {
+    const face = new MiniFace('s1');
+    face.updateFromFile({ state: 'coding' });
+    assert.strictEqual(face.isMainSession, true);
+    assert.strictEqual(face.parentSession, null);
+    assert.strictEqual(face.isTeammate, false);
+  });
+
+  test('face with parentSession has isMainSession=false', () => {
+    const face = new MiniFace('s1');
+    face.updateFromFile({ state: 'coding', parentSession: 'parent-123' });
+    assert.strictEqual(face.isMainSession, false);
+  });
+
+  test('teammate has isMainSession=false', () => {
+    const face = new MiniFace('s1');
+    face.updateFromFile({ state: 'waiting', isTeammate: true, teamName: 'backend' });
+    assert.strictEqual(face.isMainSession, false);
+  });
+});
+
+// -- OrbitalSystem._assignLabels with taskDescription -----------------
+
+describe('teams -- OrbitalSystem._assignLabels with taskDescription', () => {
+  test('face with taskDescription gets label from taskDescription', () => {
+    const os = new OrbitalSystem();
+    const face = new MiniFace('s1');
+    face.taskDescription = 'fix bug';
+    os.faces.set('s1', face);
+    os._assignLabels();
+    assert.strictEqual(face.label, 'fix bug');
+  });
+
+  test('long taskDescription is truncated to 8 chars', () => {
+    const os = new OrbitalSystem();
+    const face = new MiniFace('s1');
+    face.taskDescription = 'implement authentication system';
+    os.faces.set('s1', face);
+    os._assignLabels();
+    assert.strictEqual(face.label.length, 8);
+    assert.strictEqual(face.label, 'implemen');
+  });
+
+  test('teammateName takes priority over taskDescription', () => {
+    const os = new OrbitalSystem();
+    const face = new MiniFace('s1');
+    face.teammateName = 'writer';
+    face.taskDescription = 'fix bug';
+    face.isTeammate = true;
+    os.faces.set('s1', face);
+    os._assignLabels();
+    assert.strictEqual(face.label, 'writer');
+  });
+
+  test('taskDescription takes priority over cwd basename', () => {
+    const os = new OrbitalSystem();
+    const face = new MiniFace('s1');
+    face.taskDescription = 'audit';
+    face.cwd = '/home/user/my-project';
+    os.faces.set('s1', face);
+    os._assignLabels();
+    assert.strictEqual(face.label, 'audit');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
