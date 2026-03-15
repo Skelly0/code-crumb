@@ -46,7 +46,7 @@ state-machine.js Pure logic — tool→state mapping (multi-editor), error detec
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
 setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode|openclaw])
-test.js          Test runner — loads 12 modular test files from tests/ (~1026 tests)
+test.js          Test runner — loads 12 modular test files from tests/ (~1393 tests)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Orbital demo — simulates subagent sessions orbiting the main face
 code-crumb.sh   Unix shell wrapper for launch.js

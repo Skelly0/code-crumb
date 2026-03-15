@@ -66,7 +66,7 @@ const INTER_GROUP_GAP = 0.15;      // Radians of spacing between group sectors (
 const INTRA_GROUP_GAP = 0.35;      // Radians between faces within a group (~20 deg)
 const TETHER_BRIGHTNESS = 0.15;    // Dim factor for sibling tether dots
 const GROUP_LABEL_BRIGHTNESS = 0.45; // Dim factor for floating group label
-const REPOSITION_MS = 2000;        // Duration of orbital reposition animation in ms
+const REPOSITION_MS = 4000;        // Duration of orbital reposition animation in ms
 
 // Signal 0 tests process existence without killing it (works cross-platform in Node.js)
 function isProcessAlive(pid) {
@@ -104,7 +104,7 @@ class MiniFace {
     this.gitBranch = null;     // current git branch (if known)
     this.taskDescription = ''; // sticky task description from SubagentStart
     this.pid = 0;              // owning process PID for liveness detection
-    this._lastFileMtime = 0;   // Track file mtime to skip redundant updates
+    this._lastDataTimestamp = 0; // Track JSON timestamp to skip redundant updates (ms precision)
     this.minDisplayUntil = 0;  // Minimum display time to prevent flashing
     this.pendingState = null;  // Buffered state when minDisplayUntil blocks
     this.pendingDetail = null;
@@ -132,9 +132,11 @@ class MiniFace {
   updateFromFile(data, fileMtimeMs) {
     // Stopped faces don't need state updates — they're lingering until pruned
     if (this.stopped) return;
-    // Skip if file hasn't changed since last read (prevents tick() oscillation)
-    if (fileMtimeMs && fileMtimeMs === this._lastFileMtime) return;
-    this._lastFileMtime = fileMtimeMs || 0;
+    // Skip if data hasn't changed since last read (prevents tick() oscillation).
+    // Uses JSON timestamp (ms precision) instead of file mtime — immune to NTFS 1s granularity.
+    const dataTs = data.timestamp || 0;
+    if (dataTs && dataTs === this._lastDataTimestamp) return;
+    this._lastDataTimestamp = dataTs;
 
     const newState = data.state || 'idle';
     const now = Date.now();
@@ -552,6 +554,7 @@ class OrbitalSystem {
         seenIds.add(id);
 
         if (!this.faces.has(id)) {
+          if (data.stopped) continue; // Don't resurrect stopped sessions — prevents linger/respawn cycle
           // New orbital session detected on startup; mark it to spawn with a startup animation
           const mf = new MiniFace(id);
           mf.spawning = true;
@@ -701,6 +704,7 @@ class OrbitalSystem {
       seenIds.add(id);
 
       if (!this.faces.has(id)) {
+        if (r.data.stopped) continue; // Don't resurrect stopped sessions — prevents linger/respawn cycle
         const mf = new MiniFace(id);
         mf.spawning = true;
         mf.spawnProgress = 0;
