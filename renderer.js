@@ -643,7 +643,7 @@ function runUnifiedMode() {
       return;
     }
     prevFrame = out;
-    process.stdout.write(ansi.syncStart + _title + ansi.home + out + ansi.syncEnd);
+    process.stdout.write(ansi.syncStart + _title + ansi.home + ansi.clearBelow + out + ansi.syncEnd);
     setTimeout(loop, FRAME_MS);
   }
 
