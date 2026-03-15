@@ -1199,7 +1199,7 @@ describe('grid.js -- loadSessions mtime purge protects active faces (Bug #0)', (
     // The fix skips deleting session files for active (non-stopped, non-completion) in-memory faces
     assert.ok(
       src.includes('if (knownFace && !knownFace.stopped)') &&
-      src.includes('if (!completionStates.includes(knownFace.state)) continue;'),
+      src.includes('COMPLETION_STATES.has(knownFace.state)'),
       'loadSessions mtime purge should check for active in-memory face before deleting file'
     );
   });
@@ -1831,41 +1831,54 @@ describe('grid.js -- session cleanup uses fileToFaceId and PID check', () => {
   });
 });
 
-// -- Bug #108: updateFromFile mtime tracking + stopped guard ---
+// -- Bug #108: updateFromFile timestamp dedup + stopped guard ---
 
 describe('grid.js -- updateFromFile skips redundant updates (Bug #108)', () => {
-  test('updateFromFile skips re-application when mtime is unchanged', () => {
+  test('updateFromFile skips re-application when data.timestamp is unchanged', () => {
     const face = new MiniFace('test');
-    const mtime = Date.now() - 5000;
-    face.updateFromFile({ state: 'coding', detail: 'edit foo.js' }, mtime);
+    const ts = Date.now() - 5000;
+    face.updateFromFile({ state: 'coding', detail: 'edit foo.js', timestamp: ts }, 1000);
     assert.strictEqual(face.state, 'coding');
     assert.strictEqual(face.detail, 'edit foo.js');
 
-    // Second call with same mtime — should be skipped entirely
-    face.updateFromFile({ state: 'reading', detail: 'bar.js' }, mtime);
+    // Second call with same timestamp — should be skipped entirely
+    face.updateFromFile({ state: 'reading', detail: 'bar.js', timestamp: ts }, 2000);
     assert.strictEqual(face.state, 'coding',
-      'state should not change when mtime is unchanged');
+      'state should not change when timestamp is unchanged');
     assert.strictEqual(face.detail, 'edit foo.js',
-      'detail should not change when mtime is unchanged');
+      'detail should not change when timestamp is unchanged');
   });
 
-  test('updateFromFile applies update when mtime changes', () => {
+  test('updateFromFile applies update when data.timestamp changes', () => {
     const face = new MiniFace('test');
-    const mtime1 = Date.now() - 5000;
-    face.updateFromFile({ state: 'thinking' }, mtime1);
+    const ts1 = Date.now() - 5000;
+    face.updateFromFile({ state: 'thinking', timestamp: ts1 }, 1000);
     assert.strictEqual(face.state, 'thinking');
 
-    // New mtime — should apply (coding can interrupt thinking)
+    // New timestamp — should apply (coding can interrupt thinking)
     face.minDisplayUntil = 0; // bypass display timer for clean test
-    const mtime2 = Date.now() - 3000;
-    face.updateFromFile({ state: 'coding' }, mtime2);
+    const ts2 = Date.now() - 3000;
+    face.updateFromFile({ state: 'coding', timestamp: ts2 }, 1000);
     assert.strictEqual(face.state, 'coding',
-      'state should update when mtime changes');
+      'state should update when timestamp changes');
+  });
+
+  test('updateFromFile applies when timestamps differ but mtime is same (NTFS fix)', () => {
+    const face = new MiniFace('test');
+    const sameMtime = 1000;
+    face.updateFromFile({ state: 'thinking', timestamp: 100 }, sameMtime);
+    assert.strictEqual(face.state, 'thinking');
+
+    // Same mtime but different JSON timestamp — should apply (NTFS 1s granularity fix)
+    face.minDisplayUntil = 0;
+    face.updateFromFile({ state: 'coding', timestamp: 200 }, sameMtime);
+    assert.strictEqual(face.state, 'coding',
+      'should apply update when JSON timestamp differs even if mtime is same');
   });
 
   test('updateFromFile skips when face is stopped', () => {
     const face = new MiniFace('test');
-    face.updateFromFile({ state: 'coding' }, Date.now());
+    face.updateFromFile({ state: 'coding', timestamp: Date.now() }, Date.now());
     assert.strictEqual(face.state, 'coding');
 
     // Stop the face
@@ -1873,33 +1886,33 @@ describe('grid.js -- updateFromFile skips redundant updates (Bug #108)', () => {
     face.stoppedAt = Date.now();
 
     // Try to update — should be ignored
-    face.updateFromFile({ state: 'reading', detail: 'new stuff' }, Date.now() + 1000);
+    face.updateFromFile({ state: 'reading', detail: 'new stuff', timestamp: Date.now() + 1000 }, Date.now() + 1000);
     assert.strictEqual(face.state, 'coding',
       'stopped face should not accept new state from file');
   });
 
-  test('updateFromFile applies when mtime is 0 (no mtime available)', () => {
+  test('updateFromFile applies when timestamp is 0 (no timestamp available)', () => {
     const face = new MiniFace('test');
-    face.updateFromFile({ state: 'thinking' }, 0);
+    face.updateFromFile({ state: 'thinking', timestamp: 0 }, 0);
     assert.strictEqual(face.state, 'thinking');
 
-    // Another call with 0 mtime — should still apply (no mtime tracking)
+    // Another call with 0 timestamp — should still apply (no dedup possible)
     face.minDisplayUntil = 0;
-    face.updateFromFile({ state: 'coding' }, 0);
+    face.updateFromFile({ state: 'coding', timestamp: 0 }, 0);
     assert.strictEqual(face.state, 'coding',
-      'should apply updates when mtime is unavailable (0)');
+      'should apply updates when timestamp is unavailable (0)');
   });
 
-  test('updateFromFile applies when no mtime argument given', () => {
+  test('updateFromFile applies when no timestamp in data', () => {
     const face = new MiniFace('test');
     face.updateFromFile({ state: 'thinking' });
     assert.strictEqual(face.state, 'thinking');
 
-    // Another call with undefined mtime
+    // Another call with no timestamp
     face.minDisplayUntil = 0;
     face.updateFromFile({ state: 'coding' });
     assert.strictEqual(face.state, 'coding',
-      'should apply updates when mtime is undefined');
+      'should apply updates when timestamp is missing from data');
   });
 });
 
@@ -1977,17 +1990,24 @@ describe('grid.js -- face removal respects PID liveness when file is missing (Bu
     const sessionId = 'stopped-no-file-test';
     const filePath = pathMod.join(SESSIONS_DIR, safeFilename(sessionId) + '.json');
 
-    // Write with our PID (alive) but stopped
+    // First write as active (not stopped) so the face gets created
     fs.writeFileSync(filePath, JSON.stringify({
-      session_id: sessionId, state: 'happy', stopped: true,
+      session_id: sessionId, state: 'happy', stopped: false,
       pid: process.pid, timestamp: Date.now(),
     }));
 
     orbital.loadSessions('main-id');
     assert.ok(orbital.faces.has(sessionId), 'face should exist after first load');
+
+    // Now mark stopped via file update
+    fs.writeFileSync(filePath, JSON.stringify({
+      session_id: sessionId, state: 'happy', stopped: true,
+      pid: process.pid, timestamp: Date.now() + 1,
+    }));
+    orbital.loadSessions('main-id');
     const face = orbital.faces.get(sessionId);
-    // Ensure face is marked stopped and stale enough to be removed
-    face.stopped = true;
+    assert.ok(face.stopped, 'face should be marked stopped');
+    // Ensure face is stale enough to be removed
     face.stoppedAt = Date.now() - 20000;
 
     // Delete the file
@@ -1997,6 +2017,31 @@ describe('grid.js -- face removal respects PID liveness when file is missing (Bu
     orbital.loadSessions('main-id');
     assert.ok(!orbital.faces.has(sessionId),
       'stopped face should be removed even with live PID when file is gone');
+  });
+
+  test('stopped session file does not create new face (prevents linger/respawn cycle)', () => {
+    const fs = require('fs');
+    const pathMod = require('path');
+    const { SESSIONS_DIR, safeFilename } = require('../shared');
+    const orbital = new OrbitalSystem();
+
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+
+    const sessionId = 'stopped-no-resurrect-test';
+    const filePath = pathMod.join(SESSIONS_DIR, safeFilename(sessionId) + '.json');
+
+    // Write a stopped session file directly (simulates file lingering after face was removed)
+    fs.writeFileSync(filePath, JSON.stringify({
+      session_id: sessionId, state: 'happy', stopped: true,
+      pid: process.pid, timestamp: Date.now(),
+    }));
+
+    orbital.loadSessions('main-id');
+    assert.ok(!orbital.faces.has(sessionId),
+      'stopped file should not create a new face — prevents linger/respawn cycle');
+
+    // Cleanup
+    try { fs.unlinkSync(filePath); } catch {}
   });
 });
 
@@ -3218,8 +3263,8 @@ describe('grid.js -- constants', () => {
     assert.strictEqual(ORPHAN_TIMEOUT, 90000);
   });
 
-  test('REPOSITION_MS is 400', () => {
-    assert.strictEqual(REPOSITION_MS, 400);
+  test('REPOSITION_MS is 4000', () => {
+    assert.strictEqual(REPOSITION_MS, 4000);
   });
 });
 

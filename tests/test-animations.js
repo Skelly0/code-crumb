@@ -47,7 +47,7 @@ describe('animations.js -- mouths', () => {
 });
 
 describe('animations.js -- eyes', () => {
-  const staticEyes = ['open', 'blink', 'halfClose', 'narrowed', 'focused', 'lookLeft', 'lookRight', 'cross', 'wide', 'down', 'echo', 'content'];
+  const staticEyes = ['open', 'blink', 'halfClose', 'narrowed', 'focused', 'lookLeft', 'lookRight', 'cross', 'wide', 'down', 'content'];
 
   test('static eye functions return correct shape', () => {
     for (const name of staticEyes) {
@@ -190,7 +190,7 @@ describe('animations.js -- mouth output consistency', () => {
   });
 
   test('deterministic mouths return consistent length across calls', () => {
-    const deterministic = ['smile', 'neutral', 'wide', 'curious', 'frown', 'smirk', 'ooh', 'determined', 'wavy', 'wait', 'tight', 'dots', 'grin', 'calm', 'catMouth', 'exhale', 'content', 'responding'];
+    const deterministic = ['smile', 'neutral', 'wide', 'curious', 'frown', 'smirk', 'determined', 'wavy', 'wait', 'tight', 'dots', 'grin', 'catMouth', 'exhale', 'content', 'responding'];
     for (const name of deterministic) {
       const a = mouths[name]();
       const b = mouths[name]();

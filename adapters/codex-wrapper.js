@@ -198,7 +198,6 @@ guardedWriteState(sessionId, 'thinking', 'starting codex...', extra());
 
 const codex = spawn('codex', ['exec', '--json', ...args], {
   stdio: ['inherit', 'pipe', 'inherit'],
-  shell: true,
 });
 
 processJsonlStream(codex.stdout, handleEvent);

@@ -44,7 +44,7 @@ function savePrefs(updates) {
       if (raw) prefs = JSON.parse(raw);
     } catch {}
     Object.assign(prefs, updates);
-    fs.writeFileSync(PREFS_FILE, JSON.stringify(prefs), 'utf8');
+    fs.writeFileSync(PREFS_FILE, JSON.stringify(prefs), { encoding: 'utf8', mode: 0o600 });
   } catch {}
 }
 

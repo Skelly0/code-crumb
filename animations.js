@@ -13,7 +13,7 @@ const mouths = {
   curious:    () => ' \u25cb ',
   frown:      () => '\u25e0\u25e0\u25e0',
   smirk:      () => '  \u25e1\u25e1',
-  ooh:        () => ' \u25cb ',
+
   determined: () => '\u2550\u2550\u2550',
   glitch: () => {
     const ms = ['\u25e1\u25e0\u25e1', '\u25e0\u25e1\u25e0', '\u2550\u25e1\u2550', '\u25e1\u2550\u25e1', '\u2500\u25e1\u2500', '\u25e1\u2500\u25e1'];
@@ -24,7 +24,7 @@ const mouths = {
   tight:      () => '\u2550\u2550\u2550',
   dots:       () => '\u00b7\u00b7\u00b7',
   grin:       () => '\u25aa\u25e1\u25aa',
-  calm:       () => ' \u25e1\u25e1',
+
   conducting: () => mouths.determined(),
   catMouth:   () => ' \u03c9 ',
   exhale:     () => ' \u25e1 ',
@@ -104,6 +104,7 @@ const eyes = {
     return phases[frame % phases.length];
   },
 
+  // Intentionally identical to eyes.open — aliased for semantic clarity in the searching state
   wide()  { return { left: ['\u2588\u2588', '\u2588\u2588'], right: ['\u2588\u2588', '\u2588\u2588'] }; },
 
   sleeping(theme, frame) {
@@ -130,8 +131,6 @@ const eyes = {
     if (j === 1) return { left: [' \u2588', '\u2588 '], right: ['\u2588 ', ' \u2588'] };
     return { left: ['\u2588 ', ' \u2588'], right: [' \u2588', '\u2588 '] };
   },
-
-  echo() { return { left: ['\u2588\u2588', '\u2588\u2588'], right: ['\u2588\u2588', '\u2588\u2588'] }; },
 
   conducting(theme, frame) {
     // Orchestrator scanning: open → lookLeft → open → lookRight → open → focused

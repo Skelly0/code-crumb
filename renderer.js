@@ -34,6 +34,11 @@ const IDLE_TIMEOUT = 8000;
 const THINKING_TIMEOUT = 45000; // 45s -- safety net if Stop event is missed
 const SLEEP_TIMEOUT = 60000;
 
+// -- Hoisted sets for checkState() hot path (avoid per-call allocation) --
+const RESCUE_EXCLUDE = new Set(['idle', 'sleeping', 'responding', 'starting', 'happy', 'satisfied', 'proud', 'relieved']);
+const FRESH_READ_STATES = new Set(['thinking', 'executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'responding', 'happy', 'satisfied', 'proud', 'relieved']);
+const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
+
 // ===================================================================
 // SHARED RUNTIME
 // ===================================================================
@@ -171,6 +176,7 @@ function runUnifiedMode() {
   let lastAppliedTimestamp = 0; // Dedup: skip re-applying state with same timestamp
   function checkState() {
     const now = Date.now();
+    let cachedStateData = null; // Cache readState() to avoid duplicate fs.readFileSync
     try {
       const stat = fs.statSync(STATE_FILE);
       // Every 2s, bypass mtime check to eliminate NTFS 1-second mtime race
@@ -179,6 +185,7 @@ function runUnifiedMode() {
         if (forceRead) lastForceReadTime = now;
         lastMtime = stat.mtimeMs;
         const stateData = readState();
+        cachedStateData = stateData;
 
         // Use JSON timestamp (ms precision) for staleness instead of
         // filesystem mtime (NTFS has 1-second granularity, and mtime
@@ -261,8 +268,7 @@ function runUnifiedMode() {
     // We bypass setState() here to avoid it re-buffering the state.
     // Completion states (happy/satisfied/proud/relieved) are excluded — they
     // already transition to idle via the linger path with sessionActive=false.
-    const rescueExclude = new Set(['idle', 'sleeping', 'responding', 'starting', 'happy', 'satisfied', 'proud', 'relieved']);
-    if (lastStopped && !rescueExclude.has(face.state)) {
+    if (lastStopped && !RESCUE_EXCLUDE.has(face.state)) {
       face.prevState = face.state;
       face.state = 'responding';
       face.transitionFrame = 0;
@@ -273,18 +279,18 @@ function runUnifiedMode() {
       face.pendingDetail = '';
       face.particles.fadeAll();
       face.timeline.push({ state: 'responding', at: now });
+      face._timelineDirty = true;
       if (face.timeline.length > 200) face.timeline.shift();
     }
 
     // If we're past minDisplayUntil and in an active state,
     // do a fresh file read to catch any stop/start event missed by fs.watch mtime
     // granularity (common on Windows FAT/NTFS with 1-second mtime resolution).
-    const freshReadStates = ['thinking', 'executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'responding', 'happy', 'satisfied', 'proud', 'relieved'];
     if (now >= face.minDisplayUntil &&
-        freshReadStates.includes(face.state) &&
+        FRESH_READ_STATES.has(face.state) &&
         (face.state === 'thinking' || now - lastMainUpdate > 2000)) {
       try {
-        const freshData = readState();
+        const freshData = cachedStateData || readState();
         const freshTs = freshData.timestamp || 0;
         // Detect stopped transition: false->true only (resets via session adoption)
         const stoppedNow = freshData.stopped || false;
@@ -305,6 +311,7 @@ function runUnifiedMode() {
             face.pendingDetail = '';
             face.particles.fadeAll();
             face.timeline.push({ state: freshData.state, at: now });
+            face._timelineDirty = true;
             if (face.timeline.length > 200) face.timeline.shift();
           }
         }
@@ -314,7 +321,6 @@ function runUnifiedMode() {
     // Don't apply timeouts if minimum display time hasn't passed
     if (now < face.minDisplayUntil) return;
 
-    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     const completionLinger = COMPLETION_LINGER[face.state];
     // Session is active until Stop hook fires (writes stopped: true)
     const sessionActive = !lastStopped;
@@ -330,7 +336,7 @@ function runUnifiedMode() {
     } else if (face.state === 'thinking' &&
                now - face.lastStateChange > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT)) {
       face.setState('idle');
-    } else if (!completionStates.includes(face.state) &&
+    } else if (!COMPLETION_STATES.has(face.state) &&
                face.state !== 'idle' && face.state !== 'sleeping' &&
                face.state !== 'thinking' &&
                face.state !== 'starting' &&
@@ -352,7 +358,7 @@ function runUnifiedMode() {
   try {
     const dir = path.dirname(STATE_FILE);
     const basename = path.basename(STATE_FILE);
-    fs.watch(dir, (eventType, filename) => {
+    const stateWatcher = fs.watch(dir, (eventType, filename) => {
       if (!filename || filename === basename) {
         if (!stateWatchThrottled) {
           stateWatchThrottled = true;
@@ -361,17 +367,23 @@ function runUnifiedMode() {
         }
       }
     });
+    stateWatcher.on('error', (err) => {
+      try { process.stderr.write(`[code-crumb] state watcher error: ${err.code || err.message}\n`); } catch {}
+    });
   } catch {}
 
   // Watch sessions directory for subagent changes (skipped in minimal mode)
   if (!minimal) {
     let sessionWatchTimer = null;
     try {
-      fs.watch(SESSIONS_DIR, () => {
+      const sessionWatcher = fs.watch(SESSIONS_DIR, () => {
         if (sessionWatchTimer) clearTimeout(sessionWatchTimer);
         sessionWatchTimer = setTimeout(() => {
           if (mainSessionId) orbital.loadSessionsAsync(mainSessionId);
         }, 80);
+      });
+      sessionWatcher.on('error', (err) => {
+        try { process.stderr.write(`[code-crumb] session watcher error: ${err.code || err.message}\n`); } catch {}
       });
     } catch {}
   }

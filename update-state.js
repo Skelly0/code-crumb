@@ -30,7 +30,7 @@ const hookEvent = process.argv[2] || '';
 function writeState(state, detail = '', extra = {}) {
   const data = JSON.stringify({ state, detail, timestamp: Date.now(), ...extra });
   try {
-    fs.writeFileSync(STATE_FILE, data, 'utf8');
+    fs.writeFileSync(STATE_FILE, data, { encoding: 'utf8', mode: 0o600 });
   } catch {
     // Silently fail -- don't break Claude Code
   }
@@ -39,7 +39,7 @@ function writeState(state, detail = '', extra = {}) {
 // Write per-session state file for orbital subagent rendering
 function writeSessionState(sessionId, state, detail = '', stopped = false, extra = {}) {
   try {
-    fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+    fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
     const filename = safeFilename(sessionId) + '.json';
     const data = JSON.stringify({
       session_id: sessionId, state, detail,
@@ -47,7 +47,7 @@ function writeSessionState(sessionId, state, detail = '', stopped = false, extra
       pid: process.ppid, // editor PID — hook runs as child, so ppid is the long-lived process
       ...extra,
     });
-    fs.writeFileSync(path.join(SESSIONS_DIR, filename), data, 'utf8');
+    fs.writeFileSync(path.join(SESSIONS_DIR, filename), data, { encoding: 'utf8', mode: 0o600 });
   } catch {
     // Silently fail
   }
@@ -88,7 +88,7 @@ function readStats() {
 }
 
 function writeStats(stats) {
-  try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats), 'utf8'); } catch {}
+  try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats), { encoding: 'utf8', mode: 0o600 }); } catch {}
 }
 
 // -- Autolaunch ------------------------------------------------------
@@ -158,10 +158,19 @@ function ensureRendererRunning() {
 
 // Read stdin
 let input = '';
+const MAX_INPUT = 1048576;
+let inputTruncated = false;
 process.stdin.setEncoding('utf8');
-process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('data', chunk => {
+  if (input.length < MAX_INPUT) input += chunk;
+  else inputTruncated = true;
+});
 process.stdin.on('end', () => {
   ensureRendererRunning();
+  if (inputTruncated) {
+    writeState('thinking', 'large input');
+    process.exit(0);
+  }
   let state = 'thinking';
   let detail = '';
   let stopped = false;
