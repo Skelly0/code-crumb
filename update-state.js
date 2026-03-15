@@ -476,8 +476,10 @@ process.stdin.on('end', () => {
           !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
         shouldWriteGlobal = false;
       }
-      // Preserve stopped flag — late PostToolUse must not erase a prior Stop/SessionEnd
-      if (existing.stopped && existing.sessionId === sessionId && !stopped) {
+      // Preserve stopped flag — only late PostToolUse/PostToolUseFailure can arrive after Stop.
+      // PreToolUse (new turn) must be allowed to clear the stopped flag.
+      if (existing.stopped && existing.sessionId === sessionId && !stopped &&
+          (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')) {
         stopped = true;
         extra.stopped = true;
       }
@@ -502,7 +504,8 @@ process.stdin.on('end', () => {
       try {
         const existingSession = JSON.parse(fs.readFileSync(
           path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
-        if (!stopped && existingSession.stopped) {
+        if (!stopped && existingSession.stopped &&
+            (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')) {
           stopped = true;
           extra.stopped = true;
         }
@@ -512,7 +515,15 @@ process.stdin.on('end', () => {
           }
         }
       } catch {}
-      writeSessionState(sessionId, state, detail, stopped, extra);
+      if (hookEvent === 'Stop') {
+        // Stop = end of turn, not end of session. Keep orbital visible as idle.
+        // Global state (line 495) already has stopped=true for ownership release.
+        const idleExtra = { ...extra };
+        delete idleExtra.stopped;
+        writeSessionState(sessionId, 'idle', 'between turns', false, idleExtra);
+      } else {
+        writeSessionState(sessionId, state, detail, stopped, extra);
+      }
     }
     pruneFrequentFiles(stats.frequentFiles);
     writeStats(stats);
@@ -542,10 +553,14 @@ process.stdin.on('end', () => {
 
     let fallbackState = 'thinking';
     let fallbackDetail = '';
-    if (hookEvent === 'Stop' || hookEvent === 'SessionEnd') {
+    if (hookEvent === 'SessionEnd') {
       fallbackState = 'responding';
-      fallbackDetail = hookEvent === 'SessionEnd' ? 'session ending' : 'wrapping up';
+      fallbackDetail = 'session ending';
       fallbackExtra.stopped = true;
+    } else if (hookEvent === 'Stop') {
+      fallbackState = 'responding';
+      fallbackDetail = 'wrapping up';
+      fallbackExtra.stopped = true; // for global state only
     } else if (hookEvent === 'Notification') {
       fallbackState = 'waiting';
       fallbackDetail = 'needs attention';
@@ -575,8 +590,14 @@ process.stdin.on('end', () => {
 
     if (shouldWriteGlobal) writeState(fallbackState, fallbackDetail, fallbackExtra);
     // Always write per-session file so parallel sessions appear as orbitals.
-    writeSessionState(fallbackSessionId, fallbackState, fallbackDetail,
-      hookEvent === 'Stop', fallbackExtra);
+    if (hookEvent === 'Stop') {
+      const idleFallbackExtra = { ...fallbackExtra };
+      delete idleFallbackExtra.stopped;
+      writeSessionState(fallbackSessionId, 'idle', 'between turns', false, idleFallbackExtra);
+    } else {
+      writeSessionState(fallbackSessionId, fallbackState, fallbackDetail,
+        hookEvent === 'SessionEnd', fallbackExtra);
+    }
   }
 
   process.exit(0);

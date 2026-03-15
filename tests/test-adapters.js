@@ -1381,6 +1381,211 @@ describe('update-state.js stopped flag preservation (#98)', () => {
   });
 });
 
+describe('update-state.js parallel sessions orbital visibility fix', () => {
+  const updateStatePath = path.join(__dirname, '..', 'update-state.js');
+  const sharedMod = require(path.join(__dirname, '..', 'shared'));
+  const STATE_FILE = sharedMod.STATE_FILE;
+  const SESSIONS_DIR = sharedMod.SESSIONS_DIR;
+  const safeFilename = sharedMod.safeFilename;
+
+  // Save and restore state file
+  let savedOrbitalState;
+  try { savedOrbitalState = fs.readFileSync(STATE_FILE, 'utf8'); } catch { savedOrbitalState = null; }
+
+  // -- Source tests: hookEvent guard on stopped preservation --
+
+  test('source: global stopped preservation is restricted to PostToolUse/PostToolUseFailure', () => {
+    const src = fs.readFileSync(updateStatePath, 'utf8');
+    // The stopped preservation block must check hookEvent
+    assert.ok(
+      src.includes("hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure'"),
+      'stopped preservation must be gated on PostToolUse/PostToolUseFailure hookEvent'
+    );
+  });
+
+  test('source: per-session stopped preservation is restricted to PostToolUse/PostToolUseFailure', () => {
+    const src = fs.readFileSync(updateStatePath, 'utf8');
+    // Both global and session preservation blocks should have the hookEvent guard
+    const matches = src.match(/hookEvent === 'PostToolUse' \|\| hookEvent === 'PostToolUseFailure'/g);
+    assert.ok(matches && matches.length >= 2,
+      'both global and per-session stopped preservation must have hookEvent guard');
+  });
+
+  test('source: Stop writes idle to per-session file (not stopped)', () => {
+    const src = fs.readFileSync(updateStatePath, 'utf8');
+    assert.ok(
+      src.includes("hookEvent === 'Stop'") && src.includes("'idle', 'between turns', false"),
+      'Stop handler should write idle/between-turns/stopped=false to per-session file'
+    );
+  });
+
+  test('source: fallback catch separates Stop from SessionEnd', () => {
+    const src = fs.readFileSync(updateStatePath, 'utf8');
+    // Should NOT have the combined condition anymore
+    assert.ok(
+      !src.includes("hookEvent === 'Stop' || hookEvent === 'SessionEnd'"),
+      'fallback catch must not combine Stop and SessionEnd in the same condition'
+    );
+  });
+
+  // -- Integration tests: PreToolUse clears stopped --
+
+  test('integration: PreToolUse after Stop clears stopped on per-session file', () => {
+    const testSessionId = 'test-pretool-clears-' + Date.now();
+    const sessionFile = path.join(SESSIONS_DIR, safeFilename(testSessionId) + '.json');
+
+    // Write a stopped session file (simulating a prior Stop)
+    try {
+      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+      fs.writeFileSync(sessionFile, JSON.stringify({
+        session_id: testSessionId, state: 'responding', detail: 'wrapping up',
+        timestamp: Date.now(), stopped: true,
+      }), 'utf8');
+      // Also write a stopped global state for same session
+      fs.writeFileSync(STATE_FILE, JSON.stringify({
+        state: 'responding', detail: 'wrapping up',
+        timestamp: Date.now(), sessionId: testSessionId, stopped: true,
+      }), 'utf8');
+    } catch { return; }
+
+    // Send PreToolUse (new turn starting) — should clear stopped
+    try {
+      execFileSync(process.execPath, [updateStatePath, 'PreToolUse'], {
+        input: JSON.stringify({
+          tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
+          session_id: testSessionId,
+        }),
+        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
+        timeout: 5000,
+      });
+    } catch {}
+
+    // Per-session file must NOT have stopped: true
+    try {
+      const result = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+      assert.strictEqual(result.stopped, false,
+        'PreToolUse must clear stopped flag on per-session file (new turn)');
+    } catch (e) {
+      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
+    } finally {
+      try { fs.unlinkSync(sessionFile); } catch {}
+    }
+  });
+
+  test('integration: Stop writes idle with stopped=false to per-session file', () => {
+    const testSessionId = 'test-stop-idle-' + Date.now();
+    const sessionFile = path.join(SESSIONS_DIR, safeFilename(testSessionId) + '.json');
+
+    // Write an active session file first
+    try {
+      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+      fs.writeFileSync(sessionFile, JSON.stringify({
+        session_id: testSessionId, state: 'coding', detail: 'editing',
+        timestamp: Date.now(), stopped: false,
+      }), 'utf8');
+      fs.writeFileSync(STATE_FILE, JSON.stringify({
+        state: 'coding', detail: 'editing',
+        timestamp: Date.now(), sessionId: testSessionId,
+      }), 'utf8');
+    } catch { return; }
+
+    // Send Stop event
+    try {
+      execFileSync(process.execPath, [updateStatePath, 'Stop'], {
+        input: JSON.stringify({ session_id: testSessionId }),
+        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
+        timeout: 5000,
+      });
+    } catch {}
+
+    // Per-session file: state=idle, stopped=false (orbital stays visible)
+    try {
+      const result = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+      assert.strictEqual(result.state, 'idle',
+        'Stop should write state=idle to per-session file');
+      assert.strictEqual(result.stopped, false,
+        'Stop should write stopped=false to per-session file (keep orbital visible)');
+      assert.strictEqual(result.detail, 'between turns',
+        'Stop should write detail="between turns" to per-session file');
+    } catch (e) {
+      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
+    } finally {
+      try { fs.unlinkSync(sessionFile); } catch {}
+    }
+  });
+
+  test('integration: SessionEnd still writes stopped=true to per-session file', () => {
+    const testSessionId = 'test-sessend-stopped-' + Date.now();
+    const sessionFile = path.join(SESSIONS_DIR, safeFilename(testSessionId) + '.json');
+
+    // Write an active session file
+    try {
+      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+      fs.writeFileSync(sessionFile, JSON.stringify({
+        session_id: testSessionId, state: 'coding', detail: 'editing',
+        timestamp: Date.now(), stopped: false,
+      }), 'utf8');
+      fs.writeFileSync(STATE_FILE, JSON.stringify({
+        state: 'coding', detail: 'editing',
+        timestamp: Date.now(), sessionId: testSessionId,
+      }), 'utf8');
+    } catch { return; }
+
+    // Send SessionEnd event
+    try {
+      execFileSync(process.execPath, [updateStatePath, 'SessionEnd'], {
+        input: JSON.stringify({ session_id: testSessionId }),
+        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
+        timeout: 5000,
+      });
+    } catch {}
+
+    // Per-session file: stopped=true (session truly over)
+    try {
+      const result = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+      assert.strictEqual(result.stopped, true,
+        'SessionEnd must write stopped=true to per-session file');
+    } catch (e) {
+      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
+    } finally {
+      try { fs.unlinkSync(sessionFile); } catch {}
+    }
+  });
+
+  test('integration: Stop writes stopped=true to global state file (ownership release)', () => {
+    const testSessionId = 'test-stop-global-' + Date.now();
+
+    try {
+      fs.writeFileSync(STATE_FILE, JSON.stringify({
+        state: 'coding', detail: 'editing',
+        timestamp: Date.now(), sessionId: testSessionId,
+      }), 'utf8');
+    } catch { return; }
+
+    try {
+      execFileSync(process.execPath, [updateStatePath, 'Stop'], {
+        input: JSON.stringify({ session_id: testSessionId }),
+        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
+        timeout: 5000,
+      });
+    } catch {}
+
+    // Global state must still have stopped=true for ownership release
+    try {
+      const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      assert.strictEqual(result.stopped, true,
+        'Stop must write stopped=true to global state file for ownership release');
+    } catch (e) {
+      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
+    }
+  });
+
+  test('cleanup: restore state after orbital visibility tests', () => {
+    if (savedOrbitalState !== null) fs.writeFileSync(STATE_FILE, savedOrbitalState, 'utf8');
+    else try { fs.unlinkSync(STATE_FILE); } catch {}
+  });
+});
+
 describe('base-adapter guardedWriteState modelName preservation (#78)', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
   const sharedMod = require(path.join(__dirname, '..', 'shared'));
