@@ -3,13 +3,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js 18+](https://img.shields.io/badge/node-18%2B-brightgreen.svg)](https://nodejs.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-blue.svg)](#)
-[![662 Tests](https://img.shields.io/badge/tests-662-passing.svg)](#)
+[![1395 Tests](https://img.shields.io/badge/tests-1395-passing.svg)](#)
 
 A terminal tamagotchi that shows what your AI coding assistant is doing.
 
 ![Code Crumb proud state — crown accessory, 43 streak, diff info, neon theme](images/proud-crown-diffinfo.png)
 
-Code Crumb hooks into AI coding tool lifecycle events and displays an animated ASCII face that reacts in real time — blinking, searching, coding, celebrating, and occasionally glitching when things go wrong. 18 expressive states, 12 particle effects, 5 color palettes, orbital subagent tracking, streak counters, and you can pet it.
+Code Crumb hooks into AI coding tool lifecycle events and displays an animated ASCII face that reacts in real time — blinking, searching, coding, celebrating, and occasionally glitching when things go wrong. 23 expressive states, 15 particle effects, 5 color palettes, orbital subagent tracking, streak counters, and you can pet it.
 
 **Supported tools:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex), [OpenCode](https://github.com/sst/opencode), [OpenClaw/Pi](https://github.com/anthropics/claw) — and anything that can pipe JSON events.
 
@@ -97,7 +97,7 @@ node code-crumb/launch.js --editor openclaw            # OpenClaw/Pi
 ### Try the demo
 
 ```bash
-node code-crumb/demo.js          # Cycles through all 18 states
+node code-crumb/demo.js          # Cycles through all 23 states
 node code-crumb/grid-demo.js     # Orbital subagent constellation
 ```
 
@@ -105,7 +105,7 @@ node code-crumb/grid-demo.js     # Orbital subagent constellation
 
 ### Expressions
 
-The face has 18 distinct states — each with unique eyes, mouth, particles, and color:
+The face has 23 distinct states — each with unique eyes, mouth, particles, and color:
 
 | State | Face | Trigger |
 |---|---|---|
@@ -127,6 +127,11 @@ The face has 18 distinct states — each with unique eyes, mouth, particles, and
 | **Installing** | `▄▄` `···` — packages raining down | `npm install`, `pip install` |
 | **Caffeinated** | `██` `▪◡▪` — speed lines, jitter | 5+ tool calls in 10s |
 | **Subagent** | scanning `═══` — stream particles radiate outward | `Task` / subagent spawn |
+| **Starting** | `▄▄ ██` `◡◡` — fresh session glow | Session begins |
+| **Spawning** | `██ ██` `○` — materialization particles | Subagent launching |
+| **Committing** | `▀▀ ▀▀` `═══` — push particles upward | `git commit` |
+| **Reviewing** | `── ──` `───` — careful scanning | Code review tools |
+| **Training** | `● ●` `═══` — pulsing concentration | ML training runs |
 
 ![Sleeping state with Zzz particles and thought bubble](images/sleeping.png)
 
@@ -197,6 +202,9 @@ Five palettes — press `t` to cycle. Preferences persist between sessions.
 | `s` | Toggle stats (streak, timeline, sparkline) |
 | `a` | Toggle accessories (cat ears, thought bubbles) |
 | `o` | Toggle orbital subagents |
+| `l` | Open session list |
+| `↑↓` / `j/k` | Navigate session list |
+| `Enter` | Promote selected orbital to main |
 | `h` / `?` | Toggle help overlay |
 | `q` / Ctrl+C | Quit |
 
@@ -364,15 +372,19 @@ Or: `cd code-crumb && npm link`
 | `face.js` | ClaudeFace class — state machine and rendering |
 | `grid.js` | MiniFace + OrbitalSystem — subagent orbits |
 | `animations.js` | Eye/mouth animation functions |
-| `particles.js` | ParticleSystem — 12 visual effect styles |
+| `particles.js` | ParticleSystem — 15 visual effect styles |
 | `themes.js` | ANSI codes, palettes, color math, thought bubbles |
 | `state-machine.js` | Tool mapping, error detection, streaks |
 | `shared.js` | Shared constants, paths, utilities |
+| `transition.js` | SwapTransition — dissolve/swap/materialize animations |
+| `accessories.js` | Accessory definitions (hats, glasses, ears) and rendering |
+| `adapters/base-adapter.js` | Base adapter class with shared functionality |
 | `adapters/codex-wrapper.js` | Wraps `codex exec --json` for tool-level events |
 | `adapters/codex-notify.js` | Handles Codex `notify` config events |
 | `adapters/opencode-adapter.js` | OpenCode plugin event adapter |
 | `adapters/openclaw-adapter.js` | OpenClaw/Pi event adapter |
-| `demo.js` | Cycles through all 18 states |
+| `adapters/engmux-adapter.js` | engmux agent dispatcher event adapter |
+| `demo.js` | Cycles through all 23 states |
 | `grid-demo.js` | Orbital subagent demo |
 
 </details>
