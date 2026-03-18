@@ -521,9 +521,14 @@ describe('state-machine.js -- tool pattern constants', () => {
   });
 
   test('SUBAGENT_TOOLS matches all subagent variants', () => {
-    for (const t of ['task', 'subagent', 'spawn_agent', 'delegate', 'codex_agent', 'sessions']) {
+    for (const t of ['task', 'agent', 'subagent', 'spawn_agent', 'delegate', 'codex_agent', 'sessions']) {
       assert.ok(SUBAGENT_TOOLS.test(t), `SUBAGENT_TOOLS should match "${t}"`);
     }
+  });
+
+  test('toolToState("Agent") returns subagent state', () => {
+    const r = toolToState('Agent', { description: 'fix tests' });
+    assert.strictEqual(r.state, 'subagent');
   });
 
   test('Patterns are case-insensitive', () => {
@@ -1689,7 +1694,7 @@ describe('state-machine.js -- subagent tool state propagation', () => {
   });
 
   test('subagent tools should NOT trigger propagation', () => {
-    const subTools = ['Task', 'Subagent', 'spawn_agent', 'delegate', 'codex_agent', 'sessions'];
+    const subTools = ['Task', 'Agent', 'Subagent', 'spawn_agent', 'delegate', 'codex_agent', 'sessions'];
     for (const tool of subTools) {
       assert.ok(SUBAGENT_TOOLS.test(tool), `${tool} SHOULD be a subagent tool`);
     }
