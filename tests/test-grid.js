@@ -3355,12 +3355,13 @@ describe('MiniFace activity cycling', () => {
     const face = new MiniFace('no-parent');
     face.state = 'thinking';
     face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
-    face.firstSeen = Date.now() - 10000;
+    // Place firstSeen so cycle index would land on 'coding' (idx 3) if cycling fired
+    face.firstSeen = Date.now() - (3 * CYCLE_INTERVAL + 500);
     face.minDisplayUntil = 0;
     face.tick(100);
-    // Without parentSession, cycling should not activate — state stays thinking
-    // (it may transition via normal timeout logic, but not to a cycling state pattern)
-    assert.ok(!face.parentSession);
+    // Without parentSession, cycling should not activate — normal timeout moves
+    // thinking to idle, but NOT to a cycling work state like coding
+    assert.notStrictEqual(face.state, 'coding');
   });
 
   test('stopped faces do not cycle', () => {
@@ -3369,12 +3370,11 @@ describe('MiniFace activity cycling', () => {
     face.stopped = true;
     face.state = 'thinking';
     face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
-    face.firstSeen = Date.now() - 10000;
+    face.firstSeen = Date.now() - (3 * CYCLE_INTERVAL + 500);
     face.minDisplayUntil = 0;
-    const stateBefore = face.state;
     face.tick(100);
-    // Stopped guard prevents cycling — state unchanged or normal timeout
-    assert.ok(face.stopped);
+    // Stopped guard prevents cycling — state should NOT be a cycling work state
+    assert.notStrictEqual(face.state, 'coding');
   });
 
   test('spawning faces do not cycle', () => {
@@ -3386,8 +3386,8 @@ describe('MiniFace activity cycling', () => {
     face.firstSeen = Date.now() - 100;
     face.minDisplayUntil = 0;
     face.tick(100);
-    // Spawning guard prevents cycling
-    assert.strictEqual(face.spawning, true);
+    // Spawning guard prevents cycling — state stays spawning (too early for 2s auto-transition)
+    assert.strictEqual(face.state, 'spawning');
   });
 
   test('fresh data prevents cycling (sinceUpdate < CYCLE_STALE_MS)', () => {
@@ -3415,6 +3415,20 @@ describe('MiniFace activity cycling', () => {
     const expectedIdx = Math.floor(cycleTime / CYCLE_INTERVAL) % CYCLE_WORK_STATES.length;
     const expectedState = CYCLE_WORK_STATES[expectedIdx];
     assert.strictEqual(face.state, expectedState);
+  });
+
+  test('non-thinking cycling states survive timeout logic', () => {
+    const face = new MiniFace('survive-test');
+    face.parentSession = 'parent-1';
+    face.state = 'idle';
+    // Place firstSeen so cycle index lands on 'coding' (idx 3)
+    face.firstSeen = Date.now() - (3 * CYCLE_INTERVAL + 500);
+    face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
+    face.minDisplayUntil = 0;
+    face.tick(100);
+    // Cycling should set 'coding' and the early return prevents timeout
+    // logic from overwriting it back to 'thinking'
+    assert.strictEqual(face.state, 'coding');
   });
 
   test('cycling sets minDisplayUntil to 800ms', () => {
@@ -3465,7 +3479,9 @@ describe('MiniFace activity cycling', () => {
     face.tick(100);
     const cycledState = face.state;
     assert.ok(CYCLE_WORK_STATES.includes(cycledState), `cycled to ${cycledState}`);
-    // Now simulate real data arriving
+    // Now simulate real data arriving — expire minDisplayUntil first since
+    // cycling sets it to now+800 and active work states can't interrupt each other
+    face.minDisplayUntil = 0;
     face.updateFromFile({ state: 'coding', detail: 'real.js', timestamp: Date.now() });
     assert.strictEqual(face.state, 'coding');
     assert.strictEqual(face.detail, 'real.js');

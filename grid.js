@@ -69,7 +69,7 @@ const GROUP_LABEL_BRIGHTNESS = 0.45; // Dim factor for floating group label
 const REPOSITION_MS = 4000;        // Duration of orbital reposition animation in ms
 
 // -- Activity Cycling Constants (for synthetic subagent faces) --------
-const CYCLE_WORK_STATES = ['thinking', 'reading', 'searching', 'coding', 'executing', 'thinking'];
+const CYCLE_WORK_STATES = ['thinking', 'reading', 'searching', 'coding', 'executing'];
 const CYCLE_INTERVAL = 2500;       // ms between state changes
 const CYCLE_STALE_MS = 3000;       // start cycling after 3s of no real data
 
@@ -275,8 +275,8 @@ class MiniFace {
       this.minDisplayUntil = now + 1500;
     }
 
-    // Activity cycling for synthetic subagent faces — foreground subagents
-    // block the parent process, so no tool hooks fire. Cycle through work
+    // Activity cycling for synthetic subagent faces — while a subagent tool
+    // is running, the parent emits no further hook events. Cycle through work
     // states to show the face is alive and working.
     if (this.parentSession && !this.stopped && !this.spawning) {
       const sinceUpdate = now - this.lastUpdate;
@@ -287,8 +287,9 @@ class MiniFace {
         if (this.state !== cycleState) {
           this.state = cycleState;
           this.detail = this._cycleDetail();
-          this.minDisplayUntil = now + 800;
         }
+        this.minDisplayUntil = now + 800;
+        return; // Cycling owns state — skip timeout logic below
       }
     }
 
