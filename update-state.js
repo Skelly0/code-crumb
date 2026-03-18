@@ -247,14 +247,6 @@ process.stdin.on('end', () => {
         }
       }
 
-      // Track subagents
-      if (SUBAGENT_TOOLS.test(toolName)) {
-        stats.session.subagentCount++;
-        if (stats.session.subagentCount > (stats.records.mostSubagents || 0)) {
-          stats.records.mostSubagents = stats.session.subagentCount;
-        }
-      }
-
       // Propagate tool state to the most recently started subagent orbital.
       // Only the latest gets live tool state -- earlier subagents keep their last
       // known state. This is correct because the parent's tool calls are sequential

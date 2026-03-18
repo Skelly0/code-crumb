@@ -68,6 +68,11 @@ const TETHER_BRIGHTNESS = 0.15;    // Dim factor for sibling tether dots
 const GROUP_LABEL_BRIGHTNESS = 0.45; // Dim factor for floating group label
 const REPOSITION_MS = 4000;        // Duration of orbital reposition animation in ms
 
+// -- Activity Cycling Constants (for synthetic subagent faces) --------
+const CYCLE_WORK_STATES = ['thinking', 'reading', 'searching', 'coding', 'executing', 'thinking'];
+const CYCLE_INTERVAL = 2500;       // ms between state changes
+const CYCLE_STALE_MS = 3000;       // start cycling after 3s of no real data
+
 // Signal 0 tests process existence without killing it (works cross-platform in Node.js)
 function isProcessAlive(pid) {
   if (!pid || pid <= 1) return false; // reject 0, negative, and PID 1 (init — always alive)
@@ -270,6 +275,23 @@ class MiniFace {
       this.minDisplayUntil = now + 1500;
     }
 
+    // Activity cycling for synthetic subagent faces — foreground subagents
+    // block the parent process, so no tool hooks fire. Cycle through work
+    // states to show the face is alive and working.
+    if (this.parentSession && !this.stopped && !this.spawning) {
+      const sinceUpdate = now - this.lastUpdate;
+      if (sinceUpdate > CYCLE_STALE_MS) {
+        const cycleTime = now - this.firstSeen;
+        const idx = Math.floor(cycleTime / CYCLE_INTERVAL) % CYCLE_WORK_STATES.length;
+        const cycleState = CYCLE_WORK_STATES[idx];
+        if (this.state !== cycleState) {
+          this.state = cycleState;
+          this.detail = this._cycleDetail();
+          this.minDisplayUntil = now + 800;
+        }
+      }
+    }
+
     const completionLinger = COMPLETION_LINGER[this.state];
     const sessionActive = !this.stopped;
 
@@ -290,6 +312,17 @@ class MiniFace {
     if (this.state === 'idle' && elapsed > SLEEP_TIMEOUT) {
       this.state = 'sleeping';
       this.minDisplayUntil = now + 1500;
+    }
+  }
+
+  _cycleDetail() {
+    if (this.taskDescription) return this.taskDescription.slice(0, 8);
+    switch (this.state) {
+      case 'reading':   return 'reading';
+      case 'searching': return 'looking';
+      case 'coding':    return 'writing';
+      case 'executing': return 'running';
+      default:          return 'working';
     }
   }
 
@@ -1581,4 +1614,5 @@ module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
   STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS,
   INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, GROUP_LABEL_BRIGHTNESS,
+  CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS,
 };

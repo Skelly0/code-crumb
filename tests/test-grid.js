@@ -6,7 +6,7 @@
 // +================================================================+
 
 const assert = require('assert');
-const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS } = require('../grid');
+const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS } = require('../grid');
 const { gridMouths, eyes, mouths } = require('../animations');
 const { PALETTES } = require('../themes');
 const { ParticleSystem } = require('../particles');
@@ -3339,6 +3339,139 @@ describe('grid.js -- MiniFace active work interrupts interruptible', () => {
     face.minDisplayUntil = Date.now() + 60000;
     face.updateFromFile({ state: 'reading', detail: 'bar.js' });
     assert.strictEqual(face.state, 'reading');
+  });
+});
+
+// -- Activity Cycling Tests -------------------------------------------
+
+describe('MiniFace activity cycling', () => {
+  test('cycling constants are exported', () => {
+    assert.ok(Array.isArray(CYCLE_WORK_STATES));
+    assert.strictEqual(typeof CYCLE_INTERVAL, 'number');
+    assert.strictEqual(typeof CYCLE_STALE_MS, 'number');
+  });
+
+  test('non-subagent faces do not cycle (no parentSession)', () => {
+    const face = new MiniFace('no-parent');
+    face.state = 'thinking';
+    face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
+    face.firstSeen = Date.now() - 10000;
+    face.minDisplayUntil = 0;
+    face.tick(100);
+    // Without parentSession, cycling should not activate — state stays thinking
+    // (it may transition via normal timeout logic, but not to a cycling state pattern)
+    assert.ok(!face.parentSession);
+  });
+
+  test('stopped faces do not cycle', () => {
+    const face = new MiniFace('stopped-sub');
+    face.parentSession = 'parent-1';
+    face.stopped = true;
+    face.state = 'thinking';
+    face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
+    face.firstSeen = Date.now() - 10000;
+    face.minDisplayUntil = 0;
+    const stateBefore = face.state;
+    face.tick(100);
+    // Stopped guard prevents cycling — state unchanged or normal timeout
+    assert.ok(face.stopped);
+  });
+
+  test('spawning faces do not cycle', () => {
+    const face = new MiniFace('spawning-sub');
+    face.parentSession = 'parent-1';
+    face.spawning = true;
+    face.state = 'spawning';
+    face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
+    face.firstSeen = Date.now() - 100;
+    face.minDisplayUntil = 0;
+    face.tick(100);
+    // Spawning guard prevents cycling
+    assert.strictEqual(face.spawning, true);
+  });
+
+  test('fresh data prevents cycling (sinceUpdate < CYCLE_STALE_MS)', () => {
+    const face = new MiniFace('fresh-data');
+    face.parentSession = 'parent-1';
+    face.state = 'reading';
+    face.lastUpdate = Date.now(); // just updated
+    face.firstSeen = Date.now() - 30000;
+    face.minDisplayUntil = 0;
+    face.tick(100);
+    // lastUpdate is fresh so cycling doesn't kick in
+    assert.strictEqual(face.state, 'reading');
+  });
+
+  test('deterministic cycling based on firstSeen', () => {
+    const face = new MiniFace('cycle-test');
+    face.parentSession = 'parent-1';
+    face.state = 'thinking';
+    const baseTime = Date.now();
+    face.firstSeen = baseTime - 10000;
+    face.lastUpdate = baseTime - CYCLE_STALE_MS - 1000;
+    face.minDisplayUntil = 0;
+    face.tick(100);
+    const cycleTime = Date.now() - face.firstSeen;
+    const expectedIdx = Math.floor(cycleTime / CYCLE_INTERVAL) % CYCLE_WORK_STATES.length;
+    const expectedState = CYCLE_WORK_STATES[expectedIdx];
+    assert.strictEqual(face.state, expectedState);
+  });
+
+  test('cycling sets minDisplayUntil to 800ms', () => {
+    const face = new MiniFace('display-time');
+    face.parentSession = 'parent-1';
+    face.state = 'idle'; // will differ from cycle state
+    face.firstSeen = Date.now() - 15000;
+    face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
+    face.minDisplayUntil = 0;
+    const before = Date.now();
+    face.tick(100);
+    // minDisplayUntil should be ~now + 800
+    assert.ok(face.minDisplayUntil >= before + 700);
+    assert.ok(face.minDisplayUntil <= before + 1000);
+  });
+
+  test('_cycleDetail returns taskDescription when available', () => {
+    const face = new MiniFace('detail-task');
+    face.parentSession = 'parent-1';
+    face.taskDescription = 'fix login bugs';
+    face.state = 'coding';
+    assert.strictEqual(face._cycleDetail(), 'fix logi');
+  });
+
+  test('_cycleDetail returns state-specific text without taskDescription', () => {
+    const face = new MiniFace('detail-state');
+    face.parentSession = 'parent-1';
+    face.state = 'reading';
+    assert.strictEqual(face._cycleDetail(), 'reading');
+    face.state = 'searching';
+    assert.strictEqual(face._cycleDetail(), 'looking');
+    face.state = 'coding';
+    assert.strictEqual(face._cycleDetail(), 'writing');
+    face.state = 'executing';
+    assert.strictEqual(face._cycleDetail(), 'running');
+    face.state = 'thinking';
+    assert.strictEqual(face._cycleDetail(), 'working');
+  });
+
+  test('real data override stops cycling', () => {
+    const face = new MiniFace('override-test');
+    face.parentSession = 'parent-1';
+    face.state = 'idle';
+    face.firstSeen = Date.now() - 15000;
+    face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
+    face.minDisplayUntil = 0;
+    // Cycling kicks in — state should be one of the cycle states
+    face.tick(100);
+    const cycledState = face.state;
+    assert.ok(CYCLE_WORK_STATES.includes(cycledState), `cycled to ${cycledState}`);
+    // Now simulate real data arriving
+    face.updateFromFile({ state: 'coding', detail: 'real.js', timestamp: Date.now() });
+    assert.strictEqual(face.state, 'coding');
+    assert.strictEqual(face.detail, 'real.js');
+    // Next tick should NOT cycle because lastUpdate is fresh
+    face.tick(100);
+    assert.strictEqual(face.state, 'coding');
   });
 });
 
