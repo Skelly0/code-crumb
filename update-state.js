@@ -199,8 +199,18 @@ process.stdin.on('end', () => {
     }
     if (!stats.frequentFiles) stats.frequentFiles = {};
 
-    // Initialize session if new
-    if (stats.session.id !== sessionId) {
+    // Detect subagent sessions: different session_id while parent has active subagents.
+    // Subagent hooks fire with their own session_id, not the parent's.
+    let isKnownSubagent = false;
+    if (stats.session.id && stats.session.id !== sessionId
+        && stats.session.activeSubagents && stats.session.activeSubagents.length > 0
+        && hookEvent !== 'SessionStart' && hookEvent !== 'SessionEnd'
+        && hookEvent !== 'SubagentStart' && hookEvent !== 'SubagentStop') {
+      isKnownSubagent = true;
+    }
+
+    // Initialize session if new (skip for known subagents to preserve parent stats)
+    if (stats.session.id !== sessionId && !isKnownSubagent) {
       // Save records from previous session before resetting
       if (stats.session.id && stats.session.start) {
         const dur = Date.now() - stats.session.start;
@@ -253,7 +263,8 @@ process.stdin.on('end', () => {
       // Only the latest gets live tool state -- earlier subagents keep their last
       // known state. This is correct because the parent's tool calls are sequential
       // and logically belong to the most recent subagent context.
-      if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName)) {
+      // Skip propagation for known subagents -- they write their own session files directly.
+      if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName) && !isKnownSubagent) {
         const latest = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
         _writeSubagentToolState(latest, state, detail, sessionId);
         _touchEarlierSubagents(stats.session.activeSubagents);
@@ -288,7 +299,7 @@ process.stdin.on('end', () => {
       updateStreak(stats, state === 'error');
 
       // Propagate tool result state to the most recently started subagent (see PreToolUse comment)
-      if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName)) {
+      if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName) && !isKnownSubagent) {
         const latest = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
         _writeSubagentToolState(latest, state, detail, sessionId);
         _touchEarlierSubagents(stats.session.activeSubagents);
@@ -471,6 +482,31 @@ process.stdin.on('end', () => {
     if (stopped) extra.stopped = true;
     if (workState) { extra.workState = workState; extra.workDetail = workDetail; }
     if (hookEvent === 'SessionStart') extra.isSessionStart = true;
+
+    // Stamp parentSession on subagent writes so the parentSession guard
+    // blocks them from writing global state, and the renderer treats them as orbitals.
+    if (isKnownSubagent) {
+      extra.parentSession = stats.session.id;
+      // Retire synthetic orbital: SubagentStart created a synthetic file (spawning state).
+      // Now that the real subagent is sending its own hooks, mark the synthetic as done
+      // so it fades out quickly instead of lingering for STALE_MS.
+      if (hookEvent === 'PreToolUse') {
+        try {
+          const subs = stats.session.activeSubagents;
+          for (let i = subs.length - 1; i >= 0; i--) {
+            const synthFp = path.join(SESSIONS_DIR, safeFilename(subs[i].id) + '.json');
+            const synthData = JSON.parse(fs.readFileSync(synthFp, 'utf8'));
+            if (!synthData.stopped && synthData.state === 'spawning') {
+              if (synthData.taskDescription) extra.taskDescription = synthData.taskDescription;
+              fs.writeFileSync(synthFp, JSON.stringify({
+                ...synthData, stopped: true, state: 'happy', detail: 'done',
+              }), { encoding: 'utf8', mode: 0o600 });
+              break;
+            }
+          }
+        } catch {}
+      }
+    }
 
     // Only write to global state file if this session "owns" it.
     // Subagents should only write to their per-session file so they

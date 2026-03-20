@@ -2461,4 +2461,118 @@ describe('state-machine.js -- toolToState for workState piggyback', () => {
   });
 });
 
+// -- Subagent session detection (update-state.js core fix) --
+
+describe('update-state.js -- subagent session detection (isKnownSubagent)', () => {
+  // Helper: read update-state.js source for structural assertions
+  function readSrc() {
+    const fs = require('fs');
+    return fs.readFileSync(require('path').join(__dirname, '..', 'update-state.js'), 'utf8');
+  }
+
+  test('isKnownSubagent detection block exists', () => {
+    const src = readSrc();
+    assert.ok(src.includes('let isKnownSubagent = false'),
+      'should declare isKnownSubagent variable');
+    assert.ok(src.includes('isKnownSubagent = true'),
+      'should set isKnownSubagent to true when conditions met');
+  });
+
+  test('detection requires different session_id AND activeSubagents > 0', () => {
+    const src = readSrc();
+    assert.ok(src.includes('stats.session.id !== sessionId'),
+      'should check for different session_id');
+    assert.ok(src.includes('stats.session.activeSubagents && stats.session.activeSubagents.length > 0'),
+      'should check for non-empty activeSubagents');
+  });
+
+  test('detection excludes SessionStart, SessionEnd, SubagentStart, SubagentStop', () => {
+    const src = readSrc();
+    const detectionBlock = src.split('let isKnownSubagent = false')[1].split('isKnownSubagent = true')[0];
+    assert.ok(detectionBlock.includes("hookEvent !== 'SessionStart'"),
+      'should exclude SessionStart from subagent detection');
+    assert.ok(detectionBlock.includes("hookEvent !== 'SessionEnd'"),
+      'should exclude SessionEnd from subagent detection');
+    assert.ok(detectionBlock.includes("hookEvent !== 'SubagentStart'"),
+      'should exclude SubagentStart from subagent detection');
+    assert.ok(detectionBlock.includes("hookEvent !== 'SubagentStop'"),
+      'should exclude SubagentStop from subagent detection');
+  });
+
+  test('session reset is skipped when isKnownSubagent', () => {
+    const src = readSrc();
+    assert.ok(
+      src.includes('stats.session.id !== sessionId && !isKnownSubagent) {'),
+      'session reset condition should include !isKnownSubagent guard'
+    );
+  });
+
+  test('PreToolUse propagation is skipped when isKnownSubagent', () => {
+    const src = readSrc();
+    // Find the PreToolUse propagation block
+    const preBlock = src.split("hookEvent === 'PreToolUse'")[1];
+    const preContent = preBlock.split("hookEvent === 'PostToolUse'")[0];
+    assert.ok(
+      preContent.includes('&& !isKnownSubagent'),
+      'PreToolUse propagation should be guarded by !isKnownSubagent'
+    );
+  });
+
+  test('PostToolUse propagation is skipped when isKnownSubagent', () => {
+    const src = readSrc();
+    // Find the PostToolUse propagation block (after the PreToolUse one)
+    const postBlocks = src.split("hookEvent === 'PostToolUse'");
+    // The propagation guard is in the PostToolUse handler body
+    const postContent = postBlocks[1].split("hookEvent === 'Stop'")[0];
+    assert.ok(
+      postContent.includes('!isKnownSubagent'),
+      'PostToolUse propagation should be guarded by !isKnownSubagent'
+    );
+  });
+
+  test('parentSession is stamped on subagent extra when isKnownSubagent', () => {
+    const src = readSrc();
+    assert.ok(
+      src.includes('if (isKnownSubagent) {') && src.includes('extra.parentSession = stats.session.id'),
+      'should stamp parentSession from parent session id when isKnownSubagent'
+    );
+  });
+
+  test('synthetic orbital cleanup retires spawning files', () => {
+    const src = readSrc();
+    // The cleanup block should find spawning synthetics and mark them stopped
+    const cleanupBlock = src.split('Retire synthetic orbital')[1];
+    assert.ok(cleanupBlock, 'should have synthetic orbital cleanup comment');
+    const cleanupContent = cleanupBlock.split('} catch {}')[0];
+    assert.ok(cleanupContent.includes("synthData.state === 'spawning'"),
+      'should check for spawning state when retiring synthetics');
+    assert.ok(cleanupContent.includes("stopped: true"),
+      'should mark synthetic as stopped');
+  });
+
+  test('subagent Stop does not corrupt parent session (parentSession guard)', () => {
+    const src = readSrc();
+    // The parentSession guard at the global write section blocks subagents
+    assert.ok(
+      src.includes('if (mySession.parentSession) shouldWriteGlobal = false'),
+      'parentSession guard should block subagent global writes'
+    );
+    // isKnownSubagent stamps parentSession, so the guard catches it
+    assert.ok(
+      src.includes('extra.parentSession = stats.session.id'),
+      'isKnownSubagent sets parentSession so the guard activates'
+    );
+  });
+
+  test('isKnownSubagent detection comes before session reset', () => {
+    const src = readSrc();
+    const detectionIdx = src.indexOf('let isKnownSubagent = false');
+    const resetIdx = src.indexOf('stats.session.id !== sessionId && !isKnownSubagent');
+    assert.ok(detectionIdx > 0, 'detection block should exist');
+    assert.ok(resetIdx > 0, 'guarded reset should exist');
+    assert.ok(detectionIdx < resetIdx,
+      'detection must come before the session reset check');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
