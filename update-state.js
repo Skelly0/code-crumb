@@ -473,7 +473,7 @@ process.stdin.on('end', () => {
       sessionId,
       modelName,
       toolCalls: stats.session.toolCalls,
-      filesEdited: stats.session.filesEdited.length,
+      filesEdited: stats.session.filesEdited?.length || 0,
       sessionStart: stats.session.start,
       streak: stats.streak,
       cwd: process.cwd(),
@@ -504,7 +504,9 @@ process.stdin.on('end', () => {
       // PreToolUse is the first tool event a real subagent sends -- retire on first contact.
       if (hookEvent === 'PreToolUse') {
         const subs = stats.session.activeSubagents;
-        for (let i = subs.length - 1; i >= 0; i--) {
+        // Iterate forward: oldest spawning synthetic is most likely to match
+        // the first real subagent hook when multiple subagents are concurrent.
+        for (let i = 0; i < subs.length; i++) {
           try {
             const synthFp = path.join(SESSIONS_DIR, safeFilename(subs[i].id) + '.json');
             const synthData = JSON.parse(fs.readFileSync(synthFp, 'utf8'));

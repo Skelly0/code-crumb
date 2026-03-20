@@ -2612,9 +2612,23 @@ describe('update-state.js -- subagent session detection (isKnownSubagent)', () =
     const cleanupContent = cleanupBlock.split('}\n    }')[0];
     // The for loop should contain try, not be wrapped by it
     assert.ok(
-      cleanupContent.includes('for (let i = subs.length') &&
+      cleanupContent.includes('for (let i = 0') &&
       cleanupContent.indexOf('for (') < cleanupContent.indexOf('try {'),
       'try-catch should be inside the for loop, not wrapping it'
+    );
+  });
+
+  test('synthetic cleanup iterates forward (oldest first for concurrent subagents)', () => {
+    const src = readSrc();
+    const cleanupBlock = src.split('Retire synthetic orbital')[1];
+    const cleanupContent = cleanupBlock.split('}\n    }')[0];
+    assert.ok(
+      cleanupContent.includes('for (let i = 0; i < subs.length'),
+      'synthetic cleanup should iterate forward to retire oldest spawning face first'
+    );
+    assert.ok(
+      !cleanupContent.includes('subs.length - 1; i >= 0; i--'),
+      'synthetic cleanup should NOT iterate backward'
     );
   });
 
