@@ -2226,4 +2226,94 @@ describe('face.js -- ClaudeFace sparkline capping', () => {
   });
 });
 
+// -- workState injection (renderer piggyback for fast tool race condition) ---
+
+describe('face.js -- workState injection simulation', () => {
+  // These tests simulate what renderer.js checkState() does when it receives
+  // a PostToolUse state file that includes workState/workDetail fields.
+
+  const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
+  const ACTIVE_WORK_STATES = new Set(['executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'committing', 'reviewing', 'subagent', 'responding', 'training']);
+
+  function applyStateWithWorkState(face, stateData) {
+    // Mirror the renderer's checkState() injection logic
+    if (stateData.workState
+        && COMPLETION_STATES.has(stateData.state)
+        && !ACTIVE_WORK_STATES.has(face.state)) {
+      face.setState(stateData.workState, stateData.workDetail || '');
+    }
+    face.setState(stateData.state, stateData.detail);
+  }
+
+  test('thinking face receives workState=executing then relieved: executing applies, relieved buffers', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    applyStateWithWorkState(face, { state: 'relieved', detail: 'done', workState: 'executing', workDetail: 'ls' });
+    assert.strictEqual(face.state, 'executing', 'work state should apply when face was thinking');
+    assert.strictEqual(face.stateDetail, 'ls');
+    assert.strictEqual(face.pendingState, 'relieved', 'completion should be buffered behind work state');
+  });
+
+  test('thinking face receives workState=coding then satisfied: coding applies, satisfied buffers', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    applyStateWithWorkState(face, { state: 'satisfied', detail: 'edited', workState: 'coding', workDetail: 'main.js' });
+    assert.strictEqual(face.state, 'coding');
+    assert.strictEqual(face.pendingState, 'satisfied');
+  });
+
+  test('face already executing when completion arrives: workState injection skipped', () => {
+    const face = new ClaudeFace();
+    face.setState('executing', 'npm test');
+    applyStateWithWorkState(face, { state: 'relieved', detail: 'done', workState: 'executing', workDetail: 'npm test' });
+    // Should NOT re-inject executing -- face was already in active work state
+    assert.strictEqual(face.state, 'executing', 'should stay on existing executing state');
+    assert.strictEqual(face.stateDetail, 'npm test');
+    assert.strictEqual(face.pendingState, 'relieved');
+  });
+
+  test('face in coding when different workState arrives: injection skipped (already active)', () => {
+    const face = new ClaudeFace();
+    face.setState('coding', 'editing');
+    applyStateWithWorkState(face, { state: 'satisfied', detail: 'done', workState: 'executing', workDetail: 'ls' });
+    assert.strictEqual(face.state, 'coding', 'should stay on coding, not switch to executing');
+    assert.strictEqual(face.pendingState, 'satisfied');
+  });
+
+  test('no workState field: behaves like normal setState', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    applyStateWithWorkState(face, { state: 'relieved', detail: 'done' });
+    // No workState means no injection -- relieved goes straight in
+    // (thinking is not active work, so relieved should apply or buffer per normal rules)
+    assert.ok(face.state === 'relieved' || face.pendingState === 'relieved',
+      'relieved should either apply or buffer without injection');
+  });
+
+  test('error state is not in COMPLETION_STATES: workState injection skipped', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    applyStateWithWorkState(face, { state: 'error', detail: 'failed', workState: 'executing', workDetail: 'rm -rf' });
+    // error bypasses everything via normal setState -- should NOT inject executing first
+    assert.strictEqual(face.state, 'error', 'error should apply directly without injection');
+  });
+
+  test('idle face receives workState=searching then happy: searching applies', () => {
+    const face = new ClaudeFace();
+    // idle is not in ACTIVE_WORK_STATES, so injection should fire
+    applyStateWithWorkState(face, { state: 'happy', detail: 'found', workState: 'searching', workDetail: 'grep' });
+    assert.strictEqual(face.state, 'searching');
+    assert.strictEqual(face.pendingState, 'happy');
+  });
+
+  test('sleeping face receives workState=reading then proud: reading applies', () => {
+    const face = new ClaudeFace();
+    face.setState('sleeping');
+    face.minDisplayUntil = 0; // expire sleep so states can apply
+    applyStateWithWorkState(face, { state: 'proud', detail: 'committed', workState: 'reading', workDetail: 'file.js' });
+    assert.strictEqual(face.state, 'reading');
+    assert.strictEqual(face.pendingState, 'proud');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
