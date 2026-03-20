@@ -1281,16 +1281,15 @@ describe('update-state.js stopped flag preservation (#98)', () => {
     );
   });
 
-  test('source: renderer lastStopped only goes false->true from state file', () => {
+  test('source: renderer lastStopped resets when same session sends non-stopped state', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-    // Should use `if (stateData.stopped) lastStopped = true` not `lastStopped = stateData.stopped || false`
     assert.ok(
-      src.includes('if (stateData.stopped) lastStopped = true'),
-      'renderer.js should only set lastStopped to true, never back to false from state file'
+      src.includes('lastStopped = !!stateData.stopped'),
+      'renderer.js should reset lastStopped when state file has no stopped flag'
     );
     assert.ok(
-      !src.includes('lastStopped = stateData.stopped || false'),
-      'renderer.js should not have the old bidirectional lastStopped assignment'
+      !src.includes('if (stateData.stopped) lastStopped = true'),
+      'renderer.js should not have the old one-way latch'
     );
   });
 
@@ -1304,6 +1303,14 @@ describe('update-state.js stopped flag preservation (#98)', () => {
       !src.includes('stoppedNow !== lastStopped && freshTs'),
       'renderer.js should not have the old bidirectional stoppedNow !== lastStopped check'
     );
+  });
+
+  test('source: update-state.js blocks subagents with parentSession from global state writes', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
+    const pattern = 'mySession.parentSession) shouldWriteGlobal = false';
+    const matches = src.split(pattern).length - 1;
+    assert.ok(matches >= 2,
+      `update-state.js should have parentSession guard in both main and fallback paths (found ${matches})`);
   });
 
   test('integration: PostToolUse after Stop preserves stopped in global state file', () => {
@@ -1372,6 +1379,51 @@ describe('update-state.js stopped flag preservation (#98)', () => {
       if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
     } finally {
       try { fs.unlinkSync(sessionFile); } catch {}
+    }
+  });
+
+  test('integration: subagent with parentSession is blocked from global state writes', () => {
+    // Set up: main session owns the global state file
+    const mainId = 'test-main-' + Date.now();
+    const subId = 'test-sub-' + Date.now();
+    const mainState = JSON.stringify({
+      state: 'thinking', detail: 'planning',
+      timestamp: Date.now(), sessionId: mainId, stopped: true,
+    });
+    try { fs.writeFileSync(STATE_FILE, mainState, 'utf8'); } catch { return; }
+
+    // Create a session file for the subagent with parentSession set
+    // (simulates what SubagentStart does before the subagent's first hook)
+    const subSessionFile = path.join(SESSIONS_DIR, safeFilename(subId) + '.json');
+    try {
+      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+      fs.writeFileSync(subSessionFile, JSON.stringify({
+        session_id: subId, state: 'spawning', detail: 'subagent',
+        timestamp: Date.now(), parentSession: mainId,
+      }), 'utf8');
+    } catch { return; }
+
+    // Spawn update-state.js as the subagent sending a PreToolUse
+    try {
+      execFileSync(process.execPath, [updateStatePath, 'PreToolUse'], {
+        input: JSON.stringify({
+          tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
+          session_id: subId,
+        }),
+        env: { ...process.env, CLAUDE_SESSION_ID: subId, CODE_CRUMB_STATE: STATE_FILE },
+        timeout: 5000,
+      });
+    } catch {}
+
+    // Global state file must still belong to main session — subagent was blocked
+    try {
+      const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      assert.strictEqual(result.sessionId, mainId,
+        'subagent with parentSession must not overwrite global state file');
+    } catch (e) {
+      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
+    } finally {
+      try { fs.unlinkSync(subSessionFile); } catch {}
     }
   });
 

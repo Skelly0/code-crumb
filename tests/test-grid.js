@@ -1017,6 +1017,58 @@ describe('grid.js -- SessionStart adoption (issue #58)', () => {
       'renderer should adopt new session when detail is "session starting"');
   });
 
+  test('subagent with parentSession is blocked from global state writes', () => {
+    // Simulates the new guard in update-state.js: after the existing-session
+    // ownership check, we read the caller's own session file. If it has
+    // parentSession, shouldWriteGlobal is forced false.
+    let shouldWriteGlobal = true;
+    const mySessionData = { parentSession: 'main-session-123' };
+
+    // Apply the new guard
+    if (mySessionData.parentSession) shouldWriteGlobal = false;
+
+    assert.strictEqual(shouldWriteGlobal, false,
+      'subagent with parentSession must not write to global state');
+  });
+
+  test('independent session (no parentSession) is allowed to write when main is stopped', () => {
+    // An independent session whose session file has no parentSession should
+    // still be allowed through, matching the pre-existing behavior where
+    // stopped=true releases ownership.
+    const existingStopped = true;
+    let shouldWriteGlobal = true;
+
+    // Existing session is stopped, so ownership check passes
+    if (!existingStopped) shouldWriteGlobal = false;
+
+    // No parentSession in session file — guard does not trigger
+    const mySessionData = { state: 'thinking' };
+    if (mySessionData.parentSession) shouldWriteGlobal = false;
+
+    assert.strictEqual(shouldWriteGlobal, true,
+      'independent session should be allowed to write global state when main is stopped');
+  });
+
+  test('lastStopped resets to false when same session sends non-stopped event', () => {
+    // Simulates the renderer fix: lastStopped = !!stateData.stopped
+    // When the main session starts a new turn (PreToolUse), stopped is absent.
+    let lastStopped = true; // was set by previous Stop event
+
+    // New PreToolUse arrives — no stopped flag
+    const stateData = { state: 'thinking', detail: 'planning' };
+    lastStopped = !!stateData.stopped;
+
+    assert.strictEqual(lastStopped, false,
+      'lastStopped must reset to false when state has no stopped flag');
+
+    // Verify it still goes true when stopped is present
+    const stoppedData = { state: 'responding', stopped: true };
+    lastStopped = !!stoppedData.stopped;
+
+    assert.strictEqual(lastStopped, true,
+      'lastStopped must be true when state has stopped flag');
+  });
+
   test('renderer does NOT adopt random subagent writing to state file', () => {
     // A subagent with a different detail should NOT trigger adoption
     const mainSessionId = 'main-session';

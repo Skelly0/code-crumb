@@ -241,7 +241,7 @@ function runUnifiedMode() {
 
         lastMainUpdate = Date.now();
         lastFileState = stateData.state;
-        if (stateData.stopped) lastStopped = true;
+        lastStopped = !!stateData.stopped;
 
         // Don't apply incoming state while a swap transition is animating —
         // the face should dissolve with its current state until the swap frame.
@@ -292,7 +292,7 @@ function runUnifiedMode() {
       try {
         const freshData = cachedStateData || readState();
         const freshTs = freshData.timestamp || 0;
-        // Detect stopped transition: false->true only (resets via session adoption)
+        // Detect stopped transition: false->true only (primary reset at line 244 and session adoption)
         const stoppedNow = freshData.stopped || false;
         if (stoppedNow && !lastStopped && freshTs > lastAppliedTimestamp) {
           lastAppliedTimestamp = freshTs;
