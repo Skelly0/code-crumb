@@ -1307,10 +1307,10 @@ describe('update-state.js stopped flag preservation (#98)', () => {
 
   test('source: update-state.js blocks subagents with parentSession from global state writes', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
-    assert.ok(
-      src.includes('mySession.parentSession) shouldWriteGlobal = false'),
-      'update-state.js should check parentSession and block global writes for subagents'
-    );
+    const pattern = 'mySession.parentSession) shouldWriteGlobal = false';
+    const matches = src.split(pattern).length - 1;
+    assert.ok(matches >= 2,
+      `update-state.js should have parentSession guard in both main and fallback paths (found ${matches})`);
   });
 
   test('integration: PostToolUse after Stop preserves stopped in global state file', () => {
@@ -1379,6 +1379,51 @@ describe('update-state.js stopped flag preservation (#98)', () => {
       if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
     } finally {
       try { fs.unlinkSync(sessionFile); } catch {}
+    }
+  });
+
+  test('integration: subagent with parentSession is blocked from global state writes', () => {
+    // Set up: main session owns the global state file
+    const mainId = 'test-main-' + Date.now();
+    const subId = 'test-sub-' + Date.now();
+    const mainState = JSON.stringify({
+      state: 'thinking', detail: 'planning',
+      timestamp: Date.now(), sessionId: mainId, stopped: true,
+    });
+    try { fs.writeFileSync(STATE_FILE, mainState, 'utf8'); } catch { return; }
+
+    // Create a session file for the subagent with parentSession set
+    // (simulates what SubagentStart does before the subagent's first hook)
+    const subSessionFile = path.join(SESSIONS_DIR, safeFilename(subId) + '.json');
+    try {
+      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+      fs.writeFileSync(subSessionFile, JSON.stringify({
+        session_id: subId, state: 'spawning', detail: 'subagent',
+        timestamp: Date.now(), parentSession: mainId,
+      }), 'utf8');
+    } catch { return; }
+
+    // Spawn update-state.js as the subagent sending a PreToolUse
+    try {
+      execFileSync(process.execPath, [updateStatePath, 'PreToolUse'], {
+        input: JSON.stringify({
+          tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
+          session_id: subId,
+        }),
+        env: { ...process.env, CLAUDE_SESSION_ID: subId, CODE_CRUMB_STATE: STATE_FILE },
+        timeout: 5000,
+      });
+    } catch {}
+
+    // Global state file must still belong to main session — subagent was blocked
+    try {
+      const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+      assert.strictEqual(result.sessionId, mainId,
+        'subagent with parentSession must not overwrite global state file');
+    } catch (e) {
+      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
+    } finally {
+      try { fs.unlinkSync(subSessionFile); } catch {}
     }
   });
 

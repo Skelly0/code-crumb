@@ -519,7 +519,7 @@ process.stdin.on('end', () => {
       } catch {}
       if (hookEvent === 'Stop') {
         // Stop = end of turn, not end of session. Keep orbital visible as idle.
-        // Global state (line 495) already has stopped=true for ownership release.
+        // Global state file already has stopped=true for ownership release.
         const idleExtra = { ...extra };
         delete idleExtra.stopped;
         writeSessionState(sessionId, 'idle', 'between turns', false, idleExtra);
@@ -548,6 +548,9 @@ process.stdin.on('end', () => {
       }
     } catch {}
 
+    // Same parentSession guard as the try block above — subagents must not write global state.
+    // Uses originalFallbackId (the caller's identity), not fallbackSessionId
+    // (which may be the adopted main session's ID from the state file).
     if (shouldWriteGlobal) {
       try {
         const mySession = JSON.parse(fs.readFileSync(
