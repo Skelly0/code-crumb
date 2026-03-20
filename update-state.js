@@ -483,6 +483,16 @@ process.stdin.on('end', () => {
       }
     } catch {}
 
+    // Subagents should never take over the global state file —
+    // they appear as orbitals via their per-session files.
+    if (shouldWriteGlobal) {
+      try {
+        const mySession = JSON.parse(fs.readFileSync(
+          path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
+        if (mySession.parentSession) shouldWriteGlobal = false;
+      } catch {}
+    }
+
     // SessionStart always takes over global state — explicit new-session signal
     if (hookEvent === 'SessionStart') shouldWriteGlobal = true;
 
@@ -537,6 +547,14 @@ process.stdin.on('end', () => {
         shouldWriteGlobal = false;
       }
     } catch {}
+
+    if (shouldWriteGlobal) {
+      try {
+        const mySession = JSON.parse(fs.readFileSync(
+          path.join(SESSIONS_DIR, safeFilename(originalFallbackId) + '.json'), 'utf8'));
+        if (mySession.parentSession) shouldWriteGlobal = false;
+      } catch {}
+    }
 
     // SessionStart always takes over global state — explicit new-session signal
     if (hookEvent === 'SessionStart') shouldWriteGlobal = true;

@@ -1281,16 +1281,15 @@ describe('update-state.js stopped flag preservation (#98)', () => {
     );
   });
 
-  test('source: renderer lastStopped only goes false->true from state file', () => {
+  test('source: renderer lastStopped resets when same session sends non-stopped state', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-    // Should use `if (stateData.stopped) lastStopped = true` not `lastStopped = stateData.stopped || false`
     assert.ok(
-      src.includes('if (stateData.stopped) lastStopped = true'),
-      'renderer.js should only set lastStopped to true, never back to false from state file'
+      src.includes('lastStopped = !!stateData.stopped'),
+      'renderer.js should reset lastStopped when state file has no stopped flag'
     );
     assert.ok(
-      !src.includes('lastStopped = stateData.stopped || false'),
-      'renderer.js should not have the old bidirectional lastStopped assignment'
+      !src.includes('if (stateData.stopped) lastStopped = true'),
+      'renderer.js should not have the old one-way latch'
     );
   });
 
@@ -1303,6 +1302,14 @@ describe('update-state.js stopped flag preservation (#98)', () => {
     assert.ok(
       !src.includes('stoppedNow !== lastStopped && freshTs'),
       'renderer.js should not have the old bidirectional stoppedNow !== lastStopped check'
+    );
+  });
+
+  test('source: update-state.js blocks subagents with parentSession from global state writes', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
+    assert.ok(
+      src.includes('mySession.parentSession) shouldWriteGlobal = false'),
+      'update-state.js should check parentSession and block global writes for subagents'
     );
   });
 
