@@ -2564,6 +2564,60 @@ describe('update-state.js -- subagent session detection (isKnownSubagent)', () =
     );
   });
 
+  test('Stop handler guards stat mutations with !isKnownSubagent', () => {
+    const src = readSrc();
+    const stopBlock = src.split("hookEvent === 'Stop'")[1];
+    const stopContent = stopBlock.split("else if (hookEvent ===")[0];
+    assert.ok(
+      stopContent.includes('stats.session.start && !isKnownSubagent'),
+      'Stop handler must guard session duration tracking with !isKnownSubagent'
+    );
+    assert.ok(
+      stopContent.includes('!isKnownSubagent && (stats.session.filesEdited'),
+      'Stop handler must guard filesEdited record with !isKnownSubagent'
+    );
+  });
+
+  test('PreToolUse guards stat counters with !isKnownSubagent', () => {
+    const src = readSrc();
+    const preBlock = src.split("hookEvent === 'PreToolUse'")[1];
+    const preContent = preBlock.split("hookEvent === 'PostToolUse'")[0];
+    // toolCalls and totalToolCalls should be inside a !isKnownSubagent guard
+    assert.ok(
+      preContent.includes('if (!isKnownSubagent) {') &&
+      preContent.includes('stats.session.toolCalls++'),
+      'PreToolUse must guard toolCalls increment with !isKnownSubagent'
+    );
+  });
+
+  test('PostToolUse guards commitCount and streak with !isKnownSubagent', () => {
+    const src = readSrc();
+    const postBlocks = src.split("hookEvent === 'PostToolUse'");
+    const postContent = postBlocks[1].split("hookEvent === 'Stop'")[0];
+    assert.ok(
+      postContent.includes('if (!isKnownSubagent) {') &&
+      postContent.includes('stats.session.commitCount'),
+      'PostToolUse must guard commitCount with !isKnownSubagent'
+    );
+    assert.ok(
+      postContent.includes('updateStreak(stats'),
+      'PostToolUse must call updateStreak inside !isKnownSubagent guard'
+    );
+  });
+
+  test('synthetic cleanup try-catch is inside the loop (not wrapping it)', () => {
+    const src = readSrc();
+    // Find the synthetic cleanup block
+    const cleanupBlock = src.split('Retire synthetic orbital')[1];
+    const cleanupContent = cleanupBlock.split('}\n    }')[0];
+    // The for loop should contain try, not be wrapped by it
+    assert.ok(
+      cleanupContent.includes('for (let i = subs.length') &&
+      cleanupContent.indexOf('for (') < cleanupContent.indexOf('try {'),
+      'try-catch should be inside the for loop, not wrapping it'
+    );
+  });
+
   test('isKnownSubagent detection comes before session reset', () => {
     const src = readSrc();
     const detectionIdx = src.indexOf('let isKnownSubagent = false');

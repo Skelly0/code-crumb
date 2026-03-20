@@ -201,9 +201,12 @@ process.stdin.on('end', () => {
 
     // Detect subagent sessions: different session_id while parent has active subagents.
     // Subagent hooks fire with their own session_id, not the parent's.
+    // Without this, subagent hooks would trigger session reset (wiping parent stats)
+    // and write tool state to the global file instead of their own orbital file.
     let isKnownSubagent = false;
     if (stats.session.id && stats.session.id !== sessionId
         && stats.session.activeSubagents && stats.session.activeSubagents.length > 0
+        // Lifecycle events have dedicated handlers and must not be rerouted.
         && hookEvent !== 'SessionStart' && hookEvent !== 'SessionEnd'
         && hookEvent !== 'SubagentStart' && hookEvent !== 'SubagentStop') {
       isKnownSubagent = true;
@@ -244,18 +247,23 @@ process.stdin.on('end', () => {
 
     if (hookEvent === 'PreToolUse') {
       ({ state, detail } = toolToState(toolName, toolInput));
-      stats.session.toolCalls++;
-      stats.totalToolCalls = (stats.totalToolCalls || 0) + 1;
 
-      // Track files edited (multi-editor: Claude Code, Codex, OpenCode)
-      if (EDIT_TOOLS.test(toolName)) {
-        const fp = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
-        const base = fp ? path.basename(fp) : '';
-        if (base && !stats.session.filesEdited.includes(base)) {
-          stats.session.filesEdited.push(base);
-        }
-        if (base) {
-          stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
+      // Only count stats for the parent session -- subagent tool calls
+      // should not inflate the parent's counters or file tracking.
+      if (!isKnownSubagent) {
+        stats.session.toolCalls++;
+        stats.totalToolCalls = (stats.totalToolCalls || 0) + 1;
+
+        // Track files edited (multi-editor: Claude Code, Codex, OpenCode)
+        if (EDIT_TOOLS.test(toolName)) {
+          const fp = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
+          const base = fp ? path.basename(fp) : '';
+          if (base && !stats.session.filesEdited.includes(base)) {
+            stats.session.filesEdited.push(base);
+          }
+          if (base) {
+            stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
+          }
         }
       }
 
@@ -291,12 +299,14 @@ process.stdin.on('end', () => {
         workDetail = preToolResult.detail;
       }
 
-      // Track git commits
-      if (result.state === 'proud' && result.detail === 'committed') {
-        stats.session.commitCount = (stats.session.commitCount || 0) + 1;
+      // Track git commits and streaks (skip for known subagents -- their
+      // results should not affect the parent session's counters or streak).
+      if (!isKnownSubagent) {
+        if (result.state === 'proud' && result.detail === 'committed') {
+          stats.session.commitCount = (stats.session.commitCount || 0) + 1;
+        }
+        updateStreak(stats, state === 'error');
       }
-
-      updateStreak(stats, state === 'error');
 
       // Propagate tool result state to the most recently started subagent (see PreToolUse comment)
       if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName) && !isKnownSubagent) {
@@ -315,14 +325,15 @@ process.stdin.on('end', () => {
       detail = 'wrapping up';
       stopped = true;
 
-      // Update session records
-      if (stats.session.start) {
+      // Update session records (skip for known subagents -- their Stop must not
+      // zero the parent's session.start or inflate duration/record counters).
+      if (stats.session.start && !isKnownSubagent) {
         const dur = Date.now() - stats.session.start;
         if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
         stats.daily.cumulativeMs += dur;
         stats.session.start = 0; // Prevent double-counting on next session change
       }
-      if ((stats.session.filesEdited?.length || 0) > (stats.records.mostFilesEdited || 0)) {
+      if (!isKnownSubagent && (stats.session.filesEdited?.length || 0) > (stats.records.mostFilesEdited || 0)) {
         stats.records.mostFilesEdited = stats.session.filesEdited.length;
       }
 
@@ -489,11 +500,12 @@ process.stdin.on('end', () => {
       extra.parentSession = stats.session.id;
       // Retire synthetic orbital: SubagentStart created a synthetic file (spawning state).
       // Now that the real subagent is sending its own hooks, mark the synthetic as done
-      // so it fades out quickly instead of lingering for STALE_MS.
+      // so it is pruned after STOPPED_LINGER_MS (10s) instead of lingering for STALE_MS (120s).
+      // PreToolUse is the first tool event a real subagent sends -- retire on first contact.
       if (hookEvent === 'PreToolUse') {
-        try {
-          const subs = stats.session.activeSubagents;
-          for (let i = subs.length - 1; i >= 0; i--) {
+        const subs = stats.session.activeSubagents;
+        for (let i = subs.length - 1; i >= 0; i--) {
+          try {
             const synthFp = path.join(SESSIONS_DIR, safeFilename(subs[i].id) + '.json');
             const synthData = JSON.parse(fs.readFileSync(synthFp, 'utf8'));
             if (!synthData.stopped && synthData.state === 'spawning') {
@@ -503,8 +515,8 @@ process.stdin.on('end', () => {
               }), { encoding: 'utf8', mode: 0o600 });
               break;
             }
-          }
-        } catch {}
+          } catch {}
+        }
       }
     }
 
