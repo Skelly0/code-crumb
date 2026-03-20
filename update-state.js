@@ -175,6 +175,8 @@ process.stdin.on('end', () => {
   let detail = '';
   let stopped = false;
   let diffInfo = null;
+  let workState = null;
+  let workDetail = null;
 
   try {
     const data = JSON.parse(input);
@@ -269,6 +271,15 @@ process.stdin.on('end', () => {
       detail = result.detail;
       diffInfo = result.diffInfo;
 
+      // Piggyback the PreToolUse work state onto the PostToolUse write so the
+      // renderer can inject it if it missed the PreToolUse file write (race condition
+      // on fast commands where PostToolUse overwrites before the renderer reads).
+      const preToolResult = toolToState(toolName, toolInput);
+      if (preToolResult.state !== 'idle' && preToolResult.state !== 'thinking') {
+        workState = preToolResult.state;
+        workDetail = preToolResult.detail;
+      }
+
       // Track git commits
       if (result.state === 'proud' && result.detail === 'committed') {
         stats.session.commitCount = (stats.session.commitCount || 0) + 1;
@@ -283,6 +294,8 @@ process.stdin.on('end', () => {
         _touchEarlierSubagents(stats.session.activeSubagents);
         state = 'subagent';
         detail = `conducting ${stats.session.activeSubagents.length}`;
+        workState = null;  // conducting state is not a completion -- no piggyback needed
+        workDetail = null;
       }
     }
     else if (hookEvent === 'Stop') {
@@ -456,6 +469,7 @@ process.stdin.on('end', () => {
     };
 
     if (stopped) extra.stopped = true;
+    if (workState) { extra.workState = workState; extra.workDetail = workDetail; }
     if (hookEvent === 'SessionStart') extra.isSessionStart = true;
 
     // Only write to global state file if this session "owns" it.

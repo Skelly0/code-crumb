@@ -6,10 +6,13 @@
 // +================================================================+
 
 const assert = require('assert');
-const { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS } = require('../face');
+const fs = require('fs');
+const { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS, ACTIVE_WORK_STATES: FACE_ACTIVE_WORK_STATES, COMPLETION_STATES: FACE_COMPLETION_STATES } = require('../face');
+const { readState, ACTIVE_WORK_STATES: RENDERER_ACTIVE_WORK_STATES, COMPLETION_STATES: RENDERER_COMPLETION_STATES } = require('../renderer');
 const { ParticleSystem } = require('../particles');
 const { themes, PALETTES } = require('../themes');
 const { mouths, eyes } = require('../animations');
+const { STATE_FILE } = require('../shared');
 
 let passed = 0;
 let failed = 0;
@@ -2223,6 +2226,161 @@ describe('face.js -- ClaudeFace sparkline capping', () => {
     face.minDisplayUntil = 0;
     face.setState('reading');
     assert.ok(face.timeline.length > 2, `expected timeline to grow further, got length ${face.timeline.length}`);
+  });
+});
+
+// -- workState injection (renderer piggyback for fast tool race condition) ---
+
+describe('face.js -- workState injection simulation', () => {
+  // These tests simulate what renderer.js checkState() does when it receives
+  // a PostToolUse state file that includes workState/workDetail fields.
+
+  const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
+  const ACTIVE_WORK_STATES = new Set(['executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'committing', 'reviewing', 'subagent', 'responding', 'training']);
+
+  function applyStateWithWorkState(face, stateData) {
+    // Mirror the renderer's checkState() injection logic (renderer.js ~L262)
+    if (ACTIVE_WORK_STATES.has(stateData.workState)
+        && COMPLETION_STATES.has(stateData.state)
+        && !ACTIVE_WORK_STATES.has(face.state)) {
+      face.setState(stateData.workState, stateData.workDetail || '');
+    }
+    face.setState(stateData.state, stateData.detail);
+  }
+
+  test('thinking face receives workState=executing then relieved: executing applies, relieved buffers', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    applyStateWithWorkState(face, { state: 'relieved', detail: 'done', workState: 'executing', workDetail: 'ls' });
+    assert.strictEqual(face.state, 'executing', 'work state should apply when face was thinking');
+    assert.strictEqual(face.stateDetail, 'ls');
+    assert.strictEqual(face.pendingState, 'relieved', 'completion should be buffered behind work state');
+  });
+
+  test('thinking face receives workState=coding then satisfied: coding applies, satisfied buffers', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    applyStateWithWorkState(face, { state: 'satisfied', detail: 'edited', workState: 'coding', workDetail: 'main.js' });
+    assert.strictEqual(face.state, 'coding');
+    assert.strictEqual(face.pendingState, 'satisfied');
+  });
+
+  test('face already executing when completion arrives: workState injection skipped', () => {
+    const face = new ClaudeFace();
+    face.setState('executing', 'npm test');
+    applyStateWithWorkState(face, { state: 'relieved', detail: 'done', workState: 'executing', workDetail: 'npm test' });
+    // Should NOT re-inject executing -- face was already in active work state
+    assert.strictEqual(face.state, 'executing', 'should stay on existing executing state');
+    assert.strictEqual(face.stateDetail, 'npm test');
+    assert.strictEqual(face.pendingState, 'relieved');
+  });
+
+  test('face in coding when different workState arrives: injection skipped (already active)', () => {
+    const face = new ClaudeFace();
+    face.setState('coding', 'editing');
+    applyStateWithWorkState(face, { state: 'satisfied', detail: 'done', workState: 'executing', workDetail: 'ls' });
+    assert.strictEqual(face.state, 'coding', 'should stay on coding, not switch to executing');
+    assert.strictEqual(face.pendingState, 'satisfied');
+  });
+
+  test('no workState field: behaves like normal setState', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    applyStateWithWorkState(face, { state: 'relieved', detail: 'done' });
+    // No workState means no injection -- relieved goes straight in
+    // (thinking is not active work, so relieved should apply or buffer per normal rules)
+    assert.ok(face.state === 'relieved' || face.pendingState === 'relieved',
+      'relieved should either apply or buffer without injection');
+  });
+
+  test('error state is not in COMPLETION_STATES: workState injection skipped', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    applyStateWithWorkState(face, { state: 'error', detail: 'failed', workState: 'executing', workDetail: 'rm -rf' });
+    // error bypasses everything via normal setState -- should NOT inject executing first
+    assert.strictEqual(face.state, 'error', 'error should apply directly without injection');
+  });
+
+  test('idle face receives workState=searching then happy: searching applies', () => {
+    const face = new ClaudeFace();
+    // idle is not in ACTIVE_WORK_STATES, so injection should fire
+    applyStateWithWorkState(face, { state: 'happy', detail: 'found', workState: 'searching', workDetail: 'grep' });
+    assert.strictEqual(face.state, 'searching');
+    assert.strictEqual(face.pendingState, 'happy');
+  });
+
+  test('sleeping face receives workState=reading then proud: reading applies', () => {
+    const face = new ClaudeFace();
+    face.setState('sleeping');
+    face.minDisplayUntil = 0; // expire sleep so states can apply
+    applyStateWithWorkState(face, { state: 'proud', detail: 'committed', workState: 'reading', workDetail: 'file.js' });
+    assert.strictEqual(face.state, 'reading');
+    assert.strictEqual(face.pendingState, 'proud');
+  });
+});
+
+// -- readState() integration: workState/workDetail survive round-trip ------
+
+describe('face.js -- readState() workState round-trip', () => {
+  let backup = null;
+
+  // Save and restore the state file around these tests
+  function saveState() {
+    try { backup = fs.readFileSync(STATE_FILE, 'utf8'); } catch { backup = null; }
+  }
+  function restoreState() {
+    try {
+      if (backup !== null) fs.writeFileSync(STATE_FILE, backup, 'utf8');
+      else fs.unlinkSync(STATE_FILE);
+    } catch {}
+  }
+
+  test('readState() returns workState and workDetail from state file', () => {
+    saveState();
+    try {
+      const data = JSON.stringify({
+        state: 'relieved', detail: 'done', timestamp: Date.now(),
+        workState: 'executing', workDetail: 'ls',
+      });
+      fs.writeFileSync(STATE_FILE, data, 'utf8');
+      const result = readState();
+      assert.strictEqual(result.workState, 'executing', 'workState should survive readState()');
+      assert.strictEqual(result.workDetail, 'ls', 'workDetail should survive readState()');
+      assert.strictEqual(result.state, 'relieved');
+    } finally {
+      restoreState();
+    }
+  });
+
+  test('readState() returns null workState when field is absent', () => {
+    saveState();
+    try {
+      const data = JSON.stringify({ state: 'happy', detail: 'done', timestamp: Date.now() });
+      fs.writeFileSync(STATE_FILE, data, 'utf8');
+      const result = readState();
+      assert.strictEqual(result.workState, null, 'missing workState should default to null');
+      assert.strictEqual(result.workDetail, '', 'missing workDetail should default to empty string');
+    } finally {
+      restoreState();
+    }
+  });
+});
+
+// -- Set consistency: renderer and face.js sets must match -----------------
+
+describe('face.js -- ACTIVE_WORK_STATES / COMPLETION_STATES consistency', () => {
+  test('renderer ACTIVE_WORK_STATES matches face.js ACTIVE_WORK_STATES', () => {
+    const rendererEntries = [...RENDERER_ACTIVE_WORK_STATES].sort();
+    const faceEntries = [...FACE_ACTIVE_WORK_STATES].sort();
+    assert.deepStrictEqual(rendererEntries, faceEntries,
+      'renderer and face.js ACTIVE_WORK_STATES sets must match');
+  });
+
+  test('renderer COMPLETION_STATES matches face.js COMPLETION_STATES', () => {
+    const rendererEntries = [...RENDERER_COMPLETION_STATES].sort();
+    const faceEntries = [...FACE_COMPLETION_STATES].sort();
+    assert.deepStrictEqual(rendererEntries, faceEntries,
+      'renderer and face.js COMPLETION_STATES sets must match');
   });
 });
 

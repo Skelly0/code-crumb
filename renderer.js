@@ -38,6 +38,7 @@ const SLEEP_TIMEOUT = 60000;
 const RESCUE_EXCLUDE = new Set(['idle', 'sleeping', 'responding', 'starting', 'happy', 'satisfied', 'proud', 'relieved']);
 const FRESH_READ_STATES = new Set(['thinking', 'executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'responding', 'happy', 'satisfied', 'proud', 'relieved']);
 const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
+const ACTIVE_WORK_STATES = new Set(['executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'committing', 'reviewing', 'subagent', 'responding', 'training']);
 
 // ===================================================================
 // SHARED RUNTIME
@@ -72,6 +73,8 @@ function readState() {
       gitBranch: data.gitBranch || null,
       commitCount: data.commitCount || 0,
       isSessionStart: data.isSessionStart || false,
+      workState: data.workState || null,
+      workDetail: data.workDetail || '',
     };
   } catch {
     return { state: 'idle', detail: '' };
@@ -254,6 +257,16 @@ function runUnifiedMode() {
           if (stateData.stopped && Date.now() < face.minDisplayUntil) {
             face.minDisplayUntil = Date.now();
           }
+
+          // If PostToolUse includes a workState the renderer missed (PreToolUse
+          // was overwritten before we read it), inject the work state first.
+          // setState buffering queues the completion state behind it.
+          if (ACTIVE_WORK_STATES.has(stateData.workState)
+              && COMPLETION_STATES.has(stateData.state)
+              && !ACTIVE_WORK_STATES.has(face.state)) {
+            face.setState(stateData.workState, stateData.workDetail || '');
+          }
+
           face.setState(stateData.state, stateData.detail);
           face.setStats(stateData);
         }
@@ -748,5 +761,6 @@ if (require.main === module) {
     COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,
     IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
     PALETTES, PALETTE_NAMES,
+    readState, ACTIVE_WORK_STATES, COMPLETION_STATES,
   };
 }

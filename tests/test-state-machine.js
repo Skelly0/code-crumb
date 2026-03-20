@@ -2429,4 +2429,36 @@ describe('state-machine.js -- toolToState unknown tool', () => {
   });
 });
 
+// -- workState piggyback (PostToolUse includes PreToolUse work state) ------
+
+describe('state-machine.js -- toolToState for workState piggyback', () => {
+  test('Bash tool produces executing state (piggybacked on PostToolUse)', () => {
+    const r = toolToState('Bash', { command: 'ls' });
+    assert.strictEqual(r.state, 'executing');
+    assert.ok(r.state !== 'idle' && r.state !== 'thinking',
+      'Bash workState should not be idle or thinking');
+  });
+
+  test('Edit tool produces coding state', () => {
+    const r = toolToState('Edit', { file_path: 'foo.js' });
+    assert.strictEqual(r.state, 'coding');
+  });
+
+  test('Read tool produces reading state', () => {
+    const r = toolToState('Read', { file_path: 'foo.js' });
+    assert.strictEqual(r.state, 'reading');
+  });
+
+  test('Grep tool produces searching state', () => {
+    const r = toolToState('Grep', { pattern: 'foo' });
+    assert.strictEqual(r.state, 'searching');
+  });
+
+  test('unknown tool produces thinking (excluded from piggyback)', () => {
+    const r = toolToState('SomeRandomTool', {});
+    assert.strictEqual(r.state, 'thinking');
+    // thinking is excluded from workState piggyback in update-state.js
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };
