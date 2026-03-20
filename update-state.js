@@ -294,6 +294,8 @@ process.stdin.on('end', () => {
         _touchEarlierSubagents(stats.session.activeSubagents);
         state = 'subagent';
         detail = `conducting ${stats.session.activeSubagents.length}`;
+        workState = null;  // conducting state is not a completion -- no piggyback needed
+        workDetail = null;
       }
     }
     else if (hookEvent === 'Stop') {

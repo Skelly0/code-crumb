@@ -6,10 +6,13 @@
 // +================================================================+
 
 const assert = require('assert');
-const { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS } = require('../face');
+const fs = require('fs');
+const { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS, ACTIVE_WORK_STATES: FACE_ACTIVE_WORK_STATES, COMPLETION_STATES: FACE_COMPLETION_STATES } = require('../face');
+const { readState, ACTIVE_WORK_STATES: RENDERER_ACTIVE_WORK_STATES, COMPLETION_STATES: RENDERER_COMPLETION_STATES } = require('../renderer');
 const { ParticleSystem } = require('../particles');
 const { themes, PALETTES } = require('../themes');
 const { mouths, eyes } = require('../animations');
+const { STATE_FILE } = require('../shared');
 
 let passed = 0;
 let failed = 0;
@@ -2236,8 +2239,8 @@ describe('face.js -- workState injection simulation', () => {
   const ACTIVE_WORK_STATES = new Set(['executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'committing', 'reviewing', 'subagent', 'responding', 'training']);
 
   function applyStateWithWorkState(face, stateData) {
-    // Mirror the renderer's checkState() injection logic
-    if (stateData.workState
+    // Mirror the renderer's checkState() injection logic (renderer.js ~L262)
+    if (ACTIVE_WORK_STATES.has(stateData.workState)
         && COMPLETION_STATES.has(stateData.state)
         && !ACTIVE_WORK_STATES.has(face.state)) {
       face.setState(stateData.workState, stateData.workDetail || '');
@@ -2313,6 +2316,71 @@ describe('face.js -- workState injection simulation', () => {
     applyStateWithWorkState(face, { state: 'proud', detail: 'committed', workState: 'reading', workDetail: 'file.js' });
     assert.strictEqual(face.state, 'reading');
     assert.strictEqual(face.pendingState, 'proud');
+  });
+});
+
+// -- readState() integration: workState/workDetail survive round-trip ------
+
+describe('face.js -- readState() workState round-trip', () => {
+  let backup = null;
+
+  // Save and restore the state file around these tests
+  function saveState() {
+    try { backup = fs.readFileSync(STATE_FILE, 'utf8'); } catch { backup = null; }
+  }
+  function restoreState() {
+    try {
+      if (backup !== null) fs.writeFileSync(STATE_FILE, backup, 'utf8');
+      else fs.unlinkSync(STATE_FILE);
+    } catch {}
+  }
+
+  test('readState() returns workState and workDetail from state file', () => {
+    saveState();
+    try {
+      const data = JSON.stringify({
+        state: 'relieved', detail: 'done', timestamp: Date.now(),
+        workState: 'executing', workDetail: 'ls',
+      });
+      fs.writeFileSync(STATE_FILE, data, 'utf8');
+      const result = readState();
+      assert.strictEqual(result.workState, 'executing', 'workState should survive readState()');
+      assert.strictEqual(result.workDetail, 'ls', 'workDetail should survive readState()');
+      assert.strictEqual(result.state, 'relieved');
+    } finally {
+      restoreState();
+    }
+  });
+
+  test('readState() returns null workState when field is absent', () => {
+    saveState();
+    try {
+      const data = JSON.stringify({ state: 'happy', detail: 'done', timestamp: Date.now() });
+      fs.writeFileSync(STATE_FILE, data, 'utf8');
+      const result = readState();
+      assert.strictEqual(result.workState, null, 'missing workState should default to null');
+      assert.strictEqual(result.workDetail, '', 'missing workDetail should default to empty string');
+    } finally {
+      restoreState();
+    }
+  });
+});
+
+// -- Set consistency: renderer and face.js sets must match -----------------
+
+describe('face.js -- ACTIVE_WORK_STATES / COMPLETION_STATES consistency', () => {
+  test('renderer ACTIVE_WORK_STATES matches face.js ACTIVE_WORK_STATES', () => {
+    const rendererEntries = [...RENDERER_ACTIVE_WORK_STATES].sort();
+    const faceEntries = [...FACE_ACTIVE_WORK_STATES].sort();
+    assert.deepStrictEqual(rendererEntries, faceEntries,
+      'renderer and face.js ACTIVE_WORK_STATES sets must match');
+  });
+
+  test('renderer COMPLETION_STATES matches face.js COMPLETION_STATES', () => {
+    const rendererEntries = [...RENDERER_COMPLETION_STATES].sort();
+    const faceEntries = [...FACE_COMPLETION_STATES].sort();
+    assert.deepStrictEqual(rendererEntries, faceEntries,
+      'renderer and face.js COMPLETION_STATES sets must match');
   });
 });
 

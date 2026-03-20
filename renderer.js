@@ -73,6 +73,8 @@ function readState() {
       gitBranch: data.gitBranch || null,
       commitCount: data.commitCount || 0,
       isSessionStart: data.isSessionStart || false,
+      workState: data.workState || null,
+      workDetail: data.workDetail || '',
     };
   } catch {
     return { state: 'idle', detail: '' };
@@ -259,7 +261,7 @@ function runUnifiedMode() {
           // If PostToolUse includes a workState the renderer missed (PreToolUse
           // was overwritten before we read it), inject the work state first.
           // setState buffering queues the completion state behind it.
-          if (stateData.workState
+          if (ACTIVE_WORK_STATES.has(stateData.workState)
               && COMPLETION_STATES.has(stateData.state)
               && !ACTIVE_WORK_STATES.has(face.state)) {
             face.setState(stateData.workState, stateData.workDetail || '');
@@ -759,5 +761,6 @@ if (require.main === module) {
     COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,
     IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
     PALETTES, PALETTE_NAMES,
+    readState, ACTIVE_WORK_STATES, COMPLETION_STATES,
   };
 }
