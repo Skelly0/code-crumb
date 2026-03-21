@@ -21,7 +21,7 @@ const fs = require('fs');
 const path = require('path');
 const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename } = require('../shared');
 const {
-  toolToState, classifyToolResult, updateStreak, defaultStats,
+  toolToState, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats,
   EDIT_TOOLS,
   pruneFrequentFiles, topFrequentFiles,
 } = require('../state-machine');
@@ -173,7 +173,8 @@ function processStdinEvent(handler, fallbackFn) {
   });
   process.stdin.on('end', () => {
     if (inputTruncated) {
-      writeState('thinking', 'large input');
+      const truncResult = classifyTruncatedInput('', input);
+      writeState(truncResult.state, truncResult.detail);
       process.exit(0);
     }
     try {
