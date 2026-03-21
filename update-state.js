@@ -7,7 +7,10 @@
 // |  Usage: node update-state.js <event>                            |
 // |  Events: PreToolUse, PostToolUse, PostToolUseFailure, Stop,     |
 // |          Notification, SubagentStart, SubagentStop,            |
-// |          TeammateIdle, TaskCompleted, SessionStart, SessionEnd  |
+// |          TeammateIdle, TaskCompleted, SessionStart, SessionEnd, |
+// |          PreCompact, PostCompact, PermissionRequest, Setup,    |
+// |          Elicitation, ElicitationResult, ConfigChange,         |
+// |          InstructionsLoaded, StopFailure                       |
 // |                                                                  |
 // |  Works with Claude Code, Codex CLI, and OpenCode                |
 // +================================================================+
@@ -203,12 +206,19 @@ process.stdin.on('end', () => {
     // Subagent hooks fire with their own session_id, not the parent's.
     // Without this, subagent hooks would trigger session reset (wiping parent stats)
     // and write tool state to the global file instead of their own orbital file.
+    // Lifecycle events have dedicated handlers and must not be rerouted to subagent files.
+    // Per-session interactive events (PermissionRequest, Elicitation, ElicitationResult)
+    // stay OUT of this set so they correctly route to orbital files in subagent context.
+    const LIFECYCLE_EVENTS = new Set([
+      'SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop',
+      'PreCompact', 'PostCompact', 'Setup', 'ConfigChange',
+      'InstructionsLoaded', 'StopFailure',
+    ]);
+
     let isKnownSubagent = false;
     if (stats.session.id && stats.session.id !== sessionId
         && stats.session.activeSubagents && stats.session.activeSubagents.length > 0
-        // Lifecycle events have dedicated handlers and must not be rerouted.
-        && hookEvent !== 'SessionStart' && hookEvent !== 'SessionEnd'
-        && hookEvent !== 'SubagentStart' && hookEvent !== 'SubagentStop') {
+        && !LIFECYCLE_EVENTS.has(hookEvent)) {
       isKnownSubagent = true;
     }
 
@@ -458,6 +468,65 @@ process.stdin.on('end', () => {
       }
       stats.session.activeSubagents = [];
     }
+    else if (hookEvent === 'PreCompact') {
+      state = 'thinking';
+      const trigger = data.trigger || 'auto';
+      detail = trigger === 'manual' ? 'compacting memory' : 'auto-compacting';
+    }
+    else if (hookEvent === 'PostCompact') {
+      state = 'satisfied';
+      detail = 'memory compacted';
+    }
+    else if (hookEvent === 'PermissionRequest') {
+      state = 'waiting';
+      const tool = data.tool_name || '';
+      detail = tool ? `allow ${tool}?` : 'needs permission';
+    }
+    else if (hookEvent === 'Setup') {
+      state = 'starting';
+      const trigger = data.trigger || 'init';
+      detail = trigger === 'maintenance' ? 'maintenance' : 'setting up';
+    }
+    else if (hookEvent === 'Elicitation') {
+      state = 'waiting';
+      const server = (data.mcp_server_name || 'MCP').slice(0, 20);
+      detail = `${server}: needs input`;
+    }
+    else if (hookEvent === 'ElicitationResult') {
+      const action = data.action || 'accept';
+      if (action === 'accept') {
+        state = 'satisfied';
+        detail = 'input received';
+      } else {
+        state = 'relieved';
+        detail = action === 'decline' ? 'input declined' : 'input cancelled';
+      }
+    }
+    else if (hookEvent === 'ConfigChange') {
+      state = 'reading';
+      const fp = data.file_path || '';
+      const base = fp ? path.basename(fp) : '';
+      detail = base ? `config: ${base}` : 'config updated';
+    }
+    else if (hookEvent === 'InstructionsLoaded') {
+      state = 'reading';
+      const fp = data.file_path || '';
+      detail = fp ? path.basename(fp) : 'loading instructions';
+    }
+    else if (hookEvent === 'StopFailure') {
+      state = 'error';
+      const errorType = data.error || data.error_type || '';
+      if (errorType === 'rate_limit') detail = 'rate limited!';
+      else if (errorType === 'server_error') detail = 'server error';
+      else if (errorType === 'max_output_tokens') detail = 'output too long';
+      else if (errorType === 'authentication_failed') detail = 'auth failed';
+      else if (errorType === 'billing_error') detail = 'billing error';
+      else detail = errorType || 'API error';
+      // Track in stats -- API failures break the streak
+      if (!isKnownSubagent) {
+        updateStreak(stats, true);
+      }
+    }
     else {
       if (toolName) {
         ({ state, detail } = toolToState(toolName, toolInput));
@@ -594,8 +663,9 @@ process.stdin.on('end', () => {
     pruneFrequentFiles(stats.frequentFiles);
     writeStats(stats);
   } catch {
-    // JSON parse may fail for Stop/Notification events with empty or
-    // non-JSON stdin -- still write the correct state for the hook event.
+    // JSON parse may fail for events with empty or non-JSON stdin
+    // (e.g., Stop, Notification, lifecycle events) -- still write the
+    // correct state for the hook event.
     // Try to reuse the session ID from the global state file so we don't
     // create an orphan session file that appears as a phantom orbital.
     const originalFallbackId = process.env.CLAUDE_SESSION_ID || String(process.ppid);
@@ -663,6 +733,33 @@ process.stdin.on('end', () => {
     } else if (hookEvent === 'PostToolUseFailure') {
       fallbackState = 'error';
       fallbackDetail = 'tool failed';
+    } else if (hookEvent === 'PreCompact') {
+      fallbackState = 'thinking';
+      fallbackDetail = 'compacting memory';
+    } else if (hookEvent === 'PostCompact') {
+      fallbackState = 'satisfied';
+      fallbackDetail = 'memory compacted';
+    } else if (hookEvent === 'PermissionRequest') {
+      fallbackState = 'waiting';
+      fallbackDetail = 'needs permission';
+    } else if (hookEvent === 'Setup') {
+      fallbackState = 'starting';
+      fallbackDetail = 'setting up';
+    } else if (hookEvent === 'Elicitation') {
+      fallbackState = 'waiting';
+      fallbackDetail = 'needs input';
+    } else if (hookEvent === 'ElicitationResult') {
+      fallbackState = 'satisfied';
+      fallbackDetail = 'input received';
+    } else if (hookEvent === 'ConfigChange') {
+      fallbackState = 'reading';
+      fallbackDetail = 'config updated';
+    } else if (hookEvent === 'InstructionsLoaded') {
+      fallbackState = 'reading';
+      fallbackDetail = 'loading instructions';
+    } else if (hookEvent === 'StopFailure') {
+      fallbackState = 'error';
+      fallbackDetail = 'API error';
     }
 
     if (shouldWriteGlobal) writeState(fallbackState, fallbackDetail, fallbackExtra);

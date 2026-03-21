@@ -268,6 +268,14 @@ class ClaudeFace {
       } else if (newState === 'training') {
         this.particles.spawn(8, 'fire');
       }
+      // Detail-driven particles for specific lifecycle events
+      const d = detail || '';
+      if (newState === 'waiting' && (d.includes('allow') || d.includes('needs input'))) {
+        this.particles.spawn(4, 'question');
+      }
+      if (newState === 'thinking' && d.includes('compacting')) {
+        this.particles.spawn(6, 'rain');
+      }
     } else {
       this.lastStateChange = Date.now();
       this.stateDetail = detail;
