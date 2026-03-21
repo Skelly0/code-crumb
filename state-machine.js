@@ -136,7 +136,7 @@ function toolToState(toolName, toolInput) {
 
   // Strip ANSI escape sequences from detail before returning
   if (result.detail) {
-    result.detail = stripAnsi(result.detail);
+    result.detail = stripAnsi(result.detail).replace(/[\r\n]+/g, ' ');
   }
   return result;
 }
@@ -388,7 +388,7 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
   }
 
   // Strip ANSI escape sequences from detail before returning
-  if (detail) detail = stripAnsi(detail);
+  if (detail) detail = stripAnsi(detail).replace(/[\r\n]+/g, ' ');
   return { state, detail, diffInfo };
 }
 
