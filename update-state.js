@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const { STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, QUIT_FLAG_FILE, safeFilename, getGitBranch, getIsWorktree } = require('./shared');
 const {
-  toolToState, classifyToolResult, updateStreak, defaultStats,
+  toolToState, normalizeToolResponse, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats,
   EDIT_TOOLS, SUBAGENT_TOOLS,
   pruneFrequentFiles, topFrequentFiles, buildSubagentSessionState,
 } = require('./state-machine');
@@ -171,7 +171,8 @@ process.stdin.on('data', chunk => {
 process.stdin.on('end', () => {
   ensureRendererRunning();
   if (inputTruncated) {
-    writeState('thinking', 'large input');
+    const truncResult = classifyTruncatedInput(hookEvent, input);
+    writeState(truncResult.state, truncResult.detail);
     process.exit(0);
   }
   let state = 'thinking';
@@ -185,7 +186,7 @@ process.stdin.on('end', () => {
     const data = JSON.parse(input);
     const toolName = data.tool_name || '';
     const toolInput = data.tool_input || {};
-    const toolResponse = data.tool_response || {};
+    const toolResponse = normalizeToolResponse(data);
 
     // Extract session ID: try hook data, env, then fall back to PPID
     const sessionId = data.session_id

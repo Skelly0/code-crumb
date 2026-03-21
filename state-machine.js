@@ -227,6 +227,15 @@ function looksLikeError(text, patterns) {
       && !/0 errors?\b/i.test(clean) && !/no errors?\b/i.test(clean) && !/errors?:\s*0\b/i.test(clean)) {
     return true;
   }
+  // (b) Error pattern matches a line that doesn't contain "warning" --
+  // isolates e.g. "DeprecationWarning" (line A) from "tests failed" (line B)
+  if (/warning/i.test(clean)) {
+    const lines = clean.split('\n');
+    for (const line of lines) {
+      if (/warning/i.test(line)) continue;
+      if (patterns.some(p => p.test(line))) return true;
+    }
+  }
   return false;
 }
 
@@ -255,6 +264,25 @@ function errorDetail(stdout, stderr) {
   if (/test(s)? failed|\d+\s+fail(ed|ing)|^FAIL\b|# fail [1-9]/im.test(combined)) return 'tests failed';
   if (/npm ERR!/i.test(combined)) return 'npm error';
   return 'something went wrong';
+}
+
+// -- Tool Response Normalization --------------------------------------
+
+// Claude Code sends tool output as `tool_result` (string or object).
+// Other editors may use `tool_response` with {stdout, stderr}.
+// This normalizes both into a consistent {stdout, stderr} object.
+function normalizeToolResponse(data) {
+  const rawResult = data.tool_result || data.tool_response || {};
+  if (typeof rawResult === 'string') return { stdout: rawResult, stderr: '' };
+  if (Array.isArray(rawResult)) {
+    // Content block array: [{type:"text", text:"..."}]
+    const text = rawResult
+      .filter(b => b && b.type === 'text')
+      .map(b => b.text || '')
+      .join('\n');
+    return { stdout: text, stderr: '' };
+  }
+  return rawResult;
 }
 
 // -- Post-Tool Classification ----------------------------------------
@@ -364,6 +392,57 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
   return { state, detail, diffInfo };
 }
 
+// -- Truncated Input Classification -----------------------------------
+
+// When stdin exceeds MAX_INPUT (1MB), the full JSON can't be parsed.
+// This function extracts what it can from the raw (truncated) text to
+// avoid silently swallowing errors.  Returns { state, detail }.
+function classifyTruncatedInput(hookEvent, rawInput) {
+  // PostToolUse / PostToolUseFailure -- attempt error detection
+  if (hookEvent === 'PostToolUseFailure') {
+    return { state: 'error', detail: 'tool failed' };
+  }
+  if (hookEvent === 'PostToolUse') {
+    // Tier 1: isError flag (appears early in JSON, before large stdout)
+    if (/"isError"\s*:\s*true/.test(rawInput)) {
+      return { state: 'error', detail: errorDetail(rawInput, '') || 'something went wrong' };
+    }
+    // Tier 2: exit code embedded in stdout
+    const exitCode = extractExitCode(rawInput);
+    if (exitCode !== null && exitCode !== 0) {
+      return { state: 'error', detail: errorDetail(rawInput, '') || `exit ${exitCode}` };
+    }
+    // Tier 3: stdout error patterns for Bash tools
+    const toolMatch = rawInput.match(/"tool_name"\s*:\s*"([^"]+)"/);
+    const toolName = toolMatch ? toolMatch[1] : '';
+    if (BASH_TOOLS.test(toolName) && looksLikeError(rawInput, stdoutErrorPatterns)) {
+      return { state: 'error', detail: errorDetail(rawInput, '') || 'something went wrong' };
+    }
+    // No error detected in the captured data -- fall through to default
+  }
+
+  // Non-PostToolUse events -- map to correct face states
+  const eventMap = {
+    Stop:               { state: 'responding', detail: 'wrapping up' },
+    SessionEnd:         { state: 'responding', detail: 'session ending' },
+    Notification:       { state: 'waiting',    detail: 'needs attention' },
+    SessionStart:       { state: 'idle',       detail: 'session starting' },
+    SubagentStart:      { state: 'subagent',   detail: 'spawning subagent' },
+    SubagentStop:       { state: 'happy',      detail: 'subagent done' },
+    PostToolUseFailure: { state: 'error',      detail: 'tool failed' },
+    StopFailure:        { state: 'error',      detail: 'API error' },
+    PreCompact:         { state: 'thinking',   detail: 'compacting memory' },
+    PostCompact:        { state: 'satisfied',  detail: 'memory compacted' },
+    PermissionRequest:  { state: 'waiting',    detail: 'needs permission' },
+    Setup:              { state: 'starting',   detail: 'setting up' },
+    Elicitation:        { state: 'waiting',    detail: 'needs input' },
+    ElicitationResult:  { state: 'satisfied',  detail: 'input received' },
+    ConfigChange:       { state: 'reading',    detail: 'config updated' },
+    InstructionsLoaded: { state: 'reading',    detail: 'loading instructions' },
+  };
+  return eventMap[hookEvent] || { state: 'thinking', detail: 'large input' };
+}
+
 // -- Streak Management -----------------------------------------------
 
 const MILESTONES = [10, 25, 50, 100, 200, 500];
@@ -471,7 +550,9 @@ module.exports = {
   stripAnsi,
   errorDetail,
   extractExitCode,
+  normalizeToolResponse,
   classifyToolResult,
+  classifyTruncatedInput,
   MILESTONES,
   updateStreak,
   defaultStats,

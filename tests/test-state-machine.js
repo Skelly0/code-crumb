@@ -24,6 +24,8 @@ const {
   extractExitCode,
   isMergeConflict,
   classifyToolResult,
+  normalizeToolResponse,
+  classifyTruncatedInput,
   MILESTONES,
   updateStreak,
   defaultStats,
@@ -1553,6 +1555,192 @@ describe('state-machine.js -- looksLikeError (warning+error mixed output)', () =
 
   test('"0 errors, 3 warnings" is NOT detected as error (zero errors)', () => {
     assert.ok(!looksLikeError('0 errors, 3 warnings', stderrErrorPatterns));
+  });
+});
+
+// -- looksLikeError — per-line warning isolation --------------------------
+
+describe('state-machine.js -- looksLikeError (per-line warning isolation)', () => {
+  test('DeprecationWarning on separate line from "tests failed" IS detected', () => {
+    assert.ok(looksLikeError(
+      '(node:12345) DeprecationWarning: punycode is deprecated\nok 1400 tests\n3 tests failed',
+      stdoutErrorPatterns
+    ));
+  });
+
+  test('ExperimentalWarning on separate line from "FAIL" IS detected', () => {
+    assert.ok(looksLikeError(
+      '(node:999) ExperimentalWarning: VM Modules\nFAIL src/test.js',
+      stdoutErrorPatterns
+    ));
+  });
+
+  test('warning on separate line from "command not found" IS detected (stderr)', () => {
+    assert.ok(looksLikeError(
+      'warning: deprecated config\nfatal: command not found',
+      stderrErrorPatterns
+    ));
+  });
+
+  test('"failed with warning about X" on same line is NOT detected (preserved)', () => {
+    assert.ok(!looksLikeError('failed with warning about deprecated API', stderrErrorPatterns));
+  });
+
+  test('"0 errors, 5 warnings" multi-line still NOT detected', () => {
+    assert.ok(!looksLikeError('0 errors, 5 warnings\nBuild complete', stderrErrorPatterns));
+  });
+
+  test('npm ERR! on separate line from DeprecationWarning IS detected', () => {
+    assert.ok(looksLikeError(
+      '(node:123) DeprecationWarning: old API\nnpm ERR! code ELIFECYCLE',
+      stdoutErrorPatterns
+    ));
+  });
+});
+
+// -- normalizeToolResponse -------------------------------------------------
+
+describe('state-machine.js -- normalizeToolResponse', () => {
+  test('reads tool_result string (Claude Code format)', () => {
+    const r = normalizeToolResponse({ tool_result: 'hello world\nExit code: 0' });
+    assert.strictEqual(r.stdout, 'hello world\nExit code: 0');
+    assert.strictEqual(r.stderr, '');
+  });
+
+  test('reads tool_result object with stdout/stderr', () => {
+    const r = normalizeToolResponse({ tool_result: { stdout: 'ok', stderr: 'warn' } });
+    assert.strictEqual(r.stdout, 'ok');
+    assert.strictEqual(r.stderr, 'warn');
+  });
+
+  test('falls back to tool_response when tool_result missing', () => {
+    const r = normalizeToolResponse({ tool_response: { stdout: 'fallback', stderr: '' } });
+    assert.strictEqual(r.stdout, 'fallback');
+  });
+
+  test('tool_result takes precedence over tool_response', () => {
+    const r = normalizeToolResponse({
+      tool_result: 'from result',
+      tool_response: { stdout: 'from response' },
+    });
+    assert.strictEqual(r.stdout, 'from result');
+  });
+
+  test('handles content block array', () => {
+    const r = normalizeToolResponse({
+      tool_result: [
+        { type: 'text', text: 'line 1' },
+        { type: 'text', text: 'line 2' },
+      ],
+    });
+    assert.strictEqual(r.stdout, 'line 1\nline 2');
+    assert.strictEqual(r.stderr, '');
+  });
+
+  test('returns empty object when both missing', () => {
+    const r = normalizeToolResponse({});
+    assert.deepStrictEqual(r, {});
+  });
+
+  test('classifyToolResult detects error via tool_result string with exit code', () => {
+    const data = { tool_result: 'lots of test output\nExit code: 1' };
+    const toolResponse = normalizeToolResponse(data);
+    const result = classifyToolResult('Bash', { command: 'npm test' }, toolResponse, false);
+    assert.strictEqual(result.state, 'error');
+  });
+
+  test('classifyToolResult detects "tests passed" from tool_result string', () => {
+    const data = { tool_result: '42 tests passed\nExit code: 0' };
+    const toolResponse = normalizeToolResponse(data);
+    const result = classifyToolResult('Bash', { command: 'npm test' }, toolResponse, false);
+    assert.strictEqual(result.state, 'relieved');
+    assert.ok(result.detail.includes('42'));
+  });
+});
+
+// -- classifyTruncatedInput -----------------------------------------------
+
+describe('state-machine.js -- classifyTruncatedInput', () => {
+  test('PostToolUseFailure always returns error', () => {
+    const r = classifyTruncatedInput('PostToolUseFailure', '');
+    assert.strictEqual(r.state, 'error');
+    assert.strictEqual(r.detail, 'tool failed');
+  });
+
+  test('PostToolUse with isError flag returns error', () => {
+    const r = classifyTruncatedInput('PostToolUse', '{"tool_name":"Bash","isError": true,"tool_response":{"stdout":"stuff...');
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('PostToolUse with Exit code: 1 returns error', () => {
+    const r = classifyTruncatedInput('PostToolUse', '{"tool_name":"Bash","tool_response":{"stdout":"...lots of output...\\nExit code: 1"}}');
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('PostToolUse with Exit code: 0 does NOT return error', () => {
+    const r = classifyTruncatedInput('PostToolUse', '{"tool_name":"Bash","tool_response":{"stdout":"...output...\\nExit code: 0"}}');
+    assert.notStrictEqual(r.state, 'error');
+  });
+
+  test('PostToolUse with Bash tool + npm ERR! returns error', () => {
+    const r = classifyTruncatedInput('PostToolUse', '{"tool_name":"Bash","tool_response":{"stdout":"npm ERR! code ELIFECYCLE...');
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('PostToolUse with Bash tool + "tests failed" returns error', () => {
+    const r = classifyTruncatedInput('PostToolUse', '{"tool_name":"Bash","tool_response":{"stdout":"1400 passed\\n3 tests failed...');
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('PostToolUse with Read tool + no error patterns is not error', () => {
+    const r = classifyTruncatedInput('PostToolUse', '{"tool_name":"Read","tool_response":{"stdout":"file contents...');
+    assert.notStrictEqual(r.state, 'error');
+  });
+
+  test('Stop maps to responding', () => {
+    const r = classifyTruncatedInput('Stop', '');
+    assert.strictEqual(r.state, 'responding');
+    assert.strictEqual(r.detail, 'wrapping up');
+  });
+
+  test('Notification maps to waiting', () => {
+    const r = classifyTruncatedInput('Notification', '');
+    assert.strictEqual(r.state, 'waiting');
+  });
+
+  test('SessionStart maps to idle', () => {
+    const r = classifyTruncatedInput('SessionStart', '');
+    assert.strictEqual(r.state, 'idle');
+  });
+
+  test('StopFailure maps to error', () => {
+    const r = classifyTruncatedInput('StopFailure', '');
+    assert.strictEqual(r.state, 'error');
+    assert.strictEqual(r.detail, 'API error');
+  });
+
+  test('PreCompact maps to thinking', () => {
+    const r = classifyTruncatedInput('PreCompact', '');
+    assert.strictEqual(r.state, 'thinking');
+    assert.strictEqual(r.detail, 'compacting memory');
+  });
+
+  test('PermissionRequest maps to waiting', () => {
+    const r = classifyTruncatedInput('PermissionRequest', '');
+    assert.strictEqual(r.state, 'waiting');
+    assert.strictEqual(r.detail, 'needs permission');
+  });
+
+  test('unknown event falls back to thinking', () => {
+    const r = classifyTruncatedInput('SomeNewEvent', '');
+    assert.strictEqual(r.state, 'thinking');
+    assert.strictEqual(r.detail, 'large input');
+  });
+
+  test('empty hookEvent falls back to thinking', () => {
+    const r = classifyTruncatedInput('', '');
+    assert.strictEqual(r.state, 'thinking');
+    assert.strictEqual(r.detail, 'large input');
   });
 });
 
