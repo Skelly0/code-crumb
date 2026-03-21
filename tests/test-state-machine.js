@@ -2486,17 +2486,16 @@ describe('update-state.js -- subagent session detection (isKnownSubagent)', () =
       'should check for non-empty activeSubagents');
   });
 
-  test('detection excludes SessionStart, SessionEnd, SubagentStart, SubagentStop', () => {
+  test('detection excludes lifecycle events via LIFECYCLE_EVENTS set', () => {
     const src = readSrc();
     const detectionBlock = src.split('let isKnownSubagent = false')[1].split('isKnownSubagent = true')[0];
-    assert.ok(detectionBlock.includes("hookEvent !== 'SessionStart'"),
-      'should exclude SessionStart from subagent detection');
-    assert.ok(detectionBlock.includes("hookEvent !== 'SessionEnd'"),
-      'should exclude SessionEnd from subagent detection');
-    assert.ok(detectionBlock.includes("hookEvent !== 'SubagentStart'"),
-      'should exclude SubagentStart from subagent detection');
-    assert.ok(detectionBlock.includes("hookEvent !== 'SubagentStop'"),
-      'should exclude SubagentStop from subagent detection');
+    assert.ok(detectionBlock.includes('LIFECYCLE_EVENTS.has(hookEvent)'),
+      'should use LIFECYCLE_EVENTS set to exclude lifecycle events');
+    // Verify the set contains the original 4 events
+    assert.ok(src.includes("'SessionStart'"), 'LIFECYCLE_EVENTS should contain SessionStart');
+    assert.ok(src.includes("'SessionEnd'"), 'LIFECYCLE_EVENTS should contain SessionEnd');
+    assert.ok(src.includes("'SubagentStart'"), 'LIFECYCLE_EVENTS should contain SubagentStart');
+    assert.ok(src.includes("'SubagentStop'"), 'LIFECYCLE_EVENTS should contain SubagentStop');
   });
 
   test('session reset is skipped when isKnownSubagent', () => {
@@ -2640,6 +2639,210 @@ describe('update-state.js -- subagent session detection (isKnownSubagent)', () =
     assert.ok(resetIdx > 0, 'guarded reset should exist');
     assert.ok(detectionIdx < resetIdx,
       'detection must come before the session reset check');
+  });
+});
+
+// -- New Hook Events (PreCompact, PostCompact, PermissionRequest, etc.) ------
+
+describe('update-state.js -- new hook event handlers', () => {
+  function readSrc() {
+    const fs = require('fs');
+    return fs.readFileSync(require('path').join(__dirname, '..', 'update-state.js'), 'utf8');
+  }
+
+  function readHooks() {
+    const fs = require('fs');
+    return JSON.parse(fs.readFileSync(require('path').join(__dirname, '..', 'hooks', 'hooks.json'), 'utf8'));
+  }
+
+  // -- Hook registration tests --
+
+  test('hooks.json registers all 9 new events', () => {
+    const hooks = readHooks();
+    const newEvents = [
+      'PreCompact', 'PostCompact', 'PermissionRequest', 'Setup',
+      'Elicitation', 'ElicitationResult', 'ConfigChange',
+      'InstructionsLoaded', 'StopFailure',
+    ];
+    for (const event of newEvents) {
+      assert.ok(hooks.hooks[event], `hooks.json should register ${event}`);
+      assert.strictEqual(hooks.hooks[event][0].hooks[0].type, 'command');
+      assert.ok(
+        hooks.hooks[event][0].hooks[0].command.includes(`update-state.js" ${event}`),
+        `${event} command should pass event name as argument`
+      );
+    }
+  });
+
+  test('hooks.json does NOT register WorktreeCreate or WorktreeRemove', () => {
+    const hooks = readHooks();
+    assert.strictEqual(hooks.hooks.WorktreeCreate, undefined,
+      'WorktreeCreate would replace default worktree behavior -- must not be registered');
+    assert.strictEqual(hooks.hooks.WorktreeRemove, undefined,
+      'WorktreeRemove would replace default worktree behavior -- must not be registered');
+  });
+
+  // -- LIFECYCLE_EVENTS guard tests --
+
+  test('LIFECYCLE_EVENTS set exists and contains system-level events', () => {
+    const src = readSrc();
+    assert.ok(src.includes('const LIFECYCLE_EVENTS = new Set('),
+      'LIFECYCLE_EVENTS Set should exist');
+    const expected = [
+      'SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop',
+      'PreCompact', 'PostCompact', 'Setup', 'ConfigChange',
+      'InstructionsLoaded', 'StopFailure',
+    ];
+    for (const event of expected) {
+      assert.ok(src.includes(`'${event}'`),
+        `LIFECYCLE_EVENTS should contain '${event}'`);
+    }
+  });
+
+  test('LIFECYCLE_EVENTS does NOT contain per-session interactive events', () => {
+    const src = readSrc();
+    // Extract just the LIFECYCLE_EVENTS Set definition
+    const setStart = src.indexOf('const LIFECYCLE_EVENTS = new Set(');
+    const setEnd = src.indexOf(']);', setStart);
+    const setBlock = src.slice(setStart, setEnd);
+    assert.ok(!setBlock.includes("'PermissionRequest'"),
+      'PermissionRequest should route to orbital files in subagent context');
+    assert.ok(!setBlock.includes("'Elicitation'"),
+      'Elicitation should route to orbital files in subagent context');
+    assert.ok(!setBlock.includes("'ElicitationResult'"),
+      'ElicitationResult should route to orbital files in subagent context');
+  });
+
+  test('isKnownSubagent guard uses LIFECYCLE_EVENTS.has()', () => {
+    const src = readSrc();
+    assert.ok(src.includes('!LIFECYCLE_EVENTS.has(hookEvent)'),
+      'isKnownSubagent guard should use the LIFECYCLE_EVENTS Set');
+  });
+
+  // -- Try-block handler tests --
+
+  test('PreCompact handler sets thinking state with trigger-aware detail', () => {
+    const src = readSrc();
+    assert.ok(src.includes("hookEvent === 'PreCompact'"), 'PreCompact handler should exist');
+    const block = src.split("hookEvent === 'PreCompact'")[1].split('else if')[0];
+    assert.ok(block.includes("state = 'thinking'"), 'PreCompact should set thinking state');
+    assert.ok(block.includes('data.trigger'), 'PreCompact should check trigger field');
+    assert.ok(block.includes('compacting memory'), 'manual trigger should show compacting memory');
+    assert.ok(block.includes('auto-compacting'), 'auto trigger should show auto-compacting');
+  });
+
+  test('PostCompact handler sets satisfied state', () => {
+    const src = readSrc();
+    assert.ok(src.includes("hookEvent === 'PostCompact'"), 'PostCompact handler should exist');
+    const block = src.split("hookEvent === 'PostCompact'")[1].split('else if')[0];
+    assert.ok(block.includes("state = 'satisfied'"), 'PostCompact should set satisfied state');
+    assert.ok(block.includes('memory compacted'), 'PostCompact should show memory compacted');
+  });
+
+  test('PermissionRequest handler includes tool_name in detail', () => {
+    const src = readSrc();
+    assert.ok(src.includes("hookEvent === 'PermissionRequest'"), 'PermissionRequest handler should exist');
+    const block = src.split("hookEvent === 'PermissionRequest'")[1].split('else if')[0];
+    assert.ok(block.includes("state = 'waiting'"), 'PermissionRequest should set waiting state');
+    assert.ok(block.includes('data.tool_name'), 'PermissionRequest should extract tool_name');
+    assert.ok(block.includes('allow'), 'detail should include allow prefix');
+  });
+
+  test('Setup handler distinguishes init vs maintenance', () => {
+    const src = readSrc();
+    assert.ok(src.includes("hookEvent === 'Setup'"), 'Setup handler should exist');
+    const block = src.split("hookEvent === 'Setup'")[1].split('else if')[0];
+    assert.ok(block.includes("state = 'starting'"), 'Setup should set starting state');
+    assert.ok(block.includes('data.trigger'), 'Setup should check trigger field');
+    assert.ok(block.includes('maintenance'), 'Setup should handle maintenance trigger');
+  });
+
+  test('Elicitation handler includes server name (truncated)', () => {
+    const src = readSrc();
+    assert.ok(src.includes("hookEvent === 'Elicitation'"), 'Elicitation handler should exist');
+    const block = src.split("hookEvent === 'Elicitation'")[1].split('else if')[0];
+    assert.ok(block.includes("state = 'waiting'"), 'Elicitation should set waiting state');
+    assert.ok(block.includes('data.mcp_server_name'), 'Elicitation should extract server name');
+    assert.ok(block.includes('slice(0, 20)'), 'server name should be truncated');
+    assert.ok(block.includes('needs input'), 'detail should include needs input');
+  });
+
+  test('ElicitationResult branches on action (accept/decline/cancel)', () => {
+    const src = readSrc();
+    assert.ok(src.includes("hookEvent === 'ElicitationResult'"), 'ElicitationResult handler should exist');
+    const block = src.split("hookEvent === 'ElicitationResult'")[1].split('else if (hookEvent')[0];
+    assert.ok(block.includes('data.action'), 'ElicitationResult should check action field');
+    assert.ok(block.includes("state = 'satisfied'"), 'accept should set satisfied state');
+    assert.ok(block.includes("state = 'relieved'"), 'decline/cancel should set relieved state');
+    assert.ok(block.includes('input declined'), 'decline should show input declined');
+    assert.ok(block.includes('input cancelled'), 'cancel should show input cancelled');
+  });
+
+  test('ConfigChange handler extracts basename from file_path', () => {
+    const src = readSrc();
+    assert.ok(src.includes("hookEvent === 'ConfigChange'"), 'ConfigChange handler should exist');
+    const block = src.split("hookEvent === 'ConfigChange'")[1].split('else if')[0];
+    assert.ok(block.includes("state = 'reading'"), 'ConfigChange should set reading state');
+    assert.ok(block.includes('path.basename'), 'ConfigChange should extract basename');
+    assert.ok(block.includes('config:'), 'detail should include config: prefix');
+  });
+
+  test('InstructionsLoaded handler extracts basename', () => {
+    const src = readSrc();
+    assert.ok(src.includes("hookEvent === 'InstructionsLoaded'"), 'InstructionsLoaded handler should exist');
+    const block = src.split("hookEvent === 'InstructionsLoaded'")[1].split('else if')[0];
+    assert.ok(block.includes("state = 'reading'"), 'InstructionsLoaded should set reading state');
+    assert.ok(block.includes('path.basename'), 'InstructionsLoaded should extract basename');
+  });
+
+  test('StopFailure handler maps error types and breaks streak', () => {
+    const src = readSrc();
+    assert.ok(src.includes("hookEvent === 'StopFailure'"), 'StopFailure handler should exist');
+    const block = src.split("hookEvent === 'StopFailure'")[1].split('else if (hookEvent')[0];
+    assert.ok(block.includes("state = 'error'"), 'StopFailure should set error state');
+    assert.ok(block.includes('rate_limit'), 'should handle rate_limit');
+    assert.ok(block.includes('server_error'), 'should handle server_error');
+    assert.ok(block.includes('updateStreak(stats, true)'), 'StopFailure should break streak');
+    assert.ok(block.includes('!isKnownSubagent'), 'streak update should be guarded by !isKnownSubagent');
+  });
+
+  // -- Catch-block fallback tests --
+
+  test('all 9 new events have fallback handlers in catch block', () => {
+    const src = readSrc();
+    // The main catch block has a unique comment about JSON parse failures
+    const catchBlock = src.split('JSON parse may fail')[1] || '';
+    assert.ok(catchBlock.length > 0, 'main catch block should exist');
+    const newEvents = [
+      'PreCompact', 'PostCompact', 'PermissionRequest', 'Setup',
+      'Elicitation', 'ElicitationResult', 'ConfigChange',
+      'InstructionsLoaded', 'StopFailure',
+    ];
+    for (const event of newEvents) {
+      assert.ok(catchBlock.includes(`hookEvent === '${event}'`),
+        `catch block should have fallback handler for ${event}`);
+    }
+  });
+
+  // -- No stats inflation tests --
+
+  test('new lifecycle events do not increment toolCalls', () => {
+    const src = readSrc();
+    const lifecycleEvents = [
+      'PreCompact', 'PostCompact', 'PermissionRequest', 'Setup',
+      'Elicitation', 'ElicitationResult', 'ConfigChange', 'InstructionsLoaded',
+    ];
+    for (const event of lifecycleEvents) {
+      const parts = src.split(`hookEvent === '${event}'`);
+      // Get the handler block (between this event and the next else if)
+      if (parts.length > 1) {
+        const block = parts[1].split('else if')[0];
+        assert.ok(!block.includes('stats.session.toolCalls'),
+          `${event} handler should not modify toolCalls`);
+        assert.ok(!block.includes('stats.totalToolCalls'),
+          `${event} handler should not modify totalToolCalls`);
+      }
+    }
   });
 });
 

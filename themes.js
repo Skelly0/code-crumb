@@ -266,6 +266,10 @@ const STATE_THOUGHTS = {
     'ugh', 'wait what', 'hmm not right',
     'okay let me think', 'well that broke', 'debugging time',
   ],
+  waiting: [
+    'hello?', 'waiting...', 'tap tap tap',
+    'still here...', 'need a hand?', 'over here!',
+  ],
   committing: [
     'sealing the deal', 'writing history', 'fingers crossed',
     'committing to this', 'here it goes...', 'locking it in',
