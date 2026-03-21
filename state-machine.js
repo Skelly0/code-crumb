@@ -221,7 +221,7 @@ function looksLikeError(text, patterns) {
   if (!hit) return false;
   // Check it's not a false positive
   if (!falsePositives.some(p => p.test(clean))) return true;
-  // If "warning" triggered the false positive, check if explicit error keywords
+  // (a) If "warning" triggered the false positive, check if explicit error keywords
   // also appear (mixed warning+error output like "2 warnings, 1 error" should detect)
   if (/warning/i.test(clean) && /\berrors?\b/i.test(clean)
       && !/0 errors?\b/i.test(clean) && !/no errors?\b/i.test(clean) && !/errors?:\s*0\b/i.test(clean)) {
@@ -282,7 +282,7 @@ function normalizeToolResponse(data) {
       .join('\n');
     return { stdout: text, stderr: '' };
   }
-  return rawResult;
+  return { stdout: rawResult.stdout || '', stderr: rawResult.stderr || '' };
 }
 
 // -- Post-Tool Classification ----------------------------------------
@@ -398,11 +398,14 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
 // This function extracts what it can from the raw (truncated) text to
 // avoid silently swallowing errors.  Returns { state, detail }.
 function classifyTruncatedInput(hookEvent, rawInput) {
-  // PostToolUse / PostToolUseFailure -- attempt error detection
+  // PostToolUseFailure is always an error
   if (hookEvent === 'PostToolUseFailure') {
     return { state: 'error', detail: 'tool failed' };
   }
-  if (hookEvent === 'PostToolUse') {
+  // PostToolUse -- attempt forensic error detection from truncated data.
+  // Also runs when hookEvent is empty (adapter path) so exit codes and
+  // isError flags are still detected even without event type info.
+  if (hookEvent === 'PostToolUse' || !hookEvent) {
     // Tier 1: isError flag (appears early in JSON, before large stdout)
     if (/"isError"\s*:\s*true/.test(rawInput)) {
       return { state: 'error', detail: errorDetail(rawInput, '') || 'something went wrong' };
@@ -429,7 +432,6 @@ function classifyTruncatedInput(hookEvent, rawInput) {
     SessionStart:       { state: 'idle',       detail: 'session starting' },
     SubagentStart:      { state: 'subagent',   detail: 'spawning subagent' },
     SubagentStop:       { state: 'happy',      detail: 'subagent done' },
-    PostToolUseFailure: { state: 'error',      detail: 'tool failed' },
     StopFailure:        { state: 'error',      detail: 'API error' },
     PreCompact:         { state: 'thinking',   detail: 'compacting memory' },
     PostCompact:        { state: 'satisfied',  detail: 'memory compacted' },

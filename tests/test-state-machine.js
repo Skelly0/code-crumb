@@ -1637,9 +1637,10 @@ describe('state-machine.js -- normalizeToolResponse', () => {
     assert.strictEqual(r.stderr, '');
   });
 
-  test('returns empty object when both missing', () => {
+  test('returns {stdout:"", stderr:""} when both missing', () => {
     const r = normalizeToolResponse({});
-    assert.deepStrictEqual(r, {});
+    assert.strictEqual(r.stdout, '');
+    assert.strictEqual(r.stderr, '');
   });
 
   test('classifyToolResult detects error via tool_result string with exit code', () => {
@@ -1737,10 +1738,50 @@ describe('state-machine.js -- classifyTruncatedInput', () => {
     assert.strictEqual(r.detail, 'large input');
   });
 
-  test('empty hookEvent falls back to thinking', () => {
+  test('empty hookEvent falls back to thinking when no error signals', () => {
     const r = classifyTruncatedInput('', '');
     assert.strictEqual(r.state, 'thinking');
     assert.strictEqual(r.detail, 'large input');
+  });
+
+  test('empty hookEvent (adapter path) still detects isError flag', () => {
+    const r = classifyTruncatedInput('', '{"tool_name":"Bash","isError": true}');
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('empty hookEvent (adapter path) still detects exit code', () => {
+    const r = classifyTruncatedInput('', '{"tool_name":"Bash","stdout":"Exit code: 1"}');
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('PostToolUse with no error signals falls through to thinking', () => {
+    const r = classifyTruncatedInput('PostToolUse', '{"tool_name":"Bash","tool_result":"all good output"}');
+    assert.strictEqual(r.state, 'thinking');
+    assert.strictEqual(r.detail, 'large input');
+  });
+
+  test('SessionEnd maps to responding', () => {
+    const r = classifyTruncatedInput('SessionEnd', '');
+    assert.strictEqual(r.state, 'responding');
+    assert.strictEqual(r.detail, 'session ending');
+  });
+
+  test('SubagentStart maps to subagent', () => {
+    const r = classifyTruncatedInput('SubagentStart', '');
+    assert.strictEqual(r.state, 'subagent');
+    assert.strictEqual(r.detail, 'spawning subagent');
+  });
+
+  test('SubagentStop maps to happy', () => {
+    const r = classifyTruncatedInput('SubagentStop', '');
+    assert.strictEqual(r.state, 'happy');
+    assert.strictEqual(r.detail, 'subagent done');
+  });
+
+  test('Elicitation maps to waiting', () => {
+    const r = classifyTruncatedInput('Elicitation', '');
+    assert.strictEqual(r.state, 'waiting');
+    assert.strictEqual(r.detail, 'needs input');
   });
 });
 
