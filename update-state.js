@@ -568,19 +568,19 @@ process.stdin.on('end', () => {
     // blocks them from writing global state, and the renderer treats them as orbitals.
     if (isKnownSubagent) {
       extra.parentSession = stats.session.id;
-      // Retire synthetic orbital: SubagentStart created a synthetic file (spawning state).
+      // Retire synthetic orbital: SubagentStart created a synthetic file for the subagent.
       // Now that the real subagent is sending its own hooks, mark the synthetic as done
       // so it is pruned after STOPPED_LINGER_MS (10s) instead of lingering for STALE_MS (120s).
       // PreToolUse is the first tool event a real subagent sends -- retire on first contact.
       if (hookEvent === 'PreToolUse') {
         const subs = stats.session.activeSubagents;
-        // Iterate forward: oldest spawning synthetic is most likely to match
+        // Iterate forward: oldest non-stopped synthetic is most likely to match
         // the first real subagent hook when multiple subagents are concurrent.
         for (let i = 0; i < subs.length; i++) {
           try {
             const synthFp = path.join(SESSIONS_DIR, safeFilename(subs[i].id) + '.json');
             const synthData = JSON.parse(fs.readFileSync(synthFp, 'utf8'));
-            if (!synthData.stopped && synthData.state === 'spawning') {
+            if (!synthData.stopped) {
               if (synthData.taskDescription) extra.taskDescription = synthData.taskDescription;
               fs.writeFileSync(synthFp, JSON.stringify({
                 ...synthData, stopped: true, state: 'happy', detail: 'done',

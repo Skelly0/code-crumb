@@ -2766,14 +2766,18 @@ describe('update-state.js -- subagent session detection (isKnownSubagent)', () =
     );
   });
 
-  test('synthetic orbital cleanup retires spawning files', () => {
+  test('synthetic orbital cleanup retires non-stopped files (not just spawning)', () => {
     const src = readSrc();
-    // The cleanup block should find spawning synthetics and mark them stopped
+    // The cleanup block should find non-stopped synthetics and mark them stopped.
+    // Must NOT require state === 'spawning' because _writeSubagentToolState
+    // changes the synthetic's state before the real subagent's first PreToolUse.
     const cleanupBlock = src.split('Retire synthetic orbital')[1];
     assert.ok(cleanupBlock, 'should have synthetic orbital cleanup comment');
     const cleanupContent = cleanupBlock.split('} catch {}')[0];
-    assert.ok(cleanupContent.includes("synthData.state === 'spawning'"),
-      'should check for spawning state when retiring synthetics');
+    assert.ok(!cleanupContent.includes("synthData.state === 'spawning'"),
+      'must NOT require spawning state — tool propagation changes it before retirement');
+    assert.ok(cleanupContent.includes('!synthData.stopped'),
+      'should check !synthData.stopped to retire any non-stopped synthetic');
     assert.ok(cleanupContent.includes("stopped: true"),
       'should mark synthetic as stopped');
   });
@@ -2852,7 +2856,7 @@ describe('update-state.js -- subagent session detection (isKnownSubagent)', () =
     const cleanupContent = cleanupBlock.split('}\n    }')[0];
     assert.ok(
       cleanupContent.includes('for (let i = 0; i < subs.length'),
-      'synthetic cleanup should iterate forward to retire oldest spawning face first'
+      'synthetic cleanup should iterate forward to retire oldest face first'
     );
     assert.ok(
       !cleanupContent.includes('subs.length - 1; i >= 0; i--'),
