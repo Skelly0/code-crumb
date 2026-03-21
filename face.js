@@ -269,10 +269,11 @@ class ClaudeFace {
         this.particles.spawn(8, 'fire');
       }
       // Detail-driven particles for specific lifecycle events
-      if (newState === 'waiting' && (detail.includes('allow') || detail.includes('needs input'))) {
+      const d = detail || '';
+      if (newState === 'waiting' && (d.includes('allow') || d.includes('needs input'))) {
         this.particles.spawn(4, 'question');
       }
-      if (newState === 'thinking' && detail.includes('compacting')) {
+      if (newState === 'thinking' && d.includes('compacting')) {
         this.particles.spawn(6, 'rain');
       }
     } else {

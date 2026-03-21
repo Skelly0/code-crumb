@@ -663,8 +663,9 @@ process.stdin.on('end', () => {
     pruneFrequentFiles(stats.frequentFiles);
     writeStats(stats);
   } catch {
-    // JSON parse may fail for Stop/Notification events with empty or
-    // non-JSON stdin -- still write the correct state for the hook event.
+    // JSON parse may fail for events with empty or non-JSON stdin
+    // (e.g., Stop, Notification, lifecycle events) -- still write the
+    // correct state for the hook event.
     // Try to reuse the session ID from the global state file so we don't
     // create an orphan session file that appears as a phantom orbital.
     const originalFallbackId = process.env.CLAUDE_SESSION_ID || String(process.ppid);
