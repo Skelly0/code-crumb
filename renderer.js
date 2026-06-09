@@ -23,7 +23,7 @@ const {
 const { mouths, eyes, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { ClaudeFace } = require('./face');
-const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive } = require('./grid');
+const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartStatus } = require('./grid');
 const { SwapTransition } = require('./transition');
 
 // -- Config --------------------------------------------------------
@@ -180,6 +180,7 @@ function runUnifiedMode() {
   let lastEditorPid = 0;      // Validated (armed) PID of the editor process
   let candidatePid = 0;       // PID from the latest state write, pending validation
   let candidateSince = 0;     // When candidatePid was first seen
+  let candidateTs = 0;        // JSON timestamp of the write that reported the candidate
   let editorDead = false;     // Armed PID found dead — session presumed crashed
   let lastAppliedTimestamp = 0; // Dedup: skip re-applying state with same timestamp
   function checkState() {
@@ -198,11 +199,20 @@ function runUnifiedMode() {
         // is the long-lived editor/wrapper process and validates normally.
         if (candidatePid && candidatePid !== lastEditorPid
             && now - candidateSince > 2500) {
-          if (isProcessAlive(candidatePid)) {
-            lastEditorPid = candidatePid;
-            editorDead = false;
+          // Arm only if the process is alive AND its start time predates the
+          // write that reported it — a recycled PID must not arm and later
+          // trigger a false editorDead. While start time is still resolving,
+          // defer to the next forced read instead of arming blind.
+          if (_pidStartStatus(candidatePid) === 'pending'
+              && isProcessAlive(candidatePid)) {
+            requestPidStartTime(candidatePid); // keep resolution warm; retry next cycle
+          } else {
+            if (isOwnedByLiveProcess(candidatePid, candidateTs)) {
+              lastEditorPid = candidatePid;
+              editorDead = false;
+            }
+            candidatePid = 0;
           }
-          candidatePid = 0;
         }
         // PID liveness check: an armed editor process that died without
         // writing a Stop event (crash, kill) triggers the rescue cascade.
@@ -284,6 +294,7 @@ function runUnifiedMode() {
             && stateData.pid !== candidatePid) {
           candidatePid = stateData.pid;
           candidateSince = Date.now();
+          candidateTs = ts || Date.now();
         }
         // A write newer than anything we've applied proves the editor is
         // alive — overrides a false PID death (e.g. PID reuse).

@@ -2306,6 +2306,13 @@ describe('editor PID liveness tracking', () => {
     assert.ok(rendererSrc.includes('editorDead && ts > lastAppliedTimestamp'),
       'a fresh write should clear a false editorDead (PID reuse guard)');
   });
+
+  test('renderer arms candidate via start-time identity, not bare liveness', () => {
+    assert.ok(rendererSrc.includes('isOwnedByLiveProcess(candidatePid, candidateTs)'),
+      'arming must verify the candidate process predates the reporting write');
+    assert.ok(rendererSrc.includes('candidateTs = ts || Date.now()'),
+      'the reporting write timestamp must be captured with the candidate');
+  });
 });
 
 module.exports = { passed: () => passed, failed: () => failed };
