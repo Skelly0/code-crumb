@@ -1262,8 +1262,8 @@ describe('grid.js -- loadSessions mtime purge protects active faces (Bug #0)', (
       require('path').join(__dirname, '..', 'grid.js'), 'utf8'
     );
     assert.ok(
-      src.includes('isProcessAlive(this.pid)'),
-      'isStale should check PID liveness before falling back to timeout'
+      src.includes('isOwnedByLiveProcess(this.pid, this.lastUpdate)'),
+      'isStale should check PID ownership before falling back to timeout'
     );
   });
 
@@ -2214,10 +2214,10 @@ describe('grid.js -- completion-state face with live PID protected in file delet
     const src = fs.readFileSync(
       require('path').join(__dirname, '..', 'grid.js'), 'utf8'
     );
-    // The fix separates active non-completion (always protect) from completion with live PID
+    // The fix separates active non-completion (always protect) from completion with owning PID
     assert.ok(
-      src.includes('if (knownFace.pid && isProcessAlive(knownFace.pid)) continue;'),
-      'purge loop should check PID liveness for completion-state faces'
+      src.includes('if (knownFace.pid && isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)) continue;'),
+      'purge loop should check PID ownership for completion-state faces'
     );
   });
 });
@@ -3620,6 +3620,38 @@ describe('grid.js -- isOwnedByLiveProcess (PID identity gate)', () => {
     requestPidStartTime(7009, alive);
     // entry survives (not downgraded to pending) while refresh is queued
     assert.strictEqual(typeof _pidStartCache.get(7009).value, 'number');
+  });
+});
+
+describe('grid.js -- recycled-PID purge integration', () => {
+  test('isStale: recycled PID does not protect a quiet face', () => {
+    _pidStartCache.clear();
+    const face = new MiniFace('ghost');
+    face.state = 'coding';
+    face.lastUpdate = Date.now() - 5 * 24 * 3600 * 1000; // 5 days quiet
+    // Use our own (live) pid with an injected start time AFTER lastUpdate —
+    // simulates a recycled PID without needing to stub isProcessAlive.
+    face.pid = process.pid;
+    _pidStartCache.set(process.pid, { value: Date.now() - 1000, resolvedAt: Date.now() });
+    assert.strictEqual(face.isStale(), true); // not owner -> orphan timeout applies
+  });
+
+  test('isStale: owning PID still protects a quiet face', () => {
+    _pidStartCache.clear();
+    const face = new MiniFace('legit');
+    face.pid = process.pid;
+    face.state = 'coding';
+    face.lastUpdate = Date.now() - 5 * 60 * 1000; // 5 min quiet
+    _pidStartCache.set(process.pid, { value: face.lastUpdate - 3600 * 1000, resolvedAt: Date.now() });
+    assert.strictEqual(face.isStale(), false);
+  });
+
+  test('source: purge paths use isOwnedByLiveProcess, not bare isProcessAlive', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'grid.js'), 'utf8');
+    assert.ok(src.includes('isOwnedByLiveProcess(this.pid, this.lastUpdate)'), 'isStale gated');
+    assert.ok(src.includes('isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)'), 'face-pid purge gated');
+    assert.ok(src.includes('isOwnedByLiveProcess(face.pid, face.lastUpdate)'), 'keep-alive gated');
+    assert.ok(!src.includes('knownFace.pid && isProcessAlive(knownFace.pid)'), 'old face-pid call removed');
   });
 });
 

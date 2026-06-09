@@ -332,8 +332,9 @@ class MiniFace {
     if (this.stopped) {
       return Date.now() - this.stoppedAt > STOPPED_LINGER_MS;
     }
-    // Non-stopped: if owning process is alive, NEVER stale
-    if (this.pid && isProcessAlive(this.pid)) return false;
+    // Non-stopped: if the owning process is alive AND actually ours
+    // (start time predates our last write — recycled PIDs fail), never stale
+    if (this.pid && isOwnedByLiveProcess(this.pid, this.lastUpdate)) return false;
     // No pid or dead process: completion states get short timeout
     if (COMPLETION_STATES.has(this.state)) {
       return Date.now() - this.lastUpdate > STOPPED_LINGER_MS;
@@ -680,12 +681,12 @@ class OrbitalSystem {
           const knownFace = this.faces.get(faceId);
           if (knownFace && !knownFace.stopped) {
             if (!COMPLETION_STATES.has(knownFace.state)) continue;  // Active non-completion: always protect
-            if (knownFace.pid && isProcessAlive(knownFace.pid)) continue;  // Completion with live PID: protect
+            if (knownFace.pid && isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)) continue;  // Completion with owning PID: protect
           }
-          // No protecting face — check file PID before deleting
+          // No protecting face — check file PID identity before deleting
           try {
             const data = JSON.parse(fs.readFileSync(fp, 'utf8'));
-            if (data.pid && isProcessAlive(data.pid)) continue;
+            if (data.pid && isOwnedByLiveProcess(data.pid, data.timestamp || 0)) continue;
           } catch {
             continue; // Parse failure = mid-write race — protect the file
           }
@@ -713,6 +714,11 @@ class OrbitalSystem {
         const data = JSON.parse(raw);
         const id = data.session_id || path.basename(file, '.json');
 
+        // Keep start-time resolution warm for every session PID — on the
+        // renderer's synchronous boot scan this enqueues all PIDs at once,
+        // so one batched exec resolves them before the next purge cycle.
+        if (data.pid) requestPidStartTime(data.pid);
+
         // Skip the main session — it's the big face, not an orbital
         if (excludeId && id === excludeId) continue;
 
@@ -738,7 +744,7 @@ class OrbitalSystem {
     for (const [id, face] of this.faces) {
       if (!seenIds.has(id) || face.isStale()) {
         // File gone but process alive? Keep face — file may reappear on next hook write.
-        if (!seenIds.has(id) && !face.stopped && face.pid && isProcessAlive(face.pid)) continue;
+        if (!seenIds.has(id) && !face.stopped && face.pid && isOwnedByLiveProcess(face.pid, face.lastUpdate)) continue;
         this.faces.delete(id);
         // Don't delete session files here — the dedicated file stale purge above
         // handles cleanup with proper PID and face-state protection.
@@ -838,13 +844,13 @@ class OrbitalSystem {
             survivingResults.push(r); // Protected — active non-completion face
             continue;
           }
-          if (knownFace.pid && isProcessAlive(knownFace.pid)) {
-            survivingResults.push(r); // Protected — completion with live PID
+          if (knownFace.pid && isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)) {
+            survivingResults.push(r); // Protected — completion with owning PID
             continue;
           }
         }
-        if (r.data && r.data.pid && isProcessAlive(r.data.pid)) {
-          survivingResults.push(r); // Protected — process alive
+        if (r.data && r.data.pid && isOwnedByLiveProcess(r.data.pid, r.data.timestamp || r.mtimeMs)) {
+          survivingResults.push(r); // Protected — owning process alive
           continue;
         }
         // Stale and unprotected — delete asynchronously
@@ -865,6 +871,7 @@ class OrbitalSystem {
       }
 
       const id = r.data.session_id || path.basename(r.file, '.json');
+      if (r.data.pid) requestPidStartTime(r.data.pid); // keep start-time cache warm
       if (excludeId && id === excludeId) continue;
       seenIds.add(id);
 
@@ -882,7 +889,7 @@ class OrbitalSystem {
     for (const [id, face] of this.faces) {
       if (!seenIds.has(id) || face.isStale()) {
         // File gone but process alive? Keep face — file may reappear on next hook write.
-        if (!seenIds.has(id) && !face.stopped && face.pid && isProcessAlive(face.pid)) continue;
+        if (!seenIds.has(id) && !face.stopped && face.pid && isOwnedByLiveProcess(face.pid, face.lastUpdate)) continue;
         this.faces.delete(id);
         // Don't delete session files here — the dedicated file stale purge above
         // handles cleanup with proper PID and face-state protection.
