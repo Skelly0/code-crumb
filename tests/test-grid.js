@@ -6,7 +6,7 @@
 // +================================================================+
 
 const assert = require('assert');
-const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS } = require('../grid');
+const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS } = require('../grid');
 const { gridMouths, eyes, mouths } = require('../animations');
 const { PALETTES } = require('../themes');
 const { ParticleSystem } = require('../particles');
@@ -3540,6 +3540,86 @@ describe('MiniFace activity cycling', () => {
     // Next tick should NOT cycle because lastUpdate is fresh
     face.tick(100);
     assert.strictEqual(face.state, 'coding');
+  });
+});
+
+describe('grid.js -- isOwnedByLiveProcess (PID identity gate)', () => {
+  const alive = () => true;
+  const dead = () => false;
+
+  function setCache(pid, value, resolvedAt = Date.now()) {
+    _pidStartCache.set(pid, { value, resolvedAt });
+  }
+
+  test('dead process is never owner', () => {
+    _pidStartCache.clear();
+    setCache(7001, Date.now() - 99999999);
+    assert.strictEqual(isOwnedByLiveProcess(7001, Date.now(), dead), false);
+  });
+
+  test('pid 0 / 1 / missing is never owner', () => {
+    assert.strictEqual(isOwnedByLiveProcess(0, Date.now(), alive), false);
+    assert.strictEqual(isOwnedByLiveProcess(1, Date.now(), alive), false);
+    assert.strictEqual(isOwnedByLiveProcess(undefined, Date.now(), alive), false);
+  });
+
+  test('recycled PID (started after last write + slack) is not owner', () => {
+    _pidStartCache.clear();
+    const lastWrite = Date.now() - 5 * 24 * 3600 * 1000; // 5-day-old ghost
+    setCache(7002, Date.now() - 3600 * 1000); // process started 1h ago
+    assert.strictEqual(isOwnedByLiveProcess(7002, lastWrite, alive), false);
+  });
+
+  test('legit PID (started before last write) is owner', () => {
+    _pidStartCache.clear();
+    const lastWrite = Date.now();
+    setCache(7003, lastWrite - 3600 * 1000); // started 1h before the write
+    assert.strictEqual(isOwnedByLiveProcess(7003, lastWrite, alive), true);
+  });
+
+  test('start time within 1s slack after write still owns', () => {
+    _pidStartCache.clear();
+    const lastWrite = Date.now() - 10000;
+    setCache(7004, lastWrite + 900); // 0.9s after write — inside SLACK_MS
+    assert.strictEqual(isOwnedByLiveProcess(7004, lastWrite, alive), true);
+    setCache(7004, lastWrite + 1100); // 1.1s after — outside
+    assert.strictEqual(isOwnedByLiveProcess(7004, lastWrite, alive), false);
+  });
+
+  test('pending resolution protects (safe default)', () => {
+    _pidStartCache.clear();
+    setCache(7005, 'pending');
+    assert.strictEqual(isOwnedByLiveProcess(7005, Date.now() - 99999999, alive), true);
+  });
+
+  test('unknown-alive protects while alive (elevated editor semantics)', () => {
+    _pidStartCache.clear();
+    setCache(7006, 'unknown-alive');
+    assert.strictEqual(isOwnedByLiveProcess(7006, Date.now() - 99999999, alive), true);
+    assert.strictEqual(isOwnedByLiveProcess(7006, Date.now() - 99999999, dead), false);
+  });
+
+  test('unknown-nodata protects only within 1h cap', () => {
+    _pidStartCache.clear();
+    setCache(7007, 'unknown-nodata');
+    assert.strictEqual(isOwnedByLiveProcess(7007, Date.now() - 30 * 60 * 1000, alive), true);  // 30 min — capped window
+    assert.strictEqual(isOwnedByLiveProcess(7007, Date.now() - 2 * 3600 * 1000, alive), false); // 2 h — past cap
+  });
+
+  test('uncached pid resolves as pending-protected and enqueues', () => {
+    _pidStartCache.clear();
+    assert.strictEqual(isOwnedByLiveProcess(7008, Date.now(), alive), true);
+    assert.strictEqual(_pidStartStatus(7008), 'pending');
+  });
+
+  test('TTL: stale cache entry keeps protecting with old value but re-enqueues', () => {
+    _pidStartCache.clear();
+    const lastWrite = Date.now();
+    _pidStartCache.set(7009, { value: lastWrite - 1000, resolvedAt: Date.now() - 120000 }); // 2 min old entry
+    assert.strictEqual(isOwnedByLiveProcess(7009, lastWrite, alive), true); // old value still used
+    requestPidStartTime(7009, alive);
+    // entry survives (not downgraded to pending) while refresh is queued
+    assert.strictEqual(typeof _pidStartCache.get(7009).value, 'number');
   });
 });
 

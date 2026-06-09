@@ -80,6 +80,137 @@ function isProcessAlive(pid) {
   catch (err) { return err.code === 'EPERM'; } // EPERM = process exists, different owner
 }
 
+// -- PID identity (start-time) tracking ------------------------------
+// isProcessAlive proves *a* process exists, not *the* process — recycled
+// PIDs falsely protect dead sessions. A PID owns a session only if its
+// process started before the session's last write (+ slack).
+const SLACK_MS = 1000;                 // NTFS 1s mtime granularity + minor skew
+const PID_PROTECT_CAP_MS = 3600000;    // 1h cap when start time is unobtainable
+const PID_CACHE_TTL_MS = 60000;        // re-resolve to close live->live recycle gap
+
+// pid -> { value: epochMs | 'pending' | 'unknown-alive' | 'unknown-nodata', resolvedAt }
+const _pidStartCache = new Map();
+const _pidResolveQueue = new Set();
+let _pidExecInFlight = false;
+
+function _pidStartStatus(pid) {
+  const e = _pidStartCache.get(pid);
+  if (!e) return 'none';
+  return typeof e.value === 'number' ? 'known' : e.value;
+}
+
+// Enqueue a PID for background start-time resolution. Fresh entries are
+// left alone; TTL-expired entries keep their old value (still used by the
+// gate) while a refresh rides the next batch.
+function requestPidStartTime(pid, aliveFn = isProcessAlive) {
+  if (!pid || pid <= 1) return;
+  const now = Date.now();
+  const e = _pidStartCache.get(pid);
+  if (e && (e.value === 'pending' || now - e.resolvedAt < PID_CACHE_TTL_MS)) return;
+  if (!aliveFn(pid)) { _pidStartCache.delete(pid); return; }
+  if (!e) _pidStartCache.set(pid, { value: 'pending', resolvedAt: now });
+  _pidResolveQueue.add(pid);
+  _kickPidResolve();
+}
+
+// One outstanding exec at a time; queued PIDs ride the next batch.
+function _kickPidResolve() {
+  if (_pidExecInFlight || _pidResolveQueue.size === 0) return;
+  const pids = [..._pidResolveQueue];
+  _pidResolveQueue.clear();
+  _pidExecInFlight = true;
+  _resolvePidStartTimes(pids, (results) => {
+    const now = Date.now();
+    for (const pid of pids) {
+      if (!results) { _pidStartCache.set(pid, { value: 'unknown-nodata', resolvedAt: now }); continue; }
+      const v = results.get(pid);
+      if (v === undefined) _pidStartCache.delete(pid);        // absent from output = dead
+      else _pidStartCache.set(pid, { value: v, resolvedAt: now }); // epochMs or 'unknown-alive'
+    }
+    _pidExecInFlight = false;
+    if (_pidResolveQueue.size > 0) _kickPidResolve();
+  });
+}
+
+// Platform resolvers. callback(Map<pid, epochMs|'unknown-alive'> | null on exec failure).
+function _resolvePidStartTimes(pids, callback) {
+  if (process.platform === 'linux') {
+    const out = new Map();
+    try {
+      const uptimeSec = parseFloat(fs.readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
+      const bootEpochMs = Date.now() - uptimeSec * 1000;
+      const hz = 100; // USER_HZ is 100 on all mainstream kernels
+      for (const pid of pids) {
+        try {
+          const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+          // comm (field 2) may contain spaces/parens — split after the last ')'
+          const after = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+          const startJiffies = parseInt(after[19], 10); // stat field 22
+          if (!isNaN(startJiffies)) out.set(pid, bootEpochMs + (startJiffies / hz) * 1000);
+        } catch {} // ENOENT = dead (absent from results)
+      }
+      callback(out);
+    } catch { callback(null); }
+    return;
+  }
+  const { execFile } = require('child_process');
+  if (process.platform === 'win32') {
+    const psPath = path.join(process.env.SystemRoot || 'C:\\Windows',
+      'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    let exe = 'powershell';
+    try { if (fs.existsSync(psPath)) exe = psPath; } catch {}
+    // Per-PID error isolation: one dead PID must not poison the batch.
+    // Emits "<pid> <epochMs>" for readable processes, "<pid> EPERM" when
+    // StartTime is unreadable (elevated process), nothing when dead.
+    const script = `$ErrorActionPreference='SilentlyContinue';` +
+      `foreach($i in @(${pids.join(',')})){` +
+      `$p=Get-Process -Id $i -ErrorAction SilentlyContinue;` +
+      `if($p){ try { '{0} {1}' -f $i,[int64]($p.StartTime.ToUniversalTime() - [datetime]::new(1970,1,1,0,0,0,[DateTimeKind]::Utc)).TotalMilliseconds } catch { '{0} EPERM' -f $i } } }`;
+    execFile(exe, ['-NoProfile', '-NonInteractive', '-NoLogo', '-Command', script],
+      { windowsHide: true, timeout: 15000 }, (err, stdout) => {
+        if (err && !stdout) { callback(null); return; }
+        callback(_parsePidLines(stdout));
+      });
+    return;
+  }
+  // darwin: ps lstart with C locale for stable English date parsing
+  execFile('ps', ['-o', 'pid=,lstart=', '-p', pids.join(',')],
+    { env: { ...process.env, LC_ALL: 'C' }, timeout: 15000 }, (err, stdout) => {
+      if (err && !stdout) { callback(null); return; }
+      const out = new Map();
+      for (const line of String(stdout).split('\n')) {
+        const m = /^\s*(\d+)\s+(.+)$/.exec(line);
+        if (!m) continue;
+        const t = Date.parse(m[2]);
+        out.set(parseInt(m[1], 10), isNaN(t) ? 'unknown-alive' : t);
+      }
+      callback(out);
+    });
+}
+
+function _parsePidLines(stdout) {
+  const out = new Map();
+  for (const line of String(stdout).split('\n')) {
+    const m = /^\s*(\d+)\s+(EPERM|-?\d+)\s*$/.exec(line);
+    if (!m) continue;
+    out.set(parseInt(m[1], 10), m[2] === 'EPERM' ? 'unknown-alive' : parseInt(m[2], 10));
+  }
+  return out;
+}
+
+// The gate. Synchronous: start-time cache + a kill(0) probe — no exec,
+// never blocks. aliveFn is injectable for tests.
+function isOwnedByLiveProcess(pid, lastWriteMs, aliveFn = isProcessAlive) {
+  if (!pid || pid <= 1) return false;
+  if (!aliveFn(pid)) return false;
+  requestPidStartTime(pid, aliveFn);
+  const e = _pidStartCache.get(pid);
+  const value = e ? e.value : 'pending';
+  if (typeof value === 'number') return value <= (lastWriteMs || 0) + SLACK_MS;
+  if (value === 'pending' || value === 'unknown-alive') return true;
+  return Date.now() - (lastWriteMs || 0) < PID_PROTECT_CAP_MS; // 'unknown-nodata'
+}
+
 // -- MiniFace (compact, for grid) ----------------------------------
 class MiniFace {
   constructor(sessionId) {
@@ -1613,7 +1744,8 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
 
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
-  STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS,
+  isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus,
+  STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, SLACK_MS, PID_PROTECT_CAP_MS, PID_CACHE_TTL_MS,
   INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, GROUP_LABEL_BRIGHTNESS,
   CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS,
 };
