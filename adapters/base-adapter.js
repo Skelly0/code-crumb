@@ -28,8 +28,11 @@ const {
 
 // -- State file writing ------------------------------------------------
 
+// pid defaults to ppid (right for per-event processes like codex-notify,
+// whose parent is the editor); long-lived adapters override via extra.pid.
+// The renderer validates the PID before trusting it for liveness checks.
 function writeState(state, detail = '', extra = {}) {
-  const data = JSON.stringify({ state, detail, timestamp: Date.now(), ...extra });
+  const data = JSON.stringify({ state, detail, timestamp: Date.now(), pid: process.ppid, ...extra });
   try { fs.writeFileSync(STATE_FILE, data, { encoding: 'utf8', mode: 0o600 }); } catch {}
 }
 

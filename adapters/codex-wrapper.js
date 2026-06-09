@@ -36,7 +36,14 @@ const activeTools = new Map();
 const activeSubagents = [];
 
 function extra() {
-  return buildExtra(stats, sessionId, modelName);
+  // Unlike per-event hook processes, this wrapper is long-lived and exits
+  // with codex — its own pid is the session liveness proxy, not ppid.
+  return { ...buildExtra(stats, sessionId, modelName), pid: process.pid };
+}
+
+// Extra fields for synthetic subagent session writes (same pid reasoning).
+function subExtra(subId) {
+  return { sessionId: subId, modelName, cwd: '', parentSession: sessionId, pid: process.pid };
 }
 
 // -- JSONL Event Processor -------------------------------------------
@@ -74,9 +81,7 @@ function handleEvent(event) {
         const subId = `${sessionId}-sub-${Date.now()}`;
         const desc = toolInput?.description || toolInput?.prompt || '';
         const shortDesc = desc.length > 30 ? desc.slice(0, 27) + '...' : desc;
-        writeSessionState(subId, 'thinking', shortDesc || detail, false, {
-          sessionId: subId, modelName, cwd: '', parentSession: sessionId,
-        });
+        writeSessionState(subId, 'thinking', shortDesc || detail, false, subExtra(subId));
         activeSubagents.push({ subId, toolName, itemId: item.id });
 
         // Override main state to 'subagent'
@@ -87,9 +92,7 @@ function handleEvent(event) {
       } else if (activeSubagents.length > 0) {
         // Redirect non-subagent tool state to latest synthetic session
         const latest = activeSubagents[activeSubagents.length - 1];
-        writeSessionState(latest.subId, state, detail, false, {
-          sessionId: latest.subId, modelName, cwd: '', parentSession: sessionId,
-        });
+        writeSessionState(latest.subId, state, detail, false, subExtra(latest.subId));
 
         // Keep main state as 'subagent'
         const subDetail = `conducting ${activeSubagents.length}`;
@@ -120,9 +123,7 @@ function handleEvent(event) {
       if (SUBAGENT_TOOLS.test(toolName) && activeSubagents.length > 0) {
         // Remove oldest subagent (FIFO)
         const removed = activeSubagents.shift();
-        writeSessionState(removed.subId, result.state, result.detail, true, {
-          sessionId: removed.subId, modelName, cwd: '', parentSession: sessionId,
-        });
+        writeSessionState(removed.subId, result.state, result.detail, true, subExtra(removed.subId));
 
         if (activeSubagents.length > 0) {
           const subDetail = `conducting ${activeSubagents.length}`;
@@ -135,9 +136,7 @@ function handleEvent(event) {
       } else if (activeSubagents.length > 0) {
         // Redirect completed tool state to latest synthetic session
         const latest = activeSubagents[activeSubagents.length - 1];
-        writeSessionState(latest.subId, result.state, result.detail, false, {
-          sessionId: latest.subId, modelName, cwd: '', parentSession: sessionId,
-        });
+        writeSessionState(latest.subId, result.state, result.detail, false, subExtra(latest.subId));
 
         // Keep main state as 'subagent'
         const subDetail = `conducting ${activeSubagents.length}`;
@@ -156,9 +155,7 @@ function handleEvent(event) {
       // Clean up all remaining synthetic subagent sessions
       while (activeSubagents.length > 0) {
         const removed = activeSubagents.shift();
-        writeSessionState(removed.subId, 'happy', 'all done!', true, {
-          sessionId: removed.subId, modelName, cwd: '', parentSession: sessionId,
-        });
+        writeSessionState(removed.subId, 'happy', 'all done!', true, subExtra(removed.subId));
       }
       guardedWriteState(sessionId, 'happy', 'all done!', extra());
       writeSessionState(sessionId, 'happy', 'all done!', true, extra());
@@ -217,9 +214,7 @@ codex.on('exit', (code) => {
   // Clean up any remaining synthetic subagent sessions
   while (activeSubagents.length > 0) {
     const removed = activeSubagents.shift();
-    writeSessionState(removed.subId, 'happy', 'codex finished', true, {
-      sessionId: removed.subId, modelName, cwd: '', parentSession: sessionId,
-    });
+    writeSessionState(removed.subId, 'happy', 'codex finished', true, subExtra(removed.subId));
   }
   guardedWriteState(sessionId, 'happy', 'codex finished', extra());
   writeSessionState(sessionId, 'happy', 'codex finished', true, extra());

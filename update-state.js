@@ -30,8 +30,10 @@ const hookEvent = process.argv[2] || '';
 // -- File I/O --------------------------------------------------------
 
 // Write to the single state file (backward compat with renderer.js)
+// pid is the hook's parent — the editor on Unix, a transient shell shim on
+// Windows; the renderer validates it before trusting it for liveness checks.
 function writeState(state, detail = '', extra = {}) {
-  const data = JSON.stringify({ state, detail, timestamp: Date.now(), ...extra });
+  const data = JSON.stringify({ state, detail, timestamp: Date.now(), pid: process.ppid, ...extra });
   try {
     fs.writeFileSync(STATE_FILE, data, { encoding: 'utf8', mode: 0o600 });
   } catch {

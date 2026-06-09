@@ -2213,4 +2213,99 @@ describe('adapters -- adapter files all exist', () => {
   }
 });
 
+// -- editor PID liveness tracking ---------------------------------------
+// The global state file carries the writer's parent PID so the renderer can
+// detect a crashed editor. The renderer must validate the PID (transient
+// cmd.exe shims on Windows die instantly) and keep death detection in a
+// sticky flag — not lastStopped, which every forced re-read overwrites.
+
+describe('editor PID liveness tracking', () => {
+  const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+  const updateStateSrc = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
+
+  test('codex-notify writes parent PID to global state file', () => {
+    const { tmp, stateFile, env } = makeTempEnv('pid-1');
+    const event = { type: 'agent-turn-complete', 'thread-id': 'pid-1' };
+    try {
+      execFileSync(NODE, [path.join(ADAPTERS_DIR, 'codex-notify.js'), JSON.stringify(event)], {
+        env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+    const state = readJSON(stateFile);
+    // The adapter is our direct child, so its ppid is this test process
+    assert.strictEqual(state.pid, process.pid,
+      `state.pid should be the parent process (${process.pid}), got ${state.pid}`);
+    cleanup(tmp);
+  });
+
+  test('update-state.js writes parent PID to global state file', () => {
+    const { tmp, stateFile, env } = makeTempEnv('pid-2');
+    const input = JSON.stringify({
+      session_id: 'pid-2',
+      tool_name: 'Read',
+      tool_input: { file_path: '/tmp/x.js' },
+    });
+    try {
+      execFileSync(NODE, [path.join(__dirname, '..', 'update-state.js'), 'PreToolUse'], {
+        input, env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.pid, process.pid,
+      `state.pid should be the parent process (${process.pid}), got ${state.pid}`);
+    cleanup(tmp);
+  });
+
+  test('update-state.js writeState adds pid in the function, not at call sites', () => {
+    assert.ok(
+      updateStateSrc.includes('timestamp: Date.now(), pid: process.ppid, ...extra'),
+      'writeState should include pid: process.ppid before ...extra'
+    );
+    assert.ok(
+      !updateStateSrc.includes('{ pid: process.ppid }'),
+      'no call site should pass pid manually'
+    );
+  });
+
+  test('codex-wrapper reports its own pid (long-lived, exits with codex)', () => {
+    const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'codex-wrapper.js'), 'utf8');
+    assert.ok(src.includes('pid: process.pid'),
+      'codex-wrapper should override pid with process.pid');
+  });
+
+  test('renderer readState returns pid field', () => {
+    assert.ok(rendererSrc.includes('pid: data.pid || 0'),
+      'readState should propagate the pid field');
+  });
+
+  test('renderer keeps PID death in sticky editorDead flag, not lastStopped', () => {
+    // Bug: setting lastStopped=true on PID death was clobbered by the forced
+    // re-read in the same tick (lastStopped = !!stateData.stopped), making
+    // the rescue a no-op. Death must live in its own flag.
+    assert.ok(rendererSrc.includes('editorDead = true'),
+      'PID death should set editorDead');
+    assert.ok(rendererSrc.includes('(lastStopped || editorDead) && !RESCUE_EXCLUDE.has(face.state)'),
+      'rescue block should fire on lastStopped OR editorDead');
+    assert.ok(rendererSrc.includes('!lastStopped && !editorDead'),
+      'sessionActive should account for editorDead');
+    assert.ok(!rendererSrc.match(/isProcessAlive\(lastEditorPid\)\)\s*\{\s*lastStopped = true/),
+      'PID death must not be stored in lastStopped (clobbered by forced re-read)');
+  });
+
+  test('renderer validates candidate PIDs before arming (transient shim guard)', () => {
+    // Windows hooks report a transient cmd.exe shim as ppid — a PID is only
+    // trusted if it is still alive 2.5s after it was first seen in a write.
+    assert.ok(rendererSrc.includes('candidateSince > 2500'),
+      'candidate PID should require a 2.5s survival window');
+    assert.ok(rendererSrc.includes('isProcessAlive(candidatePid)'),
+      'candidate PID should be liveness-checked before arming');
+    assert.ok(rendererSrc.includes('editorDead && ts > lastAppliedTimestamp'),
+      'a fresh write should clear a false editorDead (PID reuse guard)');
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

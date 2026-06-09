@@ -23,7 +23,7 @@ const {
 const { mouths, eyes, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { ClaudeFace } = require('./face');
-const { MiniFace, OrbitalSystem, renderSessionList } = require('./grid');
+const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive } = require('./grid');
 const { SwapTransition } = require('./transition');
 
 // -- Config --------------------------------------------------------
@@ -75,6 +75,7 @@ function readState() {
       isSessionStart: data.isSessionStart || false,
       workState: data.workState || null,
       workDetail: data.workDetail || '',
+      pid: data.pid || 0,
     };
   } catch {
     return { state: 'idle', detail: '' };
@@ -176,6 +177,10 @@ function runUnifiedMode() {
   let lastFileState = 'idle'; // Track the last state written to the file by hooks
   let lastStopped = false;    // Track if Stop hook has fired (session ended)
   let lastForceReadTime = 0;  // Track periodic forced re-reads (bypasses mtime race)
+  let lastEditorPid = 0;      // Validated (armed) PID of the editor process
+  let candidatePid = 0;       // PID from the latest state write, pending validation
+  let candidateSince = 0;     // When candidatePid was first seen
+  let editorDead = false;     // Armed PID found dead — session presumed crashed
   let lastAppliedTimestamp = 0; // Dedup: skip re-applying state with same timestamp
   function checkState() {
     const now = Date.now();
@@ -184,6 +189,29 @@ function runUnifiedMode() {
       const stat = fs.statSync(STATE_FILE);
       // Every 2s, bypass mtime check to eliminate NTFS 1-second mtime race
       const forceRead = (now - lastForceReadTime > 2000);
+      if (forceRead) {
+        // Arm a candidate PID only if it's still alive 2.5s after first
+        // sighting. On Windows the hook's ppid is a transient cmd.exe shim
+        // (dead within ms) — those never validate, so PID rescue silently
+        // self-disables and the staleness timeouts below remain the fallback.
+        // On Unix (sh -c execs) and for the codex adapters, the reported PID
+        // is the long-lived editor/wrapper process and validates normally.
+        if (candidatePid && candidatePid !== lastEditorPid
+            && now - candidateSince > 2500) {
+          if (isProcessAlive(candidatePid)) {
+            lastEditorPid = candidatePid;
+            editorDead = false;
+          }
+          candidatePid = 0;
+        }
+        // PID liveness check: an armed editor process that died without
+        // writing a Stop event (crash, kill) triggers the rescue cascade.
+        if (lastEditorPid && !editorDead && !lastStopped && !RESCUE_EXCLUDE.has(face.state)) {
+          if (!isProcessAlive(lastEditorPid)) {
+            editorDead = true;
+          }
+        }
+      }
       if (stat.mtimeMs > lastMtime || forceRead) {
         if (forceRead) lastForceReadTime = now;
         lastMtime = stat.mtimeMs;
@@ -228,15 +256,20 @@ function runUnifiedMode() {
           if (pinnedSessionId && pinnedSessionId === mainSessionId) {
             return;
           }
-          // Adopt as new main only if old main session ended, is very stale,
-          // or a new session is explicitly starting (SessionStart hook)
-          if (lastStopped || Date.now() - lastMainUpdate > 120000
+          // Adopt as new main only if old main session ended (stopped or its
+          // editor process died), is very stale, or a new session is
+          // explicitly starting (SessionStart hook)
+          if (lastStopped || editorDead || Date.now() - lastMainUpdate > 120000
               || stateData.isSessionStart === true) {
             if (!swapTransition.active) {
               swapTransition.start(mainSessionId, incomingId);
             }
             // Actual swap happens on the 'swap' frame in the render loop
             lastStopped = false;
+            // New editor session — drop PID tracking from the old one
+            lastEditorPid = 0;
+            candidatePid = 0;
+            editorDead = false;
           } else {
             return; // Ignore — this is a subagent writing to the state file
           }
@@ -245,6 +278,16 @@ function runUnifiedMode() {
         lastMainUpdate = Date.now();
         lastFileState = stateData.state;
         lastStopped = !!stateData.stopped;
+        // Track the writer's PID as a validation candidate (same PID repeated
+        // keeps its original sighting time so it can pass the 2.5s window).
+        if (stateData.pid && stateData.pid !== lastEditorPid
+            && stateData.pid !== candidatePid) {
+          candidatePid = stateData.pid;
+          candidateSince = Date.now();
+        }
+        // A write newer than anything we've applied proves the editor is
+        // alive — overrides a false PID death (e.g. PID reuse).
+        if (editorDead && ts > lastAppliedTimestamp) editorDead = false;
 
         // Don't apply incoming state while a swap transition is animating —
         // the face should dissolve with its current state until the swap frame.
@@ -281,7 +324,7 @@ function runUnifiedMode() {
     // We bypass setState() here to avoid it re-buffering the state.
     // Completion states (happy/satisfied/proud/relieved) are excluded — they
     // already transition to idle via the linger path with sessionActive=false.
-    if (lastStopped && !RESCUE_EXCLUDE.has(face.state)) {
+    if ((lastStopped || editorDead) && !RESCUE_EXCLUDE.has(face.state)) {
       face.prevState = face.state;
       face.state = 'responding';
       face.transitionFrame = 0;
@@ -336,13 +379,14 @@ function runUnifiedMode() {
 
     const completionLinger = COMPLETION_LINGER[face.state];
     // Session is active until Stop hook fires (writes stopped: true)
-    const sessionActive = !lastStopped;
+    // or the armed editor PID is found dead
+    const sessionActive = !lastStopped && !editorDead;
 
     // Auto-transition: starting → idle after min display
     if (face.state === 'starting' && now - face.lastStateChange > 2500) {
       face.setState('idle');
     // Auto-transition: responding → happy after min display (Stop already fired)
-    } else if (face.state === 'responding' && lastStopped && now >= face.minDisplayUntil) {
+    } else if (face.state === 'responding' && (lastStopped || editorDead) && now >= face.minDisplayUntil) {
       face.setState('happy');
     } else if (completionLinger && now - face.lastStateChange > completionLinger) {
       face.setState(sessionActive ? 'thinking' : 'idle');
