@@ -203,6 +203,13 @@ function _parsePidLines(stdout) {
 
 // The gate. Synchronous: start-time cache + a kill(0) probe — no exec,
 // never blocks. aliveFn is injectable for tests.
+// Unknown start times ('unknown-alive': process present but StartTime is
+// Access-Denied, e.g. crashpad_handler holding a recycled PID; or
+// 'unknown-nodata': no exec capability) protect only up to the 1h cap.
+// A real elevated editor refreshes lastWriteMs with every hook and its
+// orbital reappears on the next write after an idle gap; an uncapped
+// protect-while-alive would instead immortalize ghosts whose PIDs were
+// recycled onto protected system processes (observed live: ghost 44240).
 function isOwnedByLiveProcess(pid, lastWriteMs, aliveFn = isProcessAlive) {
   if (!pid || pid <= 1) return false;
   if (!aliveFn(pid)) return false;
@@ -210,8 +217,8 @@ function isOwnedByLiveProcess(pid, lastWriteMs, aliveFn = isProcessAlive) {
   const e = _pidStartCache.get(pid);
   const value = e ? e.value : 'pending';
   if (typeof value === 'number') return value <= (lastWriteMs || 0) + SLACK_MS;
-  if (value === 'pending' || value === 'unknown-alive') return true;
-  return Date.now() - (lastWriteMs || 0) < PID_PROTECT_CAP_MS; // 'unknown-nodata'
+  if (value === 'pending') return true;
+  return Date.now() - (lastWriteMs || 0) < PID_PROTECT_CAP_MS; // both unknowns
 }
 
 // -- MiniFace (compact, for grid) ----------------------------------

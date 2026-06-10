@@ -3592,11 +3592,15 @@ describe('grid.js -- isOwnedByLiveProcess (PID identity gate)', () => {
     assert.strictEqual(isOwnedByLiveProcess(7005, Date.now() - 99999999, alive), true);
   });
 
-  test('unknown-alive protects while alive (elevated editor semantics)', () => {
+  test('unknown-alive protects only within 1h cap (recycled-onto-protected ghosts purge)', () => {
     _pidStartCache.clear();
     setCache(7006, 'unknown-alive');
-    assert.strictEqual(isOwnedByLiveProcess(7006, Date.now() - 99999999, alive), true);
-    assert.strictEqual(isOwnedByLiveProcess(7006, Date.now() - 99999999, dead), false);
+    // Recent write + unreadable StartTime (elevated editor): protected
+    assert.strictEqual(isOwnedByLiveProcess(7006, Date.now() - 30 * 60 * 1000, alive), true);
+    // Ancient write + unreadable StartTime (ghost PID recycled onto a
+    // protected system process, e.g. crashpad_handler): must purge
+    assert.strictEqual(isOwnedByLiveProcess(7006, Date.now() - 99999999, alive), false);
+    assert.strictEqual(isOwnedByLiveProcess(7006, Date.now(), dead), false);
   });
 
   test('unknown-nodata protects only within 1h cap', () => {
