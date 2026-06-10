@@ -2356,4 +2356,209 @@ describe('adapters -- editor provenance field', () => {
   });
 });
 
+// -- update-state.js parallel session classification (#134) -----------
+// Parallel top-level editor windows were misclassified as subagents of
+// whichever session owned stats.session while it had active subagents:
+// stamped with a sticky parentSession, blocked from global state, and
+// falsely retiring the real subagent's synthetic orbital.
+
+describe('update-state -- parallel sessions vs subagents (#134)', () => {
+  const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
+
+  function runUpdateState(event, inputObj, env) {
+    try {
+      execFileSync(NODE, [UPDATE_STATE, event], {
+        input: JSON.stringify(inputObj),
+        env,
+        timeout: 10000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+  }
+
+  // Stats blob for an owner session conducting one subagent
+  function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
+    return {
+      streak: 0, bestStreak: 0, brokenStreak: 0, brokenStreakAt: 0,
+      totalToolCalls: 5, totalErrors: 0,
+      records: { longestSession: 0, mostSubagents: 1, mostFilesEdited: 0 },
+      session: {
+        id: ownerId, start: Date.now() - 60000, toolCalls: 5, filesEdited: [],
+        subagentCount: 1, commitCount: 0,
+        activeSubagents: [{
+          id: subId, description: 'real task', taskDescription: 'real task',
+          model: 'haiku', editor: 'claude', startedAt: subStartedAt,
+        }],
+      },
+      recentMilestone: null,
+      daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
+      frequentFiles: {},
+      topLevelSessions,
+    };
+  }
+
+  function seedSyntheticOrbital(sessionsDir, subId, ownerId) {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(path.join(sessionsDir, `${subId}.json`), JSON.stringify({
+      session_id: subId, state: 'spawning', detail: 'real task',
+      timestamp: Date.now(), stopped: false,
+      parentSession: ownerId, taskDescription: 'real task', modelName: 'haiku',
+    }), 'utf8');
+  }
+
+  test('registered parallel window is NOT stamped as subagent', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('par-reg-1');
+    seedSyntheticOrbital(sessionsDir, 'owner-1-sub-1', 'owner-1');
+    fs.writeFileSync(statsFile, JSON.stringify(conductingStats(
+      'owner-1', 'owner-1-sub-1', Date.now() - 1000,
+      { 'par-reg-1': Date.now() })), 'utf8');
+
+    runUpdateState('PreToolUse', {
+      session_id: 'par-reg-1', tool_name: 'Bash', tool_input: { command: 'ls' },
+    }, env);
+
+    const session = readJSON(path.join(sessionsDir, 'par-reg-1.json'));
+    assert.strictEqual(session.parentSession, undefined,
+      'parallel window must not get a parentSession stamp');
+    assert.strictEqual(session.taskDescription, undefined,
+      'parallel window must not steal the subagent taskDescription');
+    assert.strictEqual(session.state, 'executing',
+      "parallel window shows its own tool state, not 'subagent' conducting");
+    const synth = readJSON(path.join(sessionsDir, 'owner-1-sub-1.json'));
+    assert.strictEqual(synth.stopped, false,
+      'real subagent synthetic must not be retired by an unrelated session');
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.session.id, 'owner-1',
+      'parallel window must not steal stats.session from the conductor');
+    assert.strictEqual(stats.session.toolCalls, 5,
+      "parallel window must not inflate the owner's toolCalls");
+    cleanup(tmp);
+  });
+
+  test('unregistered session whose file predates the subagent is parallel', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('par-born-1');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    // Session file exists NOW; the subagent "starts" 60s in the future,
+    // so the file provably predates it (birthtime check).
+    fs.writeFileSync(path.join(sessionsDir, 'par-born-1.json'), JSON.stringify({
+      session_id: 'par-born-1', state: 'idle', timestamp: Date.now(), stopped: false,
+    }), 'utf8');
+    seedSyntheticOrbital(sessionsDir, 'owner-1-sub-1', 'owner-1');
+    fs.writeFileSync(statsFile, JSON.stringify(conductingStats(
+      'owner-1', 'owner-1-sub-1', Date.now() + 60000)), 'utf8');
+
+    runUpdateState('PreToolUse', {
+      session_id: 'par-born-1', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    }, env);
+
+    const session = readJSON(path.join(sessionsDir, 'par-born-1.json'));
+    assert.strictEqual(session.parentSession, undefined,
+      'pre-existing session file proves the session is not the new subagent');
+    cleanup(tmp);
+  });
+
+  test('unknown new session is still classified as subagent (regression)', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('real-sub-1');
+    seedSyntheticOrbital(sessionsDir, 'owner-1-sub-1', 'owner-1');
+    fs.writeFileSync(statsFile, JSON.stringify(conductingStats(
+      'owner-1', 'owner-1-sub-1', Date.now() - 1000)), 'utf8');
+
+    runUpdateState('PreToolUse', {
+      session_id: 'real-sub-1', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    }, env);
+
+    const session = readJSON(path.join(sessionsDir, 'real-sub-1.json'));
+    assert.strictEqual(session.parentSession, 'owner-1',
+      'real subagent keeps the parentSession stamp');
+    assert.strictEqual(session.taskDescription, 'real task',
+      'real subagent inherits the synthetic taskDescription');
+    const synth = readJSON(path.join(sessionsDir, 'owner-1-sub-1.json'));
+    assert.strictEqual(synth.stopped, true,
+      'synthetic orbital is retired on the real subagent first contact');
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.session.id, 'owner-1', 'owner keeps stats.session');
+    assert.strictEqual(stats.session.toolCalls, 5, 'subagent does not inflate toolCalls');
+    cleanup(tmp);
+  });
+
+  test('healing: registered window with stale stamp gets it stripped', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('heal-1');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(path.join(sessionsDir, 'heal-1.json'), JSON.stringify({
+      session_id: 'heal-1', state: 'idle', timestamp: Date.now(), stopped: false,
+      parentSession: 'owner-1', taskDescription: 'subagent',
+    }), 'utf8');
+    seedSyntheticOrbital(sessionsDir, 'owner-1-sub-1', 'owner-1');
+    fs.writeFileSync(statsFile, JSON.stringify(conductingStats(
+      'owner-1', 'owner-1-sub-1', Date.now() - 1000,
+      { 'heal-1': Date.now() })), 'utf8');
+
+    runUpdateState('PreToolUse', {
+      session_id: 'heal-1', tool_name: 'Bash', tool_input: { command: 'ls' },
+    }, env);
+
+    const session = readJSON(path.join(sessionsDir, 'heal-1.json'));
+    assert.strictEqual(session.parentSession, undefined, 'stale parentSession stripped');
+    assert.strictEqual(session.taskDescription, undefined, 'stale taskDescription stripped');
+    cleanup(tmp);
+  });
+
+  test('healing: stats owner with stale stamp gets it stripped (no subagents)', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('heal-own-1');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(path.join(sessionsDir, 'heal-own-1.json'), JSON.stringify({
+      session_id: 'heal-own-1', state: 'idle', timestamp: Date.now(), stopped: false,
+      parentSession: 'ghost-parent', taskDescription: 'subagent',
+    }), 'utf8');
+    const stats = conductingStats('heal-own-1', 'unused', Date.now());
+    stats.session.activeSubagents = [];
+    fs.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+
+    runUpdateState('PreToolUse', {
+      session_id: 'heal-own-1', tool_name: 'Bash', tool_input: { command: 'ls' },
+    }, env);
+
+    const session = readJSON(path.join(sessionsDir, 'heal-own-1.json'));
+    assert.strictEqual(session.parentSession, undefined, 'owner cannot be a subagent');
+    assert.strictEqual(session.taskDescription, undefined, 'stale taskDescription stripped');
+    cleanup(tmp);
+  });
+
+  test('healing spares teammates -- their fields are legitimately set', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('mate-1');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(path.join(sessionsDir, 'mate-1.json'), JSON.stringify({
+      session_id: 'mate-1', state: 'idle', timestamp: Date.now(), stopped: false,
+      isTeammate: true, teammateName: 'alice', taskDescription: 'fix tests',
+    }), 'utf8');
+    const stats = conductingStats('mate-1', 'unused', Date.now());
+    stats.session.activeSubagents = [];
+    fs.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+
+    runUpdateState('PreToolUse', {
+      session_id: 'mate-1', tool_name: 'Bash', tool_input: { command: 'ls' },
+    }, env);
+
+    const session = readJSON(path.join(sessionsDir, 'mate-1.json'));
+    assert.strictEqual(session.isTeammate, true, 'isTeammate preserved');
+    assert.strictEqual(session.taskDescription, 'fix tests',
+      'teammate taskDescription must survive healing');
+    cleanup(tmp);
+  });
+
+  test('SessionStart registers the session in topLevelSessions', () => {
+    const { tmp, statsFile, env } = makeTempEnv('reg-go-1');
+
+    runUpdateState('SessionStart', { session_id: 'reg-go-1' }, env);
+
+    const stats = readJSON(statsFile);
+    assert.ok(stats.topLevelSessions, 'registry exists in stats');
+    assert.strictEqual(typeof stats.topLevelSessions['reg-go-1'], 'number',
+      'SessionStart records the session id with a timestamp');
+    cleanup(tmp);
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

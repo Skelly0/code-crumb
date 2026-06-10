@@ -515,6 +515,7 @@ function defaultStats() {
     recentMilestone: null,
     daily: { date: '', sessionCount: 0, cumulativeMs: 0 },
     frequentFiles: {},
+    topLevelSessions: {},
   };
 }
 
@@ -534,6 +535,50 @@ function buildSubagentSessionState(existing, sub, parentSessionId, defaultCwd) {
     parentSession: parentSessionId,
     taskDescription: existing.taskDescription || sub.taskDescription || sub.description,
   };
+}
+
+// -- Parallel Session Classification (pure logic) -------------------------
+
+// Registry limits for stats.topLevelSessions ({ sessionId: lastSeenMs }).
+const TOP_LEVEL_REGISTRY_MAX = 200;
+const TOP_LEVEL_REGISTRY_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+// Decide whether a foreign session (id differs from the stats owner) seen
+// while the owner has active subagents is a real subagent or an unrelated
+// parallel top-level session (#134).
+//   registryHit            session fired SessionStart (in stats.topLevelSessions)
+//   fileBornAt             birthtime of the session's own file (null/0 = unknown)
+//   earliestSubagentStart  startedAt of the oldest active subagent
+// A real subagent's session file is created by its own first hook, which can
+// only fire after SubagentStart — so a file born before the earliest active
+// subagent spawned proves the session is an independent parallel one.
+// Unknown birthtime (unsupported filesystem) falls back to 'subagent', the
+// pre-fix behavior, so real subagent grouping never regresses.
+function classifyForeignSession({ registryHit, fileBornAt, earliestSubagentStart }) {
+  if (registryHit) return 'parallel';
+  if (typeof fileBornAt === 'number' && fileBornAt > 0 &&
+      typeof earliestSubagentStart === 'number' && earliestSubagentStart > 0 &&
+      fileBornAt < earliestSubagentStart) {
+    return 'parallel';
+  }
+  return 'subagent';
+}
+
+// Prune the top-level session registry in place: drop entries older than the
+// TTL, then oldest-first down to the cap. Returns the registry.
+function pruneTopLevelSessions(registry, now) {
+  if (!registry) return registry;
+  for (const id of Object.keys(registry)) {
+    if (now - registry[id] > TOP_LEVEL_REGISTRY_TTL_MS) delete registry[id];
+  }
+  const ids = Object.keys(registry);
+  if (ids.length > TOP_LEVEL_REGISTRY_MAX) {
+    ids.sort((a, b) => registry[a] - registry[b]);
+    for (const id of ids.slice(0, ids.length - TOP_LEVEL_REGISTRY_MAX)) {
+      delete registry[id];
+    }
+  }
+  return registry;
 }
 
 module.exports = {
@@ -563,4 +608,8 @@ module.exports = {
   pruneFrequentFiles,
   topFrequentFiles,
   buildSubagentSessionState,
+  classifyForeignSession,
+  pruneTopLevelSessions,
+  TOP_LEVEL_REGISTRY_MAX,
+  TOP_LEVEL_REGISTRY_TTL_MS,
 };

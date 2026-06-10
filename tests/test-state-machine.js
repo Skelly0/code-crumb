@@ -33,6 +33,10 @@ const {
   pruneFrequentFiles,
   topFrequentFiles,
   buildSubagentSessionState,
+  classifyForeignSession,
+  pruneTopLevelSessions,
+  TOP_LEVEL_REGISTRY_MAX,
+  TOP_LEVEL_REGISTRY_TTL_MS,
 } = require('../state-machine');
 
 let passed = 0;
@@ -2727,11 +2731,11 @@ describe('update-state.js -- subagent session detection (isKnownSubagent)', () =
     assert.ok(src.includes("'SubagentStop'"), 'LIFECYCLE_EVENTS should contain SubagentStop');
   });
 
-  test('session reset is skipped when isKnownSubagent', () => {
+  test('session reset is skipped when isKnownSubagent or isParallelSession', () => {
     const src = readSrc();
     assert.ok(
-      src.includes('stats.session.id !== sessionId && !isKnownSubagent) {'),
-      'session reset condition should include !isKnownSubagent guard'
+      src.includes('stats.session.id !== sessionId && !isKnownSubagent && !isParallelSession) {'),
+      'session reset condition should include !isKnownSubagent and !isParallelSession guards'
     );
   });
 
@@ -2805,8 +2809,8 @@ describe('update-state.js -- subagent session detection (isKnownSubagent)', () =
       'Stop handler must guard session duration tracking with !isKnownSubagent'
     );
     assert.ok(
-      stopContent.includes('!isKnownSubagent && (stats.session.filesEdited'),
-      'Stop handler must guard filesEdited record with !isKnownSubagent'
+      stopContent.includes('!isKnownSubagent && !isParallelSession && (stats.session.filesEdited'),
+      'Stop handler must guard filesEdited record with !isKnownSubagent and !isParallelSession'
     );
   });
 
@@ -2814,11 +2818,11 @@ describe('update-state.js -- subagent session detection (isKnownSubagent)', () =
     const src = readSrc();
     const preBlock = src.split("hookEvent === 'PreToolUse'")[1];
     const preContent = preBlock.split("hookEvent === 'PostToolUse'")[0];
-    // toolCalls and totalToolCalls should be inside a !isKnownSubagent guard
+    // toolCalls and totalToolCalls should be inside the owner-only guard
     assert.ok(
-      preContent.includes('if (!isKnownSubagent) {') &&
+      preContent.includes('if (!isKnownSubagent && !isParallelSession) {') &&
       preContent.includes('stats.session.toolCalls++'),
-      'PreToolUse must guard toolCalls increment with !isKnownSubagent'
+      'PreToolUse must guard toolCalls increment with !isKnownSubagent and !isParallelSession'
     );
   });
 
@@ -3091,6 +3095,132 @@ describe('state-machine -- buildSubagentSessionState editor field', () => {
     assert.strictEqual(a.editor, 'claude');
     const b = buildSubagentSessionState({}, { id: 's1', description: 'd' }, 'p', '/tmp');
     assert.strictEqual(b.editor, '');
+  });
+});
+
+// -- classifyForeignSession / pruneTopLevelSessions (#134) -----------------
+
+describe('state-machine.js -- classifyForeignSession (#134)', () => {
+  test('registry hit → parallel regardless of file age', () => {
+    assert.strictEqual(classifyForeignSession({
+      registryHit: true, fileBornAt: null, earliestSubagentStart: 1000,
+    }), 'parallel');
+    assert.strictEqual(classifyForeignSession({
+      registryHit: true, fileBornAt: 5000, earliestSubagentStart: 1000,
+    }), 'parallel');
+  });
+
+  test('session file born before earliest subagent → parallel', () => {
+    assert.strictEqual(classifyForeignSession({
+      registryHit: false, fileBornAt: 1000, earliestSubagentStart: 2000,
+    }), 'parallel');
+  });
+
+  test('session file born after earliest subagent → subagent', () => {
+    assert.strictEqual(classifyForeignSession({
+      registryHit: false, fileBornAt: 3000, earliestSubagentStart: 2000,
+    }), 'subagent');
+  });
+
+  test('unknown birthtime → subagent (pre-fix behavior, safe fallback)', () => {
+    assert.strictEqual(classifyForeignSession({
+      registryHit: false, fileBornAt: null, earliestSubagentStart: 2000,
+    }), 'subagent');
+    assert.strictEqual(classifyForeignSession({
+      registryHit: false, fileBornAt: 0, earliestSubagentStart: 2000,
+    }), 'subagent');
+  });
+
+  test('invalid earliestSubagentStart → subagent', () => {
+    assert.strictEqual(classifyForeignSession({
+      registryHit: false, fileBornAt: 1000, earliestSubagentStart: 0,
+    }), 'subagent');
+    assert.strictEqual(classifyForeignSession({
+      registryHit: false, fileBornAt: 1000, earliestSubagentStart: null,
+    }), 'subagent');
+  });
+});
+
+describe('state-machine.js -- pruneTopLevelSessions (#134)', () => {
+  test('drops entries older than TTL, keeps fresh ones', () => {
+    const now = Date.now();
+    const reg = { old: now - TOP_LEVEL_REGISTRY_TTL_MS - 1000, fresh: now - 1000 };
+    pruneTopLevelSessions(reg, now);
+    assert.strictEqual(reg.old, undefined);
+    assert.ok(reg.fresh);
+  });
+
+  test('caps at TOP_LEVEL_REGISTRY_MAX, dropping oldest first', () => {
+    const now = Date.now();
+    const reg = {};
+    for (let i = 0; i < TOP_LEVEL_REGISTRY_MAX + 10; i++) {
+      reg['s' + i] = now - i * 1000; // s0 newest, high indices oldest
+    }
+    pruneTopLevelSessions(reg, now);
+    assert.strictEqual(Object.keys(reg).length, TOP_LEVEL_REGISTRY_MAX);
+    assert.ok(reg.s0, 'newest entry survives');
+    assert.strictEqual(reg['s' + (TOP_LEVEL_REGISTRY_MAX + 9)], undefined, 'oldest entry dropped');
+  });
+
+  test('null registry is safe', () => {
+    assert.strictEqual(pruneTopLevelSessions(null, Date.now()), null);
+  });
+
+  test('defaultStats includes empty topLevelSessions registry', () => {
+    assert.deepStrictEqual(defaultStats().topLevelSessions, {});
+  });
+});
+
+// -- Parallel session classification wiring (#134) -------------------------
+
+describe('update-state.js -- parallel session wiring (#134)', () => {
+  function readSrc() {
+    const fs = require('fs');
+    return fs.readFileSync(require('path').join(__dirname, '..', 'update-state.js'), 'utf8');
+  }
+
+  test('classifier declares isParallelSession alongside isKnownSubagent', () => {
+    const src = readSrc();
+    assert.ok(src.includes('let isParallelSession = false'),
+      'should declare isParallelSession variable');
+    assert.ok(src.includes('classifyForeignSession({ registryHit, fileBornAt, earliestSubagentStart })'),
+      'should delegate the decision to classifyForeignSession');
+  });
+
+  test('classifier consults the top-level registry and file birthtime', () => {
+    const src = readSrc();
+    assert.ok(src.includes('stats.topLevelSessions[sessionId]'),
+      'should check the top-level session registry');
+    assert.ok(src.includes('birthtimeMs'),
+      'should consult the session file birthtime');
+  });
+
+  test('SessionStart registers the session and prunes the registry', () => {
+    const src = readSrc();
+    const block = src.split("hookEvent === 'SessionStart'")[1].split('else if')[0];
+    assert.ok(block.includes('stats.topLevelSessions[sessionId] = Date.now()'),
+      'SessionStart should register the session as top-level');
+    assert.ok(block.includes('pruneTopLevelSessions('),
+      'SessionStart should prune the registry');
+  });
+
+  test('tool propagation blocks are guarded by !isParallelSession', () => {
+    const src = readSrc();
+    const matches = src.match(/!SUBAGENT_TOOLS\.test\(toolName\) && !isKnownSubagent && !isParallelSession/g) || [];
+    assert.strictEqual(matches.length, 2,
+      'both PreToolUse and PostToolUse propagation must exclude parallel sessions');
+  });
+
+  test('healing strips stale parentSession/taskDescription for top-level sessions', () => {
+    const src = readSrc();
+    assert.ok(src.includes('isParallelSession || stats.session.id === sessionId'),
+      'healing should trigger for parallel sessions and the stats owner');
+    assert.ok(src.includes('delete extra.parentSession'),
+      'healing should strip parentSession');
+    assert.ok(src.includes('delete extra.taskDescription'),
+      'healing should strip taskDescription');
+    assert.ok(src.includes('!extra.isTeammate'),
+      'teammates must keep their legitimately-set fields');
   });
 });
 
