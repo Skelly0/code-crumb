@@ -102,6 +102,19 @@ function _pidStartStatus(pid) {
   return typeof e.value === 'number' ? 'known' : e.value;
 }
 
+// Memoized PowerShell path — static for the process lifetime, so resolve once.
+let _psExeCached = null;
+function _winPsExe() {
+  if (_psExeCached) return _psExeCached;
+  _psExeCached = 'powershell';
+  try {
+    const psPath = path.join(process.env.SystemRoot || 'C:\\Windows',
+      'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    if (fs.existsSync(psPath)) _psExeCached = psPath;
+  } catch {}
+  return _psExeCached;
+}
+
 // Enqueue a PID for background start-time resolution. Fresh entries are
 // left alone; TTL-expired entries keep their old value (still used by the
 // gate) while a refresh rides the next batch.
@@ -122,7 +135,10 @@ function _kickPidResolve() {
   const pids = [..._pidResolveQueue];
   _pidResolveQueue.clear();
   _pidExecInFlight = true;
-  _resolvePidStartTimes(pids, (results) => {
+  let settled = false;
+  const done = (results) => {
+    if (settled) return;
+    settled = true;
     const now = Date.now();
     for (const pid of pids) {
       if (!results) { _pidStartCache.set(pid, { value: 'unknown-nodata', resolvedAt: now }); continue; }
@@ -132,7 +148,10 @@ function _kickPidResolve() {
     }
     _pidExecInFlight = false;
     if (_pidResolveQueue.size > 0) _kickPidResolve();
-  });
+  };
+  // A synchronous throw in a resolver must never latch _pidExecInFlight —
+  // that would freeze every PID at 'pending' (protected) forever.
+  try { _resolvePidStartTimes(pids, done); } catch { done(null); }
 }
 
 // Platform resolvers. callback(Map<pid, epochMs|'unknown-alive'> | null on exec failure).
@@ -158,21 +177,20 @@ function _resolvePidStartTimes(pids, callback) {
   }
   const { execFile } = require('child_process');
   if (process.platform === 'win32') {
-    const psPath = path.join(process.env.SystemRoot || 'C:\\Windows',
-      'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    let exe = 'powershell';
-    try { if (fs.existsSync(psPath)) exe = psPath; } catch {}
     // Per-PID error isolation: one dead PID must not poison the batch.
     // Emits "<pid> <epochMs>" for readable processes, "<pid> EPERM" when
-    // StartTime is unreadable (elevated process), nothing when dead.
+    // StartTime is unreadable (elevated process), nothing when dead. The
+    // trailing EOB sentinel distinguishes "all queried PIDs are dead"
+    // (empty-but-complete output) from a silently broken powershell.
     const script = `$ErrorActionPreference='SilentlyContinue';` +
       `foreach($i in @(${pids.join(',')})){` +
       `$p=Get-Process -Id $i -ErrorAction SilentlyContinue;` +
-      `if($p){ try { '{0} {1}' -f $i,[int64]($p.StartTime.ToUniversalTime() - [datetime]::new(1970,1,1,0,0,0,[DateTimeKind]::Utc)).TotalMilliseconds } catch { '{0} EPERM' -f $i } } }`;
-    execFile(exe, ['-NoProfile', '-NonInteractive', '-NoLogo', '-Command', script],
+      `if($p){ try { '{0} {1}' -f $i,[int64]($p.StartTime.ToUniversalTime() - [datetime]::new(1970,1,1,0,0,0,[DateTimeKind]::Utc)).TotalMilliseconds } catch { '{0} EPERM' -f $i } } };'EOB'`;
+    execFile(_winPsExe(), ['-NoProfile', '-NonInteractive', '-NoLogo', '-Command', script],
       { windowsHide: true, timeout: 15000 }, (err, stdout) => {
-        if (err && !stdout) { callback(null); return; }
-        callback(_parsePidLines(stdout));
+        const s = String(stdout || '');
+        if (!s.includes('EOB')) { callback(null); return; } // exec failed/blocked — no verdicts
+        callback(_parsePidLines(s));
       });
     return;
   }
@@ -695,7 +713,8 @@ class OrbitalSystem {
     for (const f of files) {
       try {
         const fp = path.join(SESSIONS_DIR, f);
-        if (now - fs.statSync(fp).mtimeMs > STALE_MS) {
+        const fileMtimeMs = fs.statSync(fp).mtimeMs;
+        if (now - fileMtimeMs > STALE_MS) {
           // Use reverse map for correct face lookup (safeFilename may transform the ID)
           const faceId = fileToFaceId.get(f) || path.basename(f, '.json');
           const knownFace = this.faces.get(faceId);
@@ -704,9 +723,11 @@ class OrbitalSystem {
             if (knownFace.pid && isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)) continue;  // Completion with owning PID: protect
           }
           // No protecting face — check file PID identity before deleting
+          // (mtime fallback matches the async purge path for legacy files
+          // whose JSON lacks a timestamp field)
           try {
             const data = JSON.parse(fs.readFileSync(fp, 'utf8'));
-            if (data.pid && isOwnedByLiveProcess(data.pid, data.timestamp || 0)) continue;
+            if (data.pid && isOwnedByLiveProcess(data.pid, data.timestamp || fileMtimeMs)) continue;
           } catch {
             continue; // Parse failure = mid-write race — protect the file
           }
