@@ -46,7 +46,7 @@ state-machine.js Pure logic — tool→state mapping (multi-editor), error detec
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
 setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode|openclaw])
-test.js          Test runner — loads 12 modular test files from tests/ (~1512 tests)
+test.js          Test runner — loads 12 modular test files from tests/ (~1543 tests)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Orbital demo — simulates subagent sessions orbiting the main face
 code-crumb.sh   Unix shell wrapper for launch.js
@@ -81,14 +81,22 @@ Editor Event (Claude Code / Codex / OpenCode / OpenClaw) → update-state.js or 
 State is communicated between the hook handler and renderer via JSON files:
 
 - `~/.code-crumb-state` — single-mode state (written by update-state.js, watched by renderer.js)
-- `~/.code-crumb-sessions/{session_id}.json` — per-session state for orbital subagents (includes sticky `taskDescription` field set at SubagentStart)
+- `~/.code-crumb-sessions/{session_id}.json` — per-session state for orbital subagents (includes sticky `taskDescription` field set at SubagentStart, and a sticky `editor` provenance field — see Editor Provenance)
 - `~/.code-crumb-stats.json` — persistent stats (streaks, records, session counters)
 - `~/.code-crumb-prefs.json` — persisted user preferences (theme, accessories, stats, orbitals toggle)
 - `~/.code-crumb.pid` — renderer process liveness tracking
 
 #### Editor PID Liveness
 
-State file writes include a `pid` field — the writer's parent PID (`process.ppid`) for per-event hook processes (update-state.js, codex-notify), or the adapter's own PID for long-lived wrappers (codex-wrapper). The renderer uses it to detect a crashed editor: a candidate PID is **armed** only if it is still alive 2.5s after first being seen in a write (on Windows the hook's ppid is a transient `cmd.exe` shim that dies instantly, so PID rescue self-disables there and staleness timeouts remain the fallback). When an armed PID dies without a Stop event, a sticky `editorDead` flag triggers the rescue cascade (responding → happy → idle) and allows a new session to be adopted as main. A write newer than anything applied clears a false `editorDead` (PID-reuse guard).
+State file writes include a `pid` field — the writer's parent PID (`process.ppid`) for per-event hook processes (codex-notify; update-state.js on Unix), or the adapter's own PID for long-lived wrappers (codex-wrapper). **On win32, update-state.js writes no `pid` at all**: the hook's ppid there is a transient `cmd.exe` shim that dies within milliseconds — useless for protection and a prime PID-recycling target — so those sessions rely on staleness timeouts (`ORPHAN_TIMEOUT`/`STALE_MS`).
+
+PID liveness is **identity-checked**, not just existence-checked: `isOwnedByLiveProcess(pid, lastWriteMs)` in grid.js only lets a PID protect a session if the process's **start time predates the session's last write** (+1s slack) — a recycled PID always fails this because its process was born after the original writer died. Start times resolve asynchronously in a per-PID cache (batched PowerShell on Windows, `/proc` on Linux, `ps` on macOS; one outstanding exec at a time; 60s TTL closes the live→live recycle gap). Unresolved (`pending`) PIDs are protected as a safe default; unreadable start times (Access-Denied on elevated/protected processes) or missing exec capability protect only up to a 1-hour cap past the last write — a real editor refreshes its session file with every hook, so its orbital self-heals on the next write, while a ghost recycled onto a protected process must not be immortal.
+
+The renderer uses the armed-PID mechanism to detect a crashed editor: a candidate PID is **armed** only if it is still alive 2.5s after first being seen in a write AND its start time predates the reporting write (arming defers while resolution is pending). When an armed PID dies without a Stop event, a sticky `editorDead` flag triggers the rescue cascade (responding → happy → idle) and allows a new session to be adopted as main. A write newer than anything applied clears a false `editorDead` (PID-reuse guard).
+
+#### Editor Provenance
+
+Every state/session write carries an `editor` field (claude/codex/opencode/openclaw/engmux) distinct from `modelName`: update-state.js writes `CODE_CRUMB_EDITOR || 'claude'`, adapters write their own identity, and engmux-adapter writes the `-E`/`--engine` dispatch target. The field is sticky (preserved by `STICKY_FIELDS`, the global owner guard, `guardedWriteState`, and `buildSubagentSessionState`). Fallback session IDs are editor-prefixed (`opencode-47040`, not bare `47040`) so anonymous sessions are self-describing and never collide across editors — update-state.js mints the same `FALLBACK_SESSION_ID` in both its try and catch paths so one session never splits into two orbitals. On the read side, `MiniFace.updateFromFile` derives `editor` best-effort for legacy files (modelName-as-editor, then ID prefix). The session list (`l`) shows each session's editor tag dimmed on row 1 and prefers the full `taskDescription` on row 3.
 
 ### State Machine
 
@@ -178,19 +186,23 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 | `CYCLE_WORK_STATES` | 5 states | grid.js (activity cycling sequence for synthetic subagent faces) |
 | `CYCLE_INTERVAL` | 2500ms | grid.js (ms between cycling state changes) |
 | `CYCLE_STALE_MS` | 3000ms | grid.js (start cycling after no real data for this duration) |
+| `SLACK_MS` | 1000ms | grid.js (start-time vs last-write comparison slack) |
+| `PID_PROTECT_CAP_MS` | 3600000ms | grid.js (max protection when start time is unknown) |
+| `PID_CACHE_TTL_MS` | 60000ms | grid.js (start-time cache re-resolve interval) |
 
 ## Environment Variables
 
 - `CODE_CRUMB_STATE` — override the single-mode state file path (default: `~/.code-crumb-state`)
 - `CLAUDE_SESSION_ID` — set the session identifier (default: parent PID)
 - `CODE_CRUMB_MODEL` — override the display name in the status line (default: `claude`; adapters default to `codex`/`opencode`/`openclaw`)
+- `CODE_CRUMB_EDITOR` — override the editor provenance tag shown in the session list (default: `claude` in update-state.js; adapters set their own identity)
 - `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` — set to `1` to enable Claude Code agent teams; Code Crumb will automatically detect teammate sessions via `TeammateIdle`/`TaskCompleted` hooks and show them in the orbital display with role labels and team-specific colors
 
 ## Testing
 
 ### Automated Tests
 
-Run `npm test` (or `node test.js`). The test runner loads 12 modular test files from `tests/`. The suite (~1512 tests) covers:
+Run `npm test` (or `node test.js`). The test runner loads 12 modular test files from `tests/`. The suite (~1543 tests) covers:
 
 - **test-shared.js**: `safeFilename` edge cases
 - **test-state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants incl. `REVIEW_TOOLS`, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
@@ -198,11 +210,11 @@ Run `npm test` (or `node test.js`). The test runner loads 12 modular test files 
 - **test-animations.js**: mouth/eye functions (shape and randomness)
 - **test-particles.js**: `ParticleSystem` (all 15 styles incl. stream, fire, lifecycle, fadeAll)
 - **test-face.js**: `ClaudeFace` state machine (`setState`, `setStats`, `update`, pending state buffering, particle spawning, sparkline, orbital toggle)
-- **test-grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles, taskDescription label priority, SessionStart adoption, `_buildGroups` grouping/sorting/color, `_calculateGroupedAngles` sector allocation with pixel-aware spacing, `_renderGroupTethers` dashed sibling lines with all-positions check and spawning exclusion, `_getGroupLabel` 4-tier priority chain (branch/cwd/taskDescription/label fallback, default branch exclusion, truncation), `_renderGroupLabels` floating labels for team/non-team groups, `_resolveOverlaps` bounding box collision resolver), `renderSessionList` selection highlight and footer
+- **test-grid.js**: `MiniFace`, `OrbitalSystem` (orbit calculation, session exclusion, rotation, connection rendering, conducting animation, stream particles, taskDescription label priority, SessionStart adoption, `_buildGroups` grouping/sorting/color, `_calculateGroupedAngles` sector allocation with pixel-aware spacing, `_renderGroupTethers` dashed sibling lines with all-positions check and spawning exclusion, `_getGroupLabel` 4-tier priority chain (branch/cwd/taskDescription/label fallback, default branch exclusion, truncation), `_renderGroupLabels` floating labels for team/non-team groups, `_resolveOverlaps` bounding box collision resolver), `renderSessionList` selection highlight, footer, editor tag rendering and row-width alignment, `isOwnedByLiveProcess` decision table and recycled-PID purge integration, `MiniFace` editor derivation (explicit field, legacy modelName, ID prefix)
 - **test-accessories.js**: accessory definitions, rendering, state-specific adornments
 - **test-teams.js**: `hashTeamColor` consistency and RGB output, `MiniFace` team fields, `_assignLabels` with `teammateName`, session schema for `TeammateIdle`/`TaskCompleted`, team grouping (clusters by teamName, tethers use team color, auras show team name label, mixed groups separate correctly)
 - **test-launch.js**: launcher logic, platform detection, editor flag handling
-- **test-adapters.js**: base adapter, engmux adapter, codex/opencode/openclaw adapter behavior, editor PID liveness tracking (pid field in state writes, renderer candidate validation and `editorDead` rescue)
+- **test-adapters.js**: base adapter, engmux adapter, codex/opencode/openclaw adapter behavior, editor PID liveness tracking (pid field in state writes incl. win32 omission, renderer candidate validation via start-time identity and `editorDead` rescue), editor provenance field plumbing (buildExtra, defaultEditor, prefixed fallback IDs, guardedWriteState preservation)
 - **test-transition.js**: `SwapTransition` lifecycle (start/tick/cancel), phase progression (dissolve/swap/materialize/done), `dimFactor` brightness curve, constants
 
 ### Visual Verification
