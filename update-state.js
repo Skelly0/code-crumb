@@ -22,6 +22,7 @@ const {
   toolToState, normalizeToolResponse, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats,
   EDIT_TOOLS, SUBAGENT_TOOLS,
   pruneFrequentFiles, topFrequentFiles, buildSubagentSessionState,
+  classifyForeignSession, pruneTopLevelSessions,
 } = require('./state-machine');
 
 // Event type passed as CLI argument (cross-platform -- no env var tricks)
@@ -215,6 +216,10 @@ process.stdin.on('end', () => {
       stats.daily = { date: today, sessionCount: 0, cumulativeMs: 0 };
     }
     if (!stats.frequentFiles) stats.frequentFiles = {};
+    // Registry of known top-level sessions (#134) — populated at SessionStart,
+    // which real subagents never fire. Used to tell parallel editor windows
+    // apart from subagents when their hooks interleave.
+    if (!stats.topLevelSessions) stats.topLevelSessions = {};
 
     // Detect subagent sessions: different session_id while parent has active subagents.
     // Subagent hooks fire with their own session_id, not the parent's.
@@ -230,14 +235,37 @@ process.stdin.on('end', () => {
     ]);
 
     let isKnownSubagent = false;
+    let isParallelSession = false;
     if (stats.session.id && stats.session.id !== sessionId
         && stats.session.activeSubagents && stats.session.activeSubagents.length > 0
         && !LIFECYCLE_EVENTS.has(hookEvent)) {
-      isKnownSubagent = true;
+      // Foreign session while the owner is conducting: real subagent, or an
+      // unrelated parallel top-level window? (#134) Without this distinction,
+      // every parallel session gets stamped as a subagent of the conductor.
+      const registryHit = !!stats.topLevelSessions[sessionId];
+      let fileBornAt = null;
+      try {
+        const st = fs.statSync(path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'));
+        if (st.birthtimeMs > 0) fileBornAt = st.birthtimeMs;
+      } catch {}
+      const earliestSubagentStart = Math.min(
+        ...stats.session.activeSubagents.map(s => s.startedAt || 0));
+      if (classifyForeignSession({ registryHit, fileBornAt, earliestSubagentStart }) === 'parallel') {
+        isParallelSession = true;
+      } else {
+        isKnownSubagent = true;
+      }
+    }
+    // Keep registry entries fresh for active windows so the TTL prune
+    // only drops sessions that are actually gone.
+    if (stats.topLevelSessions[sessionId] && !isKnownSubagent) {
+      stats.topLevelSessions[sessionId] = Date.now();
     }
 
-    // Initialize session if new (skip for known subagents to preserve parent stats)
-    if (stats.session.id !== sessionId && !isKnownSubagent) {
+    // Initialize session if new (skip for known subagents to preserve parent
+    // stats, and for parallel sessions so they don't wipe the conducting
+    // owner's activeSubagents tracking mid-dispatch).
+    if (stats.session.id !== sessionId && !isKnownSubagent && !isParallelSession) {
       // Save records from previous session before resetting
       if (stats.session.id && stats.session.start) {
         const dur = Date.now() - stats.session.start;
@@ -272,9 +300,9 @@ process.stdin.on('end', () => {
     if (hookEvent === 'PreToolUse') {
       ({ state, detail } = toolToState(toolName, toolInput));
 
-      // Only count stats for the parent session -- subagent tool calls
-      // should not inflate the parent's counters or file tracking.
-      if (!isKnownSubagent) {
+      // Only count stats for the owning session -- subagent and parallel-window
+      // tool calls must not inflate the owner's counters or file tracking.
+      if (!isKnownSubagent && !isParallelSession) {
         stats.session.toolCalls++;
         stats.totalToolCalls = (stats.totalToolCalls || 0) + 1;
 
@@ -295,8 +323,9 @@ process.stdin.on('end', () => {
       // Only the latest gets live tool state -- earlier subagents keep their last
       // known state. This is correct because the parent's tool calls are sequential
       // and logically belong to the most recent subagent context.
-      // Skip propagation for known subagents -- they write their own session files directly.
-      if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName) && !isKnownSubagent) {
+      // Skip propagation for known subagents (they write their own session files
+      // directly) and parallel windows (their tools belong to no subagent here).
+      if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName) && !isKnownSubagent && !isParallelSession) {
         const latest = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
         _writeSubagentToolState(latest, state, detail, sessionId);
         _touchEarlierSubagents(stats.session.activeSubagents);
@@ -326,14 +355,16 @@ process.stdin.on('end', () => {
       // Track git commits and streaks (skip for known subagents -- their
       // results should not affect the parent session's counters or streak).
       if (!isKnownSubagent) {
-        if (result.state === 'proud' && result.detail === 'committed') {
+        // commitCount lives on the owner's session — parallel windows must not
+        // bump it. The streak is global gamification, so they still contribute.
+        if (result.state === 'proud' && result.detail === 'committed' && !isParallelSession) {
           stats.session.commitCount = (stats.session.commitCount || 0) + 1;
         }
         updateStreak(stats, state === 'error');
       }
 
       // Propagate tool result state to the most recently started subagent (see PreToolUse comment)
-      if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName) && !isKnownSubagent) {
+      if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName) && !isKnownSubagent && !isParallelSession) {
         const latest = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
         _writeSubagentToolState(latest, state, detail, sessionId);
         _touchEarlierSubagents(stats.session.activeSubagents);
@@ -349,15 +380,15 @@ process.stdin.on('end', () => {
       detail = 'wrapping up';
       stopped = true;
 
-      // Update session records (skip for known subagents -- their Stop must not
-      // zero the parent's session.start or inflate duration/record counters).
-      if (stats.session.start && !isKnownSubagent) {
+      // Update session records (skip for known subagents and parallel windows --
+      // their Stop must not zero the owner's session.start or inflate counters).
+      if (stats.session.start && !isKnownSubagent && !isParallelSession) {
         const dur = Date.now() - stats.session.start;
         if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
         stats.daily.cumulativeMs += dur;
         stats.session.start = 0; // Prevent double-counting on next session change
       }
-      if (!isKnownSubagent && (stats.session.filesEdited?.length || 0) > (stats.records.mostFilesEdited || 0)) {
+      if (!isKnownSubagent && !isParallelSession && (stats.session.filesEdited?.length || 0) > (stats.records.mostFilesEdited || 0)) {
         stats.records.mostFilesEdited = stats.session.filesEdited.length;
       }
 
@@ -448,6 +479,10 @@ process.stdin.on('end', () => {
     else if (hookEvent === 'SessionStart') {
       state = 'idle';
       detail = 'session starting';
+      // Register as a known top-level session (#134) — subagents never fire
+      // SessionStart, so registry members are immune to subagent classification.
+      stats.topLevelSessions[sessionId] = Date.now();
+      pruneTopLevelSessions(stats.topLevelSessions, Date.now());
       // sessionCount already incremented in new-session block above
       // Clean up any stale session file from previous session with same ID
       const staleSessionFile = path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json');
@@ -668,6 +703,14 @@ process.stdin.on('end', () => {
           if (existingSession[field] && !extra[field]) {
             extra[field] = existingSession[field];
           }
+        }
+        // Heal sessions falsely stamped as subagents (#134): the stats owner
+        // and classified parallel windows are top-level by definition — drop a
+        // stale parentSession/taskDescription stamp instead of preserving it.
+        // (Teammates keep theirs; their fields are legitimately set.)
+        if ((isParallelSession || stats.session.id === sessionId) && !extra.isTeammate) {
+          delete extra.parentSession;
+          delete extra.taskDescription;
         }
       } catch {}
       if (hookEvent === 'Stop') {

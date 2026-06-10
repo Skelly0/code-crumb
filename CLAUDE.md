@@ -46,7 +46,7 @@ state-machine.js Pure logic — tool→state mapping (multi-editor), error detec
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
 setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode|openclaw])
-test.js          Test runner — loads 12 modular test files from tests/ (~1543 tests)
+test.js          Test runner — loads 12 modular test files from tests/ (~1564 tests)
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Orbital demo — simulates subagent sessions orbiting the main face
 code-crumb.sh   Unix shell wrapper for launch.js
@@ -93,6 +93,10 @@ State file writes include a `pid` field — the writer's parent PID (`process.pp
 PID liveness is **identity-checked**, not just existence-checked: `isOwnedByLiveProcess(pid, lastWriteMs)` in grid.js only lets a PID protect a session if the process's **start time predates the session's last write** (+1s slack) — a recycled PID always fails this because its process was born after the original writer died. Start times resolve asynchronously in a per-PID cache (batched PowerShell on Windows, `/proc` on Linux, `ps` on macOS; one outstanding exec at a time; 60s TTL closes the live→live recycle gap). Unresolved (`pending`) PIDs are protected as a safe default; unreadable start times (Access-Denied on elevated/protected processes) or missing exec capability protect only up to a 1-hour cap past the last write — a real editor refreshes its session file with every hook, so its orbital self-heals on the next write, while a ghost recycled onto a protected process must not be immortal.
 
 The renderer uses the armed-PID mechanism to detect a crashed editor: a candidate PID is **armed** only if it is still alive 2.5s after first being seen in a write AND its start time predates the reporting write (arming defers while resolution is pending). When an armed PID dies without a Stop event, a sticky `editorDead` flag triggers the rescue cascade (responding → happy → idle) and allows a new session to be adopted as main. A write newer than anything applied clears a false `editorDead` (PID-reuse guard).
+
+#### Parallel Session Classification
+
+The shared stats file has a single `session` owner, so a hook arriving from a different session id while the owner has `activeSubagents` used to be classified as that owner's subagent unconditionally — misclassifying unrelated parallel editor windows (sticky wrong `parentSession`, stolen `taskDescription`, frozen stats, blocked main-face ownership, and false retirement of the real subagent's synthetic orbital). `classifyForeignSession` (state-machine.js) now distinguishes the two: a foreign session is **parallel** (independent top-level) if it appears in the `stats.topLevelSessions` registry (populated at `SessionStart`, which real subagents never fire; 7-day TTL, 200-entry cap via `pruneTopLevelSessions`), or if its session file's birthtime predates the earliest active subagent's `startedAt` (a real subagent's file cannot exist before its own spawn). Unknown birthtime (unsupported filesystem) falls back to subagent classification, so real subagent grouping never regresses. Parallel sessions do not steal `stats.session` while the owner is conducting, do not count into the owner's counters, and do not propagate tool state onto subagent orbitals. Top-level sessions (the stats owner, or a classified parallel session) carrying a stale `parentSession`/`taskDescription` stamp are healed on their next write; teammates keep their legitimately-set fields.
 
 #### Editor Provenance
 
@@ -202,10 +206,10 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 
 ### Automated Tests
 
-Run `npm test` (or `node test.js`). The test runner loads 12 modular test files from `tests/`. The suite (~1543 tests) covers:
+Run `npm test` (or `node test.js`). The test runner loads 12 modular test files from `tests/`. The suite (~1564 tests) covers:
 
 - **test-shared.js**: `safeFilename` edge cases
-- **test-state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants incl. `REVIEW_TOOLS`, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization
+- **test-state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants incl. `REVIEW_TOOLS`, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization, `classifyForeignSession` parallel-vs-subagent decision table and `pruneTopLevelSessions` registry pruning (#134)
 - **test-themes.js**: `lerpColor`/`dimColor`/`breathe`/`dimAnsiOutput` color math, theme completeness (all 23 states), `COMPLETION_LINGER` ordering, thought bubble pools
 - **test-animations.js**: mouth/eye functions (shape and randomness)
 - **test-particles.js**: `ParticleSystem` (all 15 styles incl. stream, fire, lifecycle, fadeAll)
@@ -214,7 +218,7 @@ Run `npm test` (or `node test.js`). The test runner loads 12 modular test files 
 - **test-accessories.js**: accessory definitions, rendering, state-specific adornments
 - **test-teams.js**: `hashTeamColor` consistency and RGB output, `MiniFace` team fields, `_assignLabels` with `teammateName`, session schema for `TeammateIdle`/`TaskCompleted`, team grouping (clusters by teamName, tethers use team color, auras show team name label, mixed groups separate correctly)
 - **test-launch.js**: launcher logic, platform detection, editor flag handling
-- **test-adapters.js**: base adapter, engmux adapter, codex/opencode/openclaw adapter behavior, editor PID liveness tracking (pid field in state writes incl. win32 omission, renderer candidate validation via start-time identity and `editorDead` rescue), editor provenance field plumbing (buildExtra, defaultEditor, prefixed fallback IDs, guardedWriteState preservation)
+- **test-adapters.js**: base adapter, engmux adapter, codex/opencode/openclaw adapter behavior, editor PID liveness tracking (pid field in state writes incl. win32 omission, renderer candidate validation via start-time identity and `editorDead` rescue), editor provenance field plumbing (buildExtra, defaultEditor, prefixed fallback IDs, guardedWriteState preservation), parallel session classification end-to-end (registry and birthtime paths, subagent regression guard, stale-stamp healing incl. teammate exemption, SessionStart registration)
 - **test-transition.js**: `SwapTransition` lifecycle (start/tick/cancel), phase progression (dissolve/swap/materialize/done), `dimFactor` brightness curve, constants
 
 ### Visual Verification
