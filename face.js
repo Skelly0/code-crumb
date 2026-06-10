@@ -146,6 +146,9 @@ class ClaudeFace {
     // Model name (shown in status line: "{name} is thinking")
     this.modelName = process.env.CODE_CRUMB_MODEL || 'claude';
 
+    // Editor provenance (shown in the session list)
+    this.editor = process.env.CODE_CRUMB_EDITOR || 'claude';
+
     // Git context
     this.cwd = null;
     this.isWorktree = false;
@@ -291,6 +294,8 @@ class ClaudeFace {
     // Lower layers (update-state.js guard, base-adapter.js guardedWriteState) preserve
     // the owner's name on disk; this layer ensures the env var always wins at render time.
     if (data.modelName && !process.env.CODE_CRUMB_MODEL) this.modelName = data.modelName;
+    // Editor provenance: same env-wins-at-render priority as modelName
+    if (data.editor && !process.env.CODE_CRUMB_EDITOR) this.editor = data.editor;
     this.toolCallCount = data.toolCalls || 0;
     this.filesEditedCount = data.filesEdited || 0;
     this.sessionStart = data.sessionStart || 0;

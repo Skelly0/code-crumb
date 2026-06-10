@@ -3623,6 +3623,35 @@ describe('grid.js -- isOwnedByLiveProcess (PID identity gate)', () => {
   });
 });
 
+describe('grid.js -- MiniFace editor derivation', () => {
+  test('explicit editor field wins', () => {
+    const f = new MiniFace('x');
+    f.updateFromFile({ state: 'coding', editor: 'opencode', modelName: 'big-pickle' });
+    assert.strictEqual(f.editor, 'opencode');
+  });
+  test('derives from modelName when it equals a known editor', () => {
+    const f = new MiniFace('x');
+    f.updateFromFile({ state: 'coding', modelName: 'codex' });
+    assert.strictEqual(f.editor, 'codex');
+  });
+  test('derives from session id prefix', () => {
+    const f = new MiniFace('opencode-47040');
+    f.updateFromFile({ state: 'coding', modelName: 'big-pickle' });
+    assert.strictEqual(f.editor, 'opencode');
+  });
+  test('no recoverable provenance -> empty (old engmux/subagent files)', () => {
+    const f = new MiniFace('47040');
+    f.updateFromFile({ state: 'coding', modelName: 'haiku' });
+    assert.strictEqual(f.editor, '');
+  });
+  test('editor is sticky across later writes without the field', () => {
+    const f = new MiniFace('x');
+    f.updateFromFile({ state: 'coding', editor: 'openclaw', timestamp: 1 });
+    f.updateFromFile({ state: 'reading', timestamp: 2 });
+    assert.strictEqual(f.editor, 'openclaw');
+  });
+});
+
 describe('grid.js -- recycled-PID purge integration', () => {
   test('isStale: recycled PID does not protect a quiet face', () => {
     _pidStartCache.clear();

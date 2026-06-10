@@ -76,6 +76,7 @@ function readState() {
       workState: data.workState || null,
       workDetail: data.workDetail || '',
       pid: data.pid || 0,
+      editor: data.editor || '',
     };
   } catch {
     return { state: 'idle', detail: '' };
@@ -558,6 +559,7 @@ function runUnifiedMode() {
         detail: face.stateDetail,
         timestamp: Date.now(),
         modelName: face.modelName || 'claude',
+        editor: face.editor || '',
         cwd: face.cwd,
         gitBranch: face.gitBranch,
         stopped: lastStopped,
@@ -577,6 +579,7 @@ function runUnifiedMode() {
       const newData = JSON.parse(fs.readFileSync(newFile, 'utf8'));
       face.setState(newData.state || 'idle', newData.detail || '');
       if (newData.modelName) face.modelName = newData.modelName;
+      if (newData.editor) face.editor = newData.editor;
       if (newData.cwd) face.cwd = newData.cwd;
       if (newData.gitBranch) face.gitBranch = newData.gitBranch;
       lastStopped = !!newData.stopped;
@@ -680,6 +683,7 @@ function runUnifiedMode() {
         cwd: face.cwd,
         gitBranch: face.gitBranch,
         label: face.modelName || 'claude',
+        editor: face.editor || '',
         stopped: lastStopped,
         firstSeen: 0, // sort first
         isMain: true,

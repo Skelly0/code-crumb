@@ -26,6 +26,9 @@ const INTERRUPTIBLE_STATES = new Set([
 const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
 const HOME_FWD = HOME.replace(/\\/g, '/');  // Forward-slash-normalized HOME for path display
 
+// Editors whose names may appear in legacy modelName fields / ID prefixes
+const KNOWN_EDITORS = new Set(['claude', 'codex', 'opencode', 'openclaw', 'engmux']);
+
 // Predefined team accent colors — assigned consistently by hashing the team name
 const TEAM_COLORS = [
   [255, 120, 120],  // red
@@ -221,6 +224,7 @@ class MiniFace {
     this.cwd = '';
     this._cwdBasename = '';
     this.modelName = '';
+    this.editor = '';          // editor provenance (claude/codex/opencode/...)
     this.lastUpdate = Date.now();
     this.firstSeen = Date.now();
     this.stopped = false;
@@ -308,6 +312,15 @@ class MiniFace {
     this.lastUpdate = fileMtimeMs || Date.now();
     if (data.cwd) this.cwd = data.cwd;
     if (data.modelName) this.modelName = data.modelName;
+    if (data.editor) this.editor = data.editor;
+    else if (!this.editor) {
+      // Best-effort legacy derivation: modelName-as-editor, then ID prefix
+      if (KNOWN_EDITORS.has(data.modelName)) this.editor = data.modelName;
+      else {
+        const m = /^([a-z]+)-/.exec(String(this.sessionId));
+        if (m && KNOWN_EDITORS.has(m[1])) this.editor = m[1];
+      }
+    }
     if (data.parentSession) this.parentSession = data.parentSession;
     if (data.teamName) {
       this.teamName = data.teamName;
@@ -1751,7 +1764,7 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
 
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
-  isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus,
+  isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, KNOWN_EDITORS,
   STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, SLACK_MS, PID_PROTECT_CAP_MS, PID_CACHE_TTL_MS,
   INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, GROUP_LABEL_BRIGHTNESS,
   CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS,
