@@ -2255,19 +2255,22 @@ describe('editor PID liveness tracking', () => {
       if (e.status !== 0 && e.status !== null) throw e;
     }
     const state = readJSON(stateFile);
-    assert.strictEqual(state.pid, process.pid,
-      `state.pid should be the parent process (${process.pid}), got ${state.pid}`);
+    if (process.platform === 'win32') {
+      // win32: ppid is a transient cmd.exe shim — intentionally omitted
+      // (recycled-PID hazard); these sessions rely on staleness timeouts
+      assert.strictEqual(state.pid, undefined,
+        `win32 update-state.js must omit pid, got ${state.pid}`);
+    } else {
+      assert.strictEqual(state.pid, process.pid,
+        `state.pid should be the parent process (${process.pid}), got ${state.pid}`);
+    }
     cleanup(tmp);
   });
 
-  test('update-state.js writeState adds pid in the function, not at call sites', () => {
+  test('update-state.js writeState adds pid in the function, platform-conditionally', () => {
     assert.ok(
-      updateStateSrc.includes('timestamp: Date.now(), pid: process.ppid, ...extra'),
-      'writeState should include pid: process.ppid before ...extra'
-    );
-    assert.ok(
-      !updateStateSrc.includes('{ pid: process.ppid }'),
-      'no call site should pass pid manually'
+      updateStateSrc.includes("...(process.platform !== 'win32' ? { pid: process.ppid } : {}), ...extra"),
+      'writeState should spread pid conditionally (omit on win32) before ...extra'
     );
   });
 
@@ -2305,6 +2308,51 @@ describe('editor PID liveness tracking', () => {
       'candidate PID should be liveness-checked before arming');
     assert.ok(rendererSrc.includes('editorDead && ts > lastAppliedTimestamp'),
       'a fresh write should clear a false editorDead (PID reuse guard)');
+  });
+
+  test('renderer arms candidate via start-time identity, not bare liveness', () => {
+    assert.ok(rendererSrc.includes('isOwnedByLiveProcess(candidatePid, candidateTs)'),
+      'arming must verify the candidate process predates the reporting write');
+    assert.ok(rendererSrc.includes('candidateTs = ts || Date.now()'),
+      'the reporting write timestamp must be captured with the candidate');
+  });
+});
+
+describe('adapters -- editor provenance field', () => {
+  test('buildExtra includes editor', () => {
+    const baseAdapter = require('../adapters/base-adapter');
+    const stats = { session: { id: 's', start: Date.now(), toolCalls: 0, filesEdited: [] },
+      streak: 0, bestStreak: 0, brokenStreak: 0, brokenStreakAt: 0, recentMilestone: null,
+      daily: { sessionCount: 1, cumulativeMs: 0 }, frequentFiles: {} };
+    const extra = baseAdapter.buildExtra(stats, 'sid', 'codex', 'codex');
+    assert.strictEqual(extra.editor, 'codex');
+  });
+
+  test('every adapter declares its editor', () => {
+    const read = f => fs.readFileSync(path.join(__dirname, '..', 'adapters', f), 'utf8');
+    assert.ok(read('opencode-adapter.js').includes("defaultEditor: 'opencode'"));
+    assert.ok(read('openclaw-adapter.js').includes("defaultEditor: 'openclaw'"));
+    assert.ok(read('codex-notify.js').includes('editor'));
+    assert.ok(read('codex-wrapper.js').includes("editor: 'codex'"));
+    assert.ok(read('engmux-adapter.js').includes('extractEngine'));
+  });
+
+  test('runStdinAdapter fallback session id is editor-prefixed', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'adapters', 'base-adapter.js'), 'utf8');
+    assert.ok(src.includes('${defaultEditor}-${process.ppid}'));
+  });
+
+  test('update-state.js: editor invariants', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
+    assert.ok(src.includes("process.env.CODE_CRUMB_EDITOR || 'claude'"), 'editor resolution');
+    assert.ok(src.includes("'editor'"), 'editor in STICKY_FIELDS');
+    assert.ok(src.includes('FALLBACK_SESSION_ID'), 'single shared fallback id expression');
+    assert.ok(src.includes("process.platform !== 'win32'"), 'win32 transient-shim pid omission');
+  });
+
+  test('guardedWriteState preserves owner editor', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'adapters', 'base-adapter.js'), 'utf8');
+    assert.ok(src.includes('existing.editor'), 'editor preservation in guardedWriteState');
   });
 });
 

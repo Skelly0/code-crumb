@@ -27,13 +27,22 @@ const {
 // Event type passed as CLI argument (cross-platform -- no env var tricks)
 const hookEvent = process.argv[2] || '';
 
+// Editor provenance — which agent CLI this hook serves (distinct from modelName)
+const EDITOR = process.env.CODE_CRUMB_EDITOR || 'claude';
+// Single shared fallback ID — the try and catch paths MUST mint the same
+// ID or a session crossing the boundary splits into two orbitals.
+const FALLBACK_SESSION_ID = `${EDITOR}-${process.ppid}`;
+
 // -- File I/O --------------------------------------------------------
 
 // Write to the single state file (backward compat with renderer.js)
-// pid is the hook's parent — the editor on Unix, a transient shell shim on
-// Windows; the renderer validates it before trusting it for liveness checks.
+// pid is the hook's parent — the editor on Unix, where it enables liveness
+// rescue. On Windows the ppid is a transient cmd.exe shim (dead within ms):
+// useless for protection and a prime PID-recycling target, so it is omitted
+// entirely and those sessions rely on staleness timeouts.
 function writeState(state, detail = '', extra = {}) {
-  const data = JSON.stringify({ state, detail, timestamp: Date.now(), pid: process.ppid, ...extra });
+  const data = JSON.stringify({ state, detail, timestamp: Date.now(),
+    ...(process.platform !== 'win32' ? { pid: process.ppid } : {}), ...extra });
   try {
     fs.writeFileSync(STATE_FILE, data, { encoding: 'utf8', mode: 0o600 });
   } catch {
@@ -49,7 +58,9 @@ function writeSessionState(sessionId, state, detail = '', stopped = false, extra
     const data = JSON.stringify({
       session_id: sessionId, state, detail,
       timestamp: Date.now(), cwd: process.cwd(), stopped,
-      pid: process.ppid, // editor PID — hook runs as child, so ppid is the long-lived process
+      // editor PID on Unix (hook runs as child of the long-lived editor);
+      // omitted on Windows where ppid is a transient shim (recycling hazard)
+      ...(process.platform !== 'win32' ? { pid: process.ppid } : {}),
       ...extra,
     });
     fs.writeFileSync(path.join(SESSIONS_DIR, filename), data, { encoding: 'utf8', mode: 0o600 });
@@ -190,10 +201,10 @@ process.stdin.on('end', () => {
     const toolInput = data.tool_input || {};
     const toolResponse = normalizeToolResponse(data);
 
-    // Extract session ID: try hook data, env, then fall back to PPID
+    // Extract session ID: try hook data, env, then fall back to editor-prefixed PPID
     const sessionId = data.session_id
       || process.env.CLAUDE_SESSION_ID
-      || String(process.ppid);
+      || FALLBACK_SESSION_ID;
 
     // Load persistent stats
     const stats = readStats();
@@ -394,9 +405,9 @@ process.stdin.on('end', () => {
       if (stats.session.subagentCount > (stats.records.mostSubagents || 0)) {
         stats.records.mostSubagents = stats.session.subagentCount;
       }
-      stats.session.activeSubagents.push({ id: subId, description: desc, taskDescription: desc, model: data.model || 'haiku', startedAt: Date.now() });
+      stats.session.activeSubagents.push({ id: subId, description: desc, taskDescription: desc, model: data.model || 'haiku', editor: EDITOR, startedAt: Date.now() });
       writeSessionState(subId, 'spawning', desc, false, {
-        sessionId: subId, modelName: data.model || 'haiku', cwd: process.cwd(),
+        sessionId: subId, modelName: data.model || 'haiku', editor: EDITOR, cwd: process.cwd(),
         gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
         parentSession: sessionId, taskDescription: desc,
       });
@@ -413,7 +424,7 @@ process.stdin.on('end', () => {
             sessionId: finished.id, stopped: true, cwd: process.cwd(),
             gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
             parentSession: sessionId, taskDescription: finished.taskDescription || finished.description,
-            modelName: finished.model || 'haiku',
+            modelName: finished.model || 'haiku', editor: finished.editor || EDITOR,
           });
         }
         // If subId not found in our list, skip — it may belong to another session
@@ -423,7 +434,7 @@ process.stdin.on('end', () => {
           sessionId: finished.id, stopped: true, cwd: process.cwd(),
           gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
           parentSession: sessionId, taskDescription: finished.taskDescription || finished.description,
-          modelName: finished.model || 'haiku',
+          modelName: finished.model || 'haiku', editor: finished.editor || EDITOR,
         });
       }
       if (stats.session.activeSubagents.length > 0) {
@@ -466,7 +477,7 @@ process.stdin.on('end', () => {
         writeSessionState(sub.id, 'happy', 'done', true, {
           sessionId: sub.id, stopped: true, cwd: process.cwd(),
           gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
-          parentSession: sessionId, modelName: sub.model || 'haiku',
+          parentSession: sessionId, modelName: sub.model || 'haiku', editor: sub.editor || EDITOR,
         });
       }
       stats.session.activeSubagents = [];
@@ -544,6 +555,7 @@ process.stdin.on('end', () => {
     const extra = {
       sessionId,
       modelName,
+      editor: EDITOR,
       toolCalls: stats.session.toolCalls,
       filesEdited: stats.session.filesEdited?.length || 0,
       sessionStart: stats.session.start,
@@ -617,6 +629,11 @@ process.stdin.on('end', () => {
           extra.modelName !== existing.modelName) {
         extra.modelName = existing.modelName;
       }
+      // Same guard for editor provenance — the owner's editor must not be overwritten.
+      if (existing.sessionId === sessionId && existing.editor &&
+          extra.editor !== existing.editor) {
+        extra.editor = existing.editor;
+      }
     } catch {}
 
     // Subagents should never take over the global state file —
@@ -638,7 +655,7 @@ process.stdin.on('end', () => {
     if (hookEvent !== 'SessionStart') {
       // Preserve stopped flag and sticky fields from existing session file
       // (set once at SubagentStart/TeammateIdle, must survive subsequent hook updates)
-      const STICKY_FIELDS = ['taskDescription', 'parentSession', 'isTeammate', 'teamName', 'teammateName'];
+      const STICKY_FIELDS = ['taskDescription', 'parentSession', 'isTeammate', 'teamName', 'teammateName', 'editor'];
       try {
         const existingSession = JSON.parse(fs.readFileSync(
           path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
@@ -671,7 +688,7 @@ process.stdin.on('end', () => {
     // correct state for the hook event.
     // Try to reuse the session ID from the global state file so we don't
     // create an orphan session file that appears as a phantom orbital.
-    const originalFallbackId = process.env.CLAUDE_SESSION_ID || String(process.ppid);
+    const originalFallbackId = process.env.CLAUDE_SESSION_ID || FALLBACK_SESSION_ID;
     let fallbackSessionId = originalFallbackId;
     let shouldWriteGlobal = true;
     try {
@@ -699,7 +716,7 @@ process.stdin.on('end', () => {
     // SessionStart always takes over global state — explicit new-session signal
     if (hookEvent === 'SessionStart') shouldWriteGlobal = true;
 
-    const fallbackExtra = { sessionId: fallbackSessionId, modelName: process.env.CODE_CRUMB_MODEL || 'claude' };
+    const fallbackExtra = { sessionId: fallbackSessionId, modelName: process.env.CODE_CRUMB_MODEL || 'claude', editor: EDITOR };
 
     let fallbackState = 'thinking';
     let fallbackDetail = '';
@@ -728,7 +745,7 @@ process.stdin.on('end', () => {
       const subId = `${fallbackSessionId}-sub-${Date.now()}`;
       writeSessionState(subId, 'spawning', 'subagent', false, {
         sessionId: subId, parentSession: fallbackSessionId,
-        modelName: 'haiku', taskDescription: 'subagent',
+        modelName: 'haiku', editor: EDITOR, taskDescription: 'subagent',
       });
     } else if (hookEvent === 'SubagentStop') {
       fallbackState = 'happy';

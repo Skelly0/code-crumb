@@ -32,10 +32,19 @@ function extractModel(args) {
   return 'engmux';
 }
 
+// Extract the dispatch engine (-E / --engine) — that's the editor provenance
+function extractEngine(args) {
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] === '-E' || args[i] === '--engine') && args[i + 1]) return args[i + 1];
+  }
+  return 'engmux';
+}
+
 function writeState(state, detail, stopped = false) {
   writeSessionState(SESSION_ID, state, detail, stopped, {
     sessionId: SESSION_ID,
     modelName: extractModel(process.argv.slice(2)),
+    editor: extractEngine(process.argv.slice(2)),
     cwd: process.cwd(),
     parentSession: PARENT_SESSION,
   });

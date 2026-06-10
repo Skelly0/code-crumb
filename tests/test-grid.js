@@ -6,7 +6,7 @@
 // +================================================================+
 
 const assert = require('assert');
-const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS } = require('../grid');
+const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS } = require('../grid');
 const { gridMouths, eyes, mouths } = require('../animations');
 const { PALETTES } = require('../themes');
 const { ParticleSystem } = require('../particles');
@@ -1262,8 +1262,8 @@ describe('grid.js -- loadSessions mtime purge protects active faces (Bug #0)', (
       require('path').join(__dirname, '..', 'grid.js'), 'utf8'
     );
     assert.ok(
-      src.includes('isProcessAlive(this.pid)'),
-      'isStale should check PID liveness before falling back to timeout'
+      src.includes('isOwnedByLiveProcess(this.pid, this.lastUpdate)'),
+      'isStale should check PID ownership before falling back to timeout'
     );
   });
 
@@ -2214,10 +2214,10 @@ describe('grid.js -- completion-state face with live PID protected in file delet
     const src = fs.readFileSync(
       require('path').join(__dirname, '..', 'grid.js'), 'utf8'
     );
-    // The fix separates active non-completion (always protect) from completion with live PID
+    // The fix separates active non-completion (always protect) from completion with owning PID
     assert.ok(
-      src.includes('if (knownFace.pid && isProcessAlive(knownFace.pid)) continue;'),
-      'purge loop should check PID liveness for completion-state faces'
+      src.includes('if (knownFace.pid && isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)) continue;'),
+      'purge loop should check PID ownership for completion-state faces'
     );
   });
 });
@@ -3540,6 +3540,199 @@ describe('MiniFace activity cycling', () => {
     // Next tick should NOT cycle because lastUpdate is fresh
     face.tick(100);
     assert.strictEqual(face.state, 'coding');
+  });
+});
+
+describe('grid.js -- isOwnedByLiveProcess (PID identity gate)', () => {
+  const alive = () => true;
+  const dead = () => false;
+
+  function setCache(pid, value, resolvedAt = Date.now()) {
+    _pidStartCache.set(pid, { value, resolvedAt });
+  }
+
+  test('dead process is never owner', () => {
+    _pidStartCache.clear();
+    setCache(7001, Date.now() - 99999999);
+    assert.strictEqual(isOwnedByLiveProcess(7001, Date.now(), dead), false);
+  });
+
+  test('pid 0 / 1 / missing is never owner', () => {
+    assert.strictEqual(isOwnedByLiveProcess(0, Date.now(), alive), false);
+    assert.strictEqual(isOwnedByLiveProcess(1, Date.now(), alive), false);
+    assert.strictEqual(isOwnedByLiveProcess(undefined, Date.now(), alive), false);
+  });
+
+  test('recycled PID (started after last write + slack) is not owner', () => {
+    _pidStartCache.clear();
+    const lastWrite = Date.now() - 5 * 24 * 3600 * 1000; // 5-day-old ghost
+    setCache(7002, Date.now() - 3600 * 1000); // process started 1h ago
+    assert.strictEqual(isOwnedByLiveProcess(7002, lastWrite, alive), false);
+  });
+
+  test('legit PID (started before last write) is owner', () => {
+    _pidStartCache.clear();
+    const lastWrite = Date.now();
+    setCache(7003, lastWrite - 3600 * 1000); // started 1h before the write
+    assert.strictEqual(isOwnedByLiveProcess(7003, lastWrite, alive), true);
+  });
+
+  test('start time within 1s slack after write still owns', () => {
+    _pidStartCache.clear();
+    const lastWrite = Date.now() - 10000;
+    setCache(7004, lastWrite + 900); // 0.9s after write — inside SLACK_MS
+    assert.strictEqual(isOwnedByLiveProcess(7004, lastWrite, alive), true);
+    setCache(7004, lastWrite + 1100); // 1.1s after — outside
+    assert.strictEqual(isOwnedByLiveProcess(7004, lastWrite, alive), false);
+  });
+
+  test('pending resolution protects (safe default)', () => {
+    _pidStartCache.clear();
+    setCache(7005, 'pending');
+    assert.strictEqual(isOwnedByLiveProcess(7005, Date.now() - 99999999, alive), true);
+  });
+
+  test('unknown-alive protects only within 1h cap (recycled-onto-protected ghosts purge)', () => {
+    _pidStartCache.clear();
+    setCache(7006, 'unknown-alive');
+    // Recent write + unreadable StartTime (elevated editor): protected
+    assert.strictEqual(isOwnedByLiveProcess(7006, Date.now() - 30 * 60 * 1000, alive), true);
+    // Ancient write + unreadable StartTime (ghost PID recycled onto a
+    // protected system process, e.g. crashpad_handler): must purge
+    assert.strictEqual(isOwnedByLiveProcess(7006, Date.now() - 99999999, alive), false);
+    assert.strictEqual(isOwnedByLiveProcess(7006, Date.now(), dead), false);
+  });
+
+  test('unknown-nodata protects only within 1h cap', () => {
+    _pidStartCache.clear();
+    setCache(7007, 'unknown-nodata');
+    assert.strictEqual(isOwnedByLiveProcess(7007, Date.now() - 30 * 60 * 1000, alive), true);  // 30 min — capped window
+    assert.strictEqual(isOwnedByLiveProcess(7007, Date.now() - 2 * 3600 * 1000, alive), false); // 2 h — past cap
+  });
+
+  test('uncached pid resolves as pending-protected and enqueues', () => {
+    _pidStartCache.clear();
+    assert.strictEqual(isOwnedByLiveProcess(7008, Date.now(), alive), true);
+    assert.strictEqual(_pidStartStatus(7008), 'pending');
+  });
+
+  test('TTL: stale cache entry keeps protecting with old value but re-enqueues', () => {
+    _pidStartCache.clear();
+    const lastWrite = Date.now();
+    _pidStartCache.set(7009, { value: lastWrite - 1000, resolvedAt: Date.now() - 120000 }); // 2 min old entry
+    assert.strictEqual(isOwnedByLiveProcess(7009, lastWrite, alive), true); // old value still used
+    requestPidStartTime(7009, alive);
+    // entry survives (not downgraded to pending) while refresh is queued
+    assert.strictEqual(typeof _pidStartCache.get(7009).value, 'number');
+  });
+});
+
+describe('grid.js -- MiniFace editor derivation', () => {
+  test('explicit editor field wins', () => {
+    const f = new MiniFace('x');
+    f.updateFromFile({ state: 'coding', editor: 'opencode', modelName: 'big-pickle' });
+    assert.strictEqual(f.editor, 'opencode');
+  });
+  test('derives from modelName when it equals a known editor', () => {
+    const f = new MiniFace('x');
+    f.updateFromFile({ state: 'coding', modelName: 'codex' });
+    assert.strictEqual(f.editor, 'codex');
+  });
+  test('derives from session id prefix', () => {
+    const f = new MiniFace('opencode-47040');
+    f.updateFromFile({ state: 'coding', modelName: 'big-pickle' });
+    assert.strictEqual(f.editor, 'opencode');
+  });
+  test('no recoverable provenance -> empty (old engmux/subagent files)', () => {
+    const f = new MiniFace('47040');
+    f.updateFromFile({ state: 'coding', modelName: 'haiku' });
+    assert.strictEqual(f.editor, '');
+  });
+  test('editor is sticky across later writes without the field', () => {
+    const f = new MiniFace('x');
+    f.updateFromFile({ state: 'coding', editor: 'openclaw', timestamp: 1 });
+    f.updateFromFile({ state: 'reading', timestamp: 2 });
+    assert.strictEqual(f.editor, 'openclaw');
+  });
+});
+
+describe('grid.js -- recycled-PID purge integration', () => {
+  test('isStale: recycled PID does not protect a quiet face', () => {
+    _pidStartCache.clear();
+    const face = new MiniFace('ghost');
+    face.state = 'coding';
+    face.lastUpdate = Date.now() - 5 * 24 * 3600 * 1000; // 5 days quiet
+    // Use our own (live) pid with an injected start time AFTER lastUpdate —
+    // simulates a recycled PID without needing to stub isProcessAlive.
+    face.pid = process.pid;
+    _pidStartCache.set(process.pid, { value: Date.now() - 1000, resolvedAt: Date.now() });
+    assert.strictEqual(face.isStale(), true); // not owner -> orphan timeout applies
+  });
+
+  test('isStale: owning PID still protects a quiet face', () => {
+    _pidStartCache.clear();
+    const face = new MiniFace('legit');
+    face.pid = process.pid;
+    face.state = 'coding';
+    face.lastUpdate = Date.now() - 5 * 60 * 1000; // 5 min quiet
+    _pidStartCache.set(process.pid, { value: face.lastUpdate - 3600 * 1000, resolvedAt: Date.now() });
+    assert.strictEqual(face.isStale(), false);
+  });
+
+  test('source: purge paths use isOwnedByLiveProcess, not bare isProcessAlive', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'grid.js'), 'utf8');
+    assert.ok(src.includes('isOwnedByLiveProcess(this.pid, this.lastUpdate)'), 'isStale gated');
+    assert.ok(src.includes('isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)'), 'face-pid purge gated');
+    assert.ok(src.includes('isOwnedByLiveProcess(face.pid, face.lastUpdate)'), 'keep-alive gated');
+    assert.ok(!src.includes('knownFace.pid && isProcessAlive(knownFace.pid)'), 'old face-pid call removed');
+  });
+});
+
+describe('grid.js -- session list editor tag', () => {
+  const strip = s => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+  const mkFace = (over = {}) => Object.assign(new MiniFace('sess-1'), {
+    state: 'coding', detail: 'editing foo', label: 'scorp3', cwd: '/tmp/proj',
+    gitBranch: 'main', editor: 'opencode',
+  }, over);
+
+  test('row 1 shows the editor tag after state name', () => {
+    const out = strip(renderSessionList(120, 40, [mkFace()], null, null, -1, {}));
+    assert.ok(out.includes('opencode'), 'editor tag rendered');
+    assert.ok(out.includes('scorp3'), 'label still rendered');
+  });
+
+  test('tag is dropped, label intact, when width is tight (injected long tag)', () => {
+    const f = mkFace({ label: 'aaaaaaaaaaaaaa' });
+    f.editor = 'verylongtagxxxx'; // sliced to 8 then must still drop at the floor
+    const out = strip(renderSessionList(50, 40, [f], null, null, -1, {}));
+    assert.ok(out.includes('aaaaaaaaaaaaaa'), 'label never sliced');
+  });
+
+  test('main row shows its editor and the star marker survives', () => {
+    const mainInfo = { state: 'thinking', detail: 'pondering', cwd: '/tmp', gitBranch: 'main',
+      label: 'claude', editor: 'claude', stopped: false, firstSeen: 0, isMain: true, isPinned: false };
+    const out = strip(renderSessionList(120, 40, [], null, mainInfo, -1, {}));
+    assert.ok(out.includes('★'), 'main marker present');
+    assert.ok(out.includes('claude'));
+  });
+
+  test('row 3 prefers taskDescription over detail', () => {
+    const f = mkFace({ taskDescription: 'fix the webhook retry logic', detail: 'edit foo' });
+    const out = strip(renderSessionList(120, 40, [f], null, null, -1, {}));
+    assert.ok(out.includes('fix the webhook retry logic'));
+    assert.ok(!out.includes('edit foo'));
+  });
+
+  test('every row 1 stays exactly innerW wide with the tag present', () => {
+    const out = renderSessionList(120, 40, [mkFace()], null, null, -1, {});
+    // Each rendered row begins with a cursor-positioning escape; split there,
+    // then strip color codes. Box width caps at 54 -> innerW 52.
+    const rows = out.split(/\x1b\[\d+;\d+H/).map(strip).filter(l => l.startsWith('│') && l.length > 2);
+    assert.ok(rows.length >= 3, 'should have content rows');
+    for (const line of rows) {
+      const inner = line.slice(1, line.lastIndexOf('│'));
+      assert.strictEqual(inner.length, 52, `row width drifted: "${inner}" (${inner.length})`);
+    }
   });
 });
 

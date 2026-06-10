@@ -1943,7 +1943,7 @@ describe('state-machine.js -- subagent tool state propagation', () => {
   test('all output fields are present', () => {
     const result = buildSubagentSessionState({}, { id: 's1', description: 'd' }, 'p', '/c');
     const keys = Object.keys(result).sort();
-    assert.deepStrictEqual(keys, ['cwd', 'gitBranch', 'modelName', 'parentSession', 'sessionId', 'taskDescription']);
+    assert.deepStrictEqual(keys, ['cwd', 'editor', 'gitBranch', 'modelName', 'parentSession', 'sessionId', 'taskDescription']);
   });
 });
 
@@ -3076,6 +3076,21 @@ describe('update-state.js -- new hook event handlers', () => {
           `${event} handler should not modify totalToolCalls`);
       }
     }
+  });
+});
+
+describe('state-machine -- buildSubagentSessionState editor field', () => {
+  test('preserves editor from existing session file', () => {
+    const built = buildSubagentSessionState(
+      { editor: 'opencode', modelName: 'big-pickle' },
+      { id: 's1', model: 'haiku', description: 'task' }, 'parent-1', '/tmp');
+    assert.strictEqual(built.editor, 'opencode');
+  });
+  test('falls back to sub.editor then empty', () => {
+    const a = buildSubagentSessionState({}, { id: 's1', editor: 'claude', description: 'd' }, 'p', '/tmp');
+    assert.strictEqual(a.editor, 'claude');
+    const b = buildSubagentSessionState({}, { id: 's1', description: 'd' }, 'p', '/tmp');
+    assert.strictEqual(b.editor, '');
   });
 });
 

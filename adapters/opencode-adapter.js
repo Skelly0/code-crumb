@@ -86,6 +86,7 @@ function mapEvent(event, toolName, toolInput, toolOutput, isError, data) {
 if (require.main === module) {
   runStdinAdapter({
     defaultModel: 'opencode',
+    defaultEditor: 'opencode',
     normaliseEvent,
     mapEvent,
   });

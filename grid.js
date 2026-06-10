@@ -26,6 +26,9 @@ const INTERRUPTIBLE_STATES = new Set([
 const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
 const HOME_FWD = HOME.replace(/\\/g, '/');  // Forward-slash-normalized HOME for path display
 
+// Editors whose names may appear in legacy modelName fields / ID prefixes
+const KNOWN_EDITORS = new Set(['claude', 'codex', 'opencode', 'openclaw', 'engmux']);
+
 // Predefined team accent colors — assigned consistently by hashing the team name
 const TEAM_COLORS = [
   [255, 120, 120],  // red
@@ -80,6 +83,162 @@ function isProcessAlive(pid) {
   catch (err) { return err.code === 'EPERM'; } // EPERM = process exists, different owner
 }
 
+// -- PID identity (start-time) tracking ------------------------------
+// isProcessAlive proves *a* process exists, not *the* process — recycled
+// PIDs falsely protect dead sessions. A PID owns a session only if its
+// process started before the session's last write (+ slack).
+const SLACK_MS = 1000;                 // NTFS 1s mtime granularity + minor skew
+const PID_PROTECT_CAP_MS = 3600000;    // 1h cap when start time is unobtainable
+const PID_CACHE_TTL_MS = 60000;        // re-resolve to close live->live recycle gap
+
+// pid -> { value: epochMs | 'pending' | 'unknown-alive' | 'unknown-nodata', resolvedAt }
+const _pidStartCache = new Map();
+const _pidResolveQueue = new Set();
+let _pidExecInFlight = false;
+
+function _pidStartStatus(pid) {
+  const e = _pidStartCache.get(pid);
+  if (!e) return 'none';
+  return typeof e.value === 'number' ? 'known' : e.value;
+}
+
+// Memoized PowerShell path — static for the process lifetime, so resolve once.
+let _psExeCached = null;
+function _winPsExe() {
+  if (_psExeCached) return _psExeCached;
+  _psExeCached = 'powershell';
+  try {
+    const psPath = path.join(process.env.SystemRoot || 'C:\\Windows',
+      'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    if (fs.existsSync(psPath)) _psExeCached = psPath;
+  } catch {}
+  return _psExeCached;
+}
+
+// Enqueue a PID for background start-time resolution. Fresh entries are
+// left alone; TTL-expired entries keep their old value (still used by the
+// gate) while a refresh rides the next batch.
+function requestPidStartTime(pid, aliveFn = isProcessAlive) {
+  if (!pid || pid <= 1) return;
+  const now = Date.now();
+  const e = _pidStartCache.get(pid);
+  if (e && (e.value === 'pending' || now - e.resolvedAt < PID_CACHE_TTL_MS)) return;
+  if (!aliveFn(pid)) { _pidStartCache.delete(pid); return; }
+  if (!e) _pidStartCache.set(pid, { value: 'pending', resolvedAt: now });
+  _pidResolveQueue.add(pid);
+  _kickPidResolve();
+}
+
+// One outstanding exec at a time; queued PIDs ride the next batch.
+function _kickPidResolve() {
+  if (_pidExecInFlight || _pidResolveQueue.size === 0) return;
+  const pids = [..._pidResolveQueue];
+  _pidResolveQueue.clear();
+  _pidExecInFlight = true;
+  let settled = false;
+  const done = (results) => {
+    if (settled) return;
+    settled = true;
+    const now = Date.now();
+    for (const pid of pids) {
+      if (!results) { _pidStartCache.set(pid, { value: 'unknown-nodata', resolvedAt: now }); continue; }
+      const v = results.get(pid);
+      if (v === undefined) _pidStartCache.delete(pid);        // absent from output = dead
+      else _pidStartCache.set(pid, { value: v, resolvedAt: now }); // epochMs or 'unknown-alive'
+    }
+    _pidExecInFlight = false;
+    if (_pidResolveQueue.size > 0) _kickPidResolve();
+  };
+  // A synchronous throw in a resolver must never latch _pidExecInFlight —
+  // that would freeze every PID at 'pending' (protected) forever.
+  try { _resolvePidStartTimes(pids, done); } catch { done(null); }
+}
+
+// Platform resolvers. callback(Map<pid, epochMs|'unknown-alive'> | null on exec failure).
+function _resolvePidStartTimes(pids, callback) {
+  if (process.platform === 'linux') {
+    const out = new Map();
+    try {
+      const uptimeSec = parseFloat(fs.readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
+      const bootEpochMs = Date.now() - uptimeSec * 1000;
+      const hz = 100; // USER_HZ is 100 on all mainstream kernels
+      for (const pid of pids) {
+        try {
+          const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+          // comm (field 2) may contain spaces/parens — split after the last ')'
+          const after = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+          const startJiffies = parseInt(after[19], 10); // stat field 22
+          if (!isNaN(startJiffies)) out.set(pid, bootEpochMs + (startJiffies / hz) * 1000);
+        } catch {} // ENOENT = dead (absent from results)
+      }
+      callback(out);
+    } catch { callback(null); }
+    return;
+  }
+  const { execFile } = require('child_process');
+  if (process.platform === 'win32') {
+    // Per-PID error isolation: one dead PID must not poison the batch.
+    // Emits "<pid> <epochMs>" for readable processes, "<pid> EPERM" when
+    // StartTime is unreadable (elevated process), nothing when dead. The
+    // trailing EOB sentinel distinguishes "all queried PIDs are dead"
+    // (empty-but-complete output) from a silently broken powershell.
+    const script = `$ErrorActionPreference='SilentlyContinue';` +
+      `foreach($i in @(${pids.join(',')})){` +
+      `$p=Get-Process -Id $i -ErrorAction SilentlyContinue;` +
+      `if($p){ try { '{0} {1}' -f $i,[int64]($p.StartTime.ToUniversalTime() - [datetime]::new(1970,1,1,0,0,0,[DateTimeKind]::Utc)).TotalMilliseconds } catch { '{0} EPERM' -f $i } } };'EOB'`;
+    execFile(_winPsExe(), ['-NoProfile', '-NonInteractive', '-NoLogo', '-Command', script],
+      { windowsHide: true, timeout: 15000 }, (err, stdout) => {
+        const s = String(stdout || '');
+        if (!s.includes('EOB')) { callback(null); return; } // exec failed/blocked — no verdicts
+        callback(_parsePidLines(s));
+      });
+    return;
+  }
+  // darwin: ps lstart with C locale for stable English date parsing
+  execFile('ps', ['-o', 'pid=,lstart=', '-p', pids.join(',')],
+    { env: { ...process.env, LC_ALL: 'C' }, timeout: 15000 }, (err, stdout) => {
+      if (err && !stdout) { callback(null); return; }
+      const out = new Map();
+      for (const line of String(stdout).split('\n')) {
+        const m = /^\s*(\d+)\s+(.+)$/.exec(line);
+        if (!m) continue;
+        const t = Date.parse(m[2]);
+        out.set(parseInt(m[1], 10), isNaN(t) ? 'unknown-alive' : t);
+      }
+      callback(out);
+    });
+}
+
+function _parsePidLines(stdout) {
+  const out = new Map();
+  for (const line of String(stdout).split('\n')) {
+    const m = /^\s*(\d+)\s+(EPERM|-?\d+)\s*$/.exec(line);
+    if (!m) continue;
+    out.set(parseInt(m[1], 10), m[2] === 'EPERM' ? 'unknown-alive' : parseInt(m[2], 10));
+  }
+  return out;
+}
+
+// The gate. Synchronous: start-time cache + a kill(0) probe — no exec,
+// never blocks. aliveFn is injectable for tests.
+// Unknown start times ('unknown-alive': process present but StartTime is
+// Access-Denied, e.g. crashpad_handler holding a recycled PID; or
+// 'unknown-nodata': no exec capability) protect only up to the 1h cap.
+// A real elevated editor refreshes lastWriteMs with every hook and its
+// orbital reappears on the next write after an idle gap; an uncapped
+// protect-while-alive would instead immortalize ghosts whose PIDs were
+// recycled onto protected system processes (observed live: ghost 44240).
+function isOwnedByLiveProcess(pid, lastWriteMs, aliveFn = isProcessAlive) {
+  if (!pid || pid <= 1) return false;
+  if (!aliveFn(pid)) return false;
+  requestPidStartTime(pid, aliveFn);
+  const e = _pidStartCache.get(pid);
+  const value = e ? e.value : 'pending';
+  if (typeof value === 'number') return value <= (lastWriteMs || 0) + SLACK_MS;
+  if (value === 'pending') return true;
+  return Date.now() - (lastWriteMs || 0) < PID_PROTECT_CAP_MS; // both unknowns
+}
+
 // -- MiniFace (compact, for grid) ----------------------------------
 class MiniFace {
   constructor(sessionId) {
@@ -90,6 +249,7 @@ class MiniFace {
     this.cwd = '';
     this._cwdBasename = '';
     this.modelName = '';
+    this.editor = '';          // editor provenance (claude/codex/opencode/...)
     this.lastUpdate = Date.now();
     this.firstSeen = Date.now();
     this.stopped = false;
@@ -177,6 +337,15 @@ class MiniFace {
     this.lastUpdate = fileMtimeMs || Date.now();
     if (data.cwd) this.cwd = data.cwd;
     if (data.modelName) this.modelName = data.modelName;
+    if (data.editor) this.editor = data.editor;
+    else if (!this.editor) {
+      // Best-effort legacy derivation: modelName-as-editor, then ID prefix
+      if (KNOWN_EDITORS.has(data.modelName)) this.editor = data.modelName;
+      else {
+        const m = /^([a-z]+)-/.exec(String(this.sessionId));
+        if (m && KNOWN_EDITORS.has(m[1])) this.editor = m[1];
+      }
+    }
     if (data.parentSession) this.parentSession = data.parentSession;
     if (data.teamName) {
       this.teamName = data.teamName;
@@ -201,8 +370,9 @@ class MiniFace {
     if (this.stopped) {
       return Date.now() - this.stoppedAt > STOPPED_LINGER_MS;
     }
-    // Non-stopped: if owning process is alive, NEVER stale
-    if (this.pid && isProcessAlive(this.pid)) return false;
+    // Non-stopped: if the owning process is alive AND actually ours
+    // (start time predates our last write — recycled PIDs fail), never stale
+    if (this.pid && isOwnedByLiveProcess(this.pid, this.lastUpdate)) return false;
     // No pid or dead process: completion states get short timeout
     if (COMPLETION_STATES.has(this.state)) {
       return Date.now() - this.lastUpdate > STOPPED_LINGER_MS;
@@ -543,18 +713,21 @@ class OrbitalSystem {
     for (const f of files) {
       try {
         const fp = path.join(SESSIONS_DIR, f);
-        if (now - fs.statSync(fp).mtimeMs > STALE_MS) {
+        const fileMtimeMs = fs.statSync(fp).mtimeMs;
+        if (now - fileMtimeMs > STALE_MS) {
           // Use reverse map for correct face lookup (safeFilename may transform the ID)
           const faceId = fileToFaceId.get(f) || path.basename(f, '.json');
           const knownFace = this.faces.get(faceId);
           if (knownFace && !knownFace.stopped) {
             if (!COMPLETION_STATES.has(knownFace.state)) continue;  // Active non-completion: always protect
-            if (knownFace.pid && isProcessAlive(knownFace.pid)) continue;  // Completion with live PID: protect
+            if (knownFace.pid && isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)) continue;  // Completion with owning PID: protect
           }
-          // No protecting face — check file PID before deleting
+          // No protecting face — check file PID identity before deleting
+          // (mtime fallback matches the async purge path for legacy files
+          // whose JSON lacks a timestamp field)
           try {
             const data = JSON.parse(fs.readFileSync(fp, 'utf8'));
-            if (data.pid && isProcessAlive(data.pid)) continue;
+            if (data.pid && isOwnedByLiveProcess(data.pid, data.timestamp || fileMtimeMs)) continue;
           } catch {
             continue; // Parse failure = mid-write race — protect the file
           }
@@ -582,6 +755,11 @@ class OrbitalSystem {
         const data = JSON.parse(raw);
         const id = data.session_id || path.basename(file, '.json');
 
+        // Keep start-time resolution warm for every session PID — on the
+        // renderer's synchronous boot scan this enqueues all PIDs at once,
+        // so one batched exec resolves them before the next purge cycle.
+        if (data.pid) requestPidStartTime(data.pid);
+
         // Skip the main session — it's the big face, not an orbital
         if (excludeId && id === excludeId) continue;
 
@@ -607,7 +785,7 @@ class OrbitalSystem {
     for (const [id, face] of this.faces) {
       if (!seenIds.has(id) || face.isStale()) {
         // File gone but process alive? Keep face — file may reappear on next hook write.
-        if (!seenIds.has(id) && !face.stopped && face.pid && isProcessAlive(face.pid)) continue;
+        if (!seenIds.has(id) && !face.stopped && face.pid && isOwnedByLiveProcess(face.pid, face.lastUpdate)) continue;
         this.faces.delete(id);
         // Don't delete session files here — the dedicated file stale purge above
         // handles cleanup with proper PID and face-state protection.
@@ -707,13 +885,13 @@ class OrbitalSystem {
             survivingResults.push(r); // Protected — active non-completion face
             continue;
           }
-          if (knownFace.pid && isProcessAlive(knownFace.pid)) {
-            survivingResults.push(r); // Protected — completion with live PID
+          if (knownFace.pid && isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)) {
+            survivingResults.push(r); // Protected — completion with owning PID
             continue;
           }
         }
-        if (r.data && r.data.pid && isProcessAlive(r.data.pid)) {
-          survivingResults.push(r); // Protected — process alive
+        if (r.data && r.data.pid && isOwnedByLiveProcess(r.data.pid, r.data.timestamp || r.mtimeMs)) {
+          survivingResults.push(r); // Protected — owning process alive
           continue;
         }
         // Stale and unprotected — delete asynchronously
@@ -734,6 +912,7 @@ class OrbitalSystem {
       }
 
       const id = r.data.session_id || path.basename(r.file, '.json');
+      if (r.data.pid) requestPidStartTime(r.data.pid); // keep start-time cache warm
       if (excludeId && id === excludeId) continue;
       seenIds.add(id);
 
@@ -751,7 +930,7 @@ class OrbitalSystem {
     for (const [id, face] of this.faces) {
       if (!seenIds.has(id) || face.isStale()) {
         // File gone but process alive? Keep face — file may reappear on next hook write.
-        if (!seenIds.has(id) && !face.stopped && face.pid && isProcessAlive(face.pid)) continue;
+        if (!seenIds.has(id) && !face.stopped && face.pid && isOwnedByLiveProcess(face.pid, face.lastUpdate)) continue;
         this.faces.delete(id);
         // Don't delete session files here — the dedicated file stale purge above
         // handles cleanup with proper PID and face-state protection.
@@ -1532,11 +1711,21 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
         : (face.isMainSession ? '\u2606 ' : '');
       const row1Prefix = 4; // " ▸● " before stateName
       const fullLabel = mainTag + label;
-      const labelGap = Math.max(2, innerW - row1Prefix - stateName.length - fullLabel.length);
-      const row1Content = `${stateName}${' '.repeat(labelGap)}${fullLabel}`;
-      const row1Sliced = row1Content.slice(0, innerW - row1Prefix);
-      const r1Pad = Math.max(0, innerW - row1Prefix - row1Sliced.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${r} ${rowTc}${selMarker}${dotC}${dot}${r} ${rowTc}${row1Sliced}${' '.repeat(r1Pad)}${bc}\u2502${r}`;
+      // Three segments: state + dim editor tag + right-anchored label. The
+      // label (with its pin/main marker — the promote UX) is never sliced;
+      // the editor tag drops first under width pressure; the state name
+      // truncates only as a last resort.
+      const avail = innerW - row1Prefix;
+      const tagRaw = (face.editor || '').slice(0, 8);
+      let stateSeg = stateName;
+      const tagSeg = (tagRaw && stateSeg.length + 2 + tagRaw.length + 2 + fullLabel.length <= avail)
+        ? tagRaw : '';
+      const maxState = avail - fullLabel.length - 2 - (tagSeg ? tagSeg.length + 2 : 0);
+      if (stateSeg.length > maxState) stateSeg = stateSeg.slice(0, Math.max(0, maxState));
+      const usedLeft = stateSeg.length + (tagSeg ? 2 + tagSeg.length : 0);
+      const labelGap = Math.max(2, avail - usedLeft - fullLabel.length);
+      const r1Pad = Math.max(0, avail - usedLeft - labelGap - fullLabel.length);
+      buf += ansi.to(row, bx) + `${bc}\u2502${r} ${rowTc}${selMarker}${dotC}${dot}${r} ${rowTc}${stateSeg}${tagSeg ? `  ${rowDc}${tagSeg}` : ''}${' '.repeat(labelGap)}${rowTc}${fullLabel}${' '.repeat(r1Pad)}${bc}\u2502${r}`;
       row++;
 
       // Row 2: "    ⎇ branch  ~/path" — branch and path share the line
@@ -1557,9 +1746,9 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
       buf += ansi.to(row, bx) + `${bc}\u2502${rowDc}${row2Full}${' '.repeat(r2Pad)}${bc}\u2502${r}`;
       row++;
 
-      // Row 3: "    detail text" — detail or task description, dimmed
+      // Row 3: "    task/detail text" — full task description preferred, dimmed
       const indent3 = '    ';
-      const detailText = (face.detail || face.taskDescription || 'waiting...').slice(0, innerW - indent3.length);
+      const detailText = (face.taskDescription || face.detail || 'waiting...').slice(0, innerW - indent3.length);
       const row3Full = indent3 + detailText;
       const r3Pad = Math.max(0, innerW - row3Full.length);
       buf += ansi.to(row, bx) + `${bc}\u2502${rowDc}${row3Full}${' '.repeat(r3Pad)}${bc}\u2502${r}`;
@@ -1613,7 +1802,8 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
 
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
-  STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS,
+  isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, KNOWN_EDITORS,
+  STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, SLACK_MS, PID_PROTECT_CAP_MS, PID_CACHE_TTL_MS,
   INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, GROUP_LABEL_BRIGHTNESS,
   CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS,
 };
