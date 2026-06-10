@@ -3684,4 +3684,52 @@ describe('grid.js -- recycled-PID purge integration', () => {
   });
 });
 
+describe('grid.js -- session list editor tag', () => {
+  const strip = s => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+  const mkFace = (over = {}) => Object.assign(new MiniFace('sess-1'), {
+    state: 'coding', detail: 'editing foo', label: 'scorp3', cwd: '/tmp/proj',
+    gitBranch: 'main', editor: 'opencode',
+  }, over);
+
+  test('row 1 shows the editor tag after state name', () => {
+    const out = strip(renderSessionList(120, 40, [mkFace()], null, null, -1, {}));
+    assert.ok(out.includes('opencode'), 'editor tag rendered');
+    assert.ok(out.includes('scorp3'), 'label still rendered');
+  });
+
+  test('tag is dropped, label intact, when width is tight (injected long tag)', () => {
+    const f = mkFace({ label: 'aaaaaaaaaaaaaa' });
+    f.editor = 'verylongtagxxxx'; // sliced to 8 then must still drop at the floor
+    const out = strip(renderSessionList(50, 40, [f], null, null, -1, {}));
+    assert.ok(out.includes('aaaaaaaaaaaaaa'), 'label never sliced');
+  });
+
+  test('main row shows its editor and the star marker survives', () => {
+    const mainInfo = { state: 'thinking', detail: 'pondering', cwd: '/tmp', gitBranch: 'main',
+      label: 'claude', editor: 'claude', stopped: false, firstSeen: 0, isMain: true, isPinned: false };
+    const out = strip(renderSessionList(120, 40, [], null, mainInfo, -1, {}));
+    assert.ok(out.includes('★'), 'main marker present');
+    assert.ok(out.includes('claude'));
+  });
+
+  test('row 3 prefers taskDescription over detail', () => {
+    const f = mkFace({ taskDescription: 'fix the webhook retry logic', detail: 'edit foo' });
+    const out = strip(renderSessionList(120, 40, [f], null, null, -1, {}));
+    assert.ok(out.includes('fix the webhook retry logic'));
+    assert.ok(!out.includes('edit foo'));
+  });
+
+  test('every row 1 stays exactly innerW wide with the tag present', () => {
+    const out = renderSessionList(120, 40, [mkFace()], null, null, -1, {});
+    // Each rendered row begins with a cursor-positioning escape; split there,
+    // then strip color codes. Box width caps at 54 -> innerW 52.
+    const rows = out.split(/\x1b\[\d+;\d+H/).map(strip).filter(l => l.startsWith('│') && l.length > 2);
+    assert.ok(rows.length >= 3, 'should have content rows');
+    for (const line of rows) {
+      const inner = line.slice(1, line.lastIndexOf('│'));
+      assert.strictEqual(inner.length, 52, `row width drifted: "${inner}" (${inner.length})`);
+    }
+  });
+});
+
 module.exports = { passed: () => passed, failed: () => failed };

@@ -1683,11 +1683,21 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
         : (face.isMainSession ? '\u2606 ' : '');
       const row1Prefix = 4; // " ▸● " before stateName
       const fullLabel = mainTag + label;
-      const labelGap = Math.max(2, innerW - row1Prefix - stateName.length - fullLabel.length);
-      const row1Content = `${stateName}${' '.repeat(labelGap)}${fullLabel}`;
-      const row1Sliced = row1Content.slice(0, innerW - row1Prefix);
-      const r1Pad = Math.max(0, innerW - row1Prefix - row1Sliced.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${r} ${rowTc}${selMarker}${dotC}${dot}${r} ${rowTc}${row1Sliced}${' '.repeat(r1Pad)}${bc}\u2502${r}`;
+      // Three segments: state + dim editor tag + right-anchored label. The
+      // label (with its pin/main marker — the promote UX) is never sliced;
+      // the editor tag drops first under width pressure; the state name
+      // truncates only as a last resort.
+      const avail = innerW - row1Prefix;
+      const tagRaw = (face.editor || '').slice(0, 8);
+      let stateSeg = stateName;
+      const tagSeg = (tagRaw && stateSeg.length + 2 + tagRaw.length + 2 + fullLabel.length <= avail)
+        ? tagRaw : '';
+      const maxState = avail - fullLabel.length - 2 - (tagSeg ? tagSeg.length + 2 : 0);
+      if (stateSeg.length > maxState) stateSeg = stateSeg.slice(0, Math.max(0, maxState));
+      const usedLeft = stateSeg.length + (tagSeg ? 2 + tagSeg.length : 0);
+      const labelGap = Math.max(2, avail - usedLeft - fullLabel.length);
+      const r1Pad = Math.max(0, avail - usedLeft - labelGap - fullLabel.length);
+      buf += ansi.to(row, bx) + `${bc}\u2502${r} ${rowTc}${selMarker}${dotC}${dot}${r} ${rowTc}${stateSeg}${tagSeg ? `  ${rowDc}${tagSeg}` : ''}${' '.repeat(labelGap)}${rowTc}${fullLabel}${' '.repeat(r1Pad)}${bc}\u2502${r}`;
       row++;
 
       // Row 2: "    ⎇ branch  ~/path" — branch and path share the line
@@ -1708,9 +1718,9 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
       buf += ansi.to(row, bx) + `${bc}\u2502${rowDc}${row2Full}${' '.repeat(r2Pad)}${bc}\u2502${r}`;
       row++;
 
-      // Row 3: "    detail text" — detail or task description, dimmed
+      // Row 3: "    task/detail text" — full task description preferred, dimmed
       const indent3 = '    ';
-      const detailText = (face.detail || face.taskDescription || 'waiting...').slice(0, innerW - indent3.length);
+      const detailText = (face.taskDescription || face.detail || 'waiting...').slice(0, innerW - indent3.length);
       const row3Full = indent3 + detailText;
       const r3Pad = Math.max(0, innerW - row3Full.length);
       buf += ansi.to(row, bx) + `${bc}\u2502${rowDc}${row3Full}${' '.repeat(r3Pad)}${bc}\u2502${r}`;
