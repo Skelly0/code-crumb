@@ -77,6 +77,7 @@ function normaliseEvent(data) {
 if (require.main === module) {
   runStdinAdapter({
     defaultModel: 'openclaw',
+    defaultEditor: 'openclaw',
     normaliseEvent,
     mapEvent: null, // No custom event types -- all handled by common logic
   });

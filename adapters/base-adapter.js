@@ -82,6 +82,11 @@ function guardedWriteState(sessionId, state, detail, extra) {
       writeExtra = { ...writeExtra, modelName: existing.modelName };
       extra.modelName = existing.modelName; // Propagate to caller (writeSessionState)
     }
+    // Same preservation for editor provenance
+    if (existing.sessionId === sessionId && existing.editor) {
+      writeExtra = { ...writeExtra, editor: existing.editor };
+      extra.editor = existing.editor;
+    }
   } catch {}
   writeState(state, detail, writeExtra);
 }
@@ -108,11 +113,12 @@ function initSession(stats, sessionId) {
 // -- Extra fields builder ----------------------------------------------
 // Constructs the metadata object included in every state file write.
 
-function buildExtra(stats, sessionId, modelName) {
+function buildExtra(stats, sessionId, modelName, editor) {
   const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
   return {
     sessionId,
     modelName,
+    editor: editor || '',
     toolCalls: stats.session.toolCalls,
     filesEdited: stats.session.filesEdited.length,
     sessionStart: stats.session.start,
@@ -232,7 +238,8 @@ function processJsonlStream(stream, handler) {
 //
 // Options:
 //   defaultModel   - model name fallback (e.g. 'opencode', 'openclaw')
-//   normaliseEvent - fn(data) => { event, toolName, toolInput, toolOutput, isError, sessionId, modelName }
+//   defaultEditor  - editor provenance fallback (e.g. 'opencode', 'openclaw')
+//   normaliseEvent - fn(data) => { event, toolName, toolInput, toolOutput, isError, sessionId, modelName, editor }
 //   mapEvent       - fn(event, toolName, toolInput, toolOutput, isError, data)
 //                    => { state, detail, stopped, extra } or null to use defaults
 //
@@ -242,7 +249,7 @@ function processJsonlStream(stream, handler) {
 // automatically if mapEvent returns null.
 
 function runStdinAdapter(options) {
-  const { defaultModel, normaliseEvent, mapEvent } = options;
+  const { defaultModel, defaultEditor, normaliseEvent, mapEvent } = options;
 
   processStdinEvent((data) => {
     const norm = normaliseEvent(data);
@@ -251,19 +258,25 @@ function runStdinAdapter(options) {
     const toolInput = norm.toolInput || {};
     const toolOutput = norm.toolOutput || '';
     const isError = norm.isError || false;
+    // Fallback ID is editor-prefixed so anonymous sessions are
+    // self-describing and never collide across editors.
     const sessionId = norm.sessionId
       || data.session_id
       || process.env.CLAUDE_SESSION_ID
-      || String(process.ppid);
+      || `${defaultEditor}-${process.ppid}`;
     const modelName = norm.modelName
       || data.model_name
       || process.env.CODE_CRUMB_MODEL
       || defaultModel;
+    const editor = norm.editor
+      || data.editor
+      || process.env.CODE_CRUMB_EDITOR
+      || defaultEditor;
 
     const stats = readStats();
     initSession(stats, sessionId);
 
-    const extra = buildExtra(stats, sessionId, modelName);
+    const extra = buildExtra(stats, sessionId, modelName, editor);
 
     let state = 'thinking';
     let detail = '';
@@ -316,8 +329,9 @@ function runStdinAdapter(options) {
     pruneFrequentFiles(stats.frequentFiles);
     writeStats(stats);
   }, () => {
-    // Fallback on parse error -- write thinking state with guard
-    const sessionId = process.env.CLAUDE_SESSION_ID || String(process.ppid);
+    // Fallback on parse error -- write thinking state with guard.
+    // Same editor-prefixed ID as the main path so the session never splits.
+    const sessionId = process.env.CLAUDE_SESSION_ID || `${defaultEditor}-${process.ppid}`;
     guardedWriteState(sessionId, 'thinking', '', {});
   });
 }

@@ -29,20 +29,21 @@ try {
   const eventType = event.type || '';
   const sessionId = event['thread-id'] || `codex-${process.ppid}`;
   const modelName = process.env.CODE_CRUMB_MODEL || 'codex';
+  const editor = 'codex';
 
   if (eventType === 'agent-turn-complete') {
     const lastMsg = event['last-assistant-message'] || '';
     const detail = lastMsg.length > 40 ? lastMsg.slice(0, 37) + '...' : lastMsg;
 
-    guardedWriteState(sessionId, 'happy', detail || 'turn complete', { sessionId, modelName });
-    writeSessionState(sessionId, 'happy', detail || 'turn complete', false, { sessionId, modelName });
+    guardedWriteState(sessionId, 'happy', detail || 'turn complete', { sessionId, modelName, editor });
+    writeSessionState(sessionId, 'happy', detail || 'turn complete', false, { sessionId, modelName, editor });
   } else if (eventType === 'approval-requested') {
-    guardedWriteState(sessionId, 'waiting', 'needs approval', { sessionId, modelName });
-    writeSessionState(sessionId, 'waiting', 'needs approval', false, { sessionId, modelName });
+    guardedWriteState(sessionId, 'waiting', 'needs approval', { sessionId, modelName, editor });
+    writeSessionState(sessionId, 'waiting', 'needs approval', false, { sessionId, modelName, editor });
   } else {
     // Unknown event -- show as thinking
-    guardedWriteState(sessionId, 'thinking', eventType || 'codex event', { sessionId, modelName });
-    writeSessionState(sessionId, 'thinking', eventType || 'codex event', false, { sessionId, modelName });
+    guardedWriteState(sessionId, 'thinking', eventType || 'codex event', { sessionId, modelName, editor });
+    writeSessionState(sessionId, 'thinking', eventType || 'codex event', false, { sessionId, modelName, editor });
   }
 } catch {
   // Silent failure

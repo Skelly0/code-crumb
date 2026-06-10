@@ -38,12 +38,12 @@ const activeSubagents = [];
 function extra() {
   // Unlike per-event hook processes, this wrapper is long-lived and exits
   // with codex — its own pid is the session liveness proxy, not ppid.
-  return { ...buildExtra(stats, sessionId, modelName), pid: process.pid };
+  return { ...buildExtra(stats, sessionId, modelName, 'codex'), pid: process.pid };
 }
 
 // Extra fields for synthetic subagent session writes (same pid reasoning).
 function subExtra(subId) {
-  return { sessionId: subId, modelName, cwd: '', parentSession: sessionId, pid: process.pid };
+  return { sessionId: subId, modelName, editor: 'codex', cwd: '', parentSession: sessionId, pid: process.pid };
 }
 
 // -- JSONL Event Processor -------------------------------------------
