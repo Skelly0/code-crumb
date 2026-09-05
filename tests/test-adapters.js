@@ -15,59 +15,15 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { execFileSync, execSync } = require('child_process');
-const os = require('os');
 
-let passed = 0;
-let failed = 0;
-
-function describe(name, fn) {
-  console.log(`\n  ${name}`);
-  fn();
-}
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`    \x1b[32m\u2713\x1b[0m ${name}`);
-  } catch (e) {
-    failed++;
-    console.log(`    \x1b[31m\u2717\x1b[0m ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const suite = require('./_harness').createSuite();
+const { describe, test } = suite;
+const { makeTempEnv, cleanup, readJSON } = require('./_harness');
 
 // -- Helpers ----------------------------------------------------------
 
 const ADAPTERS_DIR = path.join(__dirname, '..', 'adapters');
 const NODE = process.execPath;
-
-// Create a temp directory for each test run so adapters write state
-// files there instead of polluting the real home directory.
-function makeTempEnv(sessionId) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-test-'));
-  const stateFile = path.join(tmp, '.code-crumb-state');
-  const sessionsDir = path.join(tmp, '.code-crumb-sessions');
-  const statsFile = path.join(tmp, '.code-crumb-stats.json');
-  // Adapters resolve paths via shared.js which reads HOME/USERPROFILE
-  // and CODE_CRUMB_STATE. We override HOME so all paths land in tmp.
-  const env = {
-    ...process.env,
-    HOME: tmp,
-    USERPROFILE: tmp,
-    CODE_CRUMB_STATE: stateFile,
-    CLAUDE_SESSION_ID: sessionId || 'test-session',
-  };
-  return { tmp, stateFile, sessionsDir, statsFile, env };
-}
-
-function cleanup(tmp) {
-  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
-}
-
-function readJSON(filepath) {
-  return JSON.parse(fs.readFileSync(filepath, 'utf8'));
-}
 
 // Run an adapter that reads stdin, return the state file contents
 function runStdinAdapter(adapterFile, inputObj, env) {
@@ -1427,10 +1383,9 @@ describe('update-state.js stopped flag preservation (#98)', () => {
     }
   });
 
-  test('cleanup: restore original state file after stopped flag tests', () => {
-    if (savedStoppedState !== null) fs.writeFileSync(STATE_FILE, savedStoppedState, 'utf8');
-    else try { fs.unlinkSync(STATE_FILE); } catch {}
-  });
+  // Restore the state file as it was before this block ran.
+  if (savedStoppedState !== null) fs.writeFileSync(STATE_FILE, savedStoppedState, 'utf8');
+  else try { fs.unlinkSync(STATE_FILE); } catch {}
 });
 
 describe('update-state.js parallel sessions orbital visibility fix', () => {
@@ -1632,10 +1587,9 @@ describe('update-state.js parallel sessions orbital visibility fix', () => {
     }
   });
 
-  test('cleanup: restore state after orbital visibility tests', () => {
-    if (savedOrbitalState !== null) fs.writeFileSync(STATE_FILE, savedOrbitalState, 'utf8');
-    else try { fs.unlinkSync(STATE_FILE); } catch {}
-  });
+  // Restore the state file as it was before this block ran.
+  if (savedOrbitalState !== null) fs.writeFileSync(STATE_FILE, savedOrbitalState, 'utf8');
+  else try { fs.unlinkSync(STATE_FILE); } catch {}
 });
 
 describe('base-adapter guardedWriteState modelName preservation (#78)', () => {
@@ -1713,10 +1667,9 @@ describe('base-adapter guardedWriteState modelName preservation (#78)', () => {
     }
   });
 
-  test('cleanup: restore original state file after modelName tests', () => {
-    if (savedModelState !== null) fs.writeFileSync(STATE_FILE, savedModelState, 'utf8');
-    else try { fs.unlinkSync(STATE_FILE); } catch {}
-  });
+  // Restore the state file as it was before this block ran.
+  if (savedModelState !== null) fs.writeFileSync(STATE_FILE, savedModelState, 'utf8');
+  else try { fs.unlinkSync(STATE_FILE); } catch {}
 });
 
 // -- base-adapter unit tests (guardedWriteState, initSession, buildExtra, trackEditedFile, processJsonlStream)
@@ -1938,52 +1891,45 @@ describe('base-adapter -- processJsonlStream unit tests', () => {
     return stream;
   }
 
-  test('parses valid JSONL lines', (done) => {
-    const events = [];
-    const stream = makeStream(['{"a":1}\n{"b":2}\n']);
-    baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
-    stream.on('end', () => {
-      // Give a tick for the flush handler
-      setTimeout(() => {
-        assert.strictEqual(events.length, 2);
-        assert.strictEqual(events[0].a, 1);
-        assert.strictEqual(events[1].b, 2);
-      }, 10);
+  // processJsonlStream flushes its buffer on 'end'. Resolve one tick after
+  // that so the assertions see the final event list.
+  function collect(chunks) {
+    return new Promise((resolve) => {
+      const events = [];
+      const stream = makeStream(chunks);
+      baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
+      stream.on('end', () => setImmediate(() => resolve(events)));
     });
+  }
+
+  test.async('parses valid JSONL lines', async () => {
+    const events = await collect(['{"a":1}\n{"b":2}\n']);
+    assert.strictEqual(events.length, 2);
+    assert.strictEqual(events[0].a, 1);
+    assert.strictEqual(events[1].b, 2);
   });
 
-  test('skips malformed lines silently', () => {
-    const events = [];
-    const stream = makeStream(['{"valid":true}\nnot json\n{"also":true}\n']);
-    baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
-    stream.on('end', () => {
-      setTimeout(() => {
-        assert.strictEqual(events.length, 2);
-      }, 10);
-    });
+  test.async('skips malformed lines silently', async () => {
+    const events = await collect(['{"valid":true}\nnot json\n{"also":true}\n']);
+    assert.strictEqual(events.length, 2);
   });
 
-  test('handles \\r\\n line endings', () => {
-    const events = [];
-    const stream = makeStream(['{"x":1}\r\n{"y":2}\r\n']);
-    baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
-    stream.on('end', () => {
-      setTimeout(() => {
-        assert.strictEqual(events.length, 2);
-      }, 10);
-    });
+  test.async('handles \\r\\n line endings', async () => {
+    const events = await collect(['{"x":1}\r\n{"y":2}\r\n']);
+    assert.strictEqual(events.length, 2);
   });
 
-  test('calls handler for each parsed object', () => {
-    const events = [];
-    const stream = makeStream(['{"type":"a"}\n', '{"type":"b"}\n']);
-    baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
-    stream.on('end', () => {
-      setTimeout(() => {
-        assert.ok(events.length >= 2);
-        assert.strictEqual(events[0].type, 'a');
-      }, 10);
-    });
+  test.async('calls handler for each parsed object', async () => {
+    const events = await collect(['{"type":"a"}\n', '{"type":"b"}\n']);
+    assert.strictEqual(events.length, 2);
+    assert.strictEqual(events[0].type, 'a');
+    assert.strictEqual(events[1].type, 'b');
+  });
+
+  test.async('flushes a trailing line that has no newline', async () => {
+    const events = await collect(['{"tail":true}']);
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].tail, true);
   });
 });
 
@@ -2561,4 +2507,4 @@ describe('update-state -- parallel sessions vs subagents (#134)', () => {
   });
 });
 
-module.exports = { passed: () => passed, failed: () => failed };
+module.exports = suite;

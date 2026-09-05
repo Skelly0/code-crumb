@@ -8,27 +8,8 @@
 const assert = require('assert');
 const { ACCESSORIES, STATE_ACCESSORIES, getAccessory } = require('../accessories');
 
-let passed = 0;
-let failed = 0;
-let currentDescribe = '';
-
-function describe(name, fn) {
-  currentDescribe = name;
-  console.log(`\n  ${name}`);
-  fn();
-}
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`    \x1b[32m\u2713\x1b[0m ${name}`);
-  } catch (e) {
-    failed++;
-    console.log(`    \x1b[31m\u2717\x1b[0m ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const suite = require('./_harness').createSuite();
+const { describe, test } = suite;
 
 describe('accessories.js -- ACCESSORIES', () => {
   test('all accessories have non-empty lines array', () => {
@@ -180,4 +161,4 @@ describe('accessories.js -- getAccessory returns same reference', () => {
   });
 });
 
-module.exports = { passed: () => passed, failed: () => failed };
+module.exports = suite;

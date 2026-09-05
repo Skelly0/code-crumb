@@ -11,27 +11,8 @@ const os = require('os');
 const path = require('path');
 const { safeFilename, PREFS_FILE, loadPrefs, savePrefs, getGitBranch, getIsWorktree } = require('../shared');
 
-let passed = 0;
-let failed = 0;
-let currentDescribe = '';
-
-function describe(name, fn) {
-  currentDescribe = name;
-  console.log(`\n  ${name}`);
-  fn();
-}
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`    \x1b[32m\u2713\x1b[0m ${name}`);
-  } catch (e) {
-    failed++;
-    console.log(`    \x1b[31m\u2717\x1b[0m ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const suite = require('./_harness').createSuite();
+const { describe, test } = suite;
 
 describe('shared.js -- safeFilename', () => {
   test('leaves alphanumeric unchanged', () => {
@@ -79,50 +60,54 @@ describe('shared.js -- preferences persistence', () => {
   let savedPrefs;
   try { savedPrefs = fs.readFileSync(PREFS_FILE, 'utf8'); } catch { savedPrefs = null; }
 
-  test('PREFS_FILE is a non-empty string', () => {
-    assert.ok(typeof PREFS_FILE === 'string');
-    assert.ok(PREFS_FILE.length > 0);
-    assert.ok(PREFS_FILE.includes('.code-crumb-prefs'));
-  });
-
-  test('loadPrefs returns an object', () => {
-    const prefs = loadPrefs();
-    assert.ok(typeof prefs === 'object');
-    assert.ok(prefs !== null);
-  });
-
-  test('savePrefs and loadPrefs roundtrip', () => {
-    savePrefs({ paletteIndex: 3, accessoriesEnabled: false, showStats: false });
-    const prefs = loadPrefs();
-    assert.strictEqual(prefs.paletteIndex, 3);
-    assert.strictEqual(prefs.accessoriesEnabled, false);
-    assert.strictEqual(prefs.showStats, false);
-  });
-
-  test('savePrefs merges with existing prefs', () => {
-    savePrefs({ paletteIndex: 2 });
-    savePrefs({ accessoriesEnabled: true });
-    const prefs = loadPrefs();
-    assert.strictEqual(prefs.paletteIndex, 2);
-    assert.strictEqual(prefs.accessoriesEnabled, true);
-  });
-
-  test('loadPrefs returns {} for corrupt file', () => {
-    fs.writeFileSync(PREFS_FILE, '{broken json!!!', 'utf8');
-    const prefs = loadPrefs();
-    assert.deepStrictEqual(prefs, {});
-  });
-
-  test('loadPrefs returns {} for empty file', () => {
-    fs.writeFileSync(PREFS_FILE, '', 'utf8');
-    const prefs = loadPrefs();
-    assert.deepStrictEqual(prefs, {});
-  });
-
   try {
-    if (savedPrefs !== null) fs.writeFileSync(PREFS_FILE, savedPrefs, 'utf8');
-    else fs.unlinkSync(PREFS_FILE);
-  } catch {}
+    test('PREFS_FILE is a non-empty string', () => {
+      assert.ok(typeof PREFS_FILE === 'string');
+      assert.ok(PREFS_FILE.length > 0);
+      assert.ok(PREFS_FILE.includes('.code-crumb-prefs'));
+    });
+
+    test('loadPrefs returns an object', () => {
+      const prefs = loadPrefs();
+      assert.ok(typeof prefs === 'object');
+      assert.ok(prefs !== null);
+    });
+
+    test('savePrefs and loadPrefs roundtrip', () => {
+      savePrefs({ paletteIndex: 3, accessoriesEnabled: false, showStats: false });
+      const prefs = loadPrefs();
+      assert.strictEqual(prefs.paletteIndex, 3);
+      assert.strictEqual(prefs.accessoriesEnabled, false);
+      assert.strictEqual(prefs.showStats, false);
+    });
+
+    test('savePrefs merges with existing prefs', () => {
+      savePrefs({ paletteIndex: 2 });
+      savePrefs({ accessoriesEnabled: true });
+      const prefs = loadPrefs();
+      assert.strictEqual(prefs.paletteIndex, 2);
+      assert.strictEqual(prefs.accessoriesEnabled, true);
+    });
+
+    test('loadPrefs returns {} for corrupt file', () => {
+      fs.writeFileSync(PREFS_FILE, '{broken json!!!', 'utf8');
+      const prefs = loadPrefs();
+      assert.deepStrictEqual(prefs, {});
+    });
+
+    test('loadPrefs returns {} for empty file', () => {
+      fs.writeFileSync(PREFS_FILE, '', 'utf8');
+      const prefs = loadPrefs();
+      assert.deepStrictEqual(prefs, {});
+    });
+
+  } finally {
+    // Restore the real prefs even if a test body threw past test().
+    try {
+      if (savedPrefs !== null) fs.writeFileSync(PREFS_FILE, savedPrefs, 'utf8');
+      else fs.unlinkSync(PREFS_FILE);
+    } catch {}
+  }
 });
 
 describe('shared.js -- getGitBranch', () => {
@@ -297,4 +282,4 @@ describe('shared.js -- getGitBranch walks up parent directories', () => {
   });
 });
 
-module.exports = { passed: () => passed, failed: () => failed };
+module.exports = suite;

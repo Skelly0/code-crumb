@@ -46,7 +46,7 @@ state-machine.js Pure logic — tool→state mapping (multi-editor), error detec
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
 setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode|openclaw])
-test.js          Test runner — loads 12 modular test files from tests/ (~1564 tests)
+test.js          Test runner — isolates HOME, loads 12 test files from tests/ (~1562 tests); --quiet, name filters
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Orbital demo — simulates subagent sessions orbiting the main face
 code-crumb.sh   Unix shell wrapper for launch.js
@@ -59,6 +59,7 @@ adapters/
   openclaw-adapter.js  Adapter for OpenClaw/Pi agent events (stdin JSON)
   engmux-adapter.js  Adapter for engmux agent dispatcher events (stdin JSON)
 tests/
+  _harness.js      Shared describe/test/test.async runner + temp-home helpers (createSuite, makeTempEnv)
   test-shared.js, test-state-machine.js, test-themes.js, test-animations.js,
   test-particles.js, test-face.js, test-grid.js, test-accessories.js,
   test-teams.js, test-launch.js, test-adapters.js, test-transition.js
@@ -66,6 +67,8 @@ tests/
   plugin.json      Claude Code plugin manifest for marketplace distribution
 hooks/
   hooks.json       Hook configuration for Claude Code plugin system
+.github/workflows/
+  test.yml         CI — node --check on every script, then npm test on ubuntu/windows/macos × node 18/20/22
 ```
 
 ## Architecture
@@ -207,8 +210,9 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 
 ### Automated Tests
 
-Run `npm test` (or `node test.js`). The test runner loads 12 modular test files from `tests/`. The suite (~1564 tests) covers:
+Run `npm test` (or `node test.js [--quiet] [filter...]`, e.g. `node test.js grid face`). Before loading anything the runner redirects `HOME`, `USERPROFILE`, and `CODE_CRUMB_STATE` to a throwaway directory (removed on exit), so the suite never touches the real `~/.code-crumb*` files or fights a running renderer — subprocess tests inherit the same env. Each test file gets its own counters from `tests/_harness.js` (`createSuite()`); `test.async` (or a test that returns a promise) is awaited before the file is counted, so async assertions can actually fail. The runner prints per-file counts and total duration and keeps going if one file fails to load. CI (`.github/workflows/test.yml`) runs `node --check` on every script and the suite on ubuntu/windows/macos × node 18/20/22. The suite (~1562 tests) covers:
 
+- **_harness.js** (not a test file): `createSuite()` returns `{ describe, test, done, passed, failed }`; `test.async(name, fn)` for promise-based tests; `makeTempEnv(sessionId)` / `cleanup(tmp)` / `readJSON(path)` for subprocess tests that need their own temp home
 - **test-shared.js**: `safeFilename` edge cases
 - **test-state-machine.js**: `toolToState` mapping (all tool types across Claude Code, Codex, OpenCode, OpenClaw/Pi), multi-editor tool pattern constants incl. `REVIEW_TOOLS`, `extractExitCode`, `looksLikeError` with stdout/stderr patterns, false positive guards, `errorDetail` friendly messages, `classifyToolResult` (full PostToolUse decision tree), `updateStreak` and milestone detection, `defaultStats` initialization, `classifyForeignSession` parallel-vs-subagent decision table and `pruneTopLevelSessions` registry pruning (#134)
 - **test-themes.js**: `lerpColor`/`dimColor`/`breathe`/`dimAnsiOutput` color math, theme completeness (all 23 states), `COMPLETION_LINGER` ordering, thought bubble pools

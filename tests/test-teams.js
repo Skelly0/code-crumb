@@ -10,25 +10,8 @@
 const assert = require('assert');
 const { MiniFace, OrbitalSystem, hashTeamColor } = require('../grid');
 
-let passed = 0;
-let failed = 0;
-
-function describe(name, fn) {
-  console.log(`\n  ${name}`);
-  fn();
-}
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`    \x1b[32m\u2713\x1b[0m ${name}`);
-  } catch (e) {
-    failed++;
-    console.log(`    \x1b[31m\u2717\x1b[0m ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const suite = require('./_harness').createSuite();
+const { describe, test } = suite;
 
 // -- hashTeamColor ---------------------------------------------------
 
@@ -427,4 +410,4 @@ describe('teams -- OrbitalSystem._assignLabels with taskDescription', () => {
   });
 });
 
-module.exports = { passed: () => passed, failed: () => failed };
+module.exports = suite;
