@@ -3768,4 +3768,25 @@ describe('grid.js -- session list editor tag', () => {
   });
 });
 
+describe('grid.js -- no incremental clear buffer', () => {
+  test('_buildClearBuf is gone', () => {
+    const os = new OrbitalSystem();
+    assert.strictEqual(typeof os._buildClearBuf, 'undefined',
+      'OrbitalSystem#_buildClearBuf should no longer exist');
+  });
+
+  test('render output does not start with a space-fill', () => {
+    const os = new OrbitalSystem();
+    const f = new MiniFace('sub-1');
+    f.label = 'sub-1';
+    f.state = 'reading';
+    os.faces.set('sub-1', f);
+    const mainPos = { row: 7, col: 26, w: 30, h: 10, centerX: 41, centerY: 12 };
+    os.render(80, 24, mainPos);          // first frame primes any clear buffer
+    const out = os.render(80, 24, mainPos);
+    assert.ok(!/^(\x1b\[\d+;\d+H +)+/.test(out),
+      'render should not prepend blanks for the previous frame');
+  });
+});
+
 module.exports = suite;

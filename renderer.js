@@ -511,9 +511,7 @@ function runUnifiedMode() {
       swapTransition.cancel();
     }
     face.particles.fadeAll(5);
-    orbital._prevClearBuf = '';  // Full clear handles it
     prevFrame = null;  // the screen is about to be cleared -- force the next frame out even if identical
-    prevSessionListClear = '';
     process.stdout.write(ansi.syncEnd + ansi.clear);
   });
 
@@ -575,7 +573,6 @@ function runUnifiedMode() {
   }
 
   let lastTime = Date.now();
-  let prevSessionListClear = '';
   function loop() {
     const now = Date.now();
     const dt = now - lastTime;
@@ -624,8 +621,6 @@ function runUnifiedMode() {
     const rows = process.stdout.rows || 24;
 
     let out = '';
-    // Pre-clear previous session list footprint so face/orbital redraws overwrite it
-    if (prevSessionListClear) out += prevSessionListClear;
     try {
       out += face.render();
     } catch {}
@@ -634,9 +629,6 @@ function runUnifiedMode() {
       try {
         out += orbital.render(cols, rows, face.lastPos, paletteThemes);
       } catch {}
-    } else if (orbital._prevClearBuf) {
-      out += orbital._prevClearBuf;
-      orbital._prevClearBuf = '';
     }
 
     // Apply transition dim to face output
@@ -661,20 +653,7 @@ function runUnifiedMode() {
         isMain: true,
         isPinned: !!pinnedSessionId,
       };
-      const slBounds = {};
-      try { out += renderSessionList(cols, rows, subSorted, paletteThemes, mainInfo, face.sessionListIndex, slBounds); } catch {}
-      // Store current bounds so next frame's pre-clear wipes this footprint
-      if (slBounds.bx != null) {
-        let clr = '';
-        const clearRow = ' '.repeat(slBounds.w);
-        for (let r = slBounds.by; r < slBounds.by + slBounds.h; r++) {
-          clr += `\x1b[${r};${slBounds.bx}H${clearRow}`;
-        }
-        prevSessionListClear = clr;
-      }
-    } else if (prevSessionListClear) {
-      // Pre-clear already ran above; just reset state
-      prevSessionListClear = '';
+      try { out += renderSessionList(cols, rows, subSorted, paletteThemes, mainInfo, face.sessionListIndex); } catch {}
     }
 
     // Update terminal title bar to reflect current state

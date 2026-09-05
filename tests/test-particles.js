@@ -7,6 +7,7 @@
 
 const assert = require('assert');
 const { ParticleSystem } = require('../particles');
+const { ansi, dimColor } = require('../themes');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
@@ -225,48 +226,6 @@ describe('particles.js -- spawn edge cases', () => {
   });
 });
 
-describe('particles.js -- clearPrevious()', () => {
-  test('returns empty string on a fresh ParticleSystem', () => {
-    const ps = new ParticleSystem();
-    assert.strictEqual(ps.clearPrevious(), '');
-  });
-
-  test('returns non-empty string after render()', () => {
-    const ps = new ParticleSystem();
-    ps.spawn(5, 'float');
-    const savedRows = process.stdout.rows;
-    const savedCols = process.stdout.columns;
-    process.stdout.rows = 24;
-    process.stdout.columns = 80;
-    try {
-      ps.render(0, 0, [255, 255, 255]);
-      const clear = ps.clearPrevious();
-      assert.ok(clear.length > 0, 'clearPrevious should return non-empty after render');
-    } finally {
-      process.stdout.rows = savedRows;
-      process.stdout.columns = savedCols;
-    }
-  });
-
-  test('second consecutive call returns empty (buffer consumed)', () => {
-    const ps = new ParticleSystem();
-    ps.spawn(5, 'float');
-    const savedRows = process.stdout.rows;
-    const savedCols = process.stdout.columns;
-    process.stdout.rows = 24;
-    process.stdout.columns = 80;
-    try {
-      ps.render(0, 0, [255, 255, 255]);
-      ps.clearPrevious(); // first call consumes buffer
-      const second = ps.clearPrevious();
-      assert.strictEqual(second, '', 'second clearPrevious should return empty');
-    } finally {
-      process.stdout.rows = savedRows;
-      process.stdout.columns = savedCols;
-    }
-  });
-});
-
 describe('particles.js -- render()', () => {
   test('render returns a string', () => {
     const ps = new ParticleSystem();
@@ -299,22 +258,6 @@ describe('particles.js -- render()', () => {
       process.stdout.columns = savedCols;
     }
   });
-
-  test('_prevClearBuf is set after render', () => {
-    const ps = new ParticleSystem();
-    ps.spawn(5, 'float');
-    const savedRows = process.stdout.rows;
-    const savedCols = process.stdout.columns;
-    process.stdout.rows = 24;
-    process.stdout.columns = 80;
-    try {
-      ps.render(0, 0, [255, 255, 255]);
-      assert.ok(ps._prevClearBuf.length > 0, '_prevClearBuf should be set after render');
-    } finally {
-      process.stdout.rows = savedRows;
-      process.stdout.columns = savedCols;
-    }
-  });
 });
 
 describe('particles.js -- render boundary clipping', () => {
@@ -332,7 +275,6 @@ describe('particles.js -- render boundary clipping', () => {
       const output = ps.render(0, 0, [255, 255, 255]);
       // The particle is at col=-10, row=-10, which is < 1, so it should be clipped
       assert.strictEqual(output, '', 'out-of-bounds particle should produce empty output');
-      assert.strictEqual(ps._prevClearBuf, '', 'clearBuf should be empty for clipped particles');
     } finally {
       process.stdout.rows = savedRows;
       process.stdout.columns = savedCols;
@@ -508,6 +450,39 @@ describe('particles.js -- push style', () => {
       assert.ok(Math.sign(p.vx) === Math.sign(dx),
         'vx should point away from center');
     }
+  });
+});
+
+describe('particles.js -- no incremental clear buffer', () => {
+  test('render emits only the draw sequence for one particle', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(1, 'float');
+    const p = ps.particles[0];
+    p.x = 5;
+    p.y = 3;
+    p.char = '*';
+    p.life = 60;
+    p.maxLife = 180;
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      const output = ps.render(0, 0, [255, 255, 255]);
+      const fade = Math.min(1, p.life / (p.maxLife * 0.3));
+      const expected = ansi.to(3, 5) + ansi.fg(...dimColor([255, 255, 255], fade)) + '*' + ansi.reset;
+      assert.strictEqual(output, expected,
+        'render should emit the draw sequence only -- no trailing clear-buffer move/space');
+    } finally {
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+
+  test('clearPrevious() is gone', () => {
+    const ps = new ParticleSystem();
+    assert.strictEqual(typeof ps.clearPrevious, 'undefined',
+      'ParticleSystem#clearPrevious should no longer exist');
   });
 });
 

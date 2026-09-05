@@ -2488,4 +2488,71 @@ describe('face.js -- long-running tool escalation', () => {
   });
 });
 
+describe('face.js -- no incremental clear band', () => {
+  // The renderer clears the whole screen every frame (ansi.home + ansi.clearBelow
+  // inside a DEC 2026 synchronized block), so the face must not paint its own
+  // runs of blanks. A band row looks like "<cursor move><30+ spaces>".
+  const BAND = /\x1b\[\d+;\d+H {30,}/;
+
+  const withTerm = (fn) => {
+    const origCols = process.stdout.columns;
+    const origRows = process.stdout.rows;
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    try {
+      return fn();
+    } finally {
+      process.stdout.columns = origCols;
+      process.stdout.rows = origRows;
+    }
+  };
+
+  test('render emits no clear band with a thought bubble showing', () => {
+    const face = new ClaudeFace();
+    face.setState('coding', 'edit face.js');
+    face.thoughtText = 'hello';
+    const out = withTerm(() => {
+      face.render();
+      face.thoughtText = 'hello';
+      return face.render();
+    });
+    assert.ok(!BAND.test(out), 'face.render should not paint a band of blanks');
+  });
+
+  test('render emits no clear band after the help overlay is dismissed', () => {
+    const face = new ClaudeFace();
+    const out = withTerm(() => {
+      face.showHelp = true;
+      face.render();
+      face.showHelp = false;
+      return face.render();
+    });
+    assert.ok(!BAND.test(out), 'dismissing help should not paint a rectangle of blanks');
+  });
+
+  test('_prevHelpBounds is gone', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual('_prevHelpBounds' in face, false,
+      'ClaudeFace#_prevHelpBounds should no longer exist');
+  });
+
+  test('_prevBubbleRight is gone', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual('_prevBubbleRight' in face, false,
+      'ClaudeFace#_prevBubbleRight should no longer exist');
+  });
+
+  test('lastPos.bubble is still published for the orbital layout', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking', 'pondering');
+    face.thoughtText = 'still here';
+    withTerm(() => {
+      face.thoughtText = 'still here';
+      face.render();
+    });
+    assert.ok(face.lastPos, 'render should publish lastPos');
+    assert.ok(face.lastPos.bubble, 'render should publish lastPos.bubble when a thought shows');
+  });
+});
+
 module.exports = suite;

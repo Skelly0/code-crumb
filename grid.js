@@ -704,7 +704,6 @@ class OrbitalSystem {
     this.time = 0;
     this._sortedCache = [];        // Cached sorted faces array
     this._sortedDirty = true;      // Rebuild cache on next getSortedFaces()
-    this._prevClearBuf = '';        // Pre-built buffer to clear previous frame's orbital content
     this._loadingInProgress = false; // Re-entrancy guard for loadSessionsAsync
     this._connDots = [];             // Reusable array for connection dot positions (avoids per-frame alloc)
     this._groupsCache = null;        // Cached _buildGroups result
@@ -1124,31 +1123,6 @@ class OrbitalSystem {
     }
   }
 
-  _buildClearBuf(facePositions, connDots, overflowInfo, rows, cols) {
-    let clearBuf = '';
-    // Clear mini-face rectangular regions
-    for (const pos of facePositions) {
-      for (let dy = 0; dy < MINI_H; dy++) {
-        const row = pos.row + dy;
-        if (row < 1 || row > rows) continue;
-        const col = Math.max(1, pos.col);
-        const w = Math.min(MINI_W, cols - col + 1);
-        if (w > 0) {
-          clearBuf += `\x1b[${row};${col}H${' '.repeat(w)}`;
-        }
-      }
-    }
-    // Clear connection dots (flat array: [row1, col1, row2, col2, ...])
-    for (let i = 0; i < connDots.length; i += 2) {
-      clearBuf += `\x1b[${connDots[i]};${connDots[i + 1]}H `;
-    }
-    // Clear overflow text
-    if (overflowInfo) {
-      clearBuf += `\x1b[${overflowInfo.row};${overflowInfo.col}H${' '.repeat(overflowInfo.len)}`;
-    }
-    this._prevClearBuf = clearBuf;
-  }
-
   calculateOrbit(cols, rows, mainPos) {
     // Minimum ellipse semi-axes: must clear the main face box + decorations
     // Vertical padding above: accessories/thought bubble need more clearance than bare face
@@ -1455,7 +1429,6 @@ class OrbitalSystem {
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
       const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 7);
       const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
-      this._buildClearBuf([], [], { row: textRow, col: textCol, len: text.length }, rows, cols);
       return `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
     }
 
@@ -1482,9 +1455,6 @@ class OrbitalSystem {
     const overflow = sorted.length - visibleCount;
     let buf = '';
 
-    // Track positions for clearing next frame
-    const sidePositions = [];
-
     // Render a vertical stack of faces centered on the main face
     const renderStack = (faces, col) => {
       if (faces.length === 0) return;
@@ -1493,7 +1463,6 @@ class OrbitalSystem {
       startRow = Math.min(startRow, Math.max(1, rows - totalH));
       for (let i = 0; i < faces.length; i++) {
         const faceRow = startRow + i * MINI_H;
-        sidePositions.push({ row: faceRow, col });
         buf += faces[i].render(faceRow, col, this.time, paletteThemes);
       }
     };
@@ -1501,25 +1470,20 @@ class OrbitalSystem {
     renderStack(leftFaces, leftCol);
     renderStack(rightFaces, rightCol);
 
-    let overflowInfo = null;
     if (overflow > 0) {
       const text = `+${overflow} more`;
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
       const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 7);
       const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
       buf += `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
-      overflowInfo = { row: textRow, col: textCol, len: text.length };
     }
-
-    this._buildClearBuf(sidePositions, [], overflowInfo, rows, cols);
 
     return buf;
   }
 
   render(cols, rows, mainPos, paletteThemes) {
-    // Clear previous frame's orbital content before drawing new
-    let buf = this._prevClearBuf;
-    this._prevClearBuf = '';
+    // No pre-clear: the renderer erases the whole screen every frame.
+    let buf = '';
 
     if (this.faces.size === 0) return buf;
 
@@ -1610,18 +1574,13 @@ class OrbitalSystem {
     buf += this._renderGroupLabels(positions, rows, cols, connDots, mainPos);
 
     // Overflow indicator
-    let overflowInfo = null;
     if (overflow > 0) {
       const text = `+${overflow} more`;
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
       const textRow = Math.min(rows - 2, mainPos.row + mainPos.h + 7);
       const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
       buf += `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
-      overflowInfo = { row: textRow, col: textCol, len: text.length };
     }
-
-    // Build clear buffer for next frame (erase these positions before drawing new ones)
-    this._buildClearBuf(positions, connDots, overflowInfo, rows, cols);
 
     return buf;
   }

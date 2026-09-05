@@ -154,8 +154,6 @@ class ClaudeFace {
     this.showOrbitals = true;
     this.subagentCount = 0;
     this.lastPos = null;
-    this._prevBubbleRight = 0;     // Rightmost col of previous frame's thought bubble
-    this._prevHelpBounds = null;   // {bx, by, w, h} of last frame's help overlay
 
     // Minimal mode (--minimal flag: face + status only, no chrome)
     this.minimalMode = false;
@@ -937,7 +935,6 @@ class ClaudeFace {
       buf += ansi.to(by + 1 + i, bx) + `${bc}\u2502${tc}${line}${' '.repeat(Math.max(0, pad))}${bc}\u2502${r}`;
     }
     buf += ansi.to(by + 1 + lines.length, bx) + `${bc}\u2570${'\u2500'.repeat(boxW)}\u256f${r}`;
-    this._prevHelpBounds = { bx, by, w: boxW + 2, h: boxH };
     return buf;
   }
 
@@ -1007,38 +1004,10 @@ class ClaudeFace {
     }
     gx += this.petWiggle;
 
+    // No incremental clearing here: the renderer erases the whole screen
+    // (ansi.home + ansi.clearBelow) inside every synchronized frame, so any
+    // blanks painted below would only overwrite already-erased cells.
     let buf = '';
-
-    // Clear previous help overlay if it was just dismissed.
-    // Help box may extend below clearBot on tall terminals, so clear its full rect.
-    if (this._prevHelpBounds && !this.showHelp) {
-      const hb = this._prevHelpBounds;
-      const hClr = ' '.repeat(hb.w);
-      for (let hr = hb.by; hr < hb.by + hb.h; hr++) {
-        buf += ansi.to(hr, hb.bx) + hClr;
-      }
-      this._prevHelpBounds = null;
-    }
-
-    // Clear previous frame's particle positions to prevent ghost characters
-    // from particles that drifted outside the face clear band.
-    // Must precede the clear band so face content draws on top of the spaces.
-    buf += this.particles.clearPrevious();
-
-    // Clear only the face + particle + thought bubble zone to prevent ghosts
-    // without blanking orbital/session-list regions (which causes flicker).
-    // _prevBubbleRight extends the band to cover last frame's thought bubble.
-    const clearBot = Math.min(rows - 1, startRow + 15);
-    const bandLeft = Math.max(1, startCol - 6);
-    const bandRight = Math.min(cols, Math.max(startCol + 36, this._prevBubbleRight));
-    const bandWidth = bandRight - bandLeft + 1;
-    const clearSpaces = ' '.repeat(bandWidth);
-    const clearTop = Math.max(1, startRow - 5);
-    for (let row = clearTop; row <= clearBot; row++) {
-      buf += ansi.to(row, bandLeft) + clearSpaces;
-    }
-    this._prevBubbleRight = 0;
-    buf += ansi.to(rows, 1) + ansi.clearLine;  // key hints row (full width)
 
     // Face box
     const inner = faceW - 10;
@@ -1134,7 +1103,6 @@ class ClaudeFace {
           buf += ansi.to(startRow + 4, bubbleCol);
           buf += `${bc}\u2570${'\u2500'.repeat(bubbleInner)}\u256f${r}`;
           this.lastPos.bubble = { row: startRow + 2, col: boxRight + 2, w: (bubbleCol - boxRight - 2) + bubbleInner + 2, h: 3 };
-          this._prevBubbleRight = bubbleCol + bubbleInner + 2;
         }
       } else if (startRow >= 5) {
         // Above-face bubble (original position, no accessory conflict)
@@ -1152,7 +1120,6 @@ class ClaudeFace {
           buf += ansi.to(startRow - 1, bubbleLeft + 2);
           buf += `${bc}\u25cb${r}`;
           this.lastPos.bubble = { row: startRow - 4, col: bubbleLeft, w: bubbleInner + 2, h: 4 };
-          this._prevBubbleRight = bubbleLeft + bubbleInner + 2;
         }
       }
     }
