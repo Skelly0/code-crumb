@@ -168,6 +168,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 - **Silent failures in hooks**: Hook code (update-state.js, adapters) wraps all I/O in try-catch and never throws — the editor must not be interrupted by a broken face
 - **Cross-platform paths**: Uses `process.env.USERPROFILE || process.env.HOME` and normalizes backslashes to forward slashes
 - **No external dependencies**: All functionality is built with Node.js built-in modules (`fs`, `path`, `child_process`)
+- **Line endings**: `.gitattributes` pins LF for everything except `*.cmd` (CRLF for cmd.exe); `.editorconfig` mirrors it (2-space, LF, trailing whitespace trimmed). Shebang files (`launch.js`, `setup.js`, `update-state.js`, `renderer.js`, `demo.js`, `grid-demo.js`, `test.js`, `code-crumb.sh`, `adapters/*.js` except `base-adapter.js`) carry the executable bit in the index.
 
 ## Key Constants
 

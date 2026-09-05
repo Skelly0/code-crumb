@@ -1,0 +1,10 @@
+# Normalize all text to LF in the repo and on checkout.
+* text=auto eol=lf
+
+# Windows batch files must stay CRLF for cmd.exe.
+*.cmd text eol=crlf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.gif binary
