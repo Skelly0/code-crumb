@@ -16,7 +16,6 @@
 // +================================================================+
 
 const { spawn } = require('child_process');
-const path = require('path');
 const {
   writeSessionState, readStats, writeStats, guardedWriteState,
   initSession, buildExtra, handleToolStart, handleToolEnd,
@@ -43,7 +42,7 @@ function extra() {
 
 // Extra fields for synthetic subagent session writes (same pid reasoning).
 function subExtra(subId) {
-  return { sessionId: subId, modelName, editor: 'codex', cwd: '', parentSession: sessionId, pid: process.pid };
+  return { sessionId: subId, modelName, editor: 'codex', parentSession: sessionId, pid: process.pid };
 }
 
 // -- JSONL Event Processor -------------------------------------------

@@ -2,21 +2,24 @@
 'use strict';
 
 // +================================================================+
-// |  Codex Notify Handler -- receives Codex `notify` events           |
+// |  Codex Notify Handler -- receives Codex `notify` events          |
 // |                                                                  |
 // |  Codex fires its `notify` program with a single JSON argument    |
-// |  containing turn-level data. This handler writes Code Crumb     |
-// |  state files based on that data.                                |
+// |  containing turn-level data. This handler writes Code Crumb      |
+// |  state files based on that data, with the same stats plumbing    |
+// |  (tool calls, streak, daily sessions) as the other adapters.     |
 // |                                                                  |
-// |  Setup in ~/.codex/config.toml:                                 |
-// |    notify = ["node", "/path/to/adapters/codex-notify.js"]       |
+// |  Setup in ~/.codex/config.toml:                                  |
+// |    notify = ["node", "/path/to/adapters/codex-notify.js"]        |
 // |                                                                  |
 // |  Limitation: Codex only fires `agent-turn-complete` events,      |
 // |  so this handler can only show turn completions -- not           |
-// |  individual tool calls. For richer output, use codex-wrapper.js |
+// |  individual tool calls. For richer output, use codex-wrapper.js. |
 // +================================================================+
 
-const { writeState, writeSessionState, guardedWriteState } = require('./base-adapter');
+const {
+  writeSessionState, guardedWriteState, readStats, writeStats, initSession, buildExtra,
+} = require('./base-adapter');
 
 // -- Parse the notify JSON argument ----------------------------------
 
@@ -31,20 +34,27 @@ try {
   const modelName = process.env.CODE_CRUMB_MODEL || 'codex';
   const editor = 'codex';
 
+  // Without this, notify-mode sessions rendered with a blank status line
+  // (toolCalls 0, no session start, no streak).
+  const stats = readStats();
+  initSession(stats, sessionId);
+  const extra = buildExtra(stats, sessionId, modelName, editor);
+
+  let state = 'thinking';
+  let detail = eventType || 'codex event';
   if (eventType === 'agent-turn-complete') {
     const lastMsg = event['last-assistant-message'] || '';
-    const detail = lastMsg.length > 40 ? lastMsg.slice(0, 37) + '...' : lastMsg;
-
-    guardedWriteState(sessionId, 'happy', detail || 'turn complete', { sessionId, modelName, editor });
-    writeSessionState(sessionId, 'happy', detail || 'turn complete', false, { sessionId, modelName, editor });
+    const short = lastMsg.length > 40 ? lastMsg.slice(0, 37) + '...' : lastMsg;
+    state = 'happy';
+    detail = short || 'turn complete';
   } else if (eventType === 'approval-requested') {
-    guardedWriteState(sessionId, 'waiting', 'needs approval', { sessionId, modelName, editor });
-    writeSessionState(sessionId, 'waiting', 'needs approval', false, { sessionId, modelName, editor });
-  } else {
-    // Unknown event -- show as thinking
-    guardedWriteState(sessionId, 'thinking', eventType || 'codex event', { sessionId, modelName, editor });
-    writeSessionState(sessionId, 'thinking', eventType || 'codex event', false, { sessionId, modelName, editor });
+    state = 'waiting';
+    detail = 'needs approval';
   }
+
+  guardedWriteState(sessionId, state, detail, extra);
+  writeSessionState(sessionId, state, detail, false, extra);
+  writeStats(stats);
 } catch {
   // Silent failure
 }

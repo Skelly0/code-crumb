@@ -20,9 +20,8 @@
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { PID_FILE, buildRendererCommands, quoteArg } = require('./shared');
 
-const HOME = process.env.USERPROFILE || process.env.HOME || '/tmp';
-const PID_FILE = path.join(HOME, '.code-crumb.pid');
 const WINDOW_TITLE = 'Code Crumb';
 
 // -- Pure helpers (exported for tests) ------------------------------------
@@ -69,30 +68,22 @@ function resolveEditor(editorName, editorArgs, baseDir) {
   }
 }
 
+// buildRendererCommands(platform, rendererArgs, windowTitle) lives in
+// shared.js so update-state.js (autolaunch) and this launcher spawn the
+// renderer the same way; it is re-exported below for existing importers.
+
 /**
- * Build the spawn arguments for launching the renderer in a new terminal
- * on the given platform.  Returns an array of { cmd, args, opts } objects
- * (Linux returns multiple fallback candidates).
+ * How to spawn the editor itself. On Windows, `claude`, `opencode` and
+ * `openclaw` are .cmd shims, which Node refuses to spawn without a shell
+ * (CVE-2024-27980 fix in 18.20/20.12). shell:true joins args verbatim, so
+ * each one is quoted here. `node` (the codex wrapper) is a real executable
+ * and keeps the plain, correctly-quoted-by-Node path.
  */
-function buildRendererCommands(platform, rendererArgs, windowTitle) {
-  if (platform === 'win32') {
-    return {
-      wt: { cmd: 'wt', args: ['-w', '0', 'new-tab', '--title', windowTitle, 'node', ...rendererArgs], opts: { detached: true, stdio: 'ignore', shell: true } },
-      cmd: { cmd: 'cmd', args: ['/c', 'start', `"${windowTitle}"`, 'node', ...rendererArgs], opts: { detached: true, stdio: 'ignore' } },
-    };
-  } else if (platform === 'darwin') {
-    const escaped = rendererArgs.map(a => a.replace(/'/g, "'\\''")).join(' ');
-    return {
-      osascript: { cmd: 'osascript', args: ['-e', `tell application "Terminal" to do script "node ${escaped}; exit"`], opts: { detached: true, stdio: 'ignore' } },
-    };
-  } else {
-    return {
-      'gnome-terminal': { cmd: 'gnome-terminal', args: ['--title=' + windowTitle, '--', 'node', ...rendererArgs] },
-      konsole:          { cmd: 'konsole', args: ['--new-tab', '-e', 'node', ...rendererArgs] },
-      'xfce4-terminal': { cmd: 'xfce4-terminal', args: ['--title=' + windowTitle, '-e', `node ${rendererArgs.join(' ')}`] },
-      xterm:            { cmd: 'xterm', args: ['-T', windowTitle, '-e', 'node', ...rendererArgs] },
-    };
+function buildEditorSpawn(platform, cmd, args) {
+  if (platform === 'win32' && cmd !== 'node' && cmd !== process.execPath) {
+    return { cmd, args: args.map(quoteArg), opts: { stdio: 'inherit', shell: true } };
   }
+  return { cmd, args, opts: { stdio: 'inherit' } };
 }
 
 // -- Side-effecting runtime -----------------------------------------------
@@ -132,7 +123,7 @@ function startRenderer() {
     for (const key of Object.keys(cmds)) {
       try {
         execSync(`command -v ${cmds[key].cmd}`, { stdio: 'ignore' });
-        spawn(cmds[key].cmd, cmds[key].args, { detached: true, stdio: 'ignore' }).unref();
+        spawn(cmds[key].cmd, cmds[key].args, cmds[key].opts).unref();
         launched = true;
         break;
       } catch {
@@ -167,10 +158,9 @@ if (require.main === module) {
   }
 
   const { cmd: editorCmd, args: editorCmdArgs } = resolveEditor(editorName, editorArgs, __dirname);
+  const spawnSpec = buildEditorSpawn(process.platform, editorCmd, editorCmdArgs);
 
-  const child = spawn(editorCmd, editorCmdArgs, {
-    stdio: 'inherit',
-  });
+  const child = spawn(spawnSpec.cmd, spawnSpec.args, spawnSpec.opts);
 
   child.on('error', (err) => {
     console.error(`Failed to start ${editorName}:`, err.message);
@@ -184,4 +174,4 @@ if (require.main === module) {
 
 // -- Exports for testing --------------------------------------------------
 
-module.exports = { parseArgs, resolveEditor, buildRendererCommands, WINDOW_TITLE };
+module.exports = { parseArgs, resolveEditor, buildRendererCommands, buildEditorSpawn, WINDOW_TITLE };

@@ -52,6 +52,13 @@ function writeState(state, detail, stopped = false) {
 
 // -- Main ---------------------------------------------------------------
 
+// engmux is a Python module. Only Windows ships a bare `python`; Linux and Homebrew
+// macOS usually have `python3` only. ENGMUX_PYTHON / PYTHON override either.
+const PYTHON = process.env.ENGMUX_PYTHON || process.env.PYTHON
+  || (process.platform === 'win32' ? 'python' : 'python3');
+// Cap captured stdout like every other stdin/stdout reader (1 MB).
+const MAX_OUTPUT = 1048576;
+
 const args = process.argv.slice(2);
 if (args.length === 0) {
   process.stderr.write('Usage: node adapters/engmux-adapter.js [engmux args...]\n');
@@ -62,13 +69,13 @@ if (args.length === 0) {
 writeState('spawning', args.join(' ').slice(0, 40));
 
 // 2. Spawn engmux
-const child = spawn('python', ['-m', 'engmux', ...args], {
+const child = spawn(PYTHON, ['-m', 'engmux', ...args], {
   stdio: ['inherit', 'pipe', 'inherit'],
   env: { ...process.env, CLAUDE_SESSION_ID: SESSION_ID },
 });
 
 let stdout = '';
-child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+child.stdout.on('data', (chunk) => { if (stdout.length < MAX_OUTPUT) stdout += chunk.toString(); });
 
 // 3. Cycle states while running
 let cycleIndex = 0;

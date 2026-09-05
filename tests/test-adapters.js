@@ -2171,7 +2171,7 @@ describe('editor PID liveness tracking', () => {
   const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
   const updateStateSrc = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
 
-  test('codex-notify writes parent PID to global state file', () => {
+  test('codex-notify publishes the parent PID (posix only -- omitted on win32 like update-state.js)', () => {
     const { tmp, stateFile, env } = makeTempEnv('pid-1');
     const event = { type: 'agent-turn-complete', 'thread-id': 'pid-1' };
     try {
@@ -2182,9 +2182,15 @@ describe('editor PID liveness tracking', () => {
       if (e.status !== 0 && e.status !== null) throw e;
     }
     const state = readJSON(stateFile);
-    // The adapter is our direct child, so its ppid is this test process
-    assert.strictEqual(state.pid, process.pid,
-      `state.pid should be the parent process (${process.pid}), got ${state.pid}`);
+    // The adapter is our direct child, so its ppid is this test process --
+    // except on Windows, where the pid is omitted (same policy as update-state.js:
+    // the ppid there is a transient shim and a PID-recycling hazard).
+    if (process.platform === 'win32') {
+      assert.strictEqual(state.pid, undefined, 'win32 must not publish a transient ppid');
+    } else {
+      assert.strictEqual(state.pid, process.pid,
+        `state.pid should be the parent process (${process.pid}), got ${state.pid}`);
+    }
     cleanup(tmp);
   });
 

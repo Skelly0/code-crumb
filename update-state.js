@@ -18,9 +18,13 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, QUIT_FLAG_FILE, safeFilename, getGitBranch, getIsWorktree } = require('./shared');
 const {
-  toolToState, normalizeToolResponse, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats,
+  STATE_FILE, SESSIONS_DIR, STATS_FILE, PID_FILE, QUIT_FLAG_FILE, SPAWN_LOCK_FILE,
+  safeFilename, getGitBranch, getIsWorktree, loadPrefs,
+  writeJsonAtomic, acquireSpawnLock, buildRendererCommands,
+} = require('./shared');
+const {
+  toolToState, normalizeToolResponse, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
   EDIT_TOOLS, SUBAGENT_TOOLS,
   pruneFrequentFiles, topFrequentFiles, buildSubagentSessionState,
   classifyForeignSession, pruneTopLevelSessions,
@@ -42,11 +46,13 @@ const FALLBACK_SESSION_ID = `${EDITOR}-${process.ppid}`;
 // rescue. On Windows the ppid is a transient cmd.exe shim (dead within ms):
 // useless for protection and a prime PID-recycling target, so it is omitted
 // entirely and those sessions rely on staleness timeouts.
+// All state writes are atomic (temp + rename): the renderer watches these
+// files and must never read a half-written one.
 function writeState(state, detail = '', extra = {}) {
-  const data = JSON.stringify({ state, detail, timestamp: Date.now(),
-    ...(process.platform !== 'win32' ? { pid: process.ppid } : {}), ...extra });
+  const data = { state, detail, timestamp: Date.now(),
+    ...(process.platform !== 'win32' ? { pid: process.ppid } : {}), ...extra };
   try {
-    fs.writeFileSync(STATE_FILE, data, { encoding: 'utf8', mode: 0o600 });
+    writeJsonAtomic(STATE_FILE, data, 0o600);
   } catch {
     // Silently fail -- don't break Claude Code
   }
@@ -57,15 +63,15 @@ function writeSessionState(sessionId, state, detail = '', stopped = false, extra
   try {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
     const filename = safeFilename(sessionId) + '.json';
-    const data = JSON.stringify({
+    const data = {
       session_id: sessionId, state, detail,
       timestamp: Date.now(), cwd: process.cwd(), stopped,
       // editor PID on Unix (hook runs as child of the long-lived editor);
       // omitted on Windows where ppid is a transient shim (recycling hazard)
       ...(process.platform !== 'win32' ? { pid: process.ppid } : {}),
       ...extra,
-    });
-    fs.writeFileSync(path.join(SESSIONS_DIR, filename), data, { encoding: 'utf8', mode: 0o600 });
+    };
+    writeJsonAtomic(path.join(SESSIONS_DIR, filename), data, 0o600);
   } catch {
     // Silently fail
   }
@@ -96,30 +102,31 @@ function _touchEarlierSubagents(activeSubagents) {
   }
 }
 
-// Persistent stats (streaks, records, session counters)
+// Persistent stats (streaks, records, session counters). normalizeStats
+// repairs a {} / old-schema file so nothing below can throw on a missing key.
 function readStats() {
   try {
-    return JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
+    return normalizeStats(JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')));
   } catch {
     return defaultStats();
   }
 }
 
 function writeStats(stats) {
-  try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats), { encoding: 'utf8', mode: 0o600 }); } catch {}
+  try { writeJsonAtomic(STATS_FILE, stats, 0o600); } catch {}
 }
 
 // -- Autolaunch ------------------------------------------------------
 
 // If the renderer isn't running and the user has opted in, spawn it in
 // a new terminal window. Runs on every hook call — the fast path (PID
-// alive) costs ~1-2ms, well within the 50ms hook budget.
+// alive) costs ~1-2ms, well within the 50ms hook budget. When the renderer
+// is down, parallel tool calls fire several hooks at once; the spawn lock
+// lets exactly one of them open a window per 5s.
 function ensureRendererRunning() {
   try {
     // Check pref — fast sync read, bail early if disabled
-    let prefs = {};
-    try { prefs = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')); } catch {}
-    if (!prefs.autolaunch) return;
+    if (!loadPrefs().autolaunch) return;
 
     // Check quit flag — user intentionally quit, don't auto-relaunch
     try { fs.accessSync(QUIT_FLAG_FILE); return; } catch {}
@@ -130,40 +137,28 @@ function ensureRendererRunning() {
       if (!isNaN(pid)) { process.kill(pid, 0); return; } // alive
     } catch {}
 
-    // Renderer dead/missing — spawn in new terminal, detached
+    // Renderer dead/missing — one hook spawns it, the rest back off.
+    if (!acquireSpawnLock(SPAWN_LOCK_FILE, 5000)) return;
+
+    const { spawn, execSync } = require('child_process');
     const rendererPath = path.resolve(__dirname, 'renderer.js');
-    const { spawn } = require('child_process');
-    const platform = process.platform;
+    const cmds = buildRendererCommands(process.platform, [rendererPath], 'Code Crumb');
 
     let child;
-    if (platform === 'win32') {
+    if (process.platform === 'win32') {
       // Probe for Windows Terminal before spawning (spawn doesn't throw synchronously)
       let hasWt = false;
-      try { require('child_process').execSync('where wt', { stdio: 'ignore' }); hasWt = true; } catch {}
-      if (hasWt) {
-        child = spawn('wt', ['-w', '0', 'new-tab', '--title', 'Code Crumb', 'node', rendererPath],
-          { detached: true, stdio: 'ignore', shell: false });
-      } else {
-        child = spawn('cmd', ['/c', 'start', '"Code Crumb"', 'node', rendererPath],
-          { detached: true, stdio: 'ignore', shell: true });
-      }
-    } else if (platform === 'darwin') {
-      const escaped = rendererPath.replace(/'/g, "'\\''");
-      child = spawn('osascript', ['-e',
-        `tell application "Terminal" to do script "node '${escaped}'; exit"`],
-        { detached: true, stdio: 'ignore' });
+      try { execSync('where wt', { stdio: 'ignore' }); hasWt = true; } catch {}
+      const c = hasWt ? cmds.wt : cmds.cmd;
+      child = spawn(c.cmd, c.args, c.opts);
+    } else if (process.platform === 'darwin') {
+      child = spawn(cmds.osascript.cmd, cmds.osascript.args, cmds.osascript.opts);
     } else {
       // Linux — try common terminal emulators in order
-      const terms = [
-        ['gnome-terminal', ['--', 'node', rendererPath]],
-        ['konsole', ['-e', 'node', rendererPath]],
-        ['xfce4-terminal', ['-e', `node ${rendererPath}`]],
-        ['xterm', ['-e', `node ${rendererPath}`]],
-      ];
-      for (const [term, args] of terms) {
+      for (const key of Object.keys(cmds)) {
         try {
-          require('child_process').execSync(`command -v ${term}`, { stdio: 'ignore' });
-          child = spawn(term, args, { detached: true, stdio: 'ignore' });
+          execSync(`command -v ${cmds[key].cmd}`, { stdio: 'ignore' });
+          child = spawn(cmds[key].cmd, cmds[key].args, cmds[key].opts);
           break;
         } catch {}
       }
@@ -648,9 +643,7 @@ process.stdin.on('end', () => {
             const synthData = JSON.parse(fs.readFileSync(synthFp, 'utf8'));
             if (!synthData.stopped) {
               if (synthData.taskDescription) extra.taskDescription = synthData.taskDescription;
-              fs.writeFileSync(synthFp, JSON.stringify({
-                ...synthData, stopped: true, state: 'happy', detail: 'done',
-              }), { encoding: 'utf8', mode: 0o600 });
+              writeJsonAtomic(synthFp, { ...synthData, stopped: true, state: 'happy', detail: 'done' }, 0o600);
               break;
             }
           } catch {}
@@ -853,13 +846,18 @@ process.stdin.on('end', () => {
 
     if (shouldWriteGlobal) writeState(fallbackState, fallbackDetail, fallbackExtra);
     // Always write per-session file so parallel sessions appear as orbitals.
+    // The adopted owner id is only right when we ARE the owner (shouldWriteGlobal);
+    // otherwise this hook belongs to some other session and must write its own
+    // orbital file, not overwrite the owner's.
+    const sessionFileId = shouldWriteGlobal ? fallbackSessionId : originalFallbackId;
+    const sessionExtra = { ...fallbackExtra, sessionId: sessionFileId };
     if (hookEvent === 'Stop') {
-      const idleFallbackExtra = { ...fallbackExtra };
+      const idleFallbackExtra = { ...sessionExtra };
       delete idleFallbackExtra.stopped;
-      writeSessionState(fallbackSessionId, 'idle', 'between turns', false, idleFallbackExtra);
+      writeSessionState(sessionFileId, 'idle', 'between turns', false, idleFallbackExtra);
     } else {
-      writeSessionState(fallbackSessionId, fallbackState, fallbackDetail,
-        hookEvent === 'SessionEnd', fallbackExtra);
+      writeSessionState(sessionFileId, fallbackState, fallbackDetail,
+        hookEvent === 'SessionEnd', sessionExtra);
     }
   }
 

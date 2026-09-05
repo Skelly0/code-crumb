@@ -110,12 +110,22 @@ function _winPsExe() {
   return _psExeCached;
 }
 
+// Evict resolved entries nobody has asked about for 3x the TTL, so PIDs from
+// sessions that vanished do not accumulate over a long renderer lifetime.
+// Pending entries are left alone: a resolver may still be about to fill them.
+function _sweepPidCache(now = Date.now()) {
+  for (const [pid, e] of _pidStartCache) {
+    if (e.value !== 'pending' && now - e.resolvedAt > 3 * PID_CACHE_TTL_MS) _pidStartCache.delete(pid);
+  }
+}
+
 // Enqueue a PID for background start-time resolution. Fresh entries are
 // left alone; TTL-expired entries keep their old value (still used by the
 // gate) while a refresh rides the next batch.
 function requestPidStartTime(pid, aliveFn = isProcessAlive) {
   if (!pid || pid <= 1) return;
   const now = Date.now();
+  _sweepPidCache(now);
   const e = _pidStartCache.get(pid);
   if (e && (e.value === 'pending' || now - e.resolvedAt < PID_CACHE_TTL_MS)) return;
   if (!aliveFn(pid)) { _pidStartCache.delete(pid); return; }
@@ -625,7 +635,7 @@ class MiniFace {
 
     const eyeStr = this.getEyes();
     const mouthStr = this.getMouth();
-    const mPad = Math.floor((BOX_INNER - mouthStr.length) / 2);
+    const mPad = Math.max(0, Math.floor((BOX_INNER - mouthStr.length) / 2));
     const mRight = BOX_INNER - mPad - mouthStr.length;
 
     let buf = '';
@@ -1002,7 +1012,12 @@ class OrbitalSystem {
   // Groups visible orbitals by team/parent for clustered positioning
 
   _buildGroups(visible) {
-    if (!this._groupsDirty && this._groupsCache) return this._groupsCache;
+    // The cache is keyed on the visible set as well as on session reloads:
+    // maxSlots changes with the terminal size, so after a resize the visible
+    // subset can differ without any session file having changed.
+    const sig = visible.map(f => f.sessionId).join(' ');
+    if (!this._groupsDirty && this._groupsCache && this._groupsSig === sig) return this._groupsCache;
+    this._groupsSig = sig;
     const map = new Map();
     for (const face of visible) {
       const key = face.teamName || face.parentSession || face.sessionId;
@@ -1814,7 +1829,7 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
-  isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, KNOWN_EDITORS,
+  isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _sweepPidCache, KNOWN_EDITORS,
   STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, SLACK_MS, PID_PROTECT_CAP_MS, PID_CACHE_TTL_MS,
   INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, GROUP_LABEL_BRIGHTNESS,
   CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS,

@@ -163,21 +163,21 @@ describe('launch.js -- buildRendererCommands win32', () => {
     assert.ok(cmds.cmd, 'should have cmd entry');
   });
 
-  test('wt command includes window title and node', () => {
+  test('wt command includes window title (quoted for the shell) and node', () => {
     const cmds = buildRendererCommands('win32', rendererArgs, title);
     assert.strictEqual(cmds.wt.cmd, 'wt');
     assert.ok(cmds.wt.args.includes('--title'));
-    assert.ok(cmds.wt.args.includes(title));
+    assert.ok(cmds.wt.args.includes(`"${title}"`), 'shell:true joins args verbatim, so the title must carry its own quotes');
     assert.ok(cmds.wt.args.includes('node'));
-    assert.ok(cmds.wt.args.includes(rendererArgs[0]));
+    assert.ok(cmds.wt.args.includes(rendererArgs[0]), 'a path without spaces stays unquoted');
   });
 
   test('cmd fallback uses start command', () => {
     const cmds = buildRendererCommands('win32', rendererArgs, title);
     assert.strictEqual(cmds.cmd.cmd, 'cmd');
     assert.ok(cmds.cmd.args.includes('/c'));
-    assert.ok(cmds.cmd.args.includes('start'));
-    assert.ok(cmds.cmd.args.includes('node'));
+    assert.ok(cmds.cmd.args.some(a => a.includes('start')));
+    assert.ok(cmds.cmd.args.some(a => a.includes('node')));
   });
 
   test('wt opts include shell: true and detached: true', () => {

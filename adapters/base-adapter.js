@@ -19,46 +19,54 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename } = require('../shared');
+const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename, writeJsonAtomic } = require('../shared');
 const {
-  toolToState, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats,
+  toolToState, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
   EDIT_TOOLS,
   pruneFrequentFiles, topFrequentFiles,
 } = require('../state-machine');
 
 // -- State file writing ------------------------------------------------
 
-// pid defaults to ppid (right for per-event processes like codex-notify,
-// whose parent is the editor); long-lived adapters override via extra.pid.
-// The renderer validates the PID before trusting it for liveness checks.
+// Same PID policy as update-state.js: ppid is the editor on Unix (per-event
+// processes like codex-notify run as its children) and enables liveness
+// rescue; on Windows ppid is a transient cmd.exe shim -- useless and a
+// PID-recycling hazard -- so it is omitted and staleness timeouts apply.
+// Long-lived adapters (codex-wrapper) override via extra.pid.
+function pidField() {
+  return process.platform !== 'win32' ? { pid: process.ppid } : {};
+}
+
 function writeState(state, detail = '', extra = {}) {
-  const data = JSON.stringify({ state, detail, timestamp: Date.now(), pid: process.ppid, ...extra });
-  try { fs.writeFileSync(STATE_FILE, data, { encoding: 'utf8', mode: 0o600 }); } catch {}
+  const data = { state, detail, timestamp: Date.now(), ...pidField(), ...extra };
+  try { writeJsonAtomic(STATE_FILE, data, 0o600); } catch {}
 }
 
 function writeSessionState(sessionId, state, detail = '', stopped = false, extra = {}) {
   try {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
     const filename = safeFilename(sessionId) + '.json';
-    const data = JSON.stringify({
+    const data = {
       session_id: sessionId, state, detail,
       timestamp: Date.now(), cwd: process.cwd(), stopped,
-      pid: process.ppid, // editor PID — hook runs as child, so ppid is the long-lived process
+      ...pidField(),
       ...extra,
-    });
-    fs.writeFileSync(path.join(SESSIONS_DIR, filename), data, { encoding: 'utf8', mode: 0o600 });
+    };
+    writeJsonAtomic(path.join(SESSIONS_DIR, filename), data, 0o600);
   } catch {}
 }
 
 // -- Stats persistence -------------------------------------------------
 
+// Always returns a fully-shaped stats object: a {} or old-schema file must
+// not make stats.session.id throw inside an adapter.
 function readStats() {
-  try { return JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); }
+  try { return normalizeStats(JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'))); }
   catch { return defaultStats(); }
 }
 
 function writeStats(stats) {
-  try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats), { encoding: 'utf8', mode: 0o600 }); } catch {}
+  try { writeJsonAtomic(STATS_FILE, stats, 0o600); } catch {}
 }
 
 // -- Session-guarded global state write --------------------------------
@@ -138,7 +146,8 @@ function buildExtra(stats, sessionId, modelName, editor) {
 
 function trackEditedFile(stats, toolName, toolInput) {
   if (EDIT_TOOLS.test(toolName)) {
-    const fp = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
+    const raw = toolInput?.file_path || toolInput?.notebook_path || toolInput?.path || toolInput?.target_file || '';
+    const fp = typeof raw === 'string' ? raw : '';
     const base = fp ? path.basename(fp) : '';
     if (base && !stats.session.filesEdited.includes(base)) {
       stats.session.filesEdited.push(base);
@@ -169,34 +178,45 @@ function handleToolEnd(stats, toolName, toolInput, toolResponse, isError) {
 // openclaw-adapter, and similar stdin-based adapters.
 //
 // handler(data) should process the parsed event object.
-// On parse failure, fallbackFn(err) is called if provided.
+// On parse failure, fallbackFn(err) is called if provided. A throw inside
+// handler() is swallowed on its own -- it must NOT be reported as
+// "unparseable stdin", or every mapping bug would hide behind the fallback's
+// thinking face.
+//
+// opts.stream / opts.exit exist for tests (default: process.stdin / process.exit).
 
-function processStdinEvent(handler, fallbackFn) {
+function processStdinEvent(handler, fallbackFn, opts = {}) {
+  const stream = opts.stream || process.stdin;
+  const exit = opts.exit || ((code) => process.exit(code));
   let input = '';
   const MAX_INPUT = 1048576;
   let inputTruncated = false;
-  process.stdin.setEncoding('utf8');
-  process.stdin.on('data', chunk => {
+  stream.setEncoding('utf8');
+  stream.on('data', chunk => {
     if (input.length < MAX_INPUT) input += chunk;
     else inputTruncated = true;
   });
-  process.stdin.on('end', () => {
+  stream.on('end', () => {
     if (inputTruncated) {
       const truncResult = classifyTruncatedInput('', input);
       writeState(truncResult.state, truncResult.detail);
-      process.exit(0);
+      exit(0);
+      return;
     }
+    let data;
     try {
-      const data = JSON.parse(input);
-      handler(data);
+      data = JSON.parse(input);
     } catch (err) {
       if (fallbackFn) {
         try { fallbackFn(err); } catch {}
       }
+      exit(0);
+      return;
     }
-    process.exit(0);
+    try { handler(data); } catch {}
+    exit(0);
   });
-  // 'end' handler above already calls process.exit(0); no 'close' handler needed
+  // 'end' handler above already calls exit(0); no 'close' handler needed
 }
 
 // -- Stdin JSONL (streaming) reader ------------------------------------
@@ -337,6 +357,7 @@ function runStdinAdapter(options) {
 }
 
 module.exports = {
+  pidField,
   writeState,
   writeSessionState,
   readStats,

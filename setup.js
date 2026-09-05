@@ -2,50 +2,48 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Setup -- configures hooks for supported editors         |
+// |  Code Crumb Setup -- configures hooks for supported editors      |
 // |  Works on Windows, macOS, and Linux                              |
 // |                                                                  |
 // |  Usage:                                                          |
 // |    node setup.js              (Claude Code -- default)           |
 // |    node setup.js claude       (Claude Code -- explicit)          |
+// |    node setup.js uninstall    (remove Claude Code hooks)         |
 // |    node setup.js codex        (Codex CLI)                        |
 // |    node setup.js opencode     (OpenCode)                         |
 // |    node setup.js openclaw     (OpenClaw / Pi)                    |
+// |    node setup.js --autolaunch (only flip the autolaunch pref)    |
+// |                                                                  |
+// |  The Claude Code installer is also a module: setupClaude() /     |
+// |  uninstallClaude() take { settingsPath, hookPath, log } so       |
+// |  tests never touch a real ~/.claude/settings.json.               |
 // +================================================================+
 
 const fs = require('fs');
 const path = require('path');
+const { HOME, savePrefs, writeJsonAtomic } = require('./shared');
 
-const HOME = process.env.USERPROFILE || process.env.HOME || '/tmp';
 const HOOK_SCRIPT = path.resolve(__dirname, 'update-state.js');
 
 // Normalise to forward slashes -- works in Node on all platforms
 // and avoids JSON escaping nightmares with backslashes
-const hookPath = HOOK_SCRIPT.replace(/\\/g, '/');
+const DEFAULT_HOOK_PATH = HOOK_SCRIPT.replace(/\\/g, '/');
+const DEFAULT_SETTINGS_PATH = path.join(HOME, '.claude', 'settings.json');
 
-// -- Editor detection ------------------------------------------------
-
-const args = process.argv.slice(2).filter(a => !a.startsWith('--'));
-const flags = process.argv.slice(2).filter(a => a.startsWith('--'));
-const editor = (args[0] || 'claude').toLowerCase();
-const autolaunchFlag = flags.includes('--autolaunch');
+const HOOK_EVENTS = [
+  'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop',
+  'Notification', 'SubagentStart', 'SubagentStop',
+  'TeammateIdle', 'TaskCompleted', 'SessionStart', 'SessionEnd',
+  'PreCompact', 'PostCompact', 'PermissionRequest', 'Setup',
+  'Elicitation', 'ElicitationResult', 'ConfigChange',
+  'InstructionsLoaded', 'StopFailure', 'UserPromptSubmit',
+];
 
 // -- Claude Code Setup -----------------------------------------------
 
-function setupClaude() {
-  const CLAUDE_SETTINGS = path.join(HOME, '.claude', 'settings.json');
-
-  const hookEvents = [
-    'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop',
-    'Notification', 'SubagentStart', 'SubagentStop',
-    'TeammateIdle', 'TaskCompleted', 'SessionStart', 'SessionEnd',
-    'PreCompact', 'PostCompact', 'PermissionRequest', 'Setup',
-    'Elicitation', 'ElicitationResult', 'ConfigChange',
-    'InstructionsLoaded', 'StopFailure', 'UserPromptSubmit',
-  ];
-
+function buildFaceHooks(hookPath) {
   const faceHooks = {};
-  for (const event of hookEvents) {
+  for (const event of HOOK_EVENTS) {
     faceHooks[event] = [
       {
         matcher: '',
@@ -56,66 +54,73 @@ function setupClaude() {
       },
     ];
   }
+  return faceHooks;
+}
 
-  console.log('\n  Code Crumb Setup (Claude Code)');
-  console.log('  ' + '='.repeat(40) + '\n');
-  console.log(`  Platform: ${process.platform}`);
-  console.log(`  Home:     ${HOME}`);
-  console.log(`  Hook:     ${hookPath}\n`);
+// Any hook entry that points at an update-state.js (ours, at any path).
+function isOurHook(entry) {
+  return !!entry?.hooks?.some(hh => typeof hh?.command === 'string' && /update-state\.js/.test(hh.command));
+}
 
-  // Read existing settings
-  let settings = {};
+// Our hook entry pointing at exactly this hookPath.
+function hasExactPath(entry, hookPath) {
+  return !!entry?.hooks?.some(hh => typeof hh?.command === 'string' && hh.command.includes(hookPath));
+}
+
+// Read settings.json. A missing file means "start fresh"; anything else that
+// goes wrong (unreadable, invalid JSON, not an object) means "do not touch
+// it" -- the old behaviour silently replaced a broken settings.json with just
+// our hooks, wiping permissions, env, MCP servers and everything else.
+function readSettings(settingsPath, log) {
+  let raw;
   try {
-    const raw = fs.readFileSync(CLAUDE_SETTINGS, 'utf8');
+    raw = fs.readFileSync(settingsPath, 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') {
+      log('  [..] No existing settings found, creating new');
+      return { settings: {}, existed: false, raw: null };
+    }
+    log(`  [!!] Could not read ${settingsPath}: ${err.message}`);
+    log('       Leaving it untouched. Fix or move the file, then re-run setup.');
+    return { error: err };
+  }
+  let settings;
+  try {
     settings = JSON.parse(raw);
-    console.log('  [ok] Found existing Claude settings');
-  } catch {
-    console.log('  [..] No existing settings found, creating new');
+  } catch (err) {
+    log(`  [!!] ${settingsPath} is not valid JSON (${err.message}).`);
+    log('       Leaving it untouched so nothing is lost. Fix the file, then re-run setup.');
+    return { error: err };
   }
-
-  // Merge hooks (don't overwrite existing hooks)
-  if (!settings.hooks) {
-    settings.hooks = {};
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    log(`  [!!] ${settingsPath} is not a JSON object. Leaving it untouched.`);
+    return { error: new Error('settings.json is not an object') };
   }
+  log('  [ok] Found existing Claude settings');
+  return { settings, existed: true, raw };
+}
 
-  let modified = false;
-  for (const [event, hookConfigs] of Object.entries(faceHooks)) {
-    if (!settings.hooks[event]) {
-      settings.hooks[event] = [];
-    }
-
-    // Check if our hook is already installed
-    const alreadyInstalled = settings.hooks[event].some(h =>
-      h.hooks?.some(hh => hh.command?.includes('update-state.js'))
-    );
-
-    if (!alreadyInstalled) {
-      settings.hooks[event].push(...hookConfigs);
-      modified = true;
-      console.log(`  + Added ${event} hook`);
-    } else {
-      console.log(`  [ok] ${event} hook already installed`);
-    }
+// Back up the previous file, then write atomically, keeping the file mode.
+function writeSettings(settingsPath, settings, existed, raw, log) {
+  const dir = path.dirname(settingsPath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  let mode = 0o600;
+  if (existed) {
+    try { mode = fs.statSync(settingsPath).mode & 0o777; } catch {}
+    try {
+      fs.writeFileSync(settingsPath + '.bak', raw, 'utf8');
+      log(`  [ok] Backup written to ${settingsPath}.bak`);
+    } catch {}
   }
+  const ok = writeJsonAtomic(settingsPath, JSON.stringify(settings, null, 2) + '\n', mode || 0o600);
+  if (!ok) log(`  [!!] Failed to write ${settingsPath}`);
+  return ok;
+}
 
-  if (modified) {
-    // Ensure .claude directory exists
-    const claudeDir = path.dirname(CLAUDE_SETTINGS);
-    if (!fs.existsSync(claudeDir)) {
-      fs.mkdirSync(claudeDir, { recursive: true });
-    }
-
-    // Write settings
-    fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf8');
-    console.log(`\n  Hooks written to ${CLAUDE_SETTINGS}`);
-  } else {
-    console.log('\n  All hooks already installed');
-  }
-
+function printClaudeUsage(settingsPath, log) {
   const rendererPath = path.resolve(__dirname, 'renderer.js').replace(/\\/g, '/');
   const demoPath = path.resolve(__dirname, 'demo.js').replace(/\\/g, '/');
-
-console.log(`
+  log(`
   ${'─'.repeat(42)}
 
   To use Code Crumb:
@@ -129,16 +134,117 @@ console.log(`
   3. To preview all expressions:
      node "${demoPath}"
 
-  Plugin install (recommended -- works with marketplace):
+  Plugin install (alternative -- works with marketplace):
      claude plugin install --plugin-dir "${path.resolve(__dirname).replace(/\\/g, '/')}"
+     Use ONE of the two: with both the manual hooks and the plugin
+     installed every event fires twice and the counters double.
 
-  To uninstall:
+  To uninstall the manual hooks:
+     node setup.js uninstall
+  Or the plugin:
      claude plugin uninstall code-crumb
-  Or remove the code-crumb hooks manually from:
-     ${CLAUDE_SETTINGS}
+  Settings file:
+     ${settingsPath}
 
   ${'─'.repeat(42)}
 `);
+}
+
+// Install (or repair) the Claude Code hooks.
+// opts: { settingsPath, hookPath, log, quiet }
+// Returns { ok, modified, added, replaced, error? }.
+function setupClaude(opts = {}) {
+  const settingsPath = opts.settingsPath || DEFAULT_SETTINGS_PATH;
+  const hookPath = opts.hookPath || DEFAULT_HOOK_PATH;
+  const log = opts.log || console.log;
+  const faceHooks = buildFaceHooks(hookPath);
+
+  log('\n  Code Crumb Setup (Claude Code)');
+  log('  ' + '='.repeat(40) + '\n');
+  log(`  Platform: ${process.platform}`);
+  log(`  Home:     ${HOME}`);
+  log(`  Hook:     ${hookPath}\n`);
+
+  const read = readSettings(settingsPath, log);
+  if (read.error) return { ok: false, modified: false, added: 0, replaced: 0, error: read.error };
+  const { settings, existed, raw } = read;
+
+  if (!settings.hooks || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks)) {
+    settings.hooks = {};
+  }
+
+  let added = 0;
+  let replaced = 0;
+  for (const [event, hookConfigs] of Object.entries(faceHooks)) {
+    if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
+    const entries = settings.hooks[event];
+
+    if (entries.some(e => hasExactPath(e, hookPath))) {
+      log(`  [ok] ${event} hook already installed`);
+      continue;
+    }
+    // A Code Crumb entry with a different path: the repo moved. Replace it
+    // instead of reporting "already installed" and leaving a dead hook.
+    if (entries.some(isOurHook)) {
+      settings.hooks[event] = entries.filter(e => !isOurHook(e)).concat(hookConfigs);
+      replaced++;
+      log(`  ~ Updated ${event} hook path`);
+      continue;
+    }
+    entries.push(...hookConfigs);
+    added++;
+    log(`  + Added ${event} hook`);
+  }
+
+  const modified = added + replaced > 0;
+  if (modified) {
+    if (!writeSettings(settingsPath, settings, existed, raw, log)) {
+      return { ok: false, modified: false, added, replaced, error: new Error('write failed') };
+    }
+    log(`\n  Hooks written to ${settingsPath}`);
+  } else {
+    log('\n  All hooks already installed');
+  }
+
+  if (!opts.quiet) printClaudeUsage(settingsPath, log);
+  return { ok: true, modified, added, replaced };
+}
+
+// Remove every Code Crumb hook entry (any path) and drop event arrays that
+// end up empty. opts: { settingsPath, log }. Returns { ok, removed, error? }.
+function uninstallClaude(opts = {}) {
+  const settingsPath = opts.settingsPath || DEFAULT_SETTINGS_PATH;
+  const log = opts.log || console.log;
+
+  log('\n  Code Crumb Uninstall (Claude Code)');
+  log('  ' + '='.repeat(40) + '\n');
+
+  const read = readSettings(settingsPath, log);
+  if (read.error) return { ok: false, removed: 0, error: read.error };
+  const { settings, existed, raw } = read;
+
+  let removed = 0;
+  if (settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)) {
+    for (const event of Object.keys(settings.hooks)) {
+      const entries = settings.hooks[event];
+      if (!Array.isArray(entries)) continue;
+      const kept = entries.filter(e => !isOurHook(e));
+      removed += entries.length - kept.length;
+      if (kept.length) settings.hooks[event] = kept;
+      else delete settings.hooks[event];
+    }
+    if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+  }
+
+  if (removed === 0) {
+    log('  [ok] No Code Crumb hooks found -- nothing to do');
+    return { ok: true, removed: 0 };
+  }
+  if (!writeSettings(settingsPath, settings, existed, raw, log)) {
+    return { ok: false, removed: 0, error: new Error('write failed') };
+  }
+  log(`  - Removed ${removed} Code Crumb hook entries from ${settingsPath}\n`);
+  return { ok: true, removed };
 }
 
 // -- Codex CLI Setup -------------------------------------------------
@@ -168,7 +274,7 @@ function setupCodex() {
 
   if (hasNotify) {
     // Check if our handler is already configured
-if (configText.includes('codex-notify.js')) {
+    if (configText.includes('codex-notify.js')) {
       console.log('  [ok] Code Crumb notify handler already configured');
     } else {
       console.log('\n  [!!] Codex already has a notify handler configured.');
@@ -393,56 +499,91 @@ function setupOpenClaw() {
 `);
 }
 
-// -- Dispatch --------------------------------------------------------
-
-switch (editor) {
-  case 'claude':
-  case 'claude-code':
-    setupClaude();
-    break;
-  case 'codex':
-  case 'openai':
-    setupCodex();
-    break;
-  case 'opencode':
-    setupOpenCode();
-    break;
-  case 'openclaw':
-  case 'claw':
-  case 'pi':
-    setupOpenClaw();
-    break;
-  default:
-    console.log(`\n  Unknown editor: "${editor}"`);
-    console.log('  Supported editors: claude, codex, opencode, openclaw');
-    console.log('  Usage: node setup.js [claude|codex|opencode|openclaw] [--autolaunch]\n');
-    process.exit(1);
-}
-
 // -- Autolaunch preference -------------------------------------------
 
-const PREFS_FILE = path.join(HOME, '.code-crumb-prefs.json');
-
-function enableAutolaunch() {
-  let prefs = {};
-  try { prefs = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')); } catch {}
-  prefs.autolaunch = true;
-  fs.writeFileSync(PREFS_FILE, JSON.stringify(prefs, null, 2), 'utf8');
-  console.log('  ✓ Autolaunch enabled — renderer will start automatically on first hook call');
+function enableAutolaunch(log = console.log) {
+  savePrefs({ autolaunch: true });
+  log('  [ok] Autolaunch enabled -- the renderer will start automatically on the first hook call');
 }
 
-if (autolaunchFlag) {
-  enableAutolaunch();
-} else if (process.stdout.isTTY && process.stdin.isTTY) {
-  // Interactive prompt
-  const readline = require('readline');
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  rl.question('  Auto-launch renderer when your editor starts? [y/N] ', (answer) => {
-    if (answer.trim().toLowerCase() === 'y') {
-      enableAutolaunch();
-    } else {
-      console.log('  Autolaunch skipped (enable later with: node setup.js --autolaunch)');
+// -- CLI -------------------------------------------------------------
+
+function printUsage() {
+  console.log('  Supported editors: claude, codex, opencode, openclaw');
+  console.log('  Usage: node setup.js [claude|codex|opencode|openclaw|uninstall] [--autolaunch]\n');
+}
+
+function main() {
+  const rawArgs = process.argv.slice(2);
+  const args = rawArgs.filter(a => !a.startsWith('--'));
+  const flags = rawArgs.filter(a => a.startsWith('--'));
+  const autolaunchFlag = flags.includes('--autolaunch');
+  const command = (args[0] || '').toLowerCase();
+
+  // `node setup.js --autolaunch` on its own only flips the preference; it
+  // used to silently re-run the whole Claude Code hook install as well.
+  if (!command && autolaunchFlag) {
+    enableAutolaunch();
+    return;
+  }
+
+  switch (command || 'claude') {
+    case 'claude':
+    case 'claude-code': {
+      const r = setupClaude();
+      if (!r.ok) process.exit(1);
+      break;
     }
-    rl.close();
-  });
+    case 'uninstall': {
+      const r = uninstallClaude();
+      process.exit(r.ok ? 0 : 1);
+      break;
+    }
+    case 'codex':
+    case 'openai':
+      setupCodex();
+      break;
+    case 'opencode':
+      setupOpenCode();
+      break;
+    case 'openclaw':
+    case 'claw':
+    case 'pi':
+      setupOpenClaw();
+      break;
+    default:
+      console.log(`\n  Unknown editor: "${command}"`);
+      printUsage();
+      process.exit(1);
+  }
+
+  if (autolaunchFlag) {
+    enableAutolaunch();
+  } else if (process.stdout.isTTY && process.stdin.isTTY) {
+    // Interactive prompt
+    const readline = require('readline');
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question('  Auto-launch renderer when your editor starts? [y/N] ', (answer) => {
+      if (answer.trim().toLowerCase() === 'y') {
+        enableAutolaunch();
+      } else {
+        console.log('  Autolaunch skipped (enable later with: node setup.js --autolaunch)');
+      }
+      rl.close();
+    });
+  }
 }
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  setupClaude,
+  uninstallClaude,
+  buildFaceHooks,
+  enableAutolaunch,
+  HOOK_EVENTS,
+  DEFAULT_HOOK_PATH,
+  DEFAULT_SETTINGS_PATH,
+};

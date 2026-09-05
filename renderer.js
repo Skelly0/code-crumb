@@ -17,7 +17,7 @@ const {
   themes, TIMELINE_COLORS, SPARKLINE_BLOCKS,
   COMPLETION_LINGER,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
-  PALETTES, PALETTE_NAMES,
+  PALETTES, PALETTE_NAMES, normalizePaletteIndex,
   setNoColor, isNoColor,
 } = require('./themes');
 const { mouths, eyes, gridMouths } = require('./animations');
@@ -165,7 +165,7 @@ function runUnifiedMode() {
   // Load persisted preferences (skipped in minimal mode)
   if (!minimal) {
     const prefs = loadPrefs();
-    if (typeof prefs.paletteIndex === 'number') face.paletteIndex = prefs.paletteIndex % PALETTES.length;
+    face.paletteIndex = normalizePaletteIndex(prefs.paletteIndex, PALETTES.length);
     if (typeof prefs.accessoriesEnabled === 'boolean') face.accessoriesEnabled = prefs.accessoriesEnabled;
     if (typeof prefs.showStats === 'boolean') face.showStats = prefs.showStats;
     if (typeof prefs.showOrbitals === 'boolean') face.showOrbitals = prefs.showOrbitals;
@@ -404,10 +404,13 @@ function runUnifiedMode() {
   // immediately, duplicates within 50ms are suppressed — Windows fs.watch
   // fires multiple events per write)
   let stateWatchThrottled = false;
+  let stateWatcher = null;
+  let sessionWatcher = null;
+  let sessionWatchTimer = null;
   try {
     const dir = path.dirname(STATE_FILE);
     const basename = path.basename(STATE_FILE);
-    const stateWatcher = fs.watch(dir, (eventType, filename) => {
+    stateWatcher = fs.watch(dir, (eventType, filename) => {
       if (!filename || filename === basename) {
         if (!stateWatchThrottled) {
           stateWatchThrottled = true;
@@ -423,9 +426,8 @@ function runUnifiedMode() {
 
   // Watch sessions directory for subagent changes (skipped in minimal mode)
   if (!minimal) {
-    let sessionWatchTimer = null;
     try {
-      const sessionWatcher = fs.watch(SESSIONS_DIR, () => {
+      sessionWatcher = fs.watch(SESSIONS_DIR, () => {
         if (sessionWatchTimer) clearTimeout(sessionWatchTimer);
         sessionWatchTimer = setTimeout(() => {
           if (mainSessionId) orbital.loadSessionsAsync(mainSessionId);
@@ -450,6 +452,9 @@ function runUnifiedMode() {
   function cleanup() {
     writeQuitFlag();
     removePid();
+    try { if (stateWatcher) stateWatcher.close(); } catch {}
+    try { if (sessionWatcher) sessionWatcher.close(); } catch {}
+    if (sessionWatchTimer) clearTimeout(sessionWatchTimer);
     try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch {}
     process.stdout.write(ansi.syncEnd + ansi.show + ansi.clear + ansi.reset);
     process.exit(0);
@@ -512,6 +517,7 @@ function runUnifiedMode() {
     });
   }
 
+  let prevFrame = null;  // last frame written; loop() skips identical frames
   process.stdout.on('resize', () => {
     // Force-complete swap on resize to avoid ghost artifacts
     if (swapTransition.active) {
@@ -520,6 +526,7 @@ function runUnifiedMode() {
     }
     face.particles.fadeAll(5);
     orbital._prevClearBuf = '';  // Full clear handles it
+    prevFrame = null;  // the screen is about to be cleared -- force the next frame out even if identical
     prevSessionListClear = '';
     process.stdout.write(ansi.syncEnd + ansi.clear);
   });
@@ -578,7 +585,6 @@ function runUnifiedMode() {
   }
 
   let lastTime = Date.now();
-  let prevFrame = null;
   let prevSessionListClear = '';
   function loop() {
     const now = Date.now();

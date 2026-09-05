@@ -43,10 +43,10 @@ transition.js    SwapTransition class — dissolve/swap/materialize animation st
 accessories.js   Accessory definitions (hats, glasses, ears, etc.) and rendering helpers
 update-state.js  Hook handler — receives editor events via stdin, writes state files
 state-machine.js Pure logic — tool→state mapping (multi-editor), error detection, streaks
-shared.js        Shared constants — paths, config, and utility functions
+shared.js        Shared constants — paths, face state sets, prefs, atomic JSON writes, spawn lock, shell quoting, buildRendererCommands
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
-setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode|openclaw])
-test.js          Test runner — isolates HOME, loads 13 test files from tests/ (~1661 tests); --quiet, name filters
+setup.js         Multi-editor setup — installs/uninstalls hooks (setup.js [claude|codex|opencode|openclaw|uninstall]); setupClaude/uninstallClaude are importable
+test.js          Test runner — isolates HOME, loads 14 test files from tests/ (~1718 tests); --quiet, name filters
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Orbital demo — simulates subagent sessions orbiting the main face
 code-crumb.sh   Unix shell wrapper for launch.js
@@ -62,7 +62,8 @@ tests/
   _harness.js      Shared describe/test/test.async runner + temp-home helpers (createSuite, makeTempEnv)
   test-shared.js, test-state-machine.js, test-themes.js, test-animations.js,
   test-particles.js, test-face.js, test-grid.js, test-accessories.js,
-  test-teams.js, test-launch.js, test-adapters.js, test-transition.js, test-emotions.js
+  test-teams.js, test-launch.js, test-adapters.js, test-transition.js, test-emotions.js,
+  test-platform.js
 .claude-plugin/
   plugin.json      Claude Code plugin manifest for marketplace distribution
 hooks/
@@ -88,10 +89,13 @@ State is communicated between the hook handler and renderer via JSON files:
 - `~/.code-crumb-stats.json` — persistent stats (streaks, records, session counters)
 - `~/.code-crumb-prefs.json` — persisted user preferences (theme, accessories, stats, orbitals toggle)
 - `~/.code-crumb.pid` — renderer process liveness tracking
+- `~/.code-crumb-spawn.lock` — autolaunch spawn lock: when the renderer is down, parallel hooks all notice at once; `acquireSpawnLock` (O_EXCL, 5s staleness) lets exactly one of them open a terminal
+
+Every state/session/stats/prefs write goes through `writeJsonAtomic` (temp file + rename, direct-write fallback) so the watching renderer never reads a half-written file. The stats file is still a lock-free read-modify-write per hook — concurrent parallel tool calls can lose a counter increment; atomic writes prevent corruption, not lost updates.
 
 #### Editor PID Liveness
 
-State file writes include a `pid` field — the writer's parent PID (`process.ppid`) for per-event hook processes (codex-notify; update-state.js on Unix), or the adapter's own PID for long-lived wrappers (codex-wrapper). **On win32, update-state.js writes no `pid` at all**: the hook's ppid there is a transient `cmd.exe` shim that dies within milliseconds — useless for protection and a prime PID-recycling target — so those sessions rely on staleness timeouts (`ORPHAN_TIMEOUT`/`STALE_MS`).
+State file writes include a `pid` field — the writer's parent PID (`process.ppid`) for per-event hook processes (codex-notify; update-state.js on Unix), or the adapter's own PID for long-lived wrappers (codex-wrapper). **On win32, update-state.js and the adapters (`pidField()` in base-adapter.js) write no `pid` at all**: the hook's ppid there is a transient `cmd.exe` shim that dies within milliseconds — useless for protection and a prime PID-recycling target — so those sessions rely on staleness timeouts (`ORPHAN_TIMEOUT`/`STALE_MS`).
 
 PID liveness is **identity-checked**, not just existence-checked: `isOwnedByLiveProcess(pid, lastWriteMs)` in grid.js only lets a PID protect a session if the process's **start time predates the session's last write** (+1s slack) — a recycled PID always fails this because its process was born after the original writer died. Start times resolve asynchronously in a per-PID cache (batched PowerShell on Windows, `/proc` on Linux, `ps` on macOS; one outstanding exec at a time; 60s TTL closes the live→live recycle gap). Unresolved (`pending`) PIDs are protected as a safe default; unreadable start times (Access-Denied on elevated/protected processes) or missing exec capability protect only up to a 1-hour cap past the last write — a real editor refreshes its session file with every hook, so its orbital self-heals on the next write, while a ghost recycled onto a protected process must not be immortal.
 
@@ -160,6 +164,7 @@ npm run setup:claude   # Install Claude Code hooks (explicit)
 npm run setup:codex    # Install Codex CLI integration
 npm run setup:opencode # Show OpenCode integration instructions
 npm run setup:openclaw # Show OpenClaw/Pi integration instructions
+npm run setup:uninstall # Remove the manual Claude Code hooks (writes settings.json.bak first)
 npm run launch         # Open renderer + start Claude Code
 npm run launch:codex   # Open renderer + start Codex wrapper
 npm run launch:opencode # Open renderer + start OpenCode
@@ -177,6 +182,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 - **Header blocks**: Each file has a boxed comment header explaining its purpose
 - **Section dividers**: Logical sections separated by `// -- Section Name ---...` comments
 - **Silent failures in hooks**: Hook code (update-state.js, adapters) wraps all I/O in try-catch and never throws — the editor must not be interrupted by a broken face
+- **Atomic writes**: never `fs.writeFileSync` a state/session/stats/prefs/settings file directly — use `writeJsonAtomic` from shared.js (setup.js also writes a `.bak` first and aborts on unreadable/invalid JSON rather than replacing it)
 - **Cross-platform paths**: Uses `process.env.USERPROFILE || process.env.HOME` and normalizes backslashes to forward slashes
 - **No external dependencies**: All functionality is built with Node.js built-in modules (`fs`, `path`, `child_process`)
 - **Line endings**: `.gitattributes` pins LF for everything except `*.cmd` (CRLF for cmd.exe); `.editorconfig` mirrors it (2-space, LF, trailing whitespace trimmed). Shebang files (`launch.js`, `setup.js`, `update-state.js`, `renderer.js`, `demo.js`, `grid-demo.js`, `test.js`, `code-crumb.sh`, `adapters/*.js` except `base-adapter.js`) carry the executable bit in the index.
@@ -220,7 +226,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 
 ### Automated Tests
 
-Run `npm test` (or `node test.js [--quiet] [filter...]`, e.g. `node test.js grid face`). Before loading anything the runner redirects `HOME`, `USERPROFILE`, and `CODE_CRUMB_STATE` to a throwaway directory (removed on exit), so the suite never touches the real `~/.code-crumb*` files or fights a running renderer — subprocess tests inherit the same env. Each test file gets its own counters from `tests/_harness.js` (`createSuite()`); `test.async` (or a test that returns a promise) is awaited before the file is counted, so async assertions can actually fail. The runner prints per-file counts and total duration and keeps going if one file fails to load. CI (`.github/workflows/test.yml`) runs `node --check` on every script and the suite on ubuntu/windows/macos × node 18/20/22. The suite (~1661 tests) covers:
+Run `npm test` (or `node test.js [--quiet] [filter...]`, e.g. `node test.js grid face`). Before loading anything the runner redirects `HOME`, `USERPROFILE`, and `CODE_CRUMB_STATE` to a throwaway directory (removed on exit), so the suite never touches the real `~/.code-crumb*` files or fights a running renderer — subprocess tests inherit the same env. Each test file gets its own counters from `tests/_harness.js` (`createSuite()`); `test.async` (or a test that returns a promise) is awaited before the file is counted, so async assertions can actually fail. The runner prints per-file counts and total duration and keeps going if one file fails to load. CI (`.github/workflows/test.yml`) runs `node --check` on every script and the suite on ubuntu/windows/macos × node 18/20/22. The suite (~1718 tests) covers:
 
 - **_harness.js** (not a test file): `createSuite()` returns `{ describe, test, done, passed, failed }`; `test.async(name, fn)` for promise-based tests; `makeTempEnv(sessionId)` / `cleanup(tmp)` / `readJSON(path)` for subprocess tests that need their own temp home
 - **test-shared.js**: `safeFilename` edge cases
@@ -236,6 +242,7 @@ Run `npm test` (or `node test.js [--quiet] [filter...]`, e.g. `node test.js grid
 - **test-adapters.js**: base adapter, engmux adapter, codex/opencode/openclaw adapter behavior, editor PID liveness tracking (pid field in state writes incl. win32 omission, renderer candidate validation via start-time identity and `editorDead` rescue), editor provenance field plumbing (buildExtra, defaultEditor, prefixed fallback IDs, guardedWriteState preservation), parallel session classification end-to-end (registry and birthtime paths, subagent regression guard, stale-stamp healing incl. teammate exemption, SessionStart registration)
 - **test-transition.js**: `SwapTransition` lifecycle (start/tick/cancel), phase progression (dissolve/swap/materialize/done), `dimFactor` brightness curve, constants
 - **test-emotions.js**: the emotion-fidelity contract — table of current Claude Code tool names → pre/post states and details, `humanizeToolName`, non-string input coercion, `normalizeToolResponse` passthrough (interrupted/isError/exitCode → error end to end), truncated-input event map, the timing table and the guaranteed-window / `pendingWork` / `forceState` rules, shared state sets and `FRESH_READ_STATES` coverage, question/echo particles, distinct orbital eyes for every state, thought pools, and subprocess tests for `UserPromptSubmit` and `Notification` types
+- **test-platform.js**: cross-platform launching (`quoteArg`/`shQuote`, `buildRendererCommands` quoting for wt / cmd / osascript / xfce4, `buildEditorSpawn` shell rules for .cmd shims), `writeJsonAtomic`, `acquireSpawnLock`, `normalizeStats`, `normalizePaletteIndex`, base-adapter `pidField` parity and `processStdinEvent` error separation, adapter source hygiene, codex-notify stats, update-state.js catch-path orbital ownership and degenerate-stats survival, renderer source-level fixes (resize redraw, watcher cleanup), face tiny-terminal behaviour, grid cache keys and PID-cache sweep, and setup.js (`setupClaude`/`uninstallClaude` against a temp settings.json: merge, corrupt-file abort, idempotency, moved-path repair, backup)
 
 ### Visual Verification
 

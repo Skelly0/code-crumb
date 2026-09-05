@@ -299,6 +299,13 @@ const STATE_THOUGHTS = {
   ],
 };
 
+// Bring a persisted palette index back into [0, n). A corrupt prefs file with
+// a negative index used to make every cycleTheme() land on PALETTES[0].
+function normalizePaletteIndex(index, n) {
+  if (!Number.isInteger(index) || !Number.isInteger(n) || n <= 0) return 0;
+  return ((index % n) + n) % n;
+}
+
 // -- Palettes --------------------------------------------------------
 // Each palette: { name, themes (17 states), timelineColors (17 states) }
 // status/emoji are semantic (same across all palettes), only colors change.
@@ -558,6 +565,7 @@ module.exports = {
   TIMELINE_COLORS,
   SPARKLINE_BLOCKS,
   COMPLETION_LINGER,
+  normalizePaletteIndex,
   IDLE_THOUGHTS,
   THINKING_THOUGHTS,
   COMPLETION_THOUGHTS,

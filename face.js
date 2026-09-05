@@ -899,8 +899,10 @@ class ClaudeFace {
     const rows = process.stdout.rows || 24;
     const theme = this.getTheme();
 
-    // Terminal too small -- show compact fallback
+    // Terminal too small -- show compact fallback. Drop lastPos too, or the
+    // orbital system keeps drawing mini-faces around a face that is not there.
     if (cols < MIN_COLS_SINGLE || rows < MIN_ROWS_SINGLE) {
+      this.lastPos = null;
       let buf = '';
       for (let row = 1; row <= rows; row++) {
         buf += ansi.to(row, 1) + ansi.clearLine;
@@ -1158,7 +1160,8 @@ class ClaudeFace {
         const tlStart = cTl[0].at;
         const totalDur = cNow - tlStart;
 
-        if (totalDur > 2000) {
+        // Skip the bar when it would land on or below the key-hint row (38x20 minimum).
+        if (totalDur > 2000 && startRow + 13 < rows) {
           let bar = '';
           for (let i = 0; i < barWidth; i++) {
             const t = tlStart + (totalDur * i / barWidth);
@@ -1175,7 +1178,7 @@ class ClaudeFace {
       }
 
       // Activity sparkline (tool call density below timeline)
-      {
+      if (startRow + 14 < rows) {
         const spkWidth = Math.min(faceW - 2, 38);
         const sparkBuckets = this._buildSparkline(spkWidth, now, compressed);
         if (sparkBuckets) {

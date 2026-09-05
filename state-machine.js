@@ -668,6 +668,23 @@ function defaultStats() {
   };
 }
 
+// Repair a stats object read from disk so every field the hooks touch exists.
+// A truncated write, an older schema, or a hand-edited file can leave `{}` or
+// a partial shape; without this, `stats.session.id` throws inside a hook.
+function normalizeStats(parsed) {
+  const def = defaultStats();
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return def;
+  const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+  const out = { ...def, ...parsed };
+  out.records = { ...def.records, ...obj(parsed.records) };
+  out.session = { ...def.session, ...obj(parsed.session) };
+  if (!Array.isArray(out.session.filesEdited)) out.session.filesEdited = [];
+  out.daily = { ...def.daily, ...obj(parsed.daily) };
+  out.frequentFiles = obj(parsed.frequentFiles);
+  out.topLevelSessions = obj(parsed.topLevelSessions);
+  return out;
+}
+
 // -- Subagent Session State (pure logic) ---------------------------------
 
 // Build the state object for writing to a subagent's session file.
@@ -758,6 +775,7 @@ module.exports = {
   MILESTONES,
   updateStreak,
   defaultStats,
+  normalizeStats,
   MAX_FREQUENT_FILES,
   pruneFrequentFiles,
   topFrequentFiles,
