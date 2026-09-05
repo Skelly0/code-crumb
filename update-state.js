@@ -2,18 +2,18 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Hook -- writes state for the face renderer              |
-// |  Called by editor hooks via stdin JSON                           |
-// |  Usage: node update-state.js <event>                            |
-// |  Events: PreToolUse, PostToolUse, PostToolUseFailure, Stop,      |
-// |          Notification, UserPromptSubmit, SubagentStart,          |
-// |          SubagentStop, TeammateIdle, TaskCompleted,              |
-// |          SessionStart, SessionEnd, PreCompact, PostCompact,      |
-// |          PermissionRequest, Setup, Elicitation,                  |
-// |          ElicitationResult, ConfigChange, InstructionsLoaded,    |
-// |          StopFailure                                             |
-// |                                                                  |
-// |  Works with Claude Code, Codex CLI, and OpenCode                |
+// |  Code Crumb Hook -- writes state for the face renderer         |
+// |  Called by editor hooks via stdin JSON                         |
+// |  Usage: node update-state.js <event>                           |
+// |  Events: PreToolUse, PostToolUse, PostToolUseFailure, Stop,    |
+// |          Notification, UserPromptSubmit, SubagentStart,        |
+// |          SubagentStop, TeammateIdle, TaskCompleted,            |
+// |          SessionStart, SessionEnd, PreCompact, PostCompact,    |
+// |          PermissionRequest, Setup, Elicitation,                |
+// |          ElicitationResult, ConfigChange, InstructionsLoaded,  |
+// |          StopFailure                                           |
+// |                                                                |
+// |  Works with Claude Code, Codex CLI, and OpenCode               |
 // +================================================================+
 
 const fs = require('fs');
@@ -371,7 +371,6 @@ process.stdin.on('end', () => {
       }
     }
     else if (hookEvent === 'Stop') {
-      const lastMsg = data.last_assistant_message || '';
       state = 'responding';
       detail = 'wrapping up';
       stopped = true;

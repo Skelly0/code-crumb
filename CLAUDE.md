@@ -9,7 +9,7 @@ Code Crumb is a zero-dependency terminal tamagotchi that visualizes what AI codi
 | Key | Action |
 |-----|--------|
 | `space` | Pet the face (sparkle particles + wiggle) |
-| `t` | Cycle color palette (default/neon/pastel/mono/sunset) |
+| `t` | Cycle color palette (default/neon/pastel/mono/sunset/highcontrast); no-op under `NO_COLOR` |
 | `s` | Toggle stats (streak, timeline, sparkline) |
 | `a` | Toggle accessories (hats, ears, etc.) |
 | `o` | Toggle orbital subagents |
@@ -19,9 +19,11 @@ Code Crumb is a zero-dependency terminal tamagotchi that visualizes what AI codi
 | `h` / `?` | Toggle help overlay |
 | `q` / Ctrl+C | Quit |
 
+Any key closes the help overlay or the session list (so `h`/`?` is not a strict toggle once open). `Enter` on row 0 of the session list un-pins the main face and resumes auto-swap; rows > 0 promote. Minimal mode (`--minimal` / `MINIMAL_BOOT=1`) disables every key except `space` and `q`.
+
 ### Color Palettes
 
-5 palettes: **default** (original colors), **neon** (high saturation cyans/magentas/limes), **pastel** (soft pinks/lavenders/mints), **mono** (greyscale), **sunset** (warm oranges/reds/golds/purples). Press `t` to cycle. All togglable preferences (theme, accessories, stats, orbitals) persist between sessions via `~/.code-crumb-prefs.json`. Indicators below the face box show `● accs` / `○ accs` and `● subs` / `○ subs`.
+6 palettes: **default** (original colors), **neon** (high saturation cyans/magentas/limes), **pastel** (soft pinks/lavenders/mints), **mono** (greyscale), **sunset** (warm oranges/reds/golds/purples), **highcontrast** (accessibility palette). Press `t` to cycle. All togglable preferences (theme, accessories, stats, orbitals) persist between sessions via `~/.code-crumb-prefs.json`. Indicators below the face box show `● accs` / `○ accs` and `● subs` / `○ subs`.
 
 ## Tech Stack
 
@@ -66,8 +68,13 @@ tests/
   test-platform.js
 .claude-plugin/
   plugin.json      Claude Code plugin manifest for marketplace distribution
+  marketplace.json Marketplace listing (source "." so the plugin cache holds the whole repo)
+plugin.json        Byte-identical copy of .claude-plugin/plugin.json at the root — the plugin cache reads it from here (commit 5ac4340); keep both in sync
 hooks/
-  hooks.json       Hook configuration for Claude Code plugin system
+  hooks.json       Hook configuration for Claude Code plugin system (21 events)
+AGENTS.md          Stub pointing agents at this file (a second copy drifted; do not resurrect it)
+README.md, LICENSE, package.json ("files" whitelist keeps tests/demos/images out of the npm tarball)
+images/            README screenshots (only referenced images are kept)
 .github/workflows/
   test.yml         CI — node --check on every script, then npm test on ubuntu/windows/macos × node 18/20/22
 ```
@@ -183,6 +190,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 - **Section dividers**: Logical sections separated by `// -- Section Name ---...` comments
 - **Silent failures in hooks**: Hook code (update-state.js, adapters) wraps all I/O in try-catch and never throws — the editor must not be interrupted by a broken face
 - **Atomic writes**: never `fs.writeFileSync` a state/session/stats/prefs/settings file directly — use `writeJsonAtomic` from shared.js (setup.js also writes a `.bak` first and aborts on unreadable/invalid JSON rather than replacing it)
+- **Whitespace and headers**: no trailing whitespace anywhere; every file's boxed header has its `|` rail aligned to the `+===+` border; non-ASCII glyphs in code strings use `uXXXX` escapes (comments may use literal Unicode)
 - **Cross-platform paths**: Uses `process.env.USERPROFILE || process.env.HOME` and normalizes backslashes to forward slashes
 - **No external dependencies**: All functionality is built with Node.js built-in modules (`fs`, `path`, `child_process`)
 - **Line endings**: `.gitattributes` pins LF for everything except `*.cmd` (CRLF for cmd.exe); `.editorconfig` mirrors it (2-space, LF, trailing whitespace trimmed). Shebang files (`launch.js`, `setup.js`, `update-state.js`, `renderer.js`, `demo.js`, `grid-demo.js`, `test.js`, `code-crumb.sh`, `adapters/*.js` except `base-adapter.js`) carry the executable bit in the index.
@@ -194,14 +202,14 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 | `FPS` | 15 | renderer.js |
 | `IDLE_TIMEOUT` | 8000ms | renderer.js |
 | `THINKING_TIMEOUT` | 45000ms | renderer.js, grid.js |
-| `SLEEP_TIMEOUT` | 60000ms | renderer.js |
+| `SLEEP_TIMEOUT` | 60000ms | renderer.js, grid.js |
 | `CAFFEINE_THRESHOLD` | 5 calls in 10s | face.js |
 | `COMPLETION_MIN_SHOW_MS` | 1800ms | face.js (guaranteed on-screen window for a reward face; only an error preempts it) |
 | `MIN_DISPLAY_MS` | per-state table | face.js (work 1200–1500, subagent/spawning 2000, training 2500, satisfied/relieved 2500, responding 3000, happy/error 4000, proud 4500) |
 | `STALE_MS` | 120000ms | grid.js (session file mtime purge threshold) |
 | `ORPHAN_TIMEOUT` | 90000ms | grid.js (fallback staleness for sessions without PID) |
 | `MAX_ORBITALS` | 8 | grid.js (max visible orbital faces) |
-| `ROTATION_SPEED` | 0.007 rad/frame | grid.js (~1 revolution per 60s) |
+| `rotationSpeed` (instance field) | 0.007 rad/frame | grid.js `OrbitalSystem` constructor (~1 revolution per 60s) |
 | `INTER_GROUP_GAP` | 0.15 rad | grid.js (angular space between group sectors) |
 | `INTRA_GROUP_GAP` | 0.35 rad | grid.js (angular space between faces within a group) |
 | `TETHER_BRIGHTNESS` | 0.15 | grid.js (dim factor for sibling tether dots) |
@@ -217,10 +225,15 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 ## Environment Variables
 
 - `CODE_CRUMB_STATE` — override the single-mode state file path (default: `~/.code-crumb-state`)
-- `CLAUDE_SESSION_ID` — set the session identifier (default: parent PID)
+- `CLAUDE_SESSION_ID` — set the session identifier (default: `<editor>-<parent PID>`, e.g. `claude-47040`; see Editor Provenance)
 - `CODE_CRUMB_MODEL` — override the display name in the status line (default: `claude`; adapters default to `codex`/`opencode`/`openclaw`)
 - `CODE_CRUMB_EDITOR` — override the editor provenance tag shown in the session list (default: `claude` in update-state.js; adapters set their own identity)
 - `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` — set to `1` to enable Claude Code agent teams; Code Crumb will automatically detect teammate sessions via `TeammateIdle`/`TaskCompleted` hooks and show them in the orbital display with role labels and team-specific colors
+- `NO_COLOR` — disable colour output in the renderer (also disables the `t` palette key)
+- `MINIMAL_BOOT` — start the renderer in minimal mode (same as the `--minimal` flag)
+- `ENGMUX_PYTHON` / `PYTHON` — interpreter used by `adapters/engmux-adapter.js` (default `python` on Windows, `python3` elsewhere)
+
+Renderer CLI flags: `--minimal` (face + status only, no chrome, only `space`/`q` keys), `--tmux` (write a one-line status file for tmux instead of drawing), `--no-color`.
 
 ## Testing
 
@@ -257,7 +270,14 @@ For orbital subagents: `npm start` + `npm run demo:orbital`.
 ## Important Constraints
 
 - **Hook performance**: update-state.js must complete in ~50ms — it runs synchronously in the editor hook pipeline
-- **State file size**: Keep state JSON under 200 bytes
-- **Terminal minimum size**: Main face requires 38x20 chars; orbitals require 80x30 (graceful degradation below)
+- **State file size**: a realistic state write is ~750–950 bytes (`frequentFiles`, `cwd`, `gitBranch` and the stats fields account for most of it); keep it around 1 KB and never embed tool output
+- **Terminal minimum size**: Main face requires 38x20 chars (`MIN_COLS_SINGLE`/`MIN_ROWS_SINGLE` in face.js; below that a "resize me" fallback is drawn and `lastPos` is cleared). Orbitals have no fixed minimum: `calculateOrbit` in grid.js derives the ellipse from the space around the main face and yields `maxSlots: 0` when nothing fits, so they degrade gracefully
 - **No network**: All IPC is file-based, no sockets or HTTP
 - **Graceful degradation**: Renderer handles terminal resize, missing state files, and stale sessions without crashing
+
+## Known Follow-ups
+
+- **Double clearing**: `renderer.js` writes `ansi.home + ansi.clearBelow` every frame (added to fix stale content in tall terminals), which makes the incremental clear buffers (`particles.clearPrevious`, `OrbitalSystem._buildClearBuf`, the 21-row band in `face.js`, `prevSessionListClear`, `_prevHelpBounds`) dead work. Either side could be removed, but each changes rendering behaviour — left as is until someone can compare flicker across terminals.
+- **Stats read-modify-write**: parallel tool calls run parallel hooks; the stats file is written atomically but not locked, so a counter increment can still be lost under contention.
+- **engmux** has an adapter but no `setup`/`launch` entry point; invoke `adapters/engmux-adapter.js` directly.
+- A state file without a `timestamp` is never applied by the renderer (`ts > lastAppliedTimestamp` with both 0). Every writer stamps one, so this only affects hand-written files.

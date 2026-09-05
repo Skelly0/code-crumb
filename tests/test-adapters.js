@@ -2,13 +2,13 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - Adapter coverage                        |
-// |  Tests for codex-notify, opencode-adapter, openclaw-adapter,     |
-// |  and codex-wrapper (structure only — requires codex binary).     |
-// |                                                                  |
-// |  Adapters are scripts, not libraries, so we test them by         |
-// |  spawning child processes with controlled env/stdin/argv and     |
-// |  verifying the state files they write.                           |
+// |  Code Crumb Test Suite - Adapter coverage                      |
+// |  Tests for codex-notify, opencode-adapter, openclaw-adapter,   |
+// |  and codex-wrapper (structure only — requires codex binary).   |
+// |                                                                |
+// |  Adapters are scripts, not libraries, so we test them by       |
+// |  spawning child processes with controlled env/stdin/argv and   |
+// |  verifying the state files they write.                         |
 // +================================================================+
 
 const assert = require('assert');

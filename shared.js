@@ -1,8 +1,8 @@
 'use strict';
 
 // +================================================================+
-// |  Shared constants and utilities                                  |
-// |  Common paths, config, and helpers used across all modules       |
+// |  Shared constants and utilities                                |
+// |  Common paths, config, and helpers used across all modules     |
 // +================================================================+
 
 const fs = require('fs');

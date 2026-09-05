@@ -2,7 +2,7 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - animations.js                            |
+// |  Code Crumb Test Suite - animations.js                         |
 // +================================================================+
 
 const assert = require('assert');

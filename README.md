@@ -3,13 +3,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js 18+](https://img.shields.io/badge/node-18%2B-brightgreen.svg)](https://nodejs.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-blue.svg)](#)
-[![1395 Tests](https://img.shields.io/badge/tests-1395-passing.svg)](#)
+[![1718 Tests](https://img.shields.io/badge/tests-1718-brightgreen.svg)](#)
 
 A terminal tamagotchi that shows what your AI coding assistant is doing.
 
 ![Code Crumb proud state — crown accessory, 43 streak, diff info, neon theme](images/proud-crown-diffinfo.png)
 
-Code Crumb hooks into AI coding tool lifecycle events and displays an animated ASCII face that reacts in real time — blinking, searching, coding, celebrating, and occasionally glitching when things go wrong. 23 expressive states, 15 particle effects, 5 color palettes, orbital subagent tracking, streak counters, and you can pet it.
+Code Crumb hooks into AI coding tool lifecycle events and displays an animated ASCII face that reacts in real time — blinking, searching, coding, celebrating, and occasionally glitching when things go wrong. 23 expressive states, 15 particle effects, 6 color palettes, orbital subagent tracking, streak counters, and you can pet it.
 
 **Supported tools:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex), [OpenCode](https://github.com/sst/opencode), [OpenClaw/Pi](https://github.com/anthropics/claw) — and anything that can pipe JSON events.
 
@@ -110,28 +110,30 @@ The face has 23 distinct states — each with unique eyes, mouth, particles, and
 | State | Face | Trigger |
 |---|---|---|
 | **Idle** | `██ ██` `◡◡◡` — calm, blinking, floating particles | No activity |
-| **Thinking** | `● ●` `───` — orbiting particles, contemplative | Before first tool call |
+| **Thinking** | `● ●` `───` — orbiting particles, contemplative | You sent a prompt; before the first tool call. Also planning tools (`TodoWrite`, plan mode) |
 | **Responding** | `▄▄ ██` `◡◡` — soft teal glow | Generating final response |
-| **Reading** | `── ──` `───` — narrowed, focused | `Read`, `View` |
-| **Searching** | `██ ██` `○` — eyes darting left and right | `Grep`, `Glob`, `WebFetch` |
-| **Coding** | `▀▀ ▀▀` `═══` — determined, in the zone | `Edit`, `Write` |
-| **Executing** | `██ ██` `◡◡` — running commands | `Bash` |
-| **Happy** | `✦ ✧` `◡◡◡◡◡` — sparkles everywhere, lingers 8s | Session complete |
-| **Satisfied** | `▀▀ ▀▀` `◡◡◡` — calm teal glow | Read/search done |
-| **Proud** | `▄▄ ██` `◡◡` — green-gold sparkles | Code edit done |
+| **Reading** | `── ──` `───` — narrowed, focused | `Read`, `NotebookRead`, `Skill`, MCP `read_*`/`get_*`/`list_*` |
+| **Searching** | `██ ██` `○` — eyes darting left and right | `Grep`, `Glob`, `LS`, `ToolSearch`, `WebFetch`, MCP `search_*` |
+| **Coding** | `▀▀ ▀▀` `═══` — determined, in the zone | `Edit`, `Write`, `NotebookEdit`, `Artifact`, MCP `create_*`/`update_*` |
+| **Executing** | `██ ██` `◡◡` — running commands | `Bash`, `PowerShell`, `KillShell`, other MCP tools |
+| **Happy** | `✦ ✧` `◡◡◡◡◡` — sparkles everywhere, lingers 8s | Session complete, `Agent`/`Workflow` finished |
+| **Satisfied** | `▀▀ ▀▀` `◡◡◡` — calm teal glow | Read/search done, review done, your answer received |
+| **Proud** | `▄▄ ██` `◡◡` — green-gold sparkles | Code edit done, commit, artifact published |
 | **Relieved** | `██ ██` `◡` — warm amber, soft exhale | Test/command passed |
-| **Error** | `╲╱ ╲╱` `◠◠◠` — border glitches, distress | Non-zero exit code |
+| **Error** | `╲╱ ╲╱` `◠◠◠` — border glitches, distress | Non-zero exit code, interrupted command, tool failure, API error |
 | **Sleeping** | `── ──` `~~~` — Zzz particles, deep indigo | 60s idle |
-| **Waiting** | `▄▄ ██` `───` — gentle `?` particles | Needs input |
+| **Waiting** | `▄▄ ██` `───` — gentle `?` particles | `AskUserQuestion`, permission prompt, idle prompt, elicitation |
 | **Testing** | `██ ██` `═══` — nervous twitches, sweat drops | `jest`, `pytest`, etc. |
 | **Installing** | `▄▄` `···` — packages raining down | `npm install`, `pip install` |
 | **Caffeinated** | `██` `▪◡▪` — speed lines, jitter | 5+ tool calls in 10s |
-| **Subagent** | scanning `═══` — stream particles radiate outward | `Task` / subagent spawn |
+| **Subagent** | scanning `═══` — stream particles radiate outward | `Agent` / `Task` / `Workflow`, checking on agents |
 | **Starting** | `▄▄ ██` `◡◡` — fresh session glow | Session begins |
 | **Spawning** | `██ ██` `○` — materialization particles | Subagent launching |
-| **Committing** | `▀▀ ▀▀` `═══` — push particles upward | `git commit` |
-| **Reviewing** | `── ──` `───` — careful scanning | Code review tools |
+| **Committing** | `▀▀ ▀▀` `═══` — push particles upward | `git commit` / `push` / `tag` |
+| **Reviewing** | `── ──` `───` — careful scanning | `ReportFindings`, diff / review tools |
 | **Training** | `● ●` `═══` — pulsing concentration | ML training runs |
+
+Reward faces (happy, proud, satisfied, relieved) are guaranteed at least 1.8s on screen before the next tool takes over; errors always preempt and hold for 4s. Work faces update live as tools run.
 
 ![Sleeping state with Zzz particles and thought bubble](images/sleeping.png)
 
@@ -174,7 +176,7 @@ When your session spawns subagents (e.g. Claude Code's `Task` tool), mini-faces 
 
 ### Color Palettes
 
-Five palettes — press `t` to cycle. Preferences persist between sessions.
+Six palettes — press `t` to cycle. Preferences persist between sessions.
 
 | Palette | Vibe |
 |---|---|
@@ -183,6 +185,7 @@ Five palettes — press `t` to cycle. Preferences persist between sessions.
 | **pastel** | Soft pinks, lavenders, mints |
 | **mono** | Greyscale |
 | **sunset** | Warm oranges, reds, golds, purples |
+| **highcontrast** | Accessibility palette — maximum contrast, no subtle dims |
 
 <p>
   <img src="images/satisfied-neon-streak.png" width="49%" alt="Satisfied state — neon theme, 30 streak" />
@@ -200,25 +203,27 @@ Five palettes — press `t` to cycle. Preferences persist between sessions.
 | `space` | Pet the face (sparkle particles + wiggle) |
 | `t` | Cycle color palette |
 | `s` | Toggle stats (streak, timeline, sparkline) |
-| `a` | Toggle accessories (cat ears, thought bubbles) |
+| `a` | Toggle accessories (hats, glasses, ears — thought bubbles stay on) |
 | `o` | Toggle orbital subagents |
 | `l` | Open session list |
 | `↑↓` / `j/k` | Navigate session list |
-| `Enter` | Promote selected orbital to main |
+| `Enter` | Promote selected orbital to main (on the first row: un-pin and resume auto-swap) |
 | `h` / `?` | Toggle help overlay |
 | `q` / Ctrl+C | Quit |
+
+Any key closes the help overlay or the session list. `t` is disabled when `NO_COLOR` is set. In minimal mode (`--minimal`) only `space` and `q` are active.
 
 ![Help overlay showing keybindings](images/help-overlay.png)
 
 ## How It Works
 
 ```
-┌───────────────┐     state files     ┌──────────────────┐
-│  Claude Code   │                     │  ~/.code-crumb-  │
+┌────────────────┐     state files     ┌───────────────────┐
+│  Claude Code   │                     │  ~/.code-crumb-   │
 │  Codex CLI     │ ──── writes ────▶  │  state            │
 │  OpenCode      │    JSON per         │  sessions/*.json  │
 │  OpenClaw/Pi   │    session          │                   │
-└───────────────┘                      └────────┬──────────┘
+└────────────────┘                     └────────┬──────────┘
                                                 │
                                            fs.watch
                                                 │
@@ -231,8 +236,8 @@ Five palettes — press `t` to cycle. Preferences persist between sessions.
                                     └───────────────────────┘
 ```
 
-1. **Hooks/adapters** fire on tool use events (PreToolUse, PostToolUse, Stop, Notification)
-2. **`update-state.js`** maps tool names to face states and writes JSON state files
+1. **Hooks/adapters** fire on lifecycle events (21 for Claude Code: your prompt, tool use, Stop, notifications, subagents, sessions, compaction, permissions, and more)
+2. **`update-state.js`** maps tool names and results to face states and writes JSON state files (atomically — the renderer never sees a half-written file)
 3. **Session IDs** isolate the main session from subagent sessions (orbital mini-faces)
 4. **`renderer.js`** watches for changes and animates at 15fps
 
@@ -240,12 +245,12 @@ Five palettes — press `t` to cycle. Preferences persist between sessions.
 
 ### Claude Code
 
-**Plugin install** (recommended): `claude plugin install --plugin-dir ./code-crumb` — hooks into 11 lifecycle events automatically: PreToolUse, PostToolUse, PostToolUseFailure, Stop, Notification, SubagentStart, SubagentStop, TeammateIdle, TaskCompleted, SessionStart, and SessionEnd. Subagent sessions appear as orbital mini-faces.
+**Plugin install** (recommended): `claude plugin install --plugin-dir ./code-crumb` — hooks into all 21 lifecycle events automatically: PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, Stop, StopFailure, Notification, PermissionRequest, Elicitation, ElicitationResult, SubagentStart, SubagentStop, TeammateIdle, TaskCompleted, SessionStart, SessionEnd, PreCompact, PostCompact, Setup, ConfigChange, and InstructionsLoaded. Subagent sessions appear as orbital mini-faces.
 
 > [!NOTE]
 > Agent teams support requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. When enabled, team members appear in the orbital display with role labels and accent colors.
 
-**Manual hooks**: `node setup.js` installs the core hooks (Pre/PostToolUse, Stop, Notification). See the [manual config](#manual-hook-setup) section for details.
+**Manual hooks**: `node setup.js` writes the same 21 hooks into `~/.claude/settings.json` (backing the file up to `settings.json.bak` first and refusing to touch a file it cannot parse). `node setup.js uninstall` removes them again. Use either the plugin or the manual hooks, not both — with both installed every event fires twice. See the [manual config](#manual-hook-setup) section for the JSON shape.
 
 ### Codex CLI
 
@@ -277,7 +282,13 @@ Uses Pi's extension system. Run `node setup.js openclaw` for instructions. The a
 |---|---|---|
 | `CODE_CRUMB_STATE` | `~/.code-crumb-state` | Override state file path |
 | `CODE_CRUMB_MODEL` | `claude` | Display name in status line |
-| `CLAUDE_SESSION_ID` | Parent PID | Session identifier |
+| `CODE_CRUMB_EDITOR` | `claude` (adapters set their own) | Editor tag shown in the session list |
+| `CLAUDE_SESSION_ID` | `<editor>-<parent PID>` | Session identifier |
+| `NO_COLOR` | unset | Disable colour output (also disables the `t` key) |
+| `MINIMAL_BOOT` | unset | Start in minimal mode (same as `--minimal`) |
+| `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | unset | `1` enables agent-team orbitals |
+
+Renderer flags: `--minimal` (face + status only), `--tmux` (write a status line for tmux instead of drawing), `--no-color`.
 
 The status line shows `claude is thinking`, `codex is coding`, etc. Each adapter sets a sensible default. The model name can also be passed via the `model_name` field in event JSON.
 
@@ -286,7 +297,7 @@ The status line shows `claude is thinking`, `codex is coding`, etc. Each adapter
 <details>
 <summary>Claude Code — manual hook config</summary>
 
-Add to `~/.claude/settings.json`:
+Add to `~/.claude/settings.json` (this shows four of the 21 events; repeat the block for the others, or let `node setup.js` write them all):
 
 ```json
 {
@@ -342,7 +353,7 @@ Or: `cd code-crumb && npm link`
 - Zero dependencies — just Node.js
 - ~0.5% CPU at 15fps (even with orbitals)
 - Hook script completes in <50ms
-- State files are <200 bytes each
+- State files are ~1 KB each, written atomically
 - No network, no sockets — all file-based IPC
 
 ## Terminal Compatibility
@@ -384,14 +395,17 @@ Or: `cd code-crumb && npm link`
 | `adapters/opencode-adapter.js` | OpenCode plugin event adapter |
 | `adapters/openclaw-adapter.js` | OpenClaw/Pi event adapter |
 | `adapters/engmux-adapter.js` | engmux agent dispatcher event adapter |
+| `hooks/hooks.json` | Hook registrations used by the Claude Code plugin |
+| `code-crumb.sh` / `code-crumb.cmd` | Shell wrappers around `launch.js` |
 | `demo.js` | Cycles through all 23 states |
 | `grid-demo.js` | Orbital subagent demo |
+| `test.js`, `tests/` | Test runner and suite (`npm test`) |
 
 </details>
 
 ## Uninstall
 
-**Claude Code:** Remove hook entries from `~/.claude/settings.json` (or `claude plugin uninstall code-crumb`)
+**Claude Code:** `node setup.js uninstall` removes the manual hooks (or `claude plugin uninstall code-crumb` for the plugin)
 
 **Codex:** Remove the `notify` line from `~/.codex/config.toml`
 

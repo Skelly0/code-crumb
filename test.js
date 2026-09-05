@@ -2,13 +2,13 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite                                           |
-// |  Zero-dependency tests using Node.js built-in assert             |
-// |                                                                  |
-// |  Run: node test.js [--quiet] [filter...]  or  npm test           |
-// |    --quiet / -q   print only failures and the summary            |
-// |    filter         run only files whose name contains it          |
-// |                   (node test.js grid face)                       |
+// |  Code Crumb Test Suite                                         |
+// |  Zero-dependency tests using Node.js built-in assert           |
+// |                                                                |
+// |  Run: node test.js [--quiet] [filter...]  or  npm test         |
+// |    --quiet / -q   print only failures and the summary          |
+// |    filter         run only files whose name contains it        |
+// |                   (node test.js grid face)                     |
 // +================================================================+
 
 const fs = require('fs');

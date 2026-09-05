@@ -2,7 +2,7 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - grid.js (OrbitalSystem)                 |
+// |  Code Crumb Test Suite - grid.js (OrbitalSystem)               |
 // +================================================================+
 
 const assert = require('assert');

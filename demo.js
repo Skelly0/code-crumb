@@ -2,10 +2,10 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Demo -- cycles through all 23 states                 |
-// |  Run this to preview all the face expressions!                   |
-// |  Includes thought bubbles, streaks, a milestone, the timeline,   |
-// |  orbital subagents, and a fast tool loop to check linger timing. |
+// |  Code Crumb Demo -- cycles through all 23 states               |
+// |  Run this to preview all the face expressions!                 |
+// |  Includes thought bubbles, streaks, a milestone, the timeline, |
+// |  orbital subagents, and a fast tool loop for linger timing.    |
 // +================================================================+
 
 const fs = require('fs');

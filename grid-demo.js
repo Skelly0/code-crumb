@@ -2,9 +2,9 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Orbital Demo                                          |
-// |  Simulates subagent sessions orbiting the main face             |
-// |  Run renderer.js first! (node renderer.js)                      |
+// |  Code Crumb Orbital Demo                                       |
+// |  Simulates subagent sessions orbiting the main face            |
+// |  Run renderer.js first! (node renderer.js)                     |
 // +================================================================+
 
 const fs = require('fs');

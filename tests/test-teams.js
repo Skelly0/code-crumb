@@ -2,9 +2,9 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - Agent Teams support                     |
-// |  Tests for team fields in MiniFace, hashTeamColor,               |
-// |  _assignLabels with teammate names, session schema               |
+// |  Code Crumb Test Suite - Agent Teams support                   |
+// |  Tests for team fields in MiniFace, hashTeamColor,             |
+// |  _assignLabels with teammate names, session schema             |
 // +================================================================+
 
 const assert = require('assert');

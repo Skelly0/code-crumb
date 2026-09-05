@@ -2,21 +2,21 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Setup -- configures hooks for supported editors      |
-// |  Works on Windows, macOS, and Linux                              |
-// |                                                                  |
-// |  Usage:                                                          |
-// |    node setup.js              (Claude Code -- default)           |
-// |    node setup.js claude       (Claude Code -- explicit)          |
-// |    node setup.js uninstall    (remove Claude Code hooks)         |
-// |    node setup.js codex        (Codex CLI)                        |
-// |    node setup.js opencode     (OpenCode)                         |
-// |    node setup.js openclaw     (OpenClaw / Pi)                    |
-// |    node setup.js --autolaunch (only flip the autolaunch pref)    |
-// |                                                                  |
-// |  The Claude Code installer is also a module: setupClaude() /     |
-// |  uninstallClaude() take { settingsPath, hookPath, log } so       |
-// |  tests never touch a real ~/.claude/settings.json.               |
+// |  Code Crumb Setup -- configures hooks for supported editors    |
+// |  Works on Windows, macOS, and Linux                            |
+// |                                                                |
+// |  Usage:                                                        |
+// |    node setup.js              (Claude Code -- default)         |
+// |    node setup.js claude       (Claude Code -- explicit)        |
+// |    node setup.js uninstall    (remove Claude Code hooks)       |
+// |    node setup.js codex        (Codex CLI)                      |
+// |    node setup.js opencode     (OpenCode)                       |
+// |    node setup.js openclaw     (OpenClaw / Pi)                  |
+// |    node setup.js --autolaunch (only flip the autolaunch pref)  |
+// |                                                                |
+// |  The Claude Code installer is also a module: setupClaude() /   |
+// |  uninstallClaude() take { settingsPath, hookPath, log } so     |
+// |  tests never touch a real ~/.claude/settings.json.             |
 // +================================================================+
 
 const fs = require('fs');

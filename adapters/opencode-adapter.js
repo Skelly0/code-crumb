@@ -2,27 +2,27 @@
 'use strict';
 
 // +================================================================+
-// |  OpenCode Adapter -- bridges OpenCode events to Code Crumb          |
-// |                                                                  |
+// |  OpenCode Adapter -- bridges OpenCode events to Code Crumb     |
+// |                                                                |
 // |  OpenCode uses a plugin system that emits events like:         |
 // |    - tool.execute.before  (maps to tool_start state)           |
 // |    - tool.execute.after   (maps to tool_end state)             |
-// |    - session.idle         (maps to turn_end/happy)            |
+// |    - session.idle         (maps to turn_end/happy)             |
 // |    - session.error        (maps to error state)                |
-// |                                                                  |
-// |  Usage (with OpenCode plugin):                                  |
+// |                                                                |
+// |  Usage (with OpenCode plugin):                                 |
 // |    Add a plugin that pipes events to this adapter via stdin.   |
-// |                                                                  |
-// |  Event Schema from OpenCode plugins:                            |
-// |    {                                                             |
+// |                                                                |
+// |  Event Schema from OpenCode plugins:                           |
+// |    {                                                           |
 // |      "type": "tool.execute.before"|"tool.execute.after"|...    |
-// |      "session_id": "...",                                       |
+// |      "session_id": "...",                                      |
 // |      "input": { "tool": "...", "args": {...} },                |
-// |      "output": {...}                                            |
-// |    }                                                             |
-// |                                                                  |
+// |      "output": {...}                                           |
+// |    }                                                           |
+// |                                                                |
 // |  Also supports generic format for compatibility:               |
-// |    { "event": "tool_start"|"tool_end"|"turn_end"|"error", ... } |
+// |    { "event": "tool_start"|"tool_end"|"turn_end"|"error", ... }|
 // +================================================================+
 
 const { runStdinAdapter } = require('./base-adapter');

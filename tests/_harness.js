@@ -1,14 +1,14 @@
 'use strict';
 
 // +================================================================+
-// |  Test Harness -- shared describe/test runner for tests/*.js     |
-// |                                                                  |
-// |  Every test file calls createSuite() for its own counters and    |
-// |  exports the suite; test.js awaits suite.done() so async tests   |
-// |  (test.async, or a test that returns a promise) are counted      |
-// |  only after they settle.                                         |
-// |                                                                  |
-// |  CRUMB_TEST_QUIET=1 prints only failures and the summary.        |
+// |  Test Harness -- shared describe/test runner for tests/*.js    |
+// |                                                                |
+// |  Every test file calls createSuite() for its own counters and  |
+// |  exports the suite; test.js awaits suite.done() so async tests |
+// |  (test.async, or a test that returns a promise) are counted    |
+// |  only after they settle.                                       |
+// |                                                                |
+// |  CRUMB_TEST_QUIET=1 prints only failures and the summary.      |
 // +================================================================+
 
 const fs = require('fs');

@@ -2,9 +2,9 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - launch.js                                  |
-// |  Tests for CLI argument parsing, editor resolution, and         |
-// |  platform-specific renderer command construction.               |
+// |  Code Crumb Test Suite - launch.js                             |
+// |  Tests for CLI argument parsing, editor resolution, and        |
+// |  platform-specific renderer command construction.              |
 // +================================================================+
 
 const assert = require('assert');

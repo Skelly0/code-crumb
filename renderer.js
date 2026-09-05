@@ -2,14 +2,14 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb -- A terminal tamagotchi for AI coding assistants   |
-// |  Shows what your AI coding assistant is doing                   |
-// |  Subagent mini-faces orbit the main face as satellites          |
+// |  Code Crumb -- A terminal tamagotchi for AI coding assistants  |
+// |  Shows what your AI coding assistant is doing                  |
+// |  Subagent mini-faces orbit the main face as satellites         |
 // +================================================================+
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, STATE_FILE, SESSIONS_DIR, TEAMS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch, QUIT_FLAG_FILE, safeFilename } = require('./shared');
+const { HOME, STATE_FILE, SESSIONS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch, QUIT_FLAG_FILE, safeFilename } = require('./shared');
 
 // -- Modules -------------------------------------------------------
 const {
@@ -34,7 +34,7 @@ const IDLE_TIMEOUT = 8000;
 const THINKING_TIMEOUT = 45000; // 45s -- safety net if Stop event is missed
 const SLEEP_TIMEOUT = 60000;
 
-// -- Hoisted sets for checkState() hot path (avoid per-call allocation) --
+// -- Hoisted sets for checkState() hot path ---------------------------
 const { ACTIVE_WORK_STATES, COMPLETION_STATES } = require('./shared');
 const RESCUE_EXCLUDE = new Set(['idle', 'sleeping', 'responding', 'starting', 'happy', 'satisfied', 'proud', 'relieved']);
 // States in which a missed Stop/start event is worth a fresh file read: every
@@ -42,9 +42,7 @@ const RESCUE_EXCLUDE = new Set(['idle', 'sleeping', 'responding', 'starting', 'h
 // state can never be forgotten here (committing/reviewing/subagent/training were).
 const FRESH_READ_STATES = new Set(['thinking', ...ACTIVE_WORK_STATES, ...COMPLETION_STATES]);
 
-// ===================================================================
-// SHARED RUNTIME
-// ===================================================================
+// -- Shared runtime -------------------------------------------------
 
 function readState() {
   try {
@@ -116,32 +114,6 @@ function writeQuitFlag() {
   try { fs.writeFileSync(QUIT_FLAG_FILE, String(Date.now()), 'utf8'); } catch {}
 }
 
-// -- Team discovery ------------------------------------------------
-// Scans ~/.claude/teams/*/config.json and returns a map of
-// team name → { teammates: string[] } for display purposes.
-function scanTeams() {
-  const teams = {};
-  try {
-    const entries = fs.readdirSync(TEAMS_DIR, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      try {
-        const cfg = JSON.parse(
-          fs.readFileSync(path.join(TEAMS_DIR, entry.name, 'config.json'), 'utf8')
-        );
-        teams[entry.name] = {
-          teammates: Array.isArray(cfg.teammates) ? cfg.teammates : [],
-        };
-      } catch {
-        // Config missing or malformed — skip
-      }
-    }
-  } catch {
-    // Teams dir doesn't exist — agent teams not in use
-  }
-  return teams;
-}
-
 // -- Unified mode (main face + orbital subagents) ------------------
 function runUnifiedMode() {
   const minimal = (process.argv.includes('--minimal') || process.env.MINIMAL_BOOT === '1');
@@ -177,7 +149,6 @@ function runUnifiedMode() {
   let lastMainUpdate = 0;
 
   let lastMtime = 0;
-  let lastFileState = 'idle'; // Track the last state written to the file by hooks
   let lastStopped = false;    // Track if Stop hook has fired (session ended)
   let lastForceReadTime = 0;  // Track periodic forced re-reads (bypasses mtime race)
   let lastEditorPid = 0;      // Validated (armed) PID of the editor process
@@ -289,7 +260,6 @@ function runUnifiedMode() {
         }
 
         lastMainUpdate = Date.now();
-        lastFileState = stateData.state;
         lastStopped = !!stateData.stopped;
         // Track the writer's PID as a validation candidate (same PID repeated
         // keeps its original sighting time so it can pass the 2.5s window).
@@ -351,12 +321,11 @@ function runUnifiedMode() {
       try {
         const freshData = cachedStateData || readState();
         const freshTs = freshData.timestamp || 0;
-        // Detect stopped transition: false->true only (primary reset at line 244 and session adoption)
+        // Detect stopped transition: false->true only (the primary reset is in the apply block above, plus session adoption)
         const stoppedNow = freshData.stopped || false;
         if (stoppedNow && !lastStopped && freshTs > lastAppliedTimestamp) {
           lastAppliedTimestamp = freshTs;
           lastStopped = stoppedNow;
-          lastFileState = freshData.state;
           // If the file says responding, apply it; otherwise
           // we just set lastStopped so the rescue block above fires next frame.
           if (freshData.state === 'responding') {
@@ -445,9 +414,6 @@ function runUnifiedMode() {
   // Initial session load (skipped in minimal mode)
   if (!minimal) orbital.loadSessions(mainSessionId);
 
-  // Initial team discovery (skipped in minimal mode)
-  let activeTeams = minimal ? {} : scanTeams();
-
   // -- Cleanup (accessible to keypress handler + signal handlers) ----
   function cleanup() {
     writeQuitFlag();
@@ -508,7 +474,7 @@ function runUnifiedMode() {
         return;
       }
       if (key === ' ') face.pet();
-      else if (key === 't' && !isNoColor()) { face.cycleTheme(); orbital.paletteIndex = face.paletteIndex; persistPrefs(); }
+      else if (key === 't' && !isNoColor()) { face.cycleTheme(); persistPrefs(); }
       else if (key === 's') { face.toggleStats(); persistPrefs(); }
       else if (key === 'a') { face.toggleAccessories(); persistPrefs(); }
       else if (key === 'o') { face.toggleOrbitals(); persistPrefs(); }
@@ -624,15 +590,11 @@ function runUnifiedMode() {
     if (orbital.frame % (FPS * 2) === 0) orbital.loadSessionsAsync(mainSessionId);
 
     // Periodically rescan team configs (~every 10s)
-    if (orbital.frame % (FPS * 10) === 0) activeTeams = scanTeams();
 
     if (face.frame % Math.floor(FPS / 2) === 0) checkState();
 
     // Tell face how many subagents are active (for status line)
     face.subagentCount = orbital.faces.size;
-
-    // Sync palette
-    orbital.paletteIndex = face.paletteIndex;
 
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;

@@ -2,7 +2,7 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - particles.js                             |
+// |  Code Crumb Test Suite - particles.js                          |
 // +================================================================+
 
 const assert = require('assert');

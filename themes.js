@@ -1,8 +1,8 @@
 'use strict';
 
 // +================================================================+
-// |  Themes, colors, ANSI codes, and thought bubble data            |
-// |  Pure data and small utility functions used by all renderers     |
+// |  Themes, colors, ANSI codes, and thought bubble data           |
+// |  Pure data and small utility functions used by all renderers   |
 // +================================================================+
 
 // -- ANSI ----------------------------------------------------------
@@ -307,7 +307,7 @@ function normalizePaletteIndex(index, n) {
 }
 
 // -- Palettes --------------------------------------------------------
-// Each palette: { name, themes (17 states), timelineColors (17 states) }
+// Each palette: { name, themes (23 states), timelineColors (23 states) }
 // status/emoji are semantic (same across all palettes), only colors change.
 
 function _buildPaletteThemes(colorMap) {

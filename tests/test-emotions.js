@@ -2,15 +2,15 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - Emotion fidelity                        |
-// |                                                                  |
-// |  The contract for "the face shows the right feeling, for the     |
-// |  right tool, for long enough to be seen":                        |
-// |    - current Claude Code tool names map to specific states       |
-// |    - tool results carry interrupted/isError/exitCode through     |
-// |    - completion faces get a guaranteed on-screen window          |
-// |    - work that arrives during that window is not lost            |
-// |    - every state has eyes, thoughts, and a hook that reaches it  |
+// |  Code Crumb Test Suite - Emotion fidelity                      |
+// |                                                                |
+// |  The contract for "the face shows the right feeling, for the   |
+// |  right tool, for long enough to be seen":                      |
+// |    - current Claude Code tool names map to specific states     |
+// |    - tool results carry interrupted/isError/exitCode through   |
+// |    - completion faces get a guaranteed on-screen window        |
+// |    - work that arrives during that window is not lost          |
+// |    - every state has eyes, thoughts, and a hook that reaches it|
 // +================================================================+
 
 const assert = require('assert');

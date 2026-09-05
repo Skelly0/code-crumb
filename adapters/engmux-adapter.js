@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 'use strict';
 
-// +================================================================+
-// |  engmux Adapter -- wraps engmux dispatches as Code Crumb orbitals |
-// |                                                                  |
-// |  Spawns engmux as a child process and writes session files so   |
-// |  the dispatched agent appears as an orbital mini-face.           |
-// |                                                                  |
-// |  Usage:                                                          |
-// |    node adapters/engmux-adapter.js [engmux args...]              |
-// |  Example:                                                        |
-// |    node adapters/engmux-adapter.js -E opencode -m opencode/big-pickle -e medium "do X" |
-// +================================================================+
+// +======================================================================+
+// |  engmux Adapter -- wraps engmux dispatches as Code Crumb orbitals    |
+// |                                                                      |
+// |  Spawns engmux as a child process and writes session files so        |
+// |  the dispatched agent appears as an orbital mini-face.               |
+// |                                                                      |
+// |  Usage:                                                              |
+// |    node adapters/engmux-adapter.js [engmux args...]                  |
+// |  Example:                                                            |
+// |    node adapters/engmux-adapter.js -E opencode -m opencode/big-pickle|
+// |      -e medium "do X"                                                |
+// +======================================================================+
 
 const { spawn } = require('child_process');
 const { writeSessionState } = require('./base-adapter');

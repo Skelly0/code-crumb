@@ -2,17 +2,17 @@
 'use strict';
 
 // +================================================================+
-// |  Codex Wrapper -- bridges OpenAI Codex CLI to Code Crumb           |
-// |                                                                  |
-// |  Wraps `codex exec --json` and translates JSONL events into     |
-// |  Code Crumb state file writes. Only works in non-interactive    |
-// |  (headless) mode since Codex lacks a hook system.               |
-// |                                                                  |
-// |  Usage:                                                          |
-// |    node adapters/codex-wrapper.js "your prompt here"            |
-// |    node adapters/codex-wrapper.js --approval auto "fix the bug" |
-// |                                                                  |
-// |  All flags before the last argument are passed to codex exec.    |
+// |  Codex Wrapper -- bridges OpenAI Codex CLI to Code Crumb       |
+// |                                                                |
+// |  Wraps `codex exec --json` and translates JSONL events into    |
+// |  Code Crumb state file writes. Only works in non-interactive   |
+// |  (headless) mode since Codex lacks a hook system.              |
+// |                                                                |
+// |  Usage:                                                        |
+// |    node adapters/codex-wrapper.js "your prompt here"           |
+// |    node adapters/codex-wrapper.js --approval auto "fix the bug"|
+// |                                                                |
+// |  All flags before the last argument are passed to codex exec.  |
 // +================================================================+
 
 const { spawn } = require('child_process');

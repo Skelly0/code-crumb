@@ -2,19 +2,19 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Launcher                                             |
-// |  Starts the face renderer (if not running) then launches        |
-// |  the specified editor, passing through all arguments.             |
-// |                                                                 |
-// |  Usage:                                                         |
-// |    node launch.js                        (face + claude)        |
-// |    node launch.js --editor codex "fix bug" (use codex wrapper)   |
-// |    node launch.js --editor claude -p "fix the bug"               |
-// |    node launch.js --dangerously-skip-permissions                 |
-// |                                                                 |
-// |  Or via the batch/shell wrappers:                               |
-// |    code-crumb                                                   |
-// |    code-crumb --dangerously-skip-permissions                    |
+// |  Code Crumb Launcher                                           |
+// |  Starts the face renderer (if not running) then launches       |
+// |  the specified editor, passing through all arguments.          |
+// |                                                                |
+// |  Usage:                                                        |
+// |    node launch.js                        (face + claude)       |
+// |    node launch.js --editor codex "fix bug" (use codex wrapper) |
+// |    node launch.js --editor claude -p "fix the bug"             |
+// |    node launch.js --dangerously-skip-permissions               |
+// |                                                                |
+// |  Or via the batch/shell wrappers:                              |
+// |    code-crumb                                                  |
+// |    code-crumb --dangerously-skip-permissions                   |
 // +================================================================+
 
 const { spawn, execSync } = require('child_process');

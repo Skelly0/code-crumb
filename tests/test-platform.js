@@ -2,13 +2,13 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - Platform and hook robustness            |
-// |                                                                  |
-// |  Cross-platform launching (quoting, .cmd shims, spaces in       |
-// |  paths), atomic state writes, spawn locking, stats-file          |
-// |  resilience, setup.js safety (never clobber settings.json),      |
-// |  adapter parity with update-state.js, and the small renderer    |
-// |  edge cases (resize, tiny terminals, stale caches).              |
+// |  Code Crumb Test Suite - Platform and hook robustness          |
+// |                                                                |
+// |  Cross-platform launching (quoting, .cmd shims, spaces in      |
+// |  paths), atomic state writes, spawn locking, stats-file        |
+// |  resilience, setup.js safety (never clobber settings.json),    |
+// |  adapter parity with update-state.js, and the small renderer   |
+// |  edge cases (resize, tiny terminals, stale caches).            |
 // +================================================================+
 
 const assert = require('assert');

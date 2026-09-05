@@ -1,20 +1,20 @@
 'use strict';
 
 // +================================================================+
-// |  State Machine -- pure logic for Code Crumb state management         |
-// |  Extracted for testability. No I/O, no side effects.            |
-// |                                                                  |
-// |  Handles:                                                        |
-// |    - Tool name → face state mapping (multi-editor)              |
-// |    - Forensic error detection (50+ regex patterns)               |
-// |    - Post-tool result classification                             |
-// |    - Streak tracking and milestone detection                     |
-// |                                                                  |
-// |  Supported editors:                                              |
-// |    - Claude Code (edit, bash, grep, glob, read, task, etc.)     |
-// |    - OpenAI Codex CLI (shell, apply_diff, apply_patch, etc.)    |
-// |    - OpenCode (file_edit, terminal, search_files, etc.)         |
-// |    - OpenClaw/Pi (read, write, edit, bash, exec, process, etc.) |
+// |  State Machine -- pure logic for Code Crumb state management   |
+// |  Extracted for testability. No I/O, no side effects.           |
+// |                                                                |
+// |  Handles:                                                      |
+// |    - Tool name → face state mapping (multi-editor)             |
+// |    - Forensic error detection (50+ regex patterns)             |
+// |    - Post-tool result classification                           |
+// |    - Streak tracking and milestone detection                   |
+// |                                                                |
+// |  Supported editors:                                            |
+// |    - Claude Code (edit, bash, grep, glob, read, task, etc.)    |
+// |    - OpenAI Codex CLI (shell, apply_diff, apply_patch, etc.)   |
+// |    - OpenCode (file_edit, terminal, search_files, etc.)        |
+// |    - OpenClaw/Pi (read, write, edit, bash, exec, process, etc.)|
 // +================================================================+
 
 const path = require('path');

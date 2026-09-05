@@ -1,14 +1,14 @@
 'use strict';
 
 // +================================================================+
-// |  ClaudeFace -- single face mode renderer class                  |
-// |  Manages state, animations, particles, thought bubbles,         |
-// |  streaks, timeline, and renders the full-size ASCII face         |
+// |  ClaudeFace -- single face mode renderer class                 |
+// |  Manages state, animations, particles, thought bubbles,        |
+// |  streaks, timeline, and renders the full-size ASCII face       |
 // +================================================================+
 
 const {
   ansi, breathe, dimColor,
-  themes, TIMELINE_COLORS, SPARKLINE_BLOCKS,
+  SPARKLINE_BLOCKS,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
   PALETTES, PALETTE_NAMES,
   isNoColor,

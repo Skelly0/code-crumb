@@ -22,5 +22,8 @@ jobs:
       - name: Syntax check every script
         shell: bash
         run: git ls-files '*.js' | xargs -n1 node --check
+      - name: No trailing whitespace
+        shell: bash
+        run: "! git grep -n -E '[[:space:]]+$' -- '*.js' '*.md' '*.json' '*.yml'"
       - name: Run test suite
         run: node test.js --quiet

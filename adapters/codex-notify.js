@@ -2,19 +2,19 @@
 'use strict';
 
 // +================================================================+
-// |  Codex Notify Handler -- receives Codex `notify` events          |
-// |                                                                  |
-// |  Codex fires its `notify` program with a single JSON argument    |
-// |  containing turn-level data. This handler writes Code Crumb      |
-// |  state files based on that data, with the same stats plumbing    |
-// |  (tool calls, streak, daily sessions) as the other adapters.     |
-// |                                                                  |
-// |  Setup in ~/.codex/config.toml:                                  |
-// |    notify = ["node", "/path/to/adapters/codex-notify.js"]        |
-// |                                                                  |
-// |  Limitation: Codex only fires `agent-turn-complete` events,      |
-// |  so this handler can only show turn completions -- not           |
-// |  individual tool calls. For richer output, use codex-wrapper.js. |
+// |  Codex Notify Handler -- receives Codex `notify` events        |
+// |                                                                |
+// |  Codex fires its `notify` program with a single JSON argument  |
+// |  containing turn-level data. This handler writes Code Crumb    |
+// |  state files based on that data, with the same stats plumbing  |
+// |  (tool calls, streak, daily sessions) as the other adapters.   |
+// |                                                                |
+// |  Setup in ~/.codex/config.toml:                                |
+// |    notify = ["node", "/path/to/adapters/codex-notify.js"]      |
+// |                                                                |
+// |  Limitation: Codex only fires `agent-turn-complete` events,    |
+// |  so this handler can only show turn completions -- not         |
+// |  individual tool calls. For richer output use codex-wrapper.js.|
 // +================================================================+
 
 const {

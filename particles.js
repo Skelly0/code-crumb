@@ -1,10 +1,10 @@
 'use strict';
 
 // +================================================================+
-// |  Particle system -- visual effects for the face renderer        |
+// |  Particle system -- visual effects for the face renderer       |
 // |  15 particle styles: float, sparkle, glitch, orbit, zzz,       |
 // |  question, sweat, falling, speedline, echo, stream, heart,     |
-// |  push, rain, fire                                               |
+// |  push, rain, fire                                              |
 // +================================================================+
 
 const { ansi, dimColor } = require('./themes');

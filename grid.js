@@ -1,9 +1,9 @@
 'use strict';
 
 // +================================================================+
-// |  Orbital mode -- MiniFace and OrbitalSystem classes              |
-// |  MiniFace renders compact subagent faces                        |
-// |  OrbitalSystem orbits them around the main ClaudeFace           |
+// |  Orbital mode -- MiniFace and OrbitalSystem classes            |
+// |  MiniFace renders compact subagent faces                       |
+// |  OrbitalSystem orbits them around the main ClaudeFace          |
 // +================================================================+
 
 const fs = require('fs');
@@ -12,7 +12,7 @@ const {
   HOME, SESSIONS_DIR, safeFilename,
   ACTIVE_WORK_STATES, INTERRUPTIBLE_STATES, COMPLETION_STATES,
 } = require('./shared');
-const { ansi, breathe, dimColor, themes, COMPLETION_LINGER, PALETTES, PALETTE_NAMES } = require('./themes');
+const { ansi, breathe, dimColor, themes, COMPLETION_LINGER } = require('./themes');
 const { gridMouths } = require('./animations');
 
 // -- Config --------------------------------------------------------
@@ -45,14 +45,11 @@ function hashTeamColor(teamName) {
   return TEAM_COLORS[h % TEAM_COLORS.length];
 }
 
-const CELL_W = 12;
 const CELL_H = 7;
 const BOX_W = 8;
 const BOX_INNER = 6;
 const STALE_MS = 120000;
 const STOPPED_LINGER_MS = 10000;
-const MIN_COLS_GRID = 14;
-const MIN_ROWS_GRID = 9;
 const IDLE_TIMEOUT = 8000;
 const SLEEP_TIMEOUT = 60000;
 const THINKING_TIMEOUT = 45000;
@@ -681,8 +678,6 @@ class MiniFace {
 const MINI_W = BOX_W;       // 8 cols visible width of mini face
 const MINI_H = CELL_H;      // 7 rows (box + label + status)
 const MAX_ORBITALS = 8;      // Beyond this, labels become unreadable
-const MIN_ORBITAL_COLS = 80;
-const MIN_ORBITAL_ROWS = 30;
 
 class OrbitalSystem {
   constructor() {
@@ -691,7 +686,6 @@ class OrbitalSystem {
     this.rotationSpeed = 0.007;    // ~1 full rotation per 60s at 15fps
     this.frame = 0;
     this.time = 0;
-    this.paletteIndex = 0;         // Synced from main face
     this._sortedCache = [];        // Cached sorted faces array
     this._sortedDirty = true;      // Rebuild cache on next getSortedFaces()
     this._prevClearBuf = '';        // Pre-built buffer to clear previous frame's orbital content

@@ -1,20 +1,20 @@
 'use strict';
 
 // +================================================================+
-// |  Base Adapter -- shared logic for all Code Crumb adapters           |
-// |                                                                  |
-// |  Provides:                                                       |
-// |    - writeState / writeSessionState   (state file IPC)           |
-// |    - readStats / writeStats           (persistent stats)         |
-// |    - guardedWriteState                (session-aware global)     |
-// |    - initSession                      (stats bootstrapping)      |
-// |    - buildExtra                       (extra fields for state)   |
-// |    - handleToolStart / handleToolEnd  (common tool event logic)  |
-// |    - processStdinEvent                (stdin JSON reader loop)   |
-// |    - trackEditedFile                  (file tracking helper)     |
-// |                                                                  |
-// |  Each adapter imports these helpers and supplies its own         |
-// |  event normalisation + mapping logic.                            |
+// |  Base Adapter -- shared logic for all Code Crumb adapters      |
+// |                                                                |
+// |  Provides:                                                     |
+// |    - writeState / writeSessionState   (state file IPC)         |
+// |    - readStats / writeStats           (persistent stats)       |
+// |    - guardedWriteState                (session-aware global)   |
+// |    - initSession                      (stats bootstrapping)    |
+// |    - buildExtra                       (extra fields for state) |
+// |    - handleToolStart / handleToolEnd  (common tool event logic)|
+// |    - processStdinEvent                (stdin JSON reader loop) |
+// |    - trackEditedFile                  (file tracking helper)   |
+// |                                                                |
+// |  Each adapter imports these helpers and supplies its own       |
+// |  event normalisation + mapping logic.                          |
 // +================================================================+
 
 const fs = require('fs');
