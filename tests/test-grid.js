@@ -6,13 +6,25 @@
 // +================================================================+
 
 const assert = require('assert');
-const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS } = require('../grid');
+const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _setPidResolver, STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS } = require('../grid');
 const { gridMouths, eyes, mouths } = require('../animations');
 const { PALETTES } = require('../themes');
 const { ParticleSystem } = require('../particles');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
+
+// The PID start-time cache is process-global and the platform resolver behind
+// it has platform-dependent timing: Linux answers in the same tick from /proc,
+// while win32/darwin go through execFile and cannot answer at all during a
+// synchronous test. A test that wants a definite ownership verdict must not
+// depend on that -- it seeds the cache itself with a start time comfortably
+// before the write (so the SLACK_MS comparison is decided), which also makes
+// requestPidStartTime return early and run no resolver anywhere. Entries are
+// deleted afterwards: process.pid is shared by every test in the run.
+function seedOwningPid(pid = process.pid) {
+  _pidStartCache.set(pid, { value: Date.now() - STALE_MS - 3600e3, resolvedAt: Date.now() });
+}
 
 describe('grid.js -- MiniFace modelName', () => {
   test('default modelName is empty', () => {
@@ -1080,8 +1092,11 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
     face.state = 'thinking';
     face.pid = process.pid; // current process — definitely alive
     face.lastUpdate = Date.now() - 200000; // 200s ago — way past any timeout
-    assert.ok(!face.isStale(),
-      'face with live owning process should never be stale');
+    seedOwningPid(); // started long before the write, so it owns the session
+    try {
+      assert.ok(!face.isStale(),
+        'face with live owning process should never be stale');
+    } finally { _pidStartCache.delete(process.pid); }
   });
 
   test('active face with dead pid and old lastUpdate is stale', () => {
@@ -1197,15 +1212,18 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
 
   test('completion state face with LIVE pid is NOT stale (Bug #108 fix)', () => {
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
-    for (const state of completionStates) {
-      const face = new MiniFace('test');
-      face.state = state;
-      face.stopped = false;
-      face.pid = process.pid; // live process — should protect from staleness
-      face.lastUpdate = Date.now() - 200000; // 200s ago — way past any timeout
-      assert.ok(!face.isStale(),
-        `completion state '${state}' with live pid should NEVER be stale`);
-    }
+    seedOwningPid();
+    try {
+      for (const state of completionStates) {
+        const face = new MiniFace('test');
+        face.state = state;
+        face.stopped = false;
+        face.pid = process.pid; // live process — should protect from staleness
+        face.lastUpdate = Date.now() - 200000; // 200s ago — way past any timeout
+        assert.ok(!face.isStale(),
+          `completion state '${state}' with live pid should NEVER be stale`);
+      }
+    } finally { _pidStartCache.delete(process.pid); }
   });
 
   test('completion state face with DEAD pid is stale after STOPPED_LINGER_MS', () => {
@@ -2881,8 +2899,11 @@ describe('grid.js -- _applySessionResults stale purge', () => {
     const results = [
       { file: 'sub1.json', data: { session_id: 'sub1', state: 'coding', pid: process.pid }, mtimeMs: Date.now() - STALE_MS - 1000 },
     ];
-    os._applySessionResults('main-id', results);
-    assert.ok(os.faces.has('sub1'), 'active non-completion face with live PID should survive stale purge');
+    seedOwningPid();
+    try {
+      os._applySessionResults('main-id', results);
+      assert.ok(os.faces.has('sub1'), 'active non-completion face with live PID should survive stale purge');
+    } finally { _pidStartCache.delete(process.pid); }
   });
 
   test('protects stale file when completion-state face has live PID', () => {
@@ -2895,8 +2916,11 @@ describe('grid.js -- _applySessionResults stale purge', () => {
     const results = [
       { file: 'sub1.json', data: { session_id: 'sub1', state: 'happy' }, mtimeMs: Date.now() - STALE_MS - 1000 },
     ];
-    os._applySessionResults('main-id', results);
-    assert.ok(os.faces.has('sub1'), 'completion face with live PID should survive stale purge');
+    seedOwningPid();
+    try {
+      os._applySessionResults('main-id', results);
+      assert.ok(os.faces.has('sub1'), 'completion face with live PID should survive stale purge');
+    } finally { _pidStartCache.delete(process.pid); }
   });
 
   test('purges stale file when completion-state face has no live PID', () => {
@@ -2928,8 +2952,11 @@ describe('grid.js -- _applySessionResults stale purge', () => {
     const results = [
       { file: 'new-sub.json', data: { session_id: 'new-sub', state: 'thinking', pid: process.pid }, mtimeMs: Date.now() - STALE_MS - 1000 },
     ];
-    os._applySessionResults('main-id', results);
-    assert.ok(os.faces.has('new-sub'), 'stale file with live PID should survive and create face');
+    seedOwningPid();
+    try {
+      os._applySessionResults('main-id', results);
+      assert.ok(os.faces.has('new-sub'), 'stale file with live PID should survive and create face');
+    } finally { _pidStartCache.delete(process.pid); }
   });
 
   test('non-stale file passes through without purge checks', () => {
@@ -3591,20 +3618,44 @@ describe('grid.js -- isOwnedByLiveProcess (PID identity gate)', () => {
     assert.strictEqual(isOwnedByLiveProcess(7007, Date.now() - 2 * 3600 * 1000, alive), false); // 2 h — past cap
   });
 
+  // A resolver that never answers synchronously: the platform resolvers differ
+  // here (Linux /proc answers in the same tick, execFile cannot), so inject one
+  // with fixed timing to make the "still resolving" window observable anywhere.
+  const deferredResolver = (pids, done) => { setImmediate(() => done(new Map())); };
+
   test('uncached pid resolves as pending-protected and enqueues', () => {
     _pidStartCache.clear();
-    assert.strictEqual(isOwnedByLiveProcess(7008, Date.now(), alive), true);
-    assert.strictEqual(_pidStartStatus(7008), 'pending');
+    _setPidResolver(deferredResolver);
+    try {
+      assert.strictEqual(isOwnedByLiveProcess(7008, Date.now(), alive), true);
+      assert.strictEqual(_pidStartStatus(7008), 'pending');
+    } finally { _setPidResolver(null); _pidStartCache.delete(7008); }
   });
 
   test('TTL: stale cache entry keeps protecting with old value but re-enqueues', () => {
     _pidStartCache.clear();
-    const lastWrite = Date.now();
-    _pidStartCache.set(7009, { value: lastWrite - 1000, resolvedAt: Date.now() - 120000 }); // 2 min old entry
-    assert.strictEqual(isOwnedByLiveProcess(7009, lastWrite, alive), true); // old value still used
-    requestPidStartTime(7009, alive);
-    // entry survives (not downgraded to pending) while refresh is queued
-    assert.strictEqual(typeof _pidStartCache.get(7009).value, 'number');
+    _setPidResolver(deferredResolver);
+    try {
+      const lastWrite = Date.now();
+      _pidStartCache.set(7009, { value: lastWrite - 1000, resolvedAt: Date.now() - 120000 }); // 2 min old entry
+      assert.strictEqual(isOwnedByLiveProcess(7009, lastWrite, alive), true); // old value still used
+      requestPidStartTime(7009, alive);
+      // entry survives (not downgraded to pending) while refresh is queued
+      assert.strictEqual(typeof _pidStartCache.get(7009).value, 'number');
+    } finally { _setPidResolver(null); _pidStartCache.delete(7009); }
+  });
+
+  test('_setPidResolver: an answered start time decides ownership on every platform', () => {
+    _pidStartCache.clear();
+    const started = Date.now() - 5000;
+    _setPidResolver((pids, done) => { done(new Map([[4242, started]])); }); // synchronous
+    try {
+      // 4242 is not a real process, so the liveness probe is stubbed out with
+      // `alive`; the verdict then rests purely on the resolved start time
+      // against the last write (+ SLACK_MS) -- the same answer on every OS.
+      assert.strictEqual(isOwnedByLiveProcess(4242, Date.now(), alive), true);
+      assert.strictEqual(isOwnedByLiveProcess(4242, Date.now() - 10000, alive), false);
+    } finally { _setPidResolver(null); _pidStartCache.delete(4242); }
   });
 });
 

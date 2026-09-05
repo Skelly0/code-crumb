@@ -131,6 +131,22 @@ function requestPidStartTime(pid, aliveFn = isProcessAlive) {
   _kickPidResolve();
 }
 
+// Test seam: swap the platform start-time resolver. The Linux resolver reads
+// /proc synchronously and calls back in the same tick, while win32/darwin go
+// through execFile and cannot call back until the caller yields -- so the same
+// test observes 'known' on Linux and 'pending' everywhere else. Tests inject a
+// resolver with deterministic timing instead. Resetting also clears the
+// in-flight latch and the queue, because _pidExecInFlight is only lowered
+// inside `done` and test.js runs every test file in one process: a fake
+// resolver that never calls back would otherwise freeze every later PID at
+// 'pending' for the rest of the run.
+let _pidResolver = _resolvePidStartTimes;
+function _setPidResolver(fn) {
+  _pidResolver = fn || _resolvePidStartTimes;
+  _pidExecInFlight = false;
+  _pidResolveQueue.clear();
+}
+
 // One outstanding exec at a time; queued PIDs ride the next batch.
 function _kickPidResolve() {
   if (_pidExecInFlight || _pidResolveQueue.size === 0) return;
@@ -153,7 +169,7 @@ function _kickPidResolve() {
   };
   // A synchronous throw in a resolver must never latch _pidExecInFlight —
   // that would freeze every PID at 'pending' (protected) forever.
-  try { _resolvePidStartTimes(pids, done); } catch { done(null); }
+  try { _pidResolver(pids, done); } catch { done(null); }
 }
 
 // Platform resolvers. callback(Map<pid, epochMs|'unknown-alive'> | null on exec failure).
@@ -1009,7 +1025,7 @@ class OrbitalSystem {
     // The cache is keyed on the visible set as well as on session reloads:
     // maxSlots changes with the terminal size, so after a resize the visible
     // subset can differ without any session file having changed.
-    const sig = visible.map(f => f.sessionId).join(' ');
+    const sig = visible.map(f => f.sessionId).join('\u0000');
     if (!this._groupsDirty && this._groupsCache && this._groupsSig === sig) return this._groupsCache;
     this._groupsSig = sig;
     const map = new Map();
@@ -1823,7 +1839,8 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
-  isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _sweepPidCache, KNOWN_EDITORS,
+  isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _sweepPidCache,
+  _setPidResolver, KNOWN_EDITORS,
   STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, SLACK_MS, PID_PROTECT_CAP_MS, PID_CACHE_TTL_MS,
   INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, GROUP_LABEL_BRIGHTNESS,
   CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS,
