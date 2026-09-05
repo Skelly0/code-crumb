@@ -19,7 +19,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename, writeJsonAtomic } = require('../shared');
+const {
+  STATE_FILE, SESSIONS_DIR, STATS_FILE, STATS_LOCK_FILE,
+  safeFilename, writeJsonAtomic, acquireFileLock,
+} = require('../shared');
 const {
   toolToState, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
   EDIT_TOOLS,
@@ -293,61 +296,70 @@ function runStdinAdapter(options) {
       || process.env.CODE_CRUMB_EDITOR
       || defaultEditor;
 
-    const stats = readStats();
-    initSession(stats, sessionId);
+    // Read -> mutate -> write of the shared stats file, serialized: several
+    // adapter processes can run at once and the last writer would otherwise
+    // drop the others' counter increments. A failed acquire proceeds
+    // unlocked -- the lock must never cost the adapter its event.
+    const releaseStats = acquireFileLock(STATS_LOCK_FILE);
+    try {
+      const stats = readStats();
+      initSession(stats, sessionId);
 
-    const extra = buildExtra(stats, sessionId, modelName, editor);
+      const extra = buildExtra(stats, sessionId, modelName, editor);
 
-    let state = 'thinking';
-    let detail = '';
-    let stopped = false;
+      let state = 'thinking';
+      let detail = '';
+      let stopped = false;
 
-    // Let the adapter handle custom event types first
-    const custom = mapEvent
-      ? mapEvent(event, toolName, toolInput, toolOutput, isError, data)
-      : null;
+      // Let the adapter handle custom event types first
+      const custom = mapEvent
+        ? mapEvent(event, toolName, toolInput, toolOutput, isError, data)
+        : null;
 
-    if (custom) {
-      state = custom.state || state;
-      detail = custom.detail || detail;
-      stopped = custom.stopped || false;
-      if (custom.extra) Object.assign(extra, custom.extra);
-    }
-    // Common event handling
-    else if (event === 'tool_start' || event === 'PreToolUse') {
-      ({ state, detail } = handleToolStart(stats, toolName, toolInput));
-    }
-    else if (event === 'tool_end' || event === 'PostToolUse') {
-      const toolResponse = { stdout: toolOutput, stderr: norm.stderr || '', isError };
-      const result = handleToolEnd(stats, toolName, toolInput, toolResponse, isError);
-      state = result.state;
-      detail = result.detail;
-      extra.diffInfo = result.diffInfo;
-    }
-    else if (event === 'turn_end' || event === 'Stop' || event === 'session_end') {
-      state = 'happy';
-      detail = 'all done!';
-      stopped = true;
-    }
-    else if (event === 'error') {
-      state = 'error';
-      detail = data.message || data.reason || data.output?.error || 'something went wrong';
-      updateStreak(stats, true);
-    }
-    else if (event === 'waiting' || event === 'Notification') {
-      state = 'waiting';
-      detail = 'needs attention';
-    }
+      if (custom) {
+        state = custom.state || state;
+        detail = custom.detail || detail;
+        stopped = custom.stopped || false;
+        if (custom.extra) Object.assign(extra, custom.extra);
+      }
+      // Common event handling
+      else if (event === 'tool_start' || event === 'PreToolUse') {
+        ({ state, detail } = handleToolStart(stats, toolName, toolInput));
+      }
+      else if (event === 'tool_end' || event === 'PostToolUse') {
+        const toolResponse = { stdout: toolOutput, stderr: norm.stderr || '', isError };
+        const result = handleToolEnd(stats, toolName, toolInput, toolResponse, isError);
+        state = result.state;
+        detail = result.detail;
+        extra.diffInfo = result.diffInfo;
+      }
+      else if (event === 'turn_end' || event === 'Stop' || event === 'session_end') {
+        state = 'happy';
+        detail = 'all done!';
+        stopped = true;
+      }
+      else if (event === 'error') {
+        state = 'error';
+        detail = data.message || data.reason || data.output?.error || 'something went wrong';
+        updateStreak(stats, true);
+      }
+      else if (event === 'waiting' || event === 'Notification') {
+        state = 'waiting';
+        detail = 'needs attention';
+      }
 
-    // Update extra with latest counters
-    extra.toolCalls = stats.session.toolCalls;
-    extra.filesEdited = stats.session.filesEdited.length;
-    if (stopped) extra.stopped = true;
+      // Update extra with latest counters
+      extra.toolCalls = stats.session.toolCalls;
+      extra.filesEdited = stats.session.filesEdited.length;
+      if (stopped) extra.stopped = true;
 
-    guardedWriteState(sessionId, state, detail, extra);
-    writeSessionState(sessionId, state, detail, stopped, extra);
-    pruneFrequentFiles(stats.frequentFiles);
-    writeStats(stats);
+      guardedWriteState(sessionId, state, detail, extra);
+      writeSessionState(sessionId, state, detail, stopped, extra);
+      pruneFrequentFiles(stats.frequentFiles);
+      writeStats(stats);
+    } finally {
+      if (releaseStats) releaseStats();
+    }
   }, () => {
     // Fallback on parse error -- write thinking state with guard.
     // Same editor-prefixed ID as the main path so the session never splits.

@@ -20,6 +20,15 @@ const PID_FILE = path.join(HOME, '.code-crumb.pid');
 const QUIT_FLAG_FILE = path.join(HOME, '.code-crumb-quit');
 const TMUX_FILE = path.join(HOME, '.code-crumb-tmux');
 const SPAWN_LOCK_FILE = path.join(HOME, '.code-crumb-spawn.lock');
+const STATS_LOCK_FILE = path.join(HOME, '.code-crumb-stats.lock');
+
+// Stats lock policy. The stats file is a read-modify-write per hook, so
+// parallel tool calls (parallel hooks) can lose a counter increment. The
+// lock serializes them; the wait is deliberately short because a hook must
+// never stall the editor -- a waiter that times out proceeds unlocked.
+const LOCK_WAIT_MS = 150;   // max time a hook waits for the stats lock
+const LOCK_STALE_MS = 2000; // a lock older than this belongs to a crashed hook
+const LOCK_SPIN_MS = 2;     // pause between retries while the lock is held
 
 // -- Face state sets ---------------------------------------------------
 // Shared by face.js (main face), grid.js (orbital MiniFace) and renderer.js
@@ -69,7 +78,7 @@ function savePrefs(updates) {
   } catch {}
 }
 
-// -- Atomic writes and spawn lock ------------------------------------
+// -- Atomic writes, spawn lock and stats lock ------------------------
 
 // Write JSON (or a pre-serialized string) atomically: temp file + rename, so
 // the renderer (which watches these files) never reads a half-written one.
@@ -113,6 +122,70 @@ function acquireSpawnLock(lockFile, staleMs = 5000) {
       return true;
     }
     return false;
+  }
+}
+
+// Block this thread for ms without a busy loop. Hooks are short-lived
+// synchronous scripts -- there is no event loop to yield to, and a spin on
+// Date.now() would burn a core. Never throws: a runtime without
+// SharedArrayBuffer (or one that forbids Atomics.wait) just returns.
+function sleepSync(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {}
+}
+
+let lockSeq = 0;
+
+// Short-lived advisory lock around a read-modify-write of a shared file.
+// The lock is a file created with O_EXCL holding a per-owner token; a lock
+// older than staleMs belongs to a crashed writer and is taken over.
+// Returns release() on success, or null if the lock stayed held for waitMs.
+// release() unlinks only while the file still carries this owner's token, so
+// a crashed owner's late release cannot free the lock its successor took over.
+// Any unexpected fs error behaves as acquired (no-op release): the lock is a
+// courtesy, never a reason to skip the caller's work.
+function acquireFileLock(lockFile, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_MS, spinMs = LOCK_SPIN_MS } = {}) {
+  // pid + time identifies the owner across processes; the counter keeps two
+  // acquires inside one process (same millisecond) from sharing a token.
+  const token = `${process.pid}.${Date.now().toString(36)}.${(lockSeq++).toString(36)}`;
+  const release = () => {
+    try {
+      if (fs.readFileSync(lockFile, 'utf8') === token) fs.unlinkSync(lockFile);
+    } catch {}
+  };
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      fs.writeFileSync(lockFile, token, { flag: 'wx', mode: 0o600 });
+      return release;
+    } catch (e) {
+      // Anything but "already held" (no directory, permissions) -- proceed.
+      if (!e || e.code !== 'EEXIST') return () => {};
+      try {
+        if (Date.now() - fs.statSync(lockFile).mtimeMs > staleMs) {
+          fs.writeFileSync(lockFile, token, { mode: 0o600 });
+          return release;
+        }
+      } catch {
+        // Vanished or unreadable between the two calls -- retry below.
+      }
+    }
+    if (Date.now() >= deadline) return null;
+    sleepSync(spinMs);
+  }
+}
+
+// Run fn() with the stats lock held, releasing it however fn ends. A failed
+// acquire is not an error: the caller proceeds unlocked (worst case, the
+// pre-lock behaviour of a possibly-lost counter increment).
+function withStatsLock(fn) {
+  let release = null;
+  try { release = acquireFileLock(STATS_LOCK_FILE); } catch {}
+  try {
+    return fn();
+  } finally {
+    if (release) { try { release(); } catch {} }
   }
 }
 
@@ -237,7 +310,9 @@ function getGitBranch(cwd) {
 
 module.exports = {
   HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, QUIT_FLAG_FILE, TEAMS_DIR, TMUX_FILE, SPAWN_LOCK_FILE,
+  STATS_LOCK_FILE, LOCK_WAIT_MS, LOCK_STALE_MS, LOCK_SPIN_MS,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   safeFilename, loadPrefs, savePrefs, getGitBranch, getIsWorktree,
-  writeJsonAtomic, acquireSpawnLock, quoteArg, shQuote, buildRendererCommands,
+  writeJsonAtomic, acquireSpawnLock, sleepSync, acquireFileLock, withStatsLock,
+  quoteArg, shQuote, buildRendererCommands,
 };

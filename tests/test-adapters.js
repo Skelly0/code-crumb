@@ -14,7 +14,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { execFileSync, execSync } = require('child_process');
+const { execFileSync, execSync, spawn } = require('child_process');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
@@ -2512,6 +2512,60 @@ describe('update-state -- parallel sessions vs subagents (#134)', () => {
     assert.strictEqual(typeof stats.topLevelSessions['reg-go-1'], 'number',
       'SessionStart records the session id with a timestamp');
     cleanup(tmp);
+  });
+});
+
+// -- Stats lock end to end ---------------------------------------------
+
+describe('update-state.js -- parallel hooks keep every stats increment', () => {
+  const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
+
+  function preToolInput(sessionId) {
+    return JSON.stringify({
+      session_id: sessionId, tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    });
+  }
+
+  test.async('6 concurrent PreToolUse hooks each count once', async () => {
+    const { tmp, statsFile, env } = makeTempEnv('lock-session');
+    try {
+      // One hook first, synchronously: it creates the session so the parallel
+      // batch only increments (a session reset mid-race would zero the counter).
+      execFileSync(NODE, [UPDATE_STATE, 'PreToolUse'], {
+        input: preToolInput('lock-session'), env, timeout: 10000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      assert.strictEqual(readJSON(statsFile).session.toolCalls, 1, 'first hook counted');
+
+      await Promise.all(Array.from({ length: 6 }, () => new Promise((resolve, reject) => {
+        const child = spawn(NODE, [UPDATE_STATE, 'PreToolUse'], {
+          env, stdio: ['pipe', 'ignore', 'ignore'],
+        });
+        child.on('error', reject);
+        child.on('exit', resolve);
+        child.stdin.end(preToolInput('lock-session'));
+      })));
+
+      const stats = readJSON(statsFile);
+      assert.strictEqual(stats.session.toolCalls, 7, 'no session.toolCalls increment lost');
+      assert.strictEqual(stats.totalToolCalls, 7, 'no totalToolCalls increment lost');
+    } finally { cleanup(tmp); }
+  });
+
+  test('the process.exit(0) paths release the lock before exiting', () => {
+    const { tmp, env } = makeTempEnv('lock-exit');
+    try {
+      try {
+        execFileSync(NODE, [UPDATE_STATE, 'TeammateIdle'], {
+          input: JSON.stringify({ teammate_name: 'x', team_name: 't' }),
+          env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } catch (e) {
+        if (e.status !== 0 && e.status !== null) throw e;
+      }
+      assert.ok(!fs.existsSync(path.join(tmp, '.code-crumb-stats.lock')),
+        'process.exit skips finally -- the exit paths must release explicitly');
+    } finally { cleanup(tmp); }
   });
 });
 

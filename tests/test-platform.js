@@ -15,7 +15,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const { Readable } = require('stream');
 
 const suite = require('./_harness').createSuite();
@@ -160,6 +160,138 @@ describe('platform -- acquireSpawnLock', () => {
   });
   test('an unwritable lock location does not block spawning', () => {
     assert.strictEqual(shared.acquireSpawnLock(path.join(os.tmpdir(), 'no-such-dir-crumb', 'spawn.lock'), 5000), true);
+  });
+});
+
+describe('shared.js -- acquireFileLock / withStatsLock', () => {
+  test('sleepSync blocks the thread for roughly the requested time', () => {
+    const t0 = Date.now();
+    shared.sleepSync(15);
+    assert.ok(Date.now() - t0 >= 10, 'sleepSync(15) must block at least 10ms');
+  });
+
+  test('acquire returns a release function; the lock file holds this owner\'s token', () => {
+    const dir = tmpDir('crumb-flock-');
+    try {
+      const lock = path.join(dir, 'stats.lock');
+      const release = shared.acquireFileLock(lock);
+      assert.strictEqual(typeof release, 'function');
+      assert.ok(fs.existsSync(lock), 'lock file exists while held');
+      const token = fs.readFileSync(lock, 'utf8');
+      assert.ok(token.startsWith(process.pid + '.'), `token should start with the pid, got ${token}`);
+      release();
+      assert.ok(!fs.existsSync(lock), 'release removes the lock file');
+    } finally { cleanup(dir); }
+  });
+
+  test('a second acquire while held gives up after waitMs and returns null', () => {
+    const dir = tmpDir('crumb-flock-');
+    try {
+      const lock = path.join(dir, 'stats.lock');
+      const held = shared.acquireFileLock(lock);
+      const t0 = Date.now();
+      const second = shared.acquireFileLock(lock, { waitMs: 20 });
+      const elapsed = Date.now() - t0;
+      assert.strictEqual(second, null, 'contended acquire returns null');
+      assert.ok(elapsed >= 20, `should wait at least waitMs, waited ${elapsed}ms`);
+      assert.ok(elapsed < 200, `should not wait far past waitMs, waited ${elapsed}ms`);
+      held();
+    } finally { cleanup(dir); }
+  });
+
+  test('a lock older than staleMs belongs to a crashed hook and is taken over', () => {
+    const dir = tmpDir('crumb-flock-');
+    try {
+      const lock = path.join(dir, 'stats.lock');
+      shared.acquireFileLock(lock);
+      const old = new Date(Date.now() - 10000);
+      fs.utimesSync(lock, old, old);
+      const taken = shared.acquireFileLock(lock, { waitMs: 20, staleMs: 2000 });
+      assert.strictEqual(typeof taken, 'function', 'stale lock is taken over');
+      taken();
+    } finally { cleanup(dir); }
+  });
+
+  test('the crashed owner\'s late release does not free the new owner\'s lock', () => {
+    const dir = tmpDir('crumb-flock-');
+    try {
+      const lock = path.join(dir, 'stats.lock');
+      const releaseA = shared.acquireFileLock(lock);
+      const tokenA = fs.readFileSync(lock, 'utf8');
+      const old = new Date(Date.now() - 10000);
+      fs.utimesSync(lock, old, old);
+      const releaseB = shared.acquireFileLock(lock, { waitMs: 20, staleMs: 2000 });
+      const tokenB = fs.readFileSync(lock, 'utf8');
+      assert.notStrictEqual(tokenB, tokenA, 'takeover writes a new token');
+      releaseA();
+      assert.ok(fs.existsSync(lock), 'A must not unlink a lock it no longer owns');
+      assert.strictEqual(fs.readFileSync(lock, 'utf8'), tokenB);
+      releaseB();
+      assert.ok(!fs.existsSync(lock));
+    } finally { cleanup(dir); }
+  });
+
+  test('an unusable lock location behaves as acquired (the lock is a courtesy)', () => {
+    const release = shared.acquireFileLock(path.join(os.tmpdir(), 'no-such-dir-crumb', 'stats.lock'), { waitMs: 20 });
+    assert.strictEqual(typeof release, 'function', 'fs errors must not stop the hook doing its work');
+    release();
+  });
+
+  test('withStatsLock returns the callback value and releases the lock', () => {
+    try { fs.unlinkSync(shared.STATS_LOCK_FILE); } catch {}
+    const v = shared.withStatsLock(() => {
+      assert.ok(fs.existsSync(shared.STATS_LOCK_FILE), 'lock is held during the callback');
+      return 42;
+    });
+    assert.strictEqual(v, 42);
+    assert.ok(!fs.existsSync(shared.STATS_LOCK_FILE), 'lock released after return');
+  });
+
+  test('withStatsLock releases the lock when the callback throws, and rethrows', () => {
+    try { fs.unlinkSync(shared.STATS_LOCK_FILE); } catch {}
+    assert.throws(() => shared.withStatsLock(() => { throw new Error('boom'); }), /boom/);
+    assert.ok(!fs.existsSync(shared.STATS_LOCK_FILE), 'lock released after a throw');
+  });
+
+  test('the stats lock lives next to the stats file', () => {
+    assert.strictEqual(shared.STATS_LOCK_FILE, path.join(shared.HOME, '.code-crumb-stats.lock'));
+    assert.strictEqual(shared.LOCK_WAIT_MS, 150);
+    assert.strictEqual(shared.LOCK_STALE_MS, 2000);
+    assert.strictEqual(shared.LOCK_SPIN_MS, 2);
+  });
+});
+
+// Six processes, twenty increments each: without serialization the read-modify-write
+// races and the total lands short of 120.
+describe('shared.js -- the stats lock serializes parallel read-modify-write', () => {
+  test.async('6 workers x 20 increments all land', async () => {
+    const { tmp, statsFile, env } = makeTempEnv('lock-worker');
+    try {
+      const worker = path.join(tmp, 'worker.js');
+      fs.writeFileSync(worker, [
+        "'use strict';",
+        "const fs = require('fs');",
+        'const shared = require(process.argv[2]);',
+        'for (let i = 0; i < 20; i++) {',
+        '  const release = shared.acquireFileLock(shared.STATS_LOCK_FILE, { waitMs: 5000 });',
+        '  let s = {};',
+        "  try { s = JSON.parse(fs.readFileSync(shared.STATS_FILE, 'utf8')); } catch {}",
+        '  s.n = (s.n || 0) + 1;',
+        '  shared.writeJsonAtomic(shared.STATS_FILE, s);',
+        '  if (release) release();',
+        '}',
+      ].join('\n'), 'utf8');
+      fs.writeFileSync(statsFile, JSON.stringify({ n: 0 }), 'utf8');
+
+      const sharedPath = path.join(ROOT, 'shared.js');
+      await Promise.all(Array.from({ length: 6 }, () => new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [worker, sharedPath], { env, stdio: 'ignore' });
+        child.on('error', reject);
+        child.on('exit', resolve);
+      })));
+
+      assert.strictEqual(readJSON(statsFile).n, 120, 'every increment must survive');
+    } finally { cleanup(tmp); }
   });
 });
 

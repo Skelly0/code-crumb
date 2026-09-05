@@ -19,9 +19,9 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  STATE_FILE, SESSIONS_DIR, STATS_FILE, PID_FILE, QUIT_FLAG_FILE, SPAWN_LOCK_FILE,
+  STATE_FILE, SESSIONS_DIR, STATS_FILE, PID_FILE, QUIT_FLAG_FILE, SPAWN_LOCK_FILE, STATS_LOCK_FILE,
   safeFilename, getGitBranch, getIsWorktree, loadPrefs,
-  writeJsonAtomic, acquireSpawnLock, buildRendererCommands,
+  writeJsonAtomic, acquireSpawnLock, acquireFileLock, buildRendererCommands,
 } = require('./shared');
 const {
   toolToState, normalizeToolResponse, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
@@ -203,7 +203,13 @@ process.stdin.on('end', () => {
       || process.env.CLAUDE_SESSION_ID
       || FALLBACK_SESSION_ID;
 
-    // Load persistent stats
+    // Load persistent stats. Everything from here to the final writeStats()
+    // is one read-modify-write: parallel tool calls fire parallel hooks, and
+    // without the lock the last writer would silently drop the others'
+    // counter increments. A failed acquire proceeds unlocked -- the hook
+    // must never stall the editor waiting on a courtesy lock.
+    const releaseStats = acquireFileLock(STATS_LOCK_FILE);
+    try {
     const stats = readStats();
 
     // Daily tracking -- reset counters on new day
@@ -421,6 +427,8 @@ process.stdin.on('end', () => {
       };
       writeSessionState(sessionId, state, detail, false, { ...teamExtra, sessionId });
       writeStats(stats);
+      // process.exit skips finally -- release the stats lock by hand.
+      if (releaseStats) releaseStats();
       process.exit(0);
     }
     else if (hookEvent === 'TaskCompleted') {
@@ -435,6 +443,8 @@ process.stdin.on('end', () => {
       };
       writeSessionState(sessionId, state, detail, false, { ...teamExtra, sessionId });
       writeStats(stats);
+      // process.exit skips finally -- release the stats lock by hand.
+      if (releaseStats) releaseStats();
       process.exit(0);
     }
     else if (hookEvent === 'SubagentStart') {
@@ -734,6 +744,7 @@ process.stdin.on('end', () => {
     }
     pruneFrequentFiles(stats.frequentFiles);
     writeStats(stats);
+    } finally { if (releaseStats) releaseStats(); }
   } catch {
     // JSON parse may fail for events with empty or non-JSON stdin
     // (e.g., Stop, Notification, lifecycle events) -- still write the
