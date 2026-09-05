@@ -2391,4 +2391,101 @@ describe('face.js -- ACTIVE_WORK_STATES / COMPLETION_STATES consistency', () => 
   });
 });
 
+describe('face.js -- long-running tool escalation', () => {
+  test('detail is untouched under 8s', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', 'npm test');
+    assert.strictEqual(f.displayDetail(), 'npm test');
+  });
+
+  test('detail gains "still running" with elapsed seconds after 8s', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', 'npm test');
+    f.lastStateChange = Date.now() - 9000;
+    assert.match(f.displayDetail(), /^npm test \u00b7 still running \u2026 9s$/);
+  });
+
+  test('an empty detail escalates to just the suffix', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', '');
+    f.lastStateChange = Date.now() - 12000;
+    assert.match(f.displayDetail(), /^still running \u2026 12s$/);
+  });
+
+  test('non-work states never escalate', () => {
+    const f = new ClaudeFace();
+    f.forceState('happy', 'all done');
+    f.lastStateChange = Date.now() - 60000;
+    assert.strictEqual(f.displayDetail(), 'all done');
+  });
+
+  test('heldMs measures the time since the current state started', () => {
+    const f = new ClaudeFace();
+    f.setState('coding', 'edit face.js');
+    f.lastStateChange = Date.now() - 5000;
+    assert.ok(f.heldMs() >= 5000 && f.heldMs() < 6000);
+  });
+
+  test('sweat particles appear after 20s of the same tool', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', 'npm test');
+    f.lastStateChange = Date.now() - 21000;
+    f.particles.particles = [];
+    for (let i = 0; i < 24; i++) f.update(66);
+    assert.ok(f.particles.particles.some(p => p.style === 'sweat'));
+  });
+
+  test('no sweat before 20s', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', 'npm test');
+    f.lastStateChange = Date.now() - 10000;
+    f.particles.particles = [];
+    for (let i = 0; i < 24; i++) f.update(66);
+    assert.ok(!f.particles.particles.some(p => p.style === 'sweat'));
+  });
+
+  test('a long-held non-work state grows no sweat', () => {
+    const f = new ClaudeFace();
+    f.forceState('idle', '');
+    f.lastStateChange = Date.now() - 60000;
+    f.particles.particles = [];
+    for (let i = 0; i < 24; i++) f.update(66);
+    assert.ok(!f.particles.particles.some(p => p.style === 'sweat'));
+  });
+
+  test('the rendered detail line keeps the suffix when the base detail is long', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', 'x'.repeat(60));
+    f.lastStateChange = Date.now() - 9000;
+    const origCols = process.stdout.columns;
+    const origRows = process.stdout.rows;
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    const out = f.render();
+    process.stdout.columns = origCols;
+    process.stdout.rows = origRows;
+    assert.ok(out.includes('still running'));
+  });
+
+  test('an escalated empty detail still draws a detail line', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', '');
+    f.lastStateChange = Date.now() - 9000;
+    const origCols = process.stdout.columns;
+    const origRows = process.stdout.rows;
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    const out = f.render();
+    process.stdout.columns = origCols;
+    process.stdout.rows = origRows;
+    assert.ok(out.includes('still running'));
+  });
+
+  test('the escalation constants are exported', () => {
+    const { LONG_TOOL_ESCALATE_MS, LONG_TOOL_SWEAT_MS } = require('../face');
+    assert.strictEqual(LONG_TOOL_ESCALATE_MS, 8000);
+    assert.strictEqual(LONG_TOOL_SWEAT_MS, 20000);
+  });
+});
+
 module.exports = suite;

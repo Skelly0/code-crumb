@@ -41,6 +41,13 @@ const MAX_SEGMENT_BLOCKS = 5;
 // Nothing but an error replaces it sooner; after the window, whatever is
 // queued flushes -- a newer completion or the next work state.
 const COMPLETION_MIN_SHOW_MS = 1800;
+// A tool can outlive the hook cadence -- one Bash call can run for minutes with
+// no further event. The renderer holds the work face for it (idleCascade);
+// the face escalates instead of going stale: the detail line gains
+// "still running ... Ns" after LONG_TOOL_ESCALATE_MS, and sweat particles
+// start after LONG_TOOL_SWEAT_MS.
+const LONG_TOOL_ESCALATE_MS = 8000;
+const LONG_TOOL_SWEAT_MS = 20000;
 // Minimum display per state before a *non-bypassing* state may replace it.
 const MIN_DISPLAY_MS = {
   // rewards + error: long
@@ -172,6 +179,41 @@ class ClaudeFace {
 
   _getMinDisplayMs(state) {
     return MIN_DISPLAY_MS[state] || DEFAULT_MIN_DISPLAY_MS;
+  }
+
+  // How long the current state has been showing. Same-state writes refresh
+  // lastStateChange, so this always measures the current tool, not the run.
+  heldMs() {
+    return Date.now() - this.lastStateChange;
+  }
+
+  // The escalation suffix for a work state that has outlived the hook cadence,
+  // or '' when the current state has not earned one.
+  _escalationSuffix() {
+    if (!ACTIVE_WORK_STATES.has(this.state)) return '';
+    const held = this.heldMs();
+    if (held < LONG_TOOL_ESCALATE_MS) return '';
+    return `still running \u2026 ${Math.floor(held / 1000)}s`;
+  }
+
+  // What the detail line shows: the raw detail, or the escalated form for a
+  // tool that has been running longer than the hook cadence would explain.
+  // maxWidth (optional) truncates the *base* detail only -- the suffix must
+  // stay visible, since it is the part that says the tool is not stuck.
+  displayDetail(maxWidth) {
+    const suffix = this._escalationSuffix();
+    let base = this.stateDetail || '';
+    if (!suffix) {
+      if (maxWidth && base.length > maxWidth) base = base.slice(0, maxWidth - 3) + '...';
+      return base;
+    }
+    if (!base) return suffix;
+    if (maxWidth) {
+      const room = maxWidth - suffix.length - 3; // 3 = the ' · ' separator
+      if (room < 4) return suffix;
+      if (base.length > room) base = base.slice(0, room - 3) + '...';
+    }
+    return `${base} \u00b7 ${suffix}`;
   }
 
   setState(newState, detail = '') {
@@ -694,6 +736,9 @@ class ClaudeFace {
     if (this.state === 'responding' && this.frame % 18 === 0) this.particles.spawn(1, 'float');
     if (this.state === 'committing' && this.frame % 5 === 0) this.particles.spawn(2, 'push');
     if (this.state === 'coding' && this.frame % 6 === 0) this.particles.spawn(1, 'rain');
+    // A tool that has been running this long starts to sweat, whatever it is.
+    if (ACTIVE_WORK_STATES.has(this.state) && this.heldMs() >= LONG_TOOL_SWEAT_MS
+        && this.frame % 12 === 0) this.particles.spawn(1, 'sweat');
 
     // Caffeinated detection — triggers when 5+ state changes happen within 10s.
     // Routes through setState() for proper minDisplayUntil / lastStateChange tracking.
@@ -1054,12 +1099,10 @@ class ClaudeFace {
     buf += ansi.to(startRow + 9, startCol);
     buf += `${ansi.fg(...theme.label)}${' '.repeat(Math.max(0, statusPad))}${statusText}${r}`;
 
-    // Detail line
-    if (this.stateDetail) {
-      const maxDetailWidth = Math.min(Math.max(10, cols - startCol - 8), 36);
-      const detailText = this.stateDetail.length > maxDetailWidth
-        ? this.stateDetail.slice(0, maxDetailWidth - 3) + '...'
-        : this.stateDetail;
+    // Detail line (escalated for a tool that has been running a long time)
+    const maxDetailWidth = Math.min(Math.max(10, cols - startCol - 8), 36);
+    const detailText = this.displayDetail(maxDetailWidth);
+    if (detailText) {
       const detailPad = Math.floor((faceW - detailText.length) / 2);
       buf += ansi.to(startRow + 10, startCol);
       buf += `${ansi.fg(...dimColor(theme.label, 0.65))}${' '.repeat(Math.max(0, detailPad))}${detailText}${r}`;
@@ -1284,4 +1327,5 @@ module.exports = {
   ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   MIN_DISPLAY_MS, COMPLETION_MIN_SHOW_MS,
+  LONG_TOOL_ESCALATE_MS, LONG_TOOL_SWEAT_MS,
 };

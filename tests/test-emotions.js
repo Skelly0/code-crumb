@@ -558,4 +558,85 @@ describe('emotions -- catch-path parity for team events', () => {
   });
 });
 
+// -- The renderer's timeout cascade -------------------------------------
+
+const {
+  idleCascade, LONG_TOOL_HOLD_MS, IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
+} = require('../renderer');
+
+describe('emotions -- a long-running tool keeps its face', () => {
+  test('executing is held while the file still says executing', () => {
+    assert.strictEqual(idleCascade({ state: 'executing', sinceChangeMs: 30000, sessionActive: true, lingerMs: 0, fileState: 'executing' }), null);
+  });
+
+  test('executing degrades to thinking once the file names something else', () => {
+    assert.strictEqual(idleCascade({ state: 'executing', sinceChangeMs: 9000, sessionActive: true, lingerMs: 0, fileState: 'relieved' }), 'thinking');
+  });
+
+  test('the hold has a cap', () => {
+    assert.strictEqual(idleCascade({ state: 'executing', sinceChangeMs: LONG_TOOL_HOLD_MS + 1, sessionActive: true, lingerMs: 0, fileState: 'executing' }), 'thinking');
+  });
+
+  test('a stopped session is never held', () => {
+    assert.strictEqual(idleCascade({ state: 'executing', sinceChangeMs: 9000, sessionActive: false, lingerMs: 0, fileState: 'executing' }), 'idle');
+  });
+
+  test('subagent work is held too', () => {
+    assert.strictEqual(idleCascade({ state: 'subagent', sinceChangeMs: 120000, sessionActive: true, lingerMs: 0, fileState: 'subagent' }), null);
+  });
+
+  test('responding is never held -- it is a post-turn state, not a tool', () => {
+    assert.strictEqual(idleCascade({ state: 'responding', sinceChangeMs: IDLE_TIMEOUT + 1, sessionActive: true, lingerMs: 0, fileState: 'responding' }), 'thinking');
+  });
+
+  test('work still degrades before IDLE_TIMEOUT is reached (nothing changes early)', () => {
+    assert.strictEqual(idleCascade({ state: 'coding', sinceChangeMs: 1000, sessionActive: true, lingerMs: 0, fileState: 'relieved' }), null);
+  });
+});
+
+describe('emotions -- the timeout cascade keeps its pre-existing branches', () => {
+  test('starting -> idle after 2.5s', () => {
+    assert.strictEqual(idleCascade({ state: 'starting', sinceChangeMs: 2600, sessionActive: true, lingerMs: 0, fileState: 'starting' }), 'idle');
+    assert.strictEqual(idleCascade({ state: 'starting', sinceChangeMs: 2400, sessionActive: true, lingerMs: 0, fileState: 'starting' }), null);
+  });
+
+  test('responding -> happy once the session ended', () => {
+    assert.strictEqual(idleCascade({ state: 'responding', sinceChangeMs: 0, sessionActive: false, lingerMs: 0, fileState: 'responding' }), 'happy');
+  });
+
+  test('completion linger -> thinking while active, idle when stopped', () => {
+    assert.strictEqual(idleCascade({ state: 'happy', sinceChangeMs: 5001, sessionActive: true, lingerMs: 5000, fileState: 'happy' }), 'thinking');
+    assert.strictEqual(idleCascade({ state: 'happy', sinceChangeMs: 5001, sessionActive: false, lingerMs: 5000, fileState: 'happy' }), 'idle');
+  });
+
+  test('a completion inside its linger holds', () => {
+    assert.strictEqual(idleCascade({ state: 'happy', sinceChangeMs: 4999, sessionActive: true, lingerMs: 5000, fileState: 'happy' }), null);
+  });
+
+  test('thinking -> idle after THINKING_TIMEOUT when active, IDLE_TIMEOUT when stopped', () => {
+    assert.strictEqual(idleCascade({ state: 'thinking', sinceChangeMs: THINKING_TIMEOUT + 1, sessionActive: true, lingerMs: 0, fileState: 'thinking' }), 'idle');
+    assert.strictEqual(idleCascade({ state: 'thinking', sinceChangeMs: IDLE_TIMEOUT + 1, sessionActive: false, lingerMs: 0, fileState: 'thinking' }), 'idle');
+    assert.strictEqual(idleCascade({ state: 'thinking', sinceChangeMs: IDLE_TIMEOUT + 1, sessionActive: true, lingerMs: 0, fileState: 'thinking' }), null);
+  });
+
+  test('idle -> sleeping after SLEEP_TIMEOUT; sleeping holds', () => {
+    assert.strictEqual(idleCascade({ state: 'idle', sinceChangeMs: SLEEP_TIMEOUT + 1, sessionActive: false, lingerMs: 0, fileState: 'idle' }), 'sleeping');
+    assert.strictEqual(idleCascade({ state: 'idle', sinceChangeMs: SLEEP_TIMEOUT - 1, sessionActive: false, lingerMs: 0, fileState: 'idle' }), null);
+    assert.strictEqual(idleCascade({ state: 'sleeping', sinceChangeMs: 999999, sessionActive: false, lingerMs: 0, fileState: 'idle' }), null);
+  });
+
+  test('waiting and error degrade like any other non-work state', () => {
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: IDLE_TIMEOUT + 1, sessionActive: true, lingerMs: 0, fileState: 'waiting' }), 'thinking');
+    assert.strictEqual(idleCascade({ state: 'error', sinceChangeMs: IDLE_TIMEOUT + 1, sessionActive: false, lingerMs: 0, fileState: 'error' }), 'idle');
+    assert.strictEqual(idleCascade({ state: 'error', sinceChangeMs: IDLE_TIMEOUT - 1, sessionActive: false, lingerMs: 0, fileState: 'error' }), null);
+  });
+
+  test('the renderer still exports the timeout constants it cascades on', () => {
+    assert.strictEqual(IDLE_TIMEOUT, 8000);
+    assert.strictEqual(THINKING_TIMEOUT, 45000);
+    assert.strictEqual(SLEEP_TIMEOUT, 60000);
+    assert.strictEqual(LONG_TOOL_HOLD_MS, 600000);
+  });
+});
+
 module.exports = suite;

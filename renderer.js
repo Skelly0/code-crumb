@@ -33,6 +33,7 @@ const FRAME_MS = Math.floor(1000 / FPS);
 const IDLE_TIMEOUT = 8000;
 const THINKING_TIMEOUT = 45000; // 45s -- safety net if Stop event is missed
 const SLEEP_TIMEOUT = 60000;
+const LONG_TOOL_HOLD_MS = 600000; // 10 min: the longest a single tool call can run
 
 // -- Hoisted sets for checkState() hot path ---------------------------
 const { ACTIVE_WORK_STATES, COMPLETION_STATES } = require('./shared');
@@ -41,6 +42,30 @@ const RESCUE_EXCLUDE = new Set(['idle', 'sleeping', 'responding', 'starting', 'h
 // active work state, every completion, and thinking. Derived so a new work
 // state can never be forgotten here (committing/reviewing/subagent/training were).
 const FRESH_READ_STATES = new Set(['thinking', ...ACTIVE_WORK_STATES, ...COMPLETION_STATES]);
+
+// -- Timeout cascade -------------------------------------------------
+// Pure: decide the timeout-driven transition for the main face.
+// Returns the next state, or null to hold the current one.
+//   state         current face state
+//   sinceChangeMs how long it has been showing (now - face.lastStateChange)
+//   sessionActive Stop has not fired and the editor PID is not known dead
+//   lingerMs      COMPLETION_LINGER for the current state (0 when it has none)
+//   fileState     the state last applied from the state file
+function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState }) {
+  if (state === 'starting') return sinceChangeMs > 2500 ? 'idle' : null;
+  if (state === 'responding' && !sessionActive) return 'happy';
+  if (lingerMs && sinceChangeMs > lingerMs) return sessionActive ? 'thinking' : 'idle';
+  if (state === 'thinking') {
+    return sinceChangeMs > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT) ? 'idle' : null;
+  }
+  if (state === 'idle') return sinceChangeMs > SLEEP_TIMEOUT ? 'sleeping' : null;
+  if (state === 'sleeping' || COMPLETION_STATES.has(state)) return null;
+  // The state file still names this same unfinished tool: hold the work face.
+  // ('responding' is in ACTIVE_WORK_STATES but is a post-turn state, never a tool.)
+  if (ACTIVE_WORK_STATES.has(state) && state !== 'responding' && sessionActive
+      && fileState === state && sinceChangeMs <= LONG_TOOL_HOLD_MS) return null;
+  return sinceChangeMs > IDLE_TIMEOUT ? (sessionActive ? 'thinking' : 'idle') : null;
+}
 
 // -- Shared runtime -------------------------------------------------
 
@@ -157,6 +182,7 @@ function runUnifiedMode() {
   let candidateTs = 0;        // JSON timestamp of the write that reported the candidate
   let editorDead = false;     // Armed PID found dead — session presumed crashed
   let lastAppliedTimestamp = 0; // Dedup: skip re-applying state with same timestamp
+  let lastAppliedState = null;  // State named by that write -- "is this tool still running?"
   function checkState() {
     const now = Date.now();
     let cachedStateData = null; // Cache readState() to avoid duplicate fs.readFileSync
@@ -254,6 +280,8 @@ function runUnifiedMode() {
             lastEditorPid = 0;
             candidatePid = 0;
             editorDead = false;
+            // The old session's tool is no longer what the file names
+            lastAppliedState = null;
           } else {
             return; // Ignore — this is a subagent writing to the state file
           }
@@ -279,6 +307,7 @@ function runUnifiedMode() {
 
         if (ts > lastAppliedTimestamp) {
           lastAppliedTimestamp = ts;
+          lastAppliedState = stateData.state;
           // Force-apply stopped state (session ended) — bypass minimum display time
           // so the face doesn't get stuck on "thinking" when Claude is interrupted
           if (stateData.stopped && Date.now() < face.minDisplayUntil) {
@@ -325,6 +354,7 @@ function runUnifiedMode() {
         const stoppedNow = freshData.stopped || false;
         if (stoppedNow && !lastStopped && freshTs > lastAppliedTimestamp) {
           lastAppliedTimestamp = freshTs;
+          lastAppliedState = freshData.state;
           lastStopped = stoppedNow;
           // If the file says responding, apply it; otherwise
           // we just set lastStopped so the rescue block above fires next frame.
@@ -338,33 +368,23 @@ function runUnifiedMode() {
     // Don't apply timeouts if minimum display time hasn't passed
     if (now < face.minDisplayUntil) return;
 
-    const completionLinger = COMPLETION_LINGER[face.state];
     // Session is active until Stop hook fires (writes stopped: true)
     // or the armed editor PID is found dead
     const sessionActive = !lastStopped && !editorDead;
 
-    // Auto-transition: starting → idle after min display
-    if (face.state === 'starting' && now - face.lastStateChange > 2500) {
-      face.setState('idle');
-    // Auto-transition: responding → happy after min display (Stop already fired)
-    } else if (face.state === 'responding' && (lastStopped || editorDead) && now >= face.minDisplayUntil) {
-      face.setState('happy');
-    } else if (completionLinger && now - face.lastStateChange > completionLinger) {
-      face.setState(sessionActive ? 'thinking' : 'idle');
-    } else if (face.state === 'thinking' &&
-               now - face.lastStateChange > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT)) {
-      face.setState('idle');
-    } else if (!COMPLETION_STATES.has(face.state) &&
-               face.state !== 'idle' && face.state !== 'sleeping' &&
-               face.state !== 'thinking' &&
-               face.state !== 'starting' &&
-               now - face.lastStateChange > IDLE_TIMEOUT) {
-      // Active tool states degrade to thinking (not idle) if session is still running
-      face.setState(sessionActive ? 'thinking' : 'idle');
-    }
-    if (face.state === 'idle' && now - face.lastStateChange > SLEEP_TIMEOUT) {
-      face.setState('sleeping');
-    }
+    // Timeout-driven transitions: starting → idle, responding → happy once the
+    // session ended, a completion's linger, thinking/idle timeouts, and the
+    // degrade-to-thinking fallback — except while the state file still names
+    // the same unfinished tool, which holds the work face (face.js escalates
+    // its detail line instead).
+    const next = idleCascade({
+      state: face.state,
+      sinceChangeMs: now - face.lastStateChange,
+      sessionActive,
+      lingerMs: COMPLETION_LINGER[face.state] || 0,
+      fileState: lastAppliedState,
+    });
+    if (next) face.setState(next);
   }
 
   checkState();
@@ -769,5 +789,6 @@ if (require.main === module) {
     IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
     PALETTES, PALETTE_NAMES,
     readState, ACTIVE_WORK_STATES, COMPLETION_STATES, FRESH_READ_STATES,
+    idleCascade, IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT, LONG_TOOL_HOLD_MS,
   };
 }
