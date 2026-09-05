@@ -24,6 +24,8 @@ const {
   extractExitCode,
   isMergeConflict,
   classifyToolResult,
+  diffFromPatch,
+  diffFromInput,
   normalizeToolResponse,
   classifyTruncatedInput,
   MILESTONES,
@@ -879,6 +881,161 @@ describe('state-machine.js -- classifyToolResult (error detection)', () => {
   test('Bash tool with stderr "error" → still error (not gated)', () => {
     const r = classifyToolResult('Bash', { command: 'make' }, { stderr: 'fatal error occurred' }, false);
     assert.strictEqual(r.state, 'error');
+  });
+});
+
+describe('state-machine.js -- diffFromPatch', () => {
+  test('counts added and removed lines in one hunk', () => {
+    assert.deepStrictEqual(diffFromPatch([{ lines: ['-a', '-b', '+c', ' ctx'] }]), { added: 1, removed: 2 });
+  });
+
+  test('sums across two hunks', () => {
+    assert.deepStrictEqual(diffFromPatch([
+      { oldStart: 1, oldLines: 2, newStart: 1, newLines: 1, lines: [' x', '-y'] },
+      { oldStart: 9, oldLines: 1, newStart: 8, newLines: 3, lines: [' z', '+p', '+q'] },
+    ]), { added: 2, removed: 1 });
+  });
+
+  test('a context-only hunk → zero counts, not null', () => {
+    assert.deepStrictEqual(diffFromPatch([{ lines: [' a', ' b'] }]), { added: 0, removed: 0 });
+  });
+
+  test('empty array → null', () => {
+    assert.strictEqual(diffFromPatch([]), null);
+  });
+
+  test('null → null', () => {
+    assert.strictEqual(diffFromPatch(null), null);
+  });
+
+  test('non-array → null', () => {
+    assert.strictEqual(diffFromPatch('nope'), null);
+  });
+
+  test('hunk without lines → null', () => {
+    assert.strictEqual(diffFromPatch([{}]), null);
+  });
+
+  test('hunk whose lines are not an array → null', () => {
+    assert.strictEqual(diffFromPatch([{ lines: 'nope' }]), null);
+  });
+
+  test('non-string entries inside a hunk are skipped', () => {
+    assert.deepStrictEqual(diffFromPatch([{ lines: ['+a', null, 42, '-b'] }]), { added: 1, removed: 1 });
+  });
+
+  test('"+++"-prefixed lines still count (hunks carry no file headers)', () => {
+    assert.deepStrictEqual(diffFromPatch([{ lines: ['+++ b/a.js', '--- a/a.js'] }]), { added: 1, removed: 1 });
+  });
+});
+
+describe('state-machine.js -- diffFromInput (fallback)', () => {
+  test('counts old_string / new_string lines', () => {
+    assert.deepStrictEqual(diffFromInput({ old_string: 'x\ny', new_string: 'x\nz' }), { added: 2, removed: 2 });
+  });
+
+  test('accepts the old_str / new_str spelling', () => {
+    assert.deepStrictEqual(diffFromInput({ old_str: 'a', new_str: 'b\nc' }), { added: 2, removed: 1 });
+  });
+
+  test('Write content counts as added lines', () => {
+    assert.deepStrictEqual(diffFromInput({ content: 'a\nb\nc' }), { added: 3, removed: 0 });
+  });
+
+  test('NotebookEdit new_source counts as added lines', () => {
+    assert.deepStrictEqual(diffFromInput({ new_source: 'a\nb\nc' }), { added: 3, removed: 0 });
+  });
+
+  test('MultiEdit sums its edits', () => {
+    assert.deepStrictEqual(diffFromInput({
+      edits: [
+        { old_string: 'a', new_string: 'b\nc' },
+        { old_string: 'd\ne', new_string: 'f' },
+      ],
+    }), { added: 3, removed: 3 });
+  });
+
+  test('MultiEdit with junk entries does not throw', () => {
+    assert.deepStrictEqual(diffFromInput({ edits: [null, { old_string: 'a' }] }), { added: 0, removed: 1 });
+  });
+
+  test('empty edits array → null', () => {
+    assert.strictEqual(diffFromInput({ edits: [] }), null);
+  });
+
+  test('nothing to count → null', () => {
+    assert.strictEqual(diffFromInput({ file_path: '/a.js' }), null);
+  });
+});
+
+describe('state-machine.js -- exact diff counts from structuredPatch', () => {
+  test('a patch beats the input-based estimate', () => {
+    const r = classifyToolResult('Edit', {
+      file_path: 'a.js', old_string: 'x\ny', new_string: 'x\nz',
+    }, {
+      structuredPatch: [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, lines: [' x', '-y', '+z'] }],
+    }, false);
+    assert.strictEqual(r.state, 'proud');
+    assert.deepStrictEqual(r.diffInfo, { added: 1, removed: 1 });
+  });
+
+  test('without a patch the input fallback is unchanged', () => {
+    const r = classifyToolResult('Edit', {
+      file_path: 'a.js', old_string: 'x\ny', new_string: 'x\nz',
+    }, {}, false);
+    assert.deepStrictEqual(r.diffInfo, { added: 2, removed: 2 });
+  });
+
+  test('a malformed patch falls back to the inputs', () => {
+    const r = classifyToolResult('Edit', {
+      file_path: 'a.js', old_string: 'x\ny', new_string: 'x\nz',
+    }, { structuredPatch: [{}] }, false);
+    assert.deepStrictEqual(r.diffInfo, { added: 2, removed: 2 });
+  });
+
+  test('MultiEdit without a patch sums its edits', () => {
+    const r = classifyToolResult('MultiEdit', {
+      file_path: 'a.js',
+      edits: [
+        { old_string: 'a', new_string: 'b\nc' },
+        { old_string: 'd\ne', new_string: 'f' },
+      ],
+    }, {}, false);
+    assert.strictEqual(r.state, 'proud');
+    assert.deepStrictEqual(r.diffInfo, { added: 3, removed: 3 });
+  });
+
+  test('MultiEdit with a patch uses the patch', () => {
+    const r = classifyToolResult('MultiEdit', {
+      file_path: 'a.js',
+      edits: [{ old_string: 'a', new_string: 'b\nc' }],
+    }, { structuredPatch: [{ lines: ['-a', '+b', '+c'] }] }, false);
+    assert.deepStrictEqual(r.diffInfo, { added: 2, removed: 1 });
+  });
+
+  test('NotebookEdit new_source is counted (used to be null)', () => {
+    const r = classifyToolResult('NotebookEdit', {
+      notebook_path: '/nb.ipynb', new_source: 'a\nb\nc',
+    }, {}, false);
+    assert.strictEqual(r.state, 'proud');
+    assert.deepStrictEqual(r.diffInfo, { added: 3, removed: 0 });
+  });
+
+  test('a deletion-only patch reports removals only', () => {
+    const r = classifyToolResult('Edit', {
+      file_path: 'a.js', old_string: 'x\ny\nz', new_string: 'x',
+    }, { structuredPatch: [{ lines: [' x', '-y', '-z'] }] }, false);
+    assert.deepStrictEqual(r.diffInfo, { added: 0, removed: 2 });
+  });
+
+  test('normalizeToolResponse carries a structuredPatch array through', () => {
+    const r = normalizeToolResponse({ tool_response: { structuredPatch: [{ lines: ['+x'] }], stdout: '' } });
+    assert.ok(Array.isArray(r.structuredPatch));
+    assert.strictEqual(r.structuredPatch[0].lines[0], '+x');
+  });
+
+  test('normalizeToolResponse drops a non-array structuredPatch', () => {
+    assert.strictEqual(normalizeToolResponse({ tool_response: { structuredPatch: 'junk' } }).structuredPatch, undefined);
   });
 });
 

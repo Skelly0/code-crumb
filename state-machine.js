@@ -384,6 +384,9 @@ function normalizeToolResponse(data) {
   if (rawResult.interrupted !== undefined) out.interrupted = !!rawResult.interrupted;
   const exit = rawResult.exitCode ?? rawResult.exit_code;
   if (typeof exit === 'number') out.exitCode = exit;
+  // Claude Code's edit diff, carried through only when it is the array we expect.
+  // It is read for line counts and never persisted -- see diffFromPatch.
+  if (Array.isArray(rawResult.structuredPatch)) out.structuredPatch = rawResult.structuredPatch;
   return out;
 }
 
@@ -395,6 +398,49 @@ function isMergeConflict(stdout, stderr) {
   return /\bCONFLICT\s+\(.*\):/.test(combined) ||
          /\bAutomatic merge failed\b/i.test(combined) ||
          /\bfix conflicts and then commit\b/i.test(combined);
+}
+
+// -- Edit Diff Counting ----------------------------------------------
+
+// Claude Code attaches a `structuredPatch` to PostToolUse for Edit/MultiEdit/
+// Write-over-existing: hunks of { oldStart, oldLines, newStart, newLines,
+// lines } where each line keeps its '+', '-' or ' ' prefix. Counting those is
+// exact -- a same-length replacement is +1 -1, where counting the raw inputs
+// claims +2 -2. Returns null when the patch is absent or malformed so the
+// caller can fall back. Only the two totals are kept; the patch is never
+// written to the state file.
+function diffFromPatch(structuredPatch) {
+  if (!Array.isArray(structuredPatch) || structuredPatch.length === 0) return null;
+  let added = 0, removed = 0, sawHunk = false;
+  for (const hunk of structuredPatch) {
+    if (!hunk || !Array.isArray(hunk.lines)) continue;
+    sawHunk = true;
+    for (const line of hunk.lines) {
+      if (typeof line !== 'string') continue;
+      if (line[0] === '+') added++;
+      else if (line[0] === '-') removed++;
+    }
+  }
+  return sawHunk ? { added, removed } : null;
+}
+
+// Fallback when no patch is available (other editors, Write to a new file):
+// line counts of the edit's own inputs. Approximate -- a replacement counts
+// both sides in full -- but it is all these tools give us.
+function diffFromInput(input) {
+  if (Array.isArray(input.edits)) {              // MultiEdit
+    let added = 0, removed = 0;
+    for (const e of input.edits) {
+      const o = toText(e && e.old_string), n = toText(e && e.new_string);
+      if (o) removed += o.split('\n').length;
+      if (n) added += n.split('\n').length;
+    }
+    return added || removed ? { added, removed } : null;
+  }
+  const oldStr = toText(input.old_string || input.old_str);
+  const newStr = toText(input.new_string || input.new_str || input.content || input.new_source);
+  if (!oldStr && !newStr) return null;
+  return { added: newStr ? newStr.split('\n').length : 0, removed: oldStr ? oldStr.split('\n').length : 0 };
 }
 
 // Encapsulates the full PostToolUse decision tree.
@@ -430,14 +476,9 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
   } else if (EDIT_TOOLS.test(name)) {
     state = 'proud';
     detail = fp ? `saved ${path.basename(fp)}` : 'code written';
-    // Calculate diff info for thought bubbles
-    const oldStr = toText(input.old_string || input.old_str);
-    const newStr = toText(input.new_string || input.new_str || input.content);
-    if (oldStr || newStr) {
-      const removed = oldStr ? oldStr.split('\n').length : 0;
-      const added = newStr ? newStr.split('\n').length : 0;
-      diffInfo = { added, removed };
-    }
+    // Diff info for thought bubbles: exact from the patch when we got one,
+    // otherwise estimated from the edit's inputs
+    diffInfo = diffFromPatch(toolResponse && toolResponse.structuredPatch) || diffFromInput(input);
   } else if (READ_TOOLS.test(name)) {
     state = 'satisfied';
     detail = fp ? `read ${path.basename(fp)}` : 'got it';
@@ -770,6 +811,8 @@ module.exports = {
   errorDetail,
   extractExitCode,
   normalizeToolResponse,
+  diffFromPatch,
+  diffFromInput,
   classifyToolResult,
   classifyTruncatedInput,
   MILESTONES,

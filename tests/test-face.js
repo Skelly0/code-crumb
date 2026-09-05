@@ -230,6 +230,32 @@ describe('face.js -- ClaudeFace.setStats', () => {
   });
 });
 
+describe('face.js -- diff thought bubble', () => {
+  function proudWith(diffInfo) {
+    const face = new ClaudeFace();
+    face.forceState('proud', 'saved a.js');
+    face.setStats({ diffInfo });
+    face._updateThought();
+    return face.thoughtText;
+  }
+
+  test('additions and removals → "+N -M lines"', () => {
+    assert.strictEqual(proudWith({ added: 4, removed: 2 }), '+4 -2 lines');
+  });
+
+  test('additions only → "+N lines"', () => {
+    assert.strictEqual(proudWith({ added: 4, removed: 0 }), '+4 lines');
+  });
+
+  test('removals only → "-M lines"', () => {
+    assert.strictEqual(proudWith({ added: 0, removed: 3 }), '-3 lines');
+  });
+
+  test('a no-op diff falls back to a generic completion thought', () => {
+    assert.notStrictEqual(proudWith({ added: 0, removed: 0 }), '-0 lines');
+  });
+});
+
 describe('face.js -- ClaudeFace modelName', () => {
   test('default modelName is "claude"', () => {
     const face = new ClaudeFace();

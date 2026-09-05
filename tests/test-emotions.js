@@ -513,6 +513,41 @@ describe('emotions -- Notification types get distinct faces', () => {
   }
 });
 
+describe('emotions -- an edit diff is counted from structuredPatch', () => {
+  test('a same-length replacement reports +1 -1, not +2 -2', () => {
+    const { tmp, stateFile, env } = makeTempEnv('diff-1');
+    try {
+      runHook('PostToolUse', {
+        session_id: 'diff-1',
+        tool_name: 'Edit',
+        tool_input: { file_path: 'a.js', old_string: 'x\ny', new_string: 'x\nz' },
+        tool_response: {
+          filePath: 'a.js',
+          structuredPatch: [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 2, lines: [' x', '-y', '+z'] }],
+        },
+      }, env);
+      const st = readJSON(stateFile);
+      assert.strictEqual(st.state, 'proud');
+      assert.deepStrictEqual(st.diffInfo, { added: 1, removed: 1 });
+      assert.ok(!('structuredPatch' in st), 'the patch itself must never be persisted');
+    } finally { cleanup(tmp); }
+  });
+
+  test('without a patch the input-based fallback still fires', () => {
+    const { tmp, stateFile, env } = makeTempEnv('diff-2');
+    try {
+      runHook('PostToolUse', {
+        session_id: 'diff-2',
+        tool_name: 'Edit',
+        tool_input: { file_path: 'a.js', old_string: 'x\ny', new_string: 'x\nz' },
+        tool_response: { filePath: 'a.js' },
+      }, env);
+      const st = readJSON(stateFile);
+      assert.deepStrictEqual(st.diffInfo, { added: 2, removed: 2 });
+    } finally { cleanup(tmp); }
+  });
+});
+
 describe('emotions -- catch-path parity for team events', () => {
   test('update-state.js fallback chain handles TeammateIdle and TaskCompleted', () => {
     const src = fs.readFileSync(UPDATE_STATE, 'utf8');

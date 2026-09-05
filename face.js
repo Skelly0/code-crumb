@@ -451,6 +451,8 @@ class ClaudeFace {
         this.thoughtText = `+${added} -${removed} lines`;
       } else if (added > 0) {
         this.thoughtText = `+${added} lines`;
+      } else if (removed > 0) {
+        this.thoughtText = `-${removed} lines`;
       } else {
         this.thoughtText = COMPLETION_THOUGHTS[this.thoughtIndex % COMPLETION_THOUGHTS.length];
       }
