@@ -18,14 +18,9 @@ const { eyes, mouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { getAccessory } = require('./accessories');
 
-// Active tool states that represent real work happening NOW.
-// These bypass the min display time of passive/thinking/completion states,
-// mirroring how 'error' already bypasses.
-const ACTIVE_WORK_STATES = new Set([
-  'executing', 'coding', 'reading', 'searching', 'testing',
-  'installing', 'committing', 'reviewing', 'subagent', 'responding',
-  'training',
-]);
+// Active tool states (real work happening NOW), completion (reward) states,
+// and the states work may interrupt -- shared with grid.js and renderer.js.
+const { ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES } = require('./shared');
 // Low-activity states used for timeline compression and consecutive-entry capping
 const LOW_ACTIVITY_STATES = new Set(['idle', 'sleeping', 'waiting']);
 
@@ -35,14 +30,28 @@ const COMPRESS_LOW_CAP = 30000;
 // Max consecutive blocks any single state segment can occupy in the timeline bar
 const MAX_SEGMENT_BLOCKS = 5;
 
-const INTERRUPTIBLE_STATES = new Set([
-  'thinking', 'happy', 'satisfied', 'proud', 'relieved',
-  'idle', 'sleeping', 'waiting',
-]);
-const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
-// Minimum ms a completion state must be visible before a work state can bypass it.
-// Prevents the "satisfied flicker" where work immediately swallows the reward face.
-const COMPLETION_MIN_SHOW_MS = 500;
+// -- Timing --------------------------------------------------------
+// The face has two kinds of state. WORK states (coding, reading, ...) should
+// track reality closely -- every PreToolUse refreshes them, so their minimum
+// display only needs to stop single-frame flicker. REWARD states (happy,
+// proud, satisfied, relieved) and error are the emotions the user actually
+// wants to see, so they get a guaranteed on-screen window.
+//
+// COMPLETION_MIN_SHOW_MS: a completion face owns the screen for this long.
+// Nothing but an error replaces it sooner; after the window, whatever is
+// queued flushes -- a newer completion or the next work state.
+const COMPLETION_MIN_SHOW_MS = 1800;
+// Minimum display per state before a *non-bypassing* state may replace it.
+const MIN_DISPLAY_MS = {
+  // rewards + error: long
+  happy: 4000, proud: 4500, satisfied: 2500, relieved: 2500, error: 4000,
+  // passive
+  thinking: 2500, responding: 3000, caffeinated: 2500, waiting: 1500, sleeping: 1000, starting: 1500,
+  // work: short -- refreshed by every tool event anyway
+  coding: 1500, reading: 1200, searching: 1200, executing: 1200, testing: 1200, installing: 1200,
+  committing: 1500, reviewing: 1500, subagent: 2000, spawning: 2000, training: 2500,
+};
+const DEFAULT_MIN_DISPLAY_MS = 1000;
 
 // -- Config --------------------------------------------------------
 const BLINK_MIN = 2500;
@@ -85,6 +94,7 @@ class ClaudeFace {
     this.minDisplayUntil = 0;
     this.pendingState = null;
     this.pendingDetail = '';
+    this.pendingWork = null;   // { state, detail } work that arrived while a completion was queued
 
     // Thought bubbles
     this.thoughtText = '';
@@ -161,15 +171,7 @@ class ClaudeFace {
   }
 
   _getMinDisplayMs(state) {
-    const times = {
-      happy: 4000, proud: 4500, satisfied: 2500, relieved: 2500,
-      error: 4000, coding: 6000, thinking: 2500, responding: 3000, reading: 4000,
-      searching: 4000, executing: 4000, testing: 4000, installing: 4000,
-      caffeinated: 2500, subagent: 4000, waiting: 1500, sleeping: 1000,
-      starting: 1500, spawning: 4000, committing: 3500, reviewing: 3500,
-      training: 5000,
-    };
-    return times[state] || 1000;
+    return MIN_DISPLAY_MS[state] || DEFAULT_MIN_DISPLAY_MS;
   }
 
   setState(newState, detail = '') {
@@ -177,108 +179,54 @@ class ClaudeFace {
       const now = Date.now();
 
       // Minimum display time: buffer incoming state if current hasn't shown long enough.
-      // Errors and rate limits always bypass -- critical feedback.
+      // Errors always bypass -- critical feedback.
       //
-      // Anti-flicker rules (Fix #96 follow-up):
-      //   1. Work states bypass completion states, BUT only after COMPLETION_MIN_SHOW_MS
-      //      so the reward face isn't swallowed in a single frame.
-      //   2. Completion states do NOT bypass active work states -- they queue behind work
-      //      and show once the current tool finishes, preventing satisfied→reading→satisfied
-      //      oscillation on fast tool sequences.
-      //   3. update() flushes a buffered work state early once the completion window passes.
+      // Anti-flicker rules:
+      //   1. A completion (reward) face owns the screen for COMPLETION_MIN_SHOW_MS.
+      //      Inside that window nothing but an error replaces it -- not the next
+      //      work state, and not a newer completion either (they queue).
+      //   2. After the window, work states bypass completions immediately.
+      //   3. Completion states do NOT bypass active work states -- they queue behind
+      //      work and show once the current tool finishes, preventing
+      //      satisfied->reading->satisfied oscillation on fast tool sequences.
+      //   4. Work that arrives while a completion is queued is remembered in
+      //      pendingWork and resumes after that completion has had its window, so
+      //      a long-running tool is never lost behind a reward face.
+      //   5. update() flushes whatever is queued once the window has passed.
       const completionAge = now - this.lastStateChange;
-      const shouldBypass = ACTIVE_WORK_STATES.has(newState)
-          && INTERRUPTIBLE_STATES.has(this.state)
-          && (!COMPLETION_STATES.has(this.state) || completionAge >= COMPLETION_MIN_SHOW_MS);
+      const inGuaranteedWindow = COMPLETION_STATES.has(this.state) && completionAge < COMPLETION_MIN_SHOW_MS;
+      const newIsWork = ACTIVE_WORK_STATES.has(newState);
+      const newIsCompletion = COMPLETION_STATES.has(newState);
+      const shouldBypass = newIsWork && INTERRUPTIBLE_STATES.has(this.state) && !inGuaranteedWindow;
 
-      // Completion states are buffered (not bypassed) when work is actively running.
-      const isCompletionDuringWork = COMPLETION_STATES.has(newState) && ACTIVE_WORK_STATES.has(this.state);
+      // Completions are buffered (not bypassed) while work is running or while a
+      // completion is still inside its guaranteed window.
+      const isCompletionDuringWork = newIsCompletion && ACTIVE_WORK_STATES.has(this.state);
+      const isCompletionDuringWindow = newIsCompletion && inGuaranteedWindow;
 
       const shouldBuffer = now < this.minDisplayUntil
           && newState !== 'error'
-          && (!COMPLETION_STATES.has(newState) || isCompletionDuringWork)
+          && (!newIsCompletion || isCompletionDuringWork || isCompletionDuringWindow)
           && !shouldBypass;
 
       if (shouldBuffer) {
-        // Errors are never overwritten. Completions protect against mundane overwrites
-        // (e.g. idle shouldn't displace a pending satisfied), but yield to newer completions.
-        const pendingIsProtected = this.pendingState === 'error'
-            || (COMPLETION_STATES.has(this.pendingState) && !COMPLETION_STATES.has(newState) && newState !== 'error');
-        if (!pendingIsProtected) {
-          this.pendingState = newState;
-          this.pendingDetail = detail;
+        // Errors are never displaced. A queued completion protects itself against
+        // mundane overwrites (idle must not displace a pending satisfied) but yields
+        // to a newer completion; work arriving behind it is remembered instead.
+        if (this.pendingState === 'error') return;
+        const pendingIsCompletion = COMPLETION_STATES.has(this.pendingState);
+        if (pendingIsCompletion && !newIsCompletion) {
+          if (newIsWork) this.pendingWork = { state: newState, detail };
+          return;
         }
+        this.pendingState = newState;
+        this.pendingDetail = detail;
+        // A completion means the tool behind any remembered work has finished.
+        if (newIsCompletion) this.pendingWork = null;
         return;
       }
 
-      this.prevState = this.state;
-      this.state = newState;
-      this.transitionFrame = 0;
-      this.lastStateChange = now;
-      this.stateDetail = detail;
-      this.minDisplayUntil = now + this._getMinDisplayMs(newState);
-      this.pendingState = null;
-      this.pendingDetail = '';
-
-      // Track timeline (cap consecutive idle/sleeping to prevent bar domination)
-      const MAX_CONSECUTIVE_LOW = 3;
-      if (LOW_ACTIVITY_STATES.has(newState)) {
-        let consecutive = 0;
-        for (let i = this.timeline.length - 1; i >= 0; i--) {
-          if (this.timeline[i].state === newState) consecutive++;
-          else break;
-        }
-        if (consecutive < MAX_CONSECUTIVE_LOW) {
-          this.timeline.push({ state: newState, at: Date.now() });
-          this._timelineDirty = true;
-        }
-      } else {
-        this.timeline.push({ state: newState, at: Date.now() });
-        this._timelineDirty = true;
-      }
-      if (this.timeline.length > 200) {
-        this.timeline.shift();
-        this._timelineDirty = true;
-      }
-
-      // Fade out old particles quickly on state change
-      this.particles.fadeAll();
-
-      this.stateChangeTimes.push(Date.now());
-      if (this.stateChangeTimes.length > 20) this.stateChangeTimes.shift();
-
-      if (newState === 'happy') {
-        this.particles.spawn(12, 'sparkle');
-      } else if (newState === 'proud') {
-        this.particles.spawn(6, 'sparkle');
-      } else if (newState === 'satisfied') {
-        this.particles.spawn(4, 'float');
-      } else if (newState === 'relieved') {
-        this.particles.spawn(3, 'float');
-      } else if (newState === 'error') {
-        this.particles.spawn(8, 'glitch');
-        this.glitchIntensity = 1.0;
-      } else if (newState === 'thinking') {
-        this.particles.spawn(6, 'orbit');
-      } else if (newState === 'responding') {
-        this.particles.spawn(4, 'float');
-      } else if (newState === 'subagent') {
-        this.particles.spawn(8, 'stream');
-      } else if (newState === 'caffeinated') {
-        this.particles.spawn(6, 'speedline');
-      } else if (newState === 'committing') {
-        this.particles.spawn(14, 'push');
-      } else if (newState === 'training') {
-        this.particles.spawn(8, 'fire');
-      }
-      // Detail-driven particles for specific lifecycle events
-      const d = detail || '';
-      if (newState === 'waiting' && (d.includes('allow') || d.includes('needs input'))) {
-        this.particles.spawn(4, 'question');
-      }
-      if (newState === 'thinking' && d.includes('compacting')) {
-        this.particles.spawn(6, 'rain');
-      }
+      this._applyState(newState, detail, now);
     } else {
       this.lastStateChange = Date.now();
       this.stateDetail = detail;
@@ -287,6 +235,120 @@ class ClaudeFace {
     // Immediately show new activity in thought bubble
     this.thoughtTimer = 0;
     this._updateThought();
+  }
+
+  // Apply a state immediately, skipping the buffering rules, and drop anything
+  // queued. Used by the renderer's rescue paths (missed Stop, dead editor).
+  // minMs overrides the state's table minimum when given.
+  forceState(newState, detail = '', minMs) {
+    const now = Date.now();
+    this.pendingState = null;
+    this.pendingDetail = '';
+    this.pendingWork = null;
+    if (newState !== this.state) {
+      this._applyState(newState, detail, now);
+    } else {
+      this.lastStateChange = now;
+      this.stateDetail = detail;
+    }
+    if (typeof minMs === 'number') this.minDisplayUntil = now + minMs;
+    this.thoughtTimer = 0;
+    this._updateThought();
+  }
+
+  // Flush whatever is queued in pendingState (called from update() once the
+  // current state has had its time). Bypasses the buffering rules on purpose.
+  _flushPending(now) {
+    const state = this.pendingState;
+    const detail = this.pendingDetail;
+    this.pendingState = null;
+    this.pendingDetail = '';
+    if (!state || state === this.state) return;
+    this._applyState(state, detail, now);
+    this.thoughtTimer = 0;
+    this._updateThought();
+  }
+
+  // The unconditional part of a state change: bookkeeping, timeline, particles.
+  _applyState(newState, detail, now) {
+    const newIsCompletion = COMPLETION_STATES.has(newState);
+    this.prevState = this.state;
+    this.state = newState;
+    this.transitionFrame = 0;
+    this.lastStateChange = now;
+    this.stateDetail = detail;
+    this.minDisplayUntil = now + this._getMinDisplayMs(newState);
+    // Promote work remembered behind the completion that just landed; it
+    // flushes after the completion's guaranteed window (see update()).
+    if (newIsCompletion && this.pendingWork) {
+      this.pendingState = this.pendingWork.state;
+      this.pendingDetail = this.pendingWork.detail;
+    } else {
+      this.pendingState = null;
+      this.pendingDetail = '';
+    }
+    this.pendingWork = null;
+
+    this._pushTimeline(newState, now);
+
+    // Fade out old particles quickly on state change
+    this.particles.fadeAll();
+
+    this.stateChangeTimes.push(now);
+    if (this.stateChangeTimes.length > 20) this.stateChangeTimes.shift();
+
+    this._spawnStateParticles(newState, detail);
+  }
+
+  // Track timeline (cap consecutive idle/sleeping/waiting to prevent bar domination)
+  _pushTimeline(state, at) {
+    const MAX_CONSECUTIVE_LOW = 3;
+    if (LOW_ACTIVITY_STATES.has(state)) {
+      let consecutive = 0;
+      for (let i = this.timeline.length - 1; i >= 0; i--) {
+        if (this.timeline[i].state === state) consecutive++;
+        else break;
+      }
+      if (consecutive >= MAX_CONSECUTIVE_LOW) return;
+    }
+    this.timeline.push({ state, at });
+    this._timelineDirty = true;
+    if (this.timeline.length > 200) this.timeline.shift();
+  }
+
+  _spawnStateParticles(newState, detail) {
+    if (newState === 'happy') {
+      this.particles.spawn(12, 'sparkle');
+    } else if (newState === 'proud') {
+      this.particles.spawn(6, 'sparkle');
+    } else if (newState === 'satisfied') {
+      this.particles.spawn(4, 'float');
+    } else if (newState === 'relieved') {
+      this.particles.spawn(3, 'float');
+    } else if (newState === 'error') {
+      this.particles.spawn(8, 'glitch');
+      this.glitchIntensity = 1.0;
+    } else if (newState === 'thinking') {
+      this.particles.spawn(6, 'orbit');
+    } else if (newState === 'responding') {
+      this.particles.spawn(4, 'echo');
+    } else if (newState === 'subagent') {
+      this.particles.spawn(8, 'stream');
+    } else if (newState === 'caffeinated') {
+      this.particles.spawn(6, 'speedline');
+    } else if (newState === 'committing') {
+      this.particles.spawn(14, 'push');
+    } else if (newState === 'training') {
+      this.particles.spawn(8, 'fire');
+    }
+    // Detail-driven particles for specific lifecycle events
+    const d = detail || '';
+    if (newState === 'waiting' && (d.includes('allow') || d.includes('needs input') || d.includes('asking'))) {
+      this.particles.spawn(4, 'question');
+    }
+    if (newState === 'thinking' && d.includes('compacting')) {
+      this.particles.spawn(6, 'rain');
+    }
   }
 
   setStats(data) {
@@ -578,14 +640,14 @@ class ClaudeFace {
     // Apply pending state if minimum display time has passed
     const nowMs = Date.now();
     if (this.pendingState && nowMs >= this.minDisplayUntil) {
-      this.setState(this.pendingState, this.pendingDetail);
+      this._flushPending(nowMs);
     } else if (this.pendingState
-        && ACTIVE_WORK_STATES.has(this.pendingState)
         && COMPLETION_STATES.has(this.state)
         && nowMs - this.lastStateChange >= COMPLETION_MIN_SHOW_MS) {
-      // Work state was buffered during the completion guaranteed window -- flush it early
-      // now that the window has passed, so we don't sit on satisfied for 4 full seconds.
-      this.setState(this.pendingState, this.pendingDetail);
+      // Something queued up behind a completion face (the next work state, or a
+      // newer completion). The reward has had its guaranteed window -- flush now
+      // rather than sitting on it for the full min display.
+      this._flushPending(nowMs);
     }
 
     // Blink timer
@@ -1213,4 +1275,8 @@ class ClaudeFace {
   }
 }
 
-module.exports = { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS, ACTIVE_WORK_STATES, COMPLETION_STATES };
+module.exports = {
+  ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS,
+  ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
+  MIN_DISPLAY_MS, COMPLETION_MIN_SHOW_MS,
+};

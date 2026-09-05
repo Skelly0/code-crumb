@@ -20,6 +20,26 @@ const PID_FILE = path.join(HOME, '.code-crumb.pid');
 const QUIT_FLAG_FILE = path.join(HOME, '.code-crumb-quit');
 const TMUX_FILE = path.join(HOME, '.code-crumb-tmux');
 
+// -- Face state sets ---------------------------------------------------
+// Shared by face.js (main face), grid.js (orbital MiniFace) and renderer.js
+// so the three never drift apart.
+
+// Active tool states: real work happening NOW. They bypass the min display
+// of passive/thinking/completion states (after a completion has had its
+// guaranteed window).
+const ACTIVE_WORK_STATES = new Set([
+  'executing', 'coding', 'reading', 'searching', 'testing',
+  'installing', 'committing', 'reviewing', 'subagent', 'responding',
+  'training',
+]);
+// Reward faces shown when a tool finishes.
+const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
+// States a work state may interrupt.
+const INTERRUPTIBLE_STATES = new Set([
+  'thinking', 'happy', 'satisfied', 'proud', 'relieved',
+  'idle', 'sleeping', 'waiting',
+]);
+
 // -- Utilities -------------------------------------------------------
 
 function safeFilename(id) {
@@ -104,4 +124,4 @@ function getGitBranch(cwd) {
   return null;
 }
 
-module.exports = { HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, QUIT_FLAG_FILE, TEAMS_DIR, TMUX_FILE, safeFilename, loadPrefs, savePrefs, getGitBranch, getIsWorktree };
+module.exports = { HOME, STATE_FILE, ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, QUIT_FLAG_FILE, TEAMS_DIR, TMUX_FILE, safeFilename, loadPrefs, savePrefs, getGitBranch, getIsWorktree };

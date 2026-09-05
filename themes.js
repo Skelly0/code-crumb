@@ -280,6 +280,23 @@ const STATE_THOUGHTS = {
     'convergence?', 'metamorphosis...',
     'the forge burns...', 'transmuting data...',
   ],
+  reviewing: [
+    'hmm, is this right?', 'let me double-check', 'reading between the lines',
+    'looks... fine?', 'wait, what about...', 'nitpicking...', 'second opinion time',
+  ],
+  responding: [
+    'putting it into words', 'okay so...', 'summing up',
+    'here is what I found', 'wrapping this up', 'almost done talking',
+  ],
+  starting: [
+    'booting up...', 'stretching...', 'good morning', 'where were we?', 'loading context',
+  ],
+  spawning: [
+    'hello world', 'coming online', 'who am I?', 'warming up', 'reporting for duty',
+  ],
+  caffeinated: [
+    'SO FAST', 'cannot stop', 'everything at once', 'zoom zoom', 'wired!', 'too many tabs',
+  ],
 };
 
 // -- Palettes --------------------------------------------------------

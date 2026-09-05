@@ -8,22 +8,17 @@
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, SESSIONS_DIR, safeFilename } = require('./shared');
+const {
+  HOME, SESSIONS_DIR, safeFilename,
+  ACTIVE_WORK_STATES, INTERRUPTIBLE_STATES, COMPLETION_STATES,
+} = require('./shared');
 const { ansi, breathe, dimColor, themes, COMPLETION_LINGER, PALETTES, PALETTE_NAMES } = require('./themes');
 const { gridMouths } = require('./animations');
 
 // -- Config --------------------------------------------------------
 
-const ACTIVE_WORK_STATES = new Set([
-  'executing', 'coding', 'reading', 'searching', 'testing',
-  'installing', 'committing', 'reviewing', 'subagent', 'responding',
-  'training',
-]);
-const INTERRUPTIBLE_STATES = new Set([
-  'thinking', 'happy', 'satisfied', 'proud', 'relieved',
-  'idle', 'sleeping', 'waiting',
-]);
-const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
+// ACTIVE_WORK_STATES / INTERRUPTIBLE_STATES / COMPLETION_STATES are shared
+// with face.js and renderer.js via shared.js.
 const HOME_FWD = HOME.replace(/\\/g, '/');  // Forward-slash-normalized HOME for path display
 
 // Editors whose names may appear in legacy modelName fields / ID prefixes
@@ -582,6 +577,22 @@ class MiniFace {
         // Focused eyes that pulse — data streaming out
         const cp = Math.floor(this.frame / 8) % 2;
         return cp ? ' \u2580\u2580 \u2580\u2580' : ' \u2588\u2588 \u2588\u2588';
+      }
+      case 'reviewing': {
+        // Scanning along a line -- reading with intent
+        const rv = Math.floor(this.frame / 6) % 3;
+        return [' \u2500\u2588 \u2500\u2588', ' \u2588\u2500 \u2588\u2500', ' \u2500\u2500 \u2500\u2500'][rv];
+      }
+      case 'training': {
+        // Furnace eyes -- embers flicker
+        const tf = Math.floor(this.frame / 5) % 2;
+        return tf ? ' \u2593\u2593 \u2593\u2593' : ' \u2592\u2592 \u2592\u2592';
+      }
+      case 'starting':
+      case 'spawning': {
+        // Booting up -- dots resolve into open eyes
+        const sp = Math.floor(this.frame / 4) % 3;
+        return [' \u00b7\u00b7 \u00b7\u00b7', ' \u2584\u2584 \u2584\u2584', ' \u2588\u2588 \u2588\u2588'][sp];
       }
       default:            return ' \u2588\u2588 \u2588\u2588';
     }
@@ -1802,6 +1813,7 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
 
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
+  ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, KNOWN_EDITORS,
   STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, SLACK_MS, PID_PROTECT_CAP_MS, PID_CACHE_TTL_MS,
   INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, GROUP_LABEL_BRIGHTNESS,

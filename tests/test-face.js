@@ -48,24 +48,24 @@ describe('face.js -- ClaudeFace._getMinDisplayMs', () => {
     assert.strictEqual(face._getMinDisplayMs('error'), 4000);
   });
 
-  test('coding → 6000ms', () => {
-    assert.strictEqual(face._getMinDisplayMs('coding'), 6000);
+  test('coding → 1500ms', () => {
+    assert.strictEqual(face._getMinDisplayMs('coding'), 1500);
   });
 
-  test('reading → 4000ms', () => {
-    assert.strictEqual(face._getMinDisplayMs('reading'), 4000);
+  test('reading → 1200ms', () => {
+    assert.strictEqual(face._getMinDisplayMs('reading'), 1200);
   });
 
   test('sleeping → 1000ms', () => {
     assert.strictEqual(face._getMinDisplayMs('sleeping'), 1000);
   });
 
-  test('committing → 3500ms', () => {
-    assert.strictEqual(face._getMinDisplayMs('committing'), 3500);
+  test('committing → 1500ms', () => {
+    assert.strictEqual(face._getMinDisplayMs('committing'), 1500);
   });
 
-  test('training min display is 5000', () => {
-    assert.strictEqual(face._getMinDisplayMs('training'), 5000);
+  test('training min display is 2500', () => {
+    assert.strictEqual(face._getMinDisplayMs('training'), 2500);
   });
 
   test('unknown state → 1000ms default', () => {
@@ -1100,12 +1100,12 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     assert.strictEqual(face.stateDetail, 'git status');
   });
 
-  test('coding bypasses relieved min display after 500ms guaranteed window', () => {
+  test('coding bypasses relieved min display after the 1800ms guaranteed window', () => {
     const face = new ClaudeFace();
     face.setState('relieved');
     assert.strictEqual(face.state, 'relieved');
-    // Simulate relieved has been showing for 600ms (past the guaranteed window)
-    face.lastStateChange = Date.now() - 600;
+    // Simulate relieved has been showing for 1900ms (past the guaranteed window)
+    face.lastStateChange = Date.now() - 1900;
     face.setState('coding', 'editing app.ts');
     assert.strictEqual(face.state, 'coding');
   });
@@ -1159,10 +1159,10 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     assert.strictEqual(face.pendingState, 'reading'); // reading queued for early flush
   });
 
-  test('work state bypasses completion after 500ms guaranteed window (Fix #96)', () => {
+  test('work state bypasses completion after the 1800ms guaranteed window (Fix #96)', () => {
     const face = new ClaudeFace();
     face.setState('happy');
-    face.lastStateChange = Date.now() - 600; // simulate 600ms elapsed
+    face.lastStateChange = Date.now() - 1900; // past the guaranteed window
     face.setState('reading');
     assert.strictEqual(face.state, 'reading'); // bypasses now that window passed
     assert.strictEqual(face.pendingState, null);
@@ -1211,18 +1211,18 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     assert.strictEqual(face.pendingState, 'caffeinated');
   });
 
-  test('executing bypasses happy min display after 500ms guaranteed window', () => {
+  test('executing bypasses happy min display after the 1800ms guaranteed window', () => {
     const face = new ClaudeFace();
     face.setState('happy');
-    face.lastStateChange = Date.now() - 600;
+    face.lastStateChange = Date.now() - 1900;
     face.setState('executing', 'next command');
     assert.strictEqual(face.state, 'executing');
   });
 
-  test('testing bypasses satisfied min display after 500ms guaranteed window', () => {
+  test('testing bypasses satisfied min display after the 1800ms guaranteed window', () => {
     const face = new ClaudeFace();
     face.setState('satisfied');
-    face.lastStateChange = Date.now() - 600;
+    face.lastStateChange = Date.now() - 1900;
     face.setState('testing', 'npm test');
     assert.strictEqual(face.state, 'testing');
   });

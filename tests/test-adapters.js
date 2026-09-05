@@ -1194,17 +1194,19 @@ describe('bug fix regressions', () => {
       'PID guard catch should check for EPERM and treat as running');
   });
 
-  test('renderer.js responding state gets 3000ms minDisplayUntil (#67)', () => {
+  test('renderer.js responding rescue paths use forceState with a 3000ms min display (#67)', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-    // Both occurrences of the responding→happy transition should use now + 3000
-    const matches = src.match(/minDisplayUntil = now \+ 3000;.*responding/g)
-                 || src.match(/now \+ 3000;.*3s min display/g)
-                 || [];
-    // Source-level check: no `now;` (immediate expire) near 'wrapping up'
+    // Both rescue paths (stopped-flag rescue and fresh-read rescue) go through
+    // face.forceState so the 3s responding minimum is applied in one place.
+    assert.ok(src.includes("face.forceState('responding', 'wrapping up', 3000)"),
+      'stopped-flag rescue should forceState responding with 3000ms');
+    assert.ok(src.includes("face.forceState('responding', freshData.detail || 'wrapping up', 3000)"),
+      'fresh-read rescue should forceState responding with 3000ms');
+    // No hand-rolled transition left behind
     assert.ok(!src.includes("minDisplayUntil = now;"),
       'responding should not use minDisplayUntil = now (immediate expire)');
-    assert.ok(src.includes("now + 3000"),
-      'responding transitions should use now + 3000');
+    assert.ok(!src.includes("face.state = 'responding';"),
+      'renderer should not assign face.state directly for responding');
   });
 });
 

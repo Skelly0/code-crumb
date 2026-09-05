@@ -35,10 +35,12 @@ const THINKING_TIMEOUT = 45000; // 45s -- safety net if Stop event is missed
 const SLEEP_TIMEOUT = 60000;
 
 // -- Hoisted sets for checkState() hot path (avoid per-call allocation) --
+const { ACTIVE_WORK_STATES, COMPLETION_STATES } = require('./shared');
 const RESCUE_EXCLUDE = new Set(['idle', 'sleeping', 'responding', 'starting', 'happy', 'satisfied', 'proud', 'relieved']);
-const FRESH_READ_STATES = new Set(['thinking', 'executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'responding', 'happy', 'satisfied', 'proud', 'relieved']);
-const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
-const ACTIVE_WORK_STATES = new Set(['executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'committing', 'reviewing', 'subagent', 'responding', 'training']);
+// States in which a missed Stop/start event is worth a fresh file read: every
+// active work state, every completion, and thinking. Derived so a new work
+// state can never be forgotten here (committing/reviewing/subagent/training were).
+const FRESH_READ_STATES = new Set(['thinking', ...ACTIVE_WORK_STATES, ...COMPLETION_STATES]);
 
 // ===================================================================
 // SHARED RUNTIME
@@ -337,18 +339,7 @@ function runUnifiedMode() {
     // Completion states (happy/satisfied/proud/relieved) are excluded — they
     // already transition to idle via the linger path with sessionActive=false.
     if ((lastStopped || editorDead) && !RESCUE_EXCLUDE.has(face.state)) {
-      face.prevState = face.state;
-      face.state = 'responding';
-      face.transitionFrame = 0;
-      face.lastStateChange = now;
-      face.stateDetail = 'wrapping up';
-      face.minDisplayUntil = now + 3000; // respect responding's 3s min display time
-      face.pendingState = null;
-      face.pendingDetail = '';
-      face.particles.fadeAll();
-      face.timeline.push({ state: 'responding', at: now });
-      face._timelineDirty = true;
-      if (face.timeline.length > 200) face.timeline.shift();
+      face.forceState('responding', 'wrapping up', 3000); // respect responding's 3s min display time
     }
 
     // If we're past minDisplayUntil and in an active state,
@@ -369,18 +360,7 @@ function runUnifiedMode() {
           // If the file says responding, apply it; otherwise
           // we just set lastStopped so the rescue block above fires next frame.
           if (freshData.state === 'responding') {
-            face.prevState = face.state;
-            face.state = freshData.state;
-            face.transitionFrame = 0;
-            face.lastStateChange = now;
-            face.stateDetail = freshData.detail || 'wrapping up';
-            face.minDisplayUntil = now + 3000; // respect responding's 3s min display time
-            face.pendingState = null;
-            face.pendingDetail = '';
-            face.particles.fadeAll();
-            face.timeline.push({ state: freshData.state, at: now });
-            face._timelineDirty = true;
-            if (face.timeline.length > 200) face.timeline.shift();
+            face.forceState('responding', freshData.detail || 'wrapping up', 3000);
           }
         }
       } catch {}
@@ -820,6 +800,6 @@ if (require.main === module) {
     COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,
     IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
     PALETTES, PALETTE_NAMES,
-    readState, ACTIVE_WORK_STATES, COMPLETION_STATES,
+    readState, ACTIVE_WORK_STATES, COMPLETION_STATES, FRESH_READ_STATES,
   };
 }

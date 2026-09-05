@@ -46,7 +46,7 @@ state-machine.js Pure logic — tool→state mapping (multi-editor), error detec
 shared.js        Shared constants — paths, config, and utility functions
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
 setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|opencode|openclaw])
-test.js          Test runner — isolates HOME, loads 12 test files from tests/ (~1562 tests); --quiet, name filters
+test.js          Test runner — isolates HOME, loads 13 test files from tests/ (~1661 tests); --quiet, name filters
 demo.js          Demo script — cycles through all face states in single-face mode
 grid-demo.js     Orbital demo — simulates subagent sessions orbiting the main face
 code-crumb.sh   Unix shell wrapper for launch.js
@@ -62,7 +62,7 @@ tests/
   _harness.js      Shared describe/test/test.async runner + temp-home helpers (createSuite, makeTempEnv)
   test-shared.js, test-state-machine.js, test-themes.js, test-animations.js,
   test-particles.js, test-face.js, test-grid.js, test-accessories.js,
-  test-teams.js, test-launch.js, test-adapters.js, test-transition.js
+  test-teams.js, test-launch.js, test-adapters.js, test-transition.js, test-emotions.js
 .claude-plugin/
   plugin.json      Claude Code plugin manifest for marketplace distribution
 hooks/
@@ -109,13 +109,19 @@ Every state/session write carries an `editor` field (claude/codex/opencode/openc
 
 23 face states: `idle`, `thinking`, `responding`, `reading`, `searching`, `coding`, `executing`, `happy`, `satisfied`, `proud`, `relieved`, `error`, `sleeping`, `waiting`, `testing`, `installing`, `caffeinated`, `subagent`, `starting`, `spawning`, `committing`, `reviewing`, `training`.
 
-States have minimum display durations (1–8 seconds) enforced via a `pendingState` queue to prevent visual flashing.
+States have minimum display durations enforced via a `pendingState` queue to prevent visual flashing. The timings live in one exported table at the top of face.js (`MIN_DISPLAY_MS`): **work** states are short (coding/committing/reviewing 1500ms; reading/searching/executing/testing/installing 1200ms; subagent/spawning 2000ms; training 2500ms) because every PreToolUse refreshes them anyway, while **reward** states (happy 4000, proud 4500, satisfied/relieved 2500) and error (4000) are long because they are the emotions the user actually wants to see; responding keeps 3000 (#67).
+
+`COMPLETION_MIN_SHOW_MS` (1800ms) is the guaranteed on-screen window for a reward face. Inside it nothing but an error replaces it — the next work state is buffered and a newer completion is queued, not shown. After the window, whatever is queued flushes (`_flushPending`), so a reward never sits for its full min display while something newer waits. Work that arrives while a completion is already queued is remembered in `pendingWork` and promoted to `pendingState` when that completion lands, so a long-running tool is never lost behind a reward face; a completion arriving clears `pendingWork` (its tool is finished). Completions never bypass active work — they queue and show when the tool finishes. Same-state writes refresh `lastStateChange` and the detail text, so a reward face stays up with live detail while a burst of identical completions lands. `face.forceState(state, detail, minMs)` applies a state immediately, skips the buffering rules, drops the queue, and records the change for caffeine detection — the renderer's rescue paths (missed Stop, dead editor) use it.
+
+The state sets `ACTIVE_WORK_STATES`, `COMPLETION_STATES`, and `INTERRUPTIBLE_STATES` are defined once in shared.js and imported by face.js, grid.js, and renderer.js; the renderer's `FRESH_READ_STATES` (states worth a fresh file read for a missed Stop) is derived from them so a new work state can never be forgotten there.
 
 ### Hook Events
 
-Twenty hook event types are handled: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `Notification`, `TeammateIdle`, `TaskCompleted`, `SubagentStart`, `SubagentStop`, `SessionStart`, `SessionEnd`, `PreCompact`, `PostCompact`, `PermissionRequest`, `Setup`, `Elicitation`, `ElicitationResult`, `ConfigChange`, `InstructionsLoaded`, `StopFailure`. Tool names from all supported editors are mapped to face states via shared regex patterns (e.g., Edit/apply_diff/file_edit → coding, Grep/search_files/codebase_search → searching, Bash/shell/terminal → executing). PostToolUse includes forensic error detection with 50+ regex patterns.
+Twenty-one hook event types are handled: `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `Notification`, `UserPromptSubmit`, `TeammateIdle`, `TaskCompleted`, `SubagentStart`, `SubagentStop`, `SessionStart`, `SessionEnd`, `PreCompact`, `PostCompact`, `PermissionRequest`, `Setup`, `Elicitation`, `ElicitationResult`, `ConfigChange`, `InstructionsLoaded`, `StopFailure`. Tool names from all supported editors are mapped to face states via shared regex patterns (e.g., Edit/apply_diff/file_edit → coding, Grep/search_files/codebase_search → searching, Bash/shell/terminal → executing) — see Multi-Editor Tool Mapping. PostToolUse includes forensic error detection with 39 regex patterns (30 stdout, 9 stderr) guarded by 14 false-positive patterns, and honours the `interrupted`, `isError`/`is_error`, and numeric `exitCode`/`exit_code` fields that `normalizeToolResponse` carries through — an Esc-interrupted command shows `error / "interrupted"`, not `relieved / "command succeeded"`.
 
 The newer hook events map to existing face states: `PreCompact` → thinking (with rain particles), `PostCompact` → satisfied, `PermissionRequest` → waiting (with question particles), `Setup` → starting, `Elicitation` → waiting (with question particles), `ElicitationResult` → satisfied/relieved, `ConfigChange` → reading, `InstructionsLoaded` → reading, `StopFailure` → error (breaks streak). Of these, `PermissionRequest`, `Elicitation`, and `ElicitationResult` are per-session interactive events that route to orbital files in subagent context; the remaining 6 are system-level events excluded from subagent routing via the `LIFECYCLE_EVENTS` Set. `WorktreeCreate`/`WorktreeRemove` are intentionally not registered because they replace default git worktree behavior.
+
+`UserPromptSubmit` → thinking (`reading your message`): the user just sent a prompt, so Claude is thinking before its first tool call — without it the face sat on happy/idle from the last Stop. The write carries no `stopped`, which also flips the renderer back to the active 45s thinking timeout. `Notification` is differentiated by `notification_type`: `permission_prompt` → waiting `allow?` (question particles), `idle_prompt` → waiting `waiting for you`, `elicitation_dialog` → waiting `needs input`, `auth_success` → satisfied `signed in`, anything else → waiting `needs attention`. The catch path (unparseable stdin) and `classifyTruncatedInput`'s event map cover the same events, including `UserPromptSubmit`, `TeammateIdle`, and `TaskCompleted`.
 
 `TeammateIdle` and `TaskCompleted` are agent-teams-specific events (requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`). They write session files with `teamName`, `teammateName`, and `isTeammate: true` fields so team members appear in the orbital display with their designated name and a team-specific accent color.
 
@@ -138,7 +144,9 @@ Singleton groups (one member) get no tethers or labels. When all faces are ungro
 
 ### Multi-Editor Tool Mapping
 
-Tool name patterns are defined as shared constants (`EDIT_TOOLS`, `BASH_TOOLS`, `READ_TOOLS`, `SEARCH_TOOLS`, `WEB_TOOLS`, `SUBAGENT_TOOLS`, `REVIEW_TOOLS`) in `state-machine.js`. Each pattern matches tool names from Claude Code, Codex CLI, OpenCode, and OpenClaw/Pi. The `modelName` field in state files controls the display name (e.g., "claude is thinking" vs "codex is coding" vs "openclaw is reading").
+Tool name patterns are defined as shared constants (`EDIT_TOOLS`, `BASH_TOOLS`, `READ_TOOLS`, `SEARCH_TOOLS`, `WEB_TOOLS`, `SUBAGENT_TOOLS`, `REVIEW_TOOLS`, `ASK_TOOLS`, `SKILL_TOOLS`, `PLAN_TOOLS`, `PUBLISH_TOOLS`) in `state-machine.js`. Each pattern matches tool names from Claude Code, Codex CLI, OpenCode, and OpenClaw/Pi, including the current Claude Code set: `NotebookEdit` → coding; `NotebookRead`/`ReadMcpResourceTool`/`ListMcpResourcesTool` → reading; `LS`/`ToolSearch` → searching (`LS` with a path shows `listing <dir>`); `KillShell`/`BashOutput`/`EnterWorktree`/`ExitWorktree` → executing; `AskUserQuestion` → waiting `asking you` (question particles) then satisfied `got your answer`; `Skill` → reading `skill: <name>` then satisfied `skill loaded`; `TodoWrite`/`EnterPlanMode`/`ExitPlanMode` → thinking `planning` and `CronCreate`/`CronList`/`CronDelete`/`ScheduleWakeup` → thinking `scheduling`, both → satisfied; `Workflow`/`SendMessage`/`ListAgents`/`TaskOutput`/`TaskStop`/`Monitor` → subagent (`orchestrating` / `messaging an agent` / `checking on agents`), and a returning `Agent`/`Task`/`Workflow`/`TaskOutput` → happy `agent done` (the others → satisfied `checked in` / `message sent`); `ReportFindings` → reviewing then satisfied `reviewed`; `Artifact`/`SendUserFile` → coding `publishing` / `sending a file` then proud `published` / `sent`. `patch` is an edit tool (it was unreachable in `REVIEW_TOOLS`).
+
+MCP tools (`mcp__<server>__<tool>`) are classified by verb: `read|get|list|fetch|describe|inspect|check|show|view|download|export|whoami|debug` → reading, `search|find|query|lookup` → searching, `create|update|write|modify|edit|insert|delete|remove|append|set|move|replace|format|batch|push|merge|upload|import|add|manage|resize|copy|draft` → coding, anything else → executing. The detail is `server: tool` with `plugin_` stripped, a doubled `x_x` collapsed (`plugin_github_github` → `github`), and underscores turned into spaces; completion is satisfied `<server> done`. Anything unmatched shows `humanizeToolName(name)` (`AskUserQuestion` → `ask user question`) instead of the raw identifier. Every text-ish input goes through `toText` (strings pass, numbers stringify, objects/arrays/null → `''`), so a structured `command`, `file_path`, or `stdout` never throws inside `stripAnsi`. The `modelName` field in state files controls the display name (e.g., "claude is thinking" vs "codex is coding" vs "openclaw is reading").
 
 ## Development Commands
 
@@ -182,6 +190,8 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 | `THINKING_TIMEOUT` | 45000ms | renderer.js, grid.js |
 | `SLEEP_TIMEOUT` | 60000ms | renderer.js |
 | `CAFFEINE_THRESHOLD` | 5 calls in 10s | face.js |
+| `COMPLETION_MIN_SHOW_MS` | 1800ms | face.js (guaranteed on-screen window for a reward face; only an error preempts it) |
+| `MIN_DISPLAY_MS` | per-state table | face.js (work 1200–1500, subagent/spawning 2000, training 2500, satisfied/relieved 2500, responding 3000, happy/error 4000, proud 4500) |
 | `STALE_MS` | 120000ms | grid.js (session file mtime purge threshold) |
 | `ORPHAN_TIMEOUT` | 90000ms | grid.js (fallback staleness for sessions without PID) |
 | `MAX_ORBITALS` | 8 | grid.js (max visible orbital faces) |
@@ -210,7 +220,7 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 
 ### Automated Tests
 
-Run `npm test` (or `node test.js [--quiet] [filter...]`, e.g. `node test.js grid face`). Before loading anything the runner redirects `HOME`, `USERPROFILE`, and `CODE_CRUMB_STATE` to a throwaway directory (removed on exit), so the suite never touches the real `~/.code-crumb*` files or fights a running renderer — subprocess tests inherit the same env. Each test file gets its own counters from `tests/_harness.js` (`createSuite()`); `test.async` (or a test that returns a promise) is awaited before the file is counted, so async assertions can actually fail. The runner prints per-file counts and total duration and keeps going if one file fails to load. CI (`.github/workflows/test.yml`) runs `node --check` on every script and the suite on ubuntu/windows/macos × node 18/20/22. The suite (~1562 tests) covers:
+Run `npm test` (or `node test.js [--quiet] [filter...]`, e.g. `node test.js grid face`). Before loading anything the runner redirects `HOME`, `USERPROFILE`, and `CODE_CRUMB_STATE` to a throwaway directory (removed on exit), so the suite never touches the real `~/.code-crumb*` files or fights a running renderer — subprocess tests inherit the same env. Each test file gets its own counters from `tests/_harness.js` (`createSuite()`); `test.async` (or a test that returns a promise) is awaited before the file is counted, so async assertions can actually fail. The runner prints per-file counts and total duration and keeps going if one file fails to load. CI (`.github/workflows/test.yml`) runs `node --check` on every script and the suite on ubuntu/windows/macos × node 18/20/22. The suite (~1661 tests) covers:
 
 - **_harness.js** (not a test file): `createSuite()` returns `{ describe, test, done, passed, failed }`; `test.async(name, fn)` for promise-based tests; `makeTempEnv(sessionId)` / `cleanup(tmp)` / `readJSON(path)` for subprocess tests that need their own temp home
 - **test-shared.js**: `safeFilename` edge cases
@@ -225,6 +235,7 @@ Run `npm test` (or `node test.js [--quiet] [filter...]`, e.g. `node test.js grid
 - **test-launch.js**: launcher logic, platform detection, editor flag handling
 - **test-adapters.js**: base adapter, engmux adapter, codex/opencode/openclaw adapter behavior, editor PID liveness tracking (pid field in state writes incl. win32 omission, renderer candidate validation via start-time identity and `editorDead` rescue), editor provenance field plumbing (buildExtra, defaultEditor, prefixed fallback IDs, guardedWriteState preservation), parallel session classification end-to-end (registry and birthtime paths, subagent regression guard, stale-stamp healing incl. teammate exemption, SessionStart registration)
 - **test-transition.js**: `SwapTransition` lifecycle (start/tick/cancel), phase progression (dissolve/swap/materialize/done), `dimFactor` brightness curve, constants
+- **test-emotions.js**: the emotion-fidelity contract — table of current Claude Code tool names → pre/post states and details, `humanizeToolName`, non-string input coercion, `normalizeToolResponse` passthrough (interrupted/isError/exitCode → error end to end), truncated-input event map, the timing table and the guaranteed-window / `pendingWork` / `forceState` rules, shared state sets and `FRESH_READ_STATES` coverage, question/echo particles, distinct orbital eyes for every state, thought pools, and subprocess tests for `UserPromptSubmit` and `Notification` types
 
 ### Visual Verification
 

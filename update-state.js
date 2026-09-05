@@ -5,12 +5,13 @@
 // |  Code Crumb Hook -- writes state for the face renderer              |
 // |  Called by editor hooks via stdin JSON                           |
 // |  Usage: node update-state.js <event>                            |
-// |  Events: PreToolUse, PostToolUse, PostToolUseFailure, Stop,     |
-// |          Notification, SubagentStart, SubagentStop,            |
-// |          TeammateIdle, TaskCompleted, SessionStart, SessionEnd, |
-// |          PreCompact, PostCompact, PermissionRequest, Setup,    |
-// |          Elicitation, ElicitationResult, ConfigChange,         |
-// |          InstructionsLoaded, StopFailure                       |
+// |  Events: PreToolUse, PostToolUse, PostToolUseFailure, Stop,      |
+// |          Notification, UserPromptSubmit, SubagentStart,          |
+// |          SubagentStop, TeammateIdle, TaskCompleted,              |
+// |          SessionStart, SessionEnd, PreCompact, PostCompact,      |
+// |          PermissionRequest, Setup, Elicitation,                  |
+// |          ElicitationResult, ConfigChange, InstructionsLoaded,    |
+// |          StopFailure                                             |
 // |                                                                  |
 // |  Works with Claude Code, Codex CLI, and OpenCode                |
 // +================================================================+
@@ -397,8 +398,24 @@ process.stdin.on('end', () => {
       // final cleanup; SubagentStop handles individual foreground agents.
     }
     else if (hookEvent === 'Notification') {
-      state = 'waiting';
-      detail = 'needs attention';
+      // notification_type: permission_prompt | idle_prompt | elicitation_dialog | auth_success
+      const kind = data.notification_type || '';
+      if (kind === 'auth_success') {
+        state = 'satisfied';
+        detail = 'signed in';
+      } else {
+        state = 'waiting';
+        detail = kind === 'permission_prompt' ? 'allow?'
+          : kind === 'idle_prompt' ? 'waiting for you'
+          : kind === 'elicitation_dialog' ? 'needs input'
+          : 'needs attention';
+      }
+    }
+    else if (hookEvent === 'UserPromptSubmit') {
+      // The user just sent a message: Claude is thinking before its first tool
+      // call. Without this the face sits on happy/idle from the last Stop.
+      state = 'thinking';
+      detail = 'reading your message';
     }
     else if (hookEvent === 'TeammateIdle') {
       state = 'waiting';
@@ -774,6 +791,15 @@ process.stdin.on('end', () => {
     } else if (hookEvent === 'Notification') {
       fallbackState = 'waiting';
       fallbackDetail = 'needs attention';
+    } else if (hookEvent === 'UserPromptSubmit') {
+      fallbackState = 'thinking';
+      fallbackDetail = 'reading your message';
+    } else if (hookEvent === 'TeammateIdle') {
+      fallbackState = 'waiting';
+      fallbackDetail = 'teammate idle';
+    } else if (hookEvent === 'TaskCompleted') {
+      fallbackState = 'happy';
+      fallbackDetail = 'task done';
     } else if (hookEvent === 'SessionStart') {
       fallbackState = 'idle';
       fallbackDetail = 'session starting';

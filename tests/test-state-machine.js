@@ -286,10 +286,10 @@ describe('state-machine.js -- toolToState', () => {
     assert.strictEqual(toolToState('Subagent', {}).state, 'subagent');
   });
 
-  test('MCP tool → executing with server:tool detail', () => {
+  test('MCP tool → state by verb, with "server: tool" detail', () => {
     const r = toolToState('mcp__github__list_repos', {});
-    assert.strictEqual(r.state, 'executing');
-    assert.strictEqual(r.detail, 'github: list_repos');
+    assert.strictEqual(r.state, 'reading');
+    assert.strictEqual(r.detail, 'github: list repos');
   });
 
   test('MCP tool with no tool part', () => {
@@ -298,10 +298,10 @@ describe('state-machine.js -- toolToState', () => {
     assert.strictEqual(r.detail, 'server: ');
   });
 
-  test('Unknown tool → thinking', () => {
+  test('Unknown tool → thinking with humanized name', () => {
     const r = toolToState('SomeNewTool', {});
     assert.strictEqual(r.state, 'thinking');
-    assert.strictEqual(r.detail, 'SomeNewTool');
+    assert.strictEqual(r.detail, 'some new tool');
   });
 
   test('Empty tool name → thinking', () => {
@@ -2628,9 +2628,9 @@ describe('state-machine.js -- toolToState MCP tools', () => {
     assert.strictEqual(r.detail, 'server: tool');
   });
 
-  test('mcp__github__create_pr maps to executing', () => {
+  test('mcp__github__create_pr maps to coding (write verb)', () => {
     const r = toolToState('mcp__github__create_pr', {});
-    assert.strictEqual(r.state, 'executing');
+    assert.strictEqual(r.state, 'coding');
   });
 });
 

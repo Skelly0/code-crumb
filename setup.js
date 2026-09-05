@@ -41,7 +41,7 @@ function setupClaude() {
     'TeammateIdle', 'TaskCompleted', 'SessionStart', 'SessionEnd',
     'PreCompact', 'PostCompact', 'PermissionRequest', 'Setup',
     'Elicitation', 'ElicitationResult', 'ConfigChange',
-    'InstructionsLoaded', 'StopFailure',
+    'InstructionsLoaded', 'StopFailure', 'UserPromptSubmit',
   ];
 
   const faceHooks = {};
