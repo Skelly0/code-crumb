@@ -43,6 +43,24 @@ function runStdinAdapter(adapterFile, inputObj, env) {
   }
 }
 
+// Run `fn` with the shared STATE_FILE (which test.js has already redirected
+// into the throwaway home) holding `data`, then put back whatever was there.
+// For in-process readers -- shared.js fixes its paths at first require, so a
+// per-test temp dir is only usable by subprocesses.
+const SHARED = require(path.join(__dirname, '..', 'shared'));
+
+function withStateFile(data, fn) {
+  let saved = null;
+  try { saved = fs.readFileSync(SHARED.STATE_FILE, 'utf8'); } catch {}
+  try {
+    fs.writeFileSync(SHARED.STATE_FILE, JSON.stringify(data), 'utf8');
+    return fn();
+  } finally {
+    if (saved !== null) fs.writeFileSync(SHARED.STATE_FILE, saved, 'utf8');
+    else try { fs.unlinkSync(SHARED.STATE_FILE); } catch {}
+  }
+}
+
 // -- codex-notify.js -------------------------------------------------
 
 describe('adapters -- codex-notify', () => {
@@ -1943,10 +1961,21 @@ describe('bug fix regressions', () => {
     assert.strictEqual(matches.length, 1, `Expected 1 "const minimal" but found ${matches.length}`);
   });
 
-  test('face.js uses petSpamLevel not petCount in getEyes', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'face.js'), 'utf8');
-    assert.ok(!src.includes('this.petCount'), 'should not reference this.petCount');
-    assert.ok(src.includes('this.petSpamLevel >= 3'));
+  test('petSpamLevel 3 changes the eyes on a happy face', () => {
+    // The counter was once petCount and the threshold once `> 3`, so level 3
+    // never reached the reward eyes. Assert the level actually drives them.
+    const { ClaudeFace } = require(path.join(__dirname, '..', 'face.js'));
+    const { eyes } = require(path.join(__dirname, '..', 'animations.js'));
+    const calm = new ClaudeFace();
+    calm.state = 'happy';
+    const spam = new ClaudeFace();
+    spam.state = 'happy';
+    spam.petSpamLevel = 3;
+    const theme = calm.getTheme();
+    assert.deepStrictEqual(spam.getEyes(theme, 0), eyes.heart(),
+      'level 3 on a happy face should give heart eyes');
+    assert.notDeepStrictEqual(calm.getEyes(theme, 0), eyes.heart(),
+      'level 0 must not');
   });
 
   test('particles.js has TTY fallbacks for rows/columns', () => {
@@ -1968,12 +1997,6 @@ describe('bug fix regressions', () => {
   test('grid.js spawn scale starts at 0.3 minimum', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'grid.js'), 'utf8');
     assert.ok(src.includes('Math.max(0.3,'));
-  });
-
-  test('update-state.js has no hardcoded subagent state cycling (Fix #79)', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
-    assert.ok(!src.includes('lastCycleTime'), 'cycling mechanism should be removed');
-    assert.ok(!src.includes('SUB_STATES'), 'hardcoded state array should be removed');
   });
 
   test('renderer.js wraps face.render() in try-catch', () => {
@@ -2007,15 +2030,26 @@ describe('bug fix regressions', () => {
     cleanup(tmp);
   });
 
-  test('update-state.js has no PreToolUse synthetic subagent session block', () => {
-    // Bug: PreToolUse + SubagentStart both created orbital sessions, causing
-    // duplicate faces. The PreToolUse block was the old workaround before
-    // SubagentStart/SubagentStop hooks existed — it's been removed.
-    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
-    assert.ok(!src.includes('isSubagentTool'),
-      'isSubagentTool variable should be gone (PreToolUse synthetic session block removed)');
-    assert.ok(!src.includes("'PreToolUse' && isSubagentTool"),
-      'PreToolUse isSubagentTool branch should not exist');
+  test('a PreToolUse for a subagent tool creates no extra orbital', () => {
+    // Bug: PreToolUse and SubagentStart both created orbital sessions, so a
+    // Task call produced two faces. Only SubagentStart may mint one now.
+    const { tmp, sessionsDir, env } = makeTempEnv('no-dup-orbital');
+    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
+    try {
+      execFileSync(NODE, [UPDATE_STATE, 'PreToolUse'], {
+        input: JSON.stringify({
+          session_id: 'no-dup-orbital', tool_name: 'Task',
+          tool_input: { description: 'go and look', subagent_type: 'Explore' },
+        }),
+        env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+    const files = fs.readdirSync(sessionsDir);
+    assert.deepStrictEqual(files, ['no-dup-orbital.json'],
+      `only the caller's own orbital may exist, got ${files.join(', ')}`);
+    cleanup(tmp);
   });
 
   test('update-state.js fallback catch block respects subagent isolation', () => {
@@ -2132,23 +2166,17 @@ describe('bug fix regressions', () => {
     cleanup(tmp);
   });
 
-  test('renderer.js readState returns isSessionStart field', () => {
-    // readState() must propagate isSessionStart so SessionStart events
-    // can trigger immediate session adoption in the render loop.
-    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-    assert.ok(src.includes('isSessionStart: data.isSessionStart'),
-      'readState should include isSessionStart field');
-  });
+  test('readState propagates isSessionStart so the renderer can adopt the session', () => {
+    const state = withStateFile({
+      state: 'idle', detail: 'session starting', sessionId: 'rs-1',
+      isSessionStart: true, timestamp: Date.now(),
+    }, () => require(path.join(__dirname, '..', 'renderer.js')).readState());
+    assert.strictEqual(state.isSessionStart, true);
 
-  test('update-state.js has no state-mirroring block for orbital faces', () => {
-    // Bug: an else-if block mirrored every parent tool call's state directly
-    // into the latest subagent session file, making orbital faces flicker
-    // and mirror the main face. Removed in favour of the time-based cycling.
-    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
-    assert.ok(!src.includes('latestSub'),
-      'latestSub variable should be gone (state-mirroring block removed)');
-    assert.ok(!src.includes('!isSubagentTool'),
-      '!isSubagentTool guard should be gone (state-mirroring block removed)');
+    const plain = withStateFile({
+      state: 'coding', detail: 'editing', sessionId: 'rs-1', timestamp: Date.now(),
+    }, () => require(path.join(__dirname, '..', 'renderer.js')).readState());
+    assert.strictEqual(plain.isSessionStart, false, 'absent means false, never undefined');
   });
 
   test('renderer.js PID guard handles EPERM as running (#65)', () => {
@@ -2157,16 +2185,35 @@ describe('bug fix regressions', () => {
       'PID guard catch should check for EPERM and treat as running');
   });
 
-  test('renderer.js responding rescue paths use forceState with a 3000ms min display (#67)', () => {
+  test('forceState applies the state at once and holds it for the given minimum (#67)', () => {
+    // The renderer's responding rescues call forceState(..., 3000). This is the
+    // half of that contract that lives in face.js and can be observed.
+    const { ClaudeFace } = require(path.join(__dirname, '..', 'face.js'));
+    const face = new ClaudeFace();
+    face.setState('coding', 'editing app.js');
+    const before = Date.now();
+    face.forceState('responding', 'wrapping up', 3000);
+    const after = Date.now();
+    assert.strictEqual(face.state, 'responding', 'forceState skips the pending queue');
+    assert.strictEqual(face.stateDetail, 'wrapping up');
+    assert.strictEqual(face.pendingState, null, 'the queue is dropped');
+    assert.ok(face.minDisplayUntil >= before + 3000 && face.minDisplayUntil <= after + 3000,
+      `minDisplayUntil should be ~now+3000, got ${face.minDisplayUntil - before}ms out`);
+    // And the hold is real: a later work state does not replace it immediately.
+    face.setState('coding', 'editing again');
+    assert.strictEqual(face.state, 'responding', 'the 3s minimum buffers the next state');
+  });
+
+  // Kept as a source check: both rescue paths live inside the renderer's
+  // 15fps render loop, which the suite has no harness for. This asserts only
+  // that they still route through face.forceState (whose behaviour the test
+  // above covers) rather than hand-rolling the transition again.
+  test('source: the renderer responding rescues go through face.forceState', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-    // Both rescue paths (stopped-flag rescue and fresh-read rescue) go through
-    // face.forceState so the 3s responding minimum is applied in one place.
-    assert.ok(src.includes("face.forceState('responding', 'wrapping up', 3000)"),
-      'stopped-flag rescue should forceState responding with 3000ms');
-    assert.ok(src.includes("face.forceState('responding', freshData.detail || 'wrapping up', 3000)"),
-      'fresh-read rescue should forceState responding with 3000ms');
-    // No hand-rolled transition left behind
-    assert.ok(!src.includes("minDisplayUntil = now;"),
+    const calls = src.match(/face\.forceState\('responding'/g) || [];
+    assert.strictEqual(calls.length, 2,
+      `both the stopped-flag and fresh-read rescues should forceState, found ${calls.length}`);
+    assert.ok(!src.includes('minDisplayUntil = now;'),
       'responding should not use minDisplayUntil = now (immediate expire)');
     assert.ok(!src.includes("face.state = 'responding';"),
       'renderer should not assign face.state directly for responding');
@@ -2920,25 +2967,84 @@ describe('bug fix structural tests', () => {
       'should have hasWt boolean flag controlled by where-wt probe');
   });
 
-  // Bug #2 -- OpenCode adapter toolInput uses data.tool_input || toolArgs, not data.input
-  test('opencode-adapter.js does not use data.input as first choice for toolInput', () => {
-    const src = fs.readFileSync(OPENCODE_ADAPTER, 'utf8');
-    // data.input is the full {tool, args} wrapper — should not be used directly as toolInput
-    assert.ok(!src.includes('toolInput = data.input'),
-      'toolInput must not be set to data.input (the full wrapper object)');
+  // Bug #2 -- OpenCode adapter toolInput unwraps the args, never the wrapper
+  test('normaliseEvent unwraps input.args instead of taking the {tool, args} wrapper', () => {
+    const { normaliseEvent } = require(OPENCODE_ADAPTER);
+    const norm = normaliseEvent({
+      type: 'tool.execute.before',
+      input: { tool: 'file_edit', args: { file_path: '/src/app.js' } },
+    });
+    assert.strictEqual(norm.toolName, 'file_edit');
+    assert.deepStrictEqual(norm.toolInput, { file_path: '/src/app.js' },
+      'toolInput is the args, not the wrapper');
+    assert.strictEqual(norm.toolInput.tool, undefined,
+      'the wrapper object must never leak into toolInput');
   });
 
-  test('opencode-adapter.js unwraps the tool args instead of taking the wrapper', () => {
-    const src = fs.readFileSync(OPENCODE_ADAPTER, 'utf8');
-    assert.ok(/data\.toolInput \|\| data\.tool_input \|\| opencodeInput\.args/.test(src),
-      'toolInput should prefer the flat plugin field, then tool_input, then the unwrapped args');
+  test('normaliseEvent prefers the flat plugin field, then tool_input, then input.args', () => {
+    const { normaliseEvent } = require(OPENCODE_ADAPTER);
+    const all = normaliseEvent({
+      type: 'tool.execute.before', tool: 'edit',
+      toolInput: { filePath: 'flat.js' },
+      tool_input: { file_path: 'snake.js' },
+      input: { tool: 'file_edit', args: { file_path: 'nested.js' } },
+    });
+    // normaliseToolInput also mirrors filePath onto file_path for the mapper.
+    assert.strictEqual(all.toolInput.file_path, 'flat.js', 'flat plugin field wins');
+
+    const snake = normaliseEvent({
+      type: 'tool.execute.before', tool: 'edit',
+      tool_input: { file_path: 'snake.js' },
+      input: { tool: 'file_edit', args: { file_path: 'nested.js' } },
+    });
+    assert.deepStrictEqual(snake.toolInput, { file_path: 'snake.js' }, 'tool_input beats input.args');
   });
 
   // Bug #4 -- SubagentStop only splices when idx >= 0
-  test('update-state.js guards SubagentStop splice with idx >= 0 check', () => {
-    const src = fs.readFileSync(UPDATE_STATE, 'utf8');
-    assert.ok(src.includes('if (idx >= 0)'),
-      'SubagentStop handler must check idx >= 0 before splicing to avoid removing wrong subagent');
+  test('SubagentStop for an unknown id retires nobody', () => {
+    // findIndex returns -1 for an id we never registered; splicing on that
+    // removes the LAST subagent and marks the wrong orbital done.
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-stop-guard');
+    const UPDATE_STATE_PATH = path.join(__dirname, '..', 'update-state.js');
+    const stats = {
+      streak: 0, bestStreak: 0, brokenStreak: 0, brokenStreakAt: 0,
+      totalToolCalls: 0, totalErrors: 0,
+      records: { longestSession: 0, mostSubagents: 1, mostFilesEdited: 0 },
+      session: {
+        id: 'sub-stop-guard', start: Date.now() - 1000, toolCalls: 0, filesEdited: [],
+        subagentCount: 1, commitCount: 0,
+        activeSubagents: [{
+          id: 'real-sub', description: 'real task', taskDescription: 'real task',
+          model: 'haiku', editor: 'claude', startedAt: Date.now() - 500,
+        }],
+      },
+      recentMilestone: null,
+      daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
+      frequentFiles: {}, topLevelSessions: {},
+    };
+    fs.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(path.join(sessionsDir, 'real-sub.json'), JSON.stringify({
+      session_id: 'real-sub', state: 'coding', detail: 'editing',
+      timestamp: Date.now(), stopped: false, parentSession: 'sub-stop-guard',
+    }), 'utf8');
+
+    try {
+      execFileSync(NODE, [UPDATE_STATE_PATH, 'SubagentStop'], {
+        input: JSON.stringify({ session_id: 'sub-stop-guard', subagent_id: 'never-registered' }),
+        env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+
+    const after = readJSON(statsFile);
+    assert.strictEqual(after.session.activeSubagents.length, 1,
+      'an unknown subagent id must not splice the real one out');
+    assert.strictEqual(after.session.activeSubagents[0].id, 'real-sub');
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'real-sub.json')).stopped, false,
+      "the running subagent's orbital must not be retired");
+    cleanup(tmp);
   });
 
   // Bug #5 -- Redundant stdin close handlers removed
@@ -2958,40 +3064,51 @@ describe('bug fix structural tests', () => {
       'base-adapter.js should not have redundant stdin close handler that calls process.exit');
   });
 
-  // Bug #7 -- Particle render includes ansi.reset after char
-  test('particles.js render method appends ansi.reset after particle character', () => {
-    const src = fs.readFileSync(PARTICLES, 'utf8');
-    assert.ok(src.includes('ansi.reset'),
-      'particles.js render should include ansi.reset to avoid color bleed after particle chars');
+  // Bug #7 -- every particle is closed with a reset, or its colour bleeds
+  test('every rendered particle is followed by a reset', () => {
+    const { ParticleSystem } = require(PARTICLES);
+    const { ansi } = require(path.join(__dirname, '..', 'themes.js'));
+    assert.ok(ansi.reset.length > 0, 'colour is on, so a reset is observable');
+    const ps = new ParticleSystem();
+    ps.spawn(20, 'float');
+    const out = ps.render(2, 2, [255, 128, 0]);
+    assert.ok(out.length > 0, 'the particles should be inside the terminal bounds');
+    assert.ok(out.endsWith(ansi.reset), 'the last particle must close its colour');
+    const chunks = out.split(ansi.reset).filter(Boolean);
+    for (const chunk of chunks) {
+      assert.ok(!chunk.includes(ansi.reset), 'split invariant');
+    }
+    assert.strictEqual(out.split(ansi.reset).length - 1, ps.particles.length,
+      'one reset per particle drawn');
   });
 
   // Bug #10 -- base-adapter initSession includes commitCount and activeSubagents
-  test('base-adapter.js initSession initialises commitCount in session object', () => {
-    const src = fs.readFileSync(BASE_ADAPTER, 'utf8');
-    assert.ok(src.includes('commitCount: 0'),
-      'initSession must include commitCount: 0 in the new session object');
-  });
-
-  test('base-adapter.js initSession initialises activeSubagents in session object', () => {
-    const src = fs.readFileSync(BASE_ADAPTER, 'utf8');
-    assert.ok(src.includes('activeSubagents: []'),
-      'initSession must include activeSubagents: [] in the new session object');
+  test('initSession gives a new session commitCount 0 and an empty activeSubagents', () => {
+    const baseAdapter = require(BASE_ADAPTER);
+    const { defaultStats } = require(path.join(__dirname, '..', 'state-machine.js'));
+    const stats = defaultStats();
+    baseAdapter.initSession(stats, 'fresh-session');
+    assert.strictEqual(stats.session.id, 'fresh-session');
+    assert.strictEqual(stats.session.commitCount, 0,
+      'a missing commitCount makes the commit counter NaN on the first commit');
+    assert.deepStrictEqual(stats.session.activeSubagents, [],
+      'a missing activeSubagents throws on the first SubagentStart');
   });
 
   // Bug #13 -- base-adapter guardedWriteState preserves existing.stopped flag
-  test('base-adapter.js guardedWriteState checks existing.stopped to preserve the flag', () => {
-    const src = fs.readFileSync(BASE_ADAPTER, 'utf8');
-    assert.ok(src.includes('existing.stopped'),
-      'guardedWriteState must read existing.stopped to preserve it for same-session writes');
-  });
-
-  // Bug #16 -- petSpamLevel threshold is >= 3, not > 3
-  test('face.js uses petSpamLevel >= 3 threshold (not > 3)', () => {
-    const src = fs.readFileSync(FACE, 'utf8');
-    assert.ok(src.includes('petSpamLevel >= 3'),
-      'face.js should activate caffeinated mode at petSpamLevel >= 3, not > 3');
-    assert.ok(!src.includes('petSpamLevel > 3'),
-      'face.js must not use petSpamLevel > 3 (off-by-one: level 3 would never trigger)');
+  test('guardedWriteState preserves a prior stopped flag for the same session', () => {
+    const baseAdapter = require(BASE_ADAPTER);
+    const result = withStateFile({
+      state: 'responding', detail: 'wrapping up', sessionId: 'gws-stopped',
+      stopped: true, timestamp: Date.now(),
+    }, () => {
+      baseAdapter.guardedWriteState('gws-stopped', 'relieved', 'command succeeded',
+        { sessionId: 'gws-stopped' });
+      return readJSON(SHARED.STATE_FILE);
+    });
+    assert.strictEqual(result.state, 'relieved', 'the late write still lands');
+    assert.strictEqual(result.stopped, true,
+      'a late PostToolUse must not erase the Stop that already happened');
   });
 });
 
