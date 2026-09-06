@@ -3109,22 +3109,19 @@ describe('editor PID liveness tracking', () => {
     cleanup(tmp);
   });
 
-  test('update-state.js writeState adds pid in the function, platform-conditionally', () => {
-    assert.ok(
-      updateStateSrc.includes("...(process.platform !== 'win32' ? { pid: process.ppid } : {}), ...extra"),
-      'writeState should spread pid conditionally (omit on win32) before ...extra'
-    );
-  });
+  test('readState propagates the writer pid, and reports 0 when there is none', () => {
+    const { readState } = require(path.join(__dirname, '..', 'renderer.js'));
+    const withPid = withStateFile({
+      state: 'coding', detail: 'editing', sessionId: 'pid-3',
+      pid: 4242, timestamp: Date.now(),
+    }, readState);
+    assert.strictEqual(withPid.pid, 4242, 'the renderer must see the pid to arm it');
 
-  test('codex-wrapper reports its own pid (long-lived, exits with codex)', () => {
-    const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'codex-wrapper.js'), 'utf8');
-    assert.ok(src.includes('pid: process.pid'),
-      'codex-wrapper should override pid with process.pid');
-  });
-
-  test('renderer readState returns pid field', () => {
-    assert.ok(rendererSrc.includes('pid: data.pid || 0'),
-      'readState should propagate the pid field');
+    const withoutPid = withStateFile({
+      state: 'coding', detail: 'editing', sessionId: 'pid-3', timestamp: Date.now(),
+    }, readState);
+    assert.strictEqual(withoutPid.pid, 0,
+      'a win32 write carries no pid; 0 means "nothing to arm", never undefined');
   });
 
   test('renderer keeps PID death in sticky editorDead flag, not lastStopped', () => {
@@ -3170,32 +3167,107 @@ describe('adapters -- editor provenance field', () => {
     assert.strictEqual(extra.editor, 'codex');
   });
 
-  test('every adapter declares its editor', () => {
-    const read = f => fs.readFileSync(path.join(__dirname, '..', 'adapters', f), 'utf8');
-    assert.ok(read('opencode-adapter.js').includes("defaultEditor: 'opencode'"));
-    assert.ok(read('openclaw-adapter.js').includes("defaultEditor: 'openclaw'"));
-    assert.ok(read('codex-notify.js').includes('editor'));
-    assert.ok(read('codex-wrapper.js').includes("const EDITOR = 'codex'"));
-    assert.ok(read('engmux-adapter.js').includes('extractEngine'));
+  test('each stdin adapter stamps its own editor onto the state file', () => {
+    // codex-wrapper is covered by the fake-codex block (editor: 'codex') and
+    // engmux by its own dispatch test (editor from -E).
+    const cases = [
+      ['opencode-adapter.js', 'opencode', { type: 'thinking', sessionId: 'ed-oc' }],
+      ['openclaw-adapter.js', 'openclaw', { event: 'tool_call', toolName: 'read', sessionId: 'ed-cl' }],
+    ];
+    for (const [file, editor, payload] of cases) {
+      const { tmp, stateFile, env } = makeTempEnv(`ed-${editor}`);
+      runStdinAdapter(path.join(ADAPTERS_DIR, file), payload, env);
+      assert.strictEqual(readJSON(stateFile).editor, editor, file);
+      cleanup(tmp);
+    }
+
+    const { tmp, stateFile, env } = makeTempEnv('ed-codex');
+    try {
+      execFileSync(NODE, [path.join(ADAPTERS_DIR, 'codex-notify.js'),
+        JSON.stringify({ type: 'agent-turn-complete', 'thread-id': 'ed-codex' })], {
+        env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+    assert.strictEqual(readJSON(stateFile).editor, 'codex', 'codex-notify.js');
+    cleanup(tmp);
   });
 
-  test('runStdinAdapter fallback session id is editor-prefixed', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'adapters', 'base-adapter.js'), 'utf8');
-    assert.ok(src.includes('${defaultEditor}-${process.ppid}'));
+  test('an anonymous adapter session gets an editor-prefixed fallback id', () => {
+    // ${defaultEditor}-${process.ppid}: under execFileSync the adapter's
+    // parent is this test runner, so the ppid it sees is our own pid.
+    const { tmp, stateFile, env } = makeTempEnv('unused');
+    delete env.CLAUDE_SESSION_ID;
+    runStdinAdapter(path.join(ADAPTERS_DIR, 'opencode-adapter.js'),
+      { type: 'thinking' }, env); // no sessionId / session_id anywhere
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.sessionId, `opencode-${process.pid}`,
+      `an anonymous session must be self-describing, got "${state.sessionId}"`);
+    cleanup(tmp);
   });
 
-  test('update-state.js: editor invariants', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
-    // env > --editor <name> > 'claude', resolved before FALLBACK_SESSION_ID
-    assert.ok(src.includes("process.env.CODE_CRUMB_EDITOR || HOOK_ARGS.editor || 'claude'"), 'editor resolution');
-    assert.ok(src.includes("'editor'"), 'editor in STICKY_FIELDS');
-    assert.ok(src.includes('FALLBACK_SESSION_ID'), 'single shared fallback id expression');
-    assert.ok(src.includes("process.platform !== 'win32'"), 'win32 transient-shim pid omission');
+  test('update-state.js takes its editor from CODE_CRUMB_EDITOR, then --editor, then claude', () => {
+    const dflt = makeTempEnv('ed-default');
+    delete dflt.env.CODE_CRUMB_EDITOR;
+    runUpdateState('PreToolUse', {
+      session_id: 'ed-default', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    }, dflt.env);
+    assert.strictEqual(readJSON(dflt.stateFile).editor, 'claude', 'default');
+    cleanup(dflt.tmp);
+
+    const flag = makeTempEnv('ed-flag');
+    delete flag.env.CODE_CRUMB_EDITOR;
+    runUpdateState('PreToolUse', {
+      session_id: 'ed-flag', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    }, flag.env, ['--editor', 'opencode']);
+    assert.strictEqual(readJSON(flag.stateFile).editor, 'opencode', '--editor <name>');
+    cleanup(flag.tmp);
+
+    const env = makeTempEnv('ed-env');
+    env.env.CODE_CRUMB_EDITOR = 'foo';
+    runUpdateState('PreToolUse', {
+      session_id: 'ed-env', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    }, env.env, ['--editor', 'opencode']);
+    assert.strictEqual(readJSON(env.stateFile).editor, 'foo', 'the env var outranks the flag');
+    cleanup(env.tmp);
   });
 
-  test('guardedWriteState preserves owner editor', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'adapters', 'base-adapter.js'), 'utf8');
-    assert.ok(src.includes('existing.editor'), 'editor preservation in guardedWriteState');
+  test('the editor a session established survives later hooks of another editor', () => {
+    // The owner guard in update-state.js pins modelName and editor for the
+    // session that owns the state file, and the same `extra` then goes to the
+    // orbital -- so a claude-defaulted hook cannot relabel an openclaw session.
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('ed-sticky');
+    delete env.CODE_CRUMB_EDITOR;
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'idle', detail: '', sessionId: 'ed-sticky',
+      editor: 'openclaw', stopped: false, timestamp: Date.now(),
+    }), 'utf8');
+
+    runUpdateState('PreToolUse', {
+      session_id: 'ed-sticky', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    }, env);
+
+    assert.strictEqual(readJSON(stateFile).editor, 'openclaw',
+      'a claude-defaulted hook must not relabel the session');
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'ed-sticky.json')).editor, 'openclaw',
+      'and the orbital carries the same provenance');
+    cleanup(tmp);
+  });
+
+  test('guardedWriteState keeps the editor the session owner established', () => {
+    const baseAdapter = require('../adapters/base-adapter');
+    const result = withStateFile({
+      state: 'thinking', detail: '', sessionId: 'ed-owner',
+      editor: 'openclaw', stopped: false, timestamp: Date.now(),
+    }, () => {
+      baseAdapter.guardedWriteState('ed-owner', 'coding', 'editing',
+        { sessionId: 'ed-owner', editor: 'codex' });
+      return readJSON(SHARED.STATE_FILE);
+    });
+    assert.strictEqual(result.state, 'coding', 'the write still lands');
+    assert.strictEqual(result.editor, 'openclaw',
+      'the owner editor wins over the writing adapter');
   });
 });
 
@@ -3206,21 +3278,6 @@ describe('adapters -- editor provenance field', () => {
 // falsely retiring the real subagent's synthetic orbital.
 
 describe('update-state -- parallel sessions vs subagents (#134)', () => {
-  const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
-
-  function runUpdateState(event, inputObj, env) {
-    try {
-      execFileSync(NODE, [UPDATE_STATE, event], {
-        input: JSON.stringify(inputObj),
-        env,
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
-  }
-
   // Stats blob for an owner session conducting one subagent
   function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
     return {
