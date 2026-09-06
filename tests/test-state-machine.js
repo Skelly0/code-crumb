@@ -2448,7 +2448,7 @@ describe('update-state.js -- touch active subagent files (Bug #3)', () => {
     assert.ok(touchIdx > writeIdx, '_touchActiveSubagents should come after _writeSubagentToolState');
   });
 
-  test('_touchActiveSubagents uses fs.utimesSync over every entry', () => {
+  test('_touchActiveSubagents touches every entry via _touchSessionFile', () => {
     const fs = require('fs');
     const src = fs.readFileSync(
       require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
@@ -2456,11 +2456,34 @@ describe('update-state.js -- touch active subagent files (Bug #3)', () => {
     const helperStart = src.indexOf('function _touchActiveSubagents(');
     const helperEnd = src.indexOf('\n}\n', helperStart);
     const helperBody = src.slice(helperStart, helperEnd);
-    assert.ok(helperBody.includes('fs.utimesSync'), 'should use fs.utimesSync to refresh mtime');
+    assert.ok(helperBody.includes('_touchSessionFile('),
+      'should delegate to the shared _touchSessionFile helper');
     assert.ok(helperBody.includes('i < activeSubagents.length;'),
       'should iterate the whole list, not stop one short of the newest');
     assert.ok(!helperBody.includes('length - 1'),
       'the skip-the-newest bound must be gone');
+  });
+
+  test('_touchSessionFile refreshes an mtime with fs.utimesSync', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(
+      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
+    );
+    const helperStart = src.indexOf('function _touchSessionFile(');
+    const helperEnd = src.indexOf('\n}\n', helperStart);
+    const helperBody = src.slice(helperStart, helperEnd);
+    assert.ok(helperStart > 0, 'should define _touchSessionFile');
+    assert.ok(helperBody.includes('fs.utimesSync'), 'should use fs.utimesSync to refresh mtime');
+  });
+
+  test('an agent event heartbeats its parent session file', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(
+      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
+    );
+    assert.ok(src.includes('if (isAgentEvent) _touchSessionFile(sessionId);'),
+      "an agent write must touch the parent's file so the renderer can tell a "
+      + 'waiting conductor from a crashed one');
   });
 });
 
@@ -2891,11 +2914,11 @@ describe('update-state.js -- subagent session detection (isKnownSubagent)', () =
     assert.ok(src.includes("'SubagentStop'"), 'LIFECYCLE_EVENTS should contain SubagentStop');
   });
 
-  test('session reset is skipped when isKnownSubagent or isParallelSession', () => {
+  test('session reset is skipped for agent events, known subagents and parallel sessions', () => {
     const src = readSrc();
     assert.ok(
-      src.includes('stats.session.id !== sessionId && !isKnownSubagent && !isParallelSession) {'),
-      'session reset condition should include !isKnownSubagent and !isParallelSession guards'
+      src.includes('stats.session.id !== sessionId && !isAgentEvent && !isKnownSubagent && !isParallelSession) {'),
+      'session reset must be guarded by !isAgentEvent, !isKnownSubagent and !isParallelSession'
     );
   });
 
@@ -3031,7 +3054,7 @@ describe('update-state.js -- subagent session detection (isKnownSubagent)', () =
   test('isKnownSubagent detection comes before session reset', () => {
     const src = readSrc();
     const detectionIdx = src.indexOf('let isKnownSubagent = false');
-    const resetIdx = src.indexOf('stats.session.id !== sessionId && !isKnownSubagent');
+    const resetIdx = src.indexOf('stats.session.id !== sessionId && !isAgentEvent && !isKnownSubagent');
     assert.ok(detectionIdx > 0, 'detection block should exist');
     assert.ok(resetIdx > 0, 'guarded reset should exist');
     assert.ok(detectionIdx < resetIdx,

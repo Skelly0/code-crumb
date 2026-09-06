@@ -70,29 +70,59 @@ const FRESH_READ_STATES = new Set(['thinking', ...ACTIVE_WORK_STATES, ...COMPLET
 //   fileState     the state last applied from the state file
 //   fileAgeMs     how long since the main session produced a NEW write
 //                 (0 when unknown -- treated as fresh)
-function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState, fileAgeMs }) {
-  if (state === 'starting') return sinceChangeMs > 2500 ? 'idle' : null;
+//   liveChildren  live subagent orbitals belonging to this session (0 = none)
+function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState, fileAgeMs, liveChildren = 0 }) {
+  // Conducting hold. A Claude Code subagent's hooks write only that agent's
+  // own orbital file, so between SubagentStart and SubagentStop nothing
+  // refreshes global state and the face would fall idle -> sleeping while its
+  // agents are visibly working around it. Hold it at 'subagent' (exactly what
+  // SubagentStart itself writes) instead of letting it rest.
+  //
+  // `conducting()` is null once the face is already there, so a held face
+  // never churns setState every frame. `hold()` substitutes it for a downward
+  // transition only -- a reward, a real work state and a plain null all pass
+  // through untouched, and so does the `waiting` hold below: "the editor needs
+  // YOU" is actionable and outranks the ambient "your agents are busy".
+  // Conducting only fills a vacuum the cascade would otherwise fill with idle.
+  //
+  // The bound is the caller's: liveChildren counts only non-stopped, non-stale
+  // children, so a crashed parent's stale orbitals stop holding the face up.
+  const conducting = () => (state === 'subagent' ? null : 'subagent');
+  const hold = (next) => (liveChildren > 0 &&
+    (next === 'idle' || next === 'sleeping' || next === 'thinking')) ? conducting() : next;
+
+  if (state === 'starting') return hold(sinceChangeMs > 2500 ? 'idle' : null);
   if (state === 'responding' && !sessionActive) return 'happy';
-  if (lingerMs && sinceChangeMs > lingerMs) return sessionActive ? 'thinking' : 'idle';
+  if (lingerMs && sinceChangeMs > lingerMs) return hold(sessionActive ? 'thinking' : 'idle');
   if (state === 'thinking') {
-    return sinceChangeMs > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT) ? 'idle' : null;
+    return hold(sinceChangeMs > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT) ? 'idle' : null);
   }
-  if (state === 'idle') return sinceChangeMs > SLEEP_TIMEOUT ? 'sleeping' : null;
-  if (state === 'sleeping' || COMPLETION_STATES.has(state)) return null;
+  // Resting: with agents still working, lift straight back to conducting
+  // rather than wait out the 60s sleep timer with orbitals busy on screen.
+  if (state === 'idle') {
+    if (liveChildren > 0) return conducting();
+    return sinceChangeMs > SLEEP_TIMEOUT ? 'sleeping' : null;
+  }
+  if (state === 'sleeping') return liveChildren > 0 ? conducting() : null;
+  if (COMPLETION_STATES.has(state)) return null;
   // Waiting on the user is real whether or not the turn has ended -- an
   // idle_prompt notification arrives *after* Stop. So this hold ignores
   // sessionActive and never expires on display time: the face waits as long as
   // the user does. It ends only once the editor has stopped producing new
   // writes for WAIT_HOLD_STALE_MS -- the one crash signal that works on every
   // platform. Degrade to idle, not thinking: nothing was ever running.
+  // This hold wins over the conducting hold while it lasts -- and once the
+  // silence bound does expire, hold() turns that 'idle' into conducting if
+  // agents are still writing, which is the honest reading: the global write
+  // clock has gone quiet but the family demonstrably has not.
   if (state === 'waiting' && fileState === 'waiting') {
-    return (fileAgeMs || 0) > WAIT_HOLD_STALE_MS ? 'idle' : null;
+    return (fileAgeMs || 0) > WAIT_HOLD_STALE_MS ? hold('idle') : null;
   }
   // The state file still names this same unfinished tool: hold the work face.
   // ('responding' is in ACTIVE_WORK_STATES but is a post-turn state, never a tool.)
   if (ACTIVE_WORK_STATES.has(state) && state !== 'responding' && sessionActive
       && fileState === state && sinceChangeMs <= LONG_TOOL_HOLD_MS) return null;
-  return sinceChangeMs > IDLE_TIMEOUT ? (sessionActive ? 'thinking' : 'idle') : null;
+  return hold(sinceChangeMs > IDLE_TIMEOUT ? (sessionActive ? 'thinking' : 'idle') : null);
 }
 
 // -- Write clock -----------------------------------------------------
@@ -440,6 +470,9 @@ function runUnifiedMode() {
     // degrade-to-thinking fallback — except while the state file still names
     // the same unfinished tool, which holds the work face (face.js escalates
     // its detail line instead).
+    // Live subagent orbitals hold the main face at "conducting N" instead of
+    // letting it fall idle while agent hooks write only their own files.
+    const liveChildren = minimal ? 0 : orbital.liveChildCount();
     const next = idleCascade({
       state: face.state,
       sinceChangeMs: now - face.lastStateChange,
@@ -447,8 +480,10 @@ function runUnifiedMode() {
       lingerMs: COMPLETION_LINGER[face.state] || 0,
       fileState: lastAppliedState,
       fileAgeMs: lastNewWriteAt ? now - lastNewWriteAt : 0,
+      liveChildren,
     });
-    if (next) face.setState(next);
+    if (next === 'subagent' && liveChildren > 0) face.setState(next, `conducting ${liveChildren}`);
+    else if (next) face.setState(next);
   }
 
   checkState();

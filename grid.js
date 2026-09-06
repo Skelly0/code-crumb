@@ -283,6 +283,11 @@ class MiniFace {
     this.lookTimer = 0;
     this.parentSession = null; // set if this is a subagent orbital
     this.agentType = '';       // Claude Code agent_type (Explore, Plan, ...)
+    // Whether the conducting parent still shows a sign of life. Only the long
+    // CHILD_ORPHAN_TIMEOUT depends on it, and it starts true so a face nobody
+    // has classified yet is protected -- the same "unresolved means protect"
+    // convention isOwnedByLiveProcess uses for a pending PID.
+    this.parentAlive = true;
     this.teamName = '';        // agent teams: team name
     this.teammateName = '';    // agent teams: teammate role/name
     this.isTeammate = false;   // true if part of an agent team
@@ -322,7 +327,15 @@ class MiniFace {
     // Skip if data hasn't changed since last read (prevents tick() oscillation).
     // Uses JSON timestamp (ms precision) instead of file mtime — immune to NTFS 1s granularity.
     const dataTs = data.timestamp || 0;
-    if (dataTs && dataTs === this._lastDataTimestamp) return;
+    if (dataTs && dataTs === this._lastDataTimestamp) {
+      // Same content, newer mtime: the file was touched, not rewritten (the
+      // parent heartbeat and _touchActiveSubagents both do this). Take the
+      // mtime so the face doesn't go stale under a demonstrably fresh file.
+      // Only the file's own mtime is used, never Date.now() -- polling must
+      // not be able to keep a dead session alive.
+      if (fileMtimeMs && fileMtimeMs > this.lastUpdate) this.lastUpdate = fileMtimeMs;
+      return;
+    }
     this._lastDataTimestamp = dataTs;
 
     const newState = data.state || 'idle';
@@ -400,11 +413,14 @@ class MiniFace {
     if (COMPLETION_STATES.has(this.state)) {
       return Date.now() - this.lastUpdate > STOPPED_LINGER_MS;
     }
-    // Everything else: orphan timeout. A live child orbital gets the longer
-    // window -- a subagent in a long model turn writes nothing until its next
-    // tool call, and dropping it there is exactly the "subagents don't all
-    // show up" symptom.
-    const orphanMs = this.parentSession ? CHILD_ORPHAN_TIMEOUT : ORPHAN_TIMEOUT;
+    // Everything else: orphan timeout. A child orbital gets the longer window
+    // -- a subagent in a long model turn writes nothing until its next tool
+    // call, and dropping it there is exactly the "subagents don't all show up"
+    // symptom. The extension is conditional on the parent still showing a sign
+    // of life, so a crashed parent's ghosts degrade on the normal schedule
+    // instead of animating fake work for a quarter of an hour.
+    const orphanMs = (this.parentSession && this.parentAlive)
+      ? CHILD_ORPHAN_TIMEOUT : ORPHAN_TIMEOUT;
     return Date.now() - this.lastUpdate > orphanMs;
   }
 
@@ -748,10 +764,23 @@ class OrbitalSystem {
 
     // Purge orphaned/finished session files — but protect active thinking faces
     const now = Date.now();
+    // One stat per file, reused by the purge below and by the parent-freshness
+    // rule: a child orbital only earns CHILD_ORPHAN_TIMEOUT while its parent's
+    // file is fresh. Every agent write heartbeats that file, so a silent parent
+    // really is a gone parent and its ghosts degrade on the normal schedule.
+    const mtimes = new Map();
+    for (const f of files) {
+      try { mtimes.set(f, fs.statSync(path.join(SESSIONS_DIR, f)).mtimeMs); } catch {}
+    }
+    const parentIsFresh = (parentSession) => {
+      const m = mtimes.get(safeFilename(parentSession) + '.json');
+      return m !== undefined && now - m <= STALE_MS;
+    };
     for (const f of files) {
       try {
         const fp = path.join(SESSIONS_DIR, f);
-        const fileMtimeMs = fs.statSync(fp).mtimeMs;
+        const fileMtimeMs = mtimes.get(f);
+        if (fileMtimeMs === undefined) continue;
         if (now - fileMtimeMs > STALE_MS) {
           // Use reverse map for correct face lookup (safeFilename may transform the ID)
           const faceId = fileToFaceId.get(f) || path.basename(f, '.json');
@@ -766,8 +795,10 @@ class OrbitalSystem {
           try {
             const data = JSON.parse(fs.readFileSync(fp, 'utf8'));
             // A live subagent orbital emits no hooks during a model turn —
-            // give child files the longer window before they are purged.
+            // give child files the longer window before they are purged, but
+            // only while the conducting parent still shows a sign of life.
             if (data.parentSession && !data.stopped &&
+                parentIsFresh(data.parentSession) &&
                 now - fileMtimeMs <= CHILD_ORPHAN_TIMEOUT) continue;
             if (data.pid && isOwnedByLiveProcess(data.pid, data.timestamp || fileMtimeMs)) continue;
           } catch {
@@ -815,7 +846,10 @@ class OrbitalSystem {
           mf.spawnProgress = 0;
           this.faces.set(id, mf);
         }
-        this.faces.get(id).updateFromFile(data, mtimeMs);
+        const mf = this.faces.get(id);
+        mf.updateFromFile(data, mtimeMs);
+        // Only children gate on this; a top-level session is always "alive".
+        mf.parentAlive = !data.parentSession || parentIsFresh(data.parentSession);
       } catch {
         // Parse failure (partial write) — protect existing face from deletion
         const existingId = fileToFaceId.get(file);
@@ -902,6 +936,22 @@ class OrbitalSystem {
     });
   }
 
+  // How many of the main session's subagent orbitals are still live.
+  // The renderer feeds this to idleCascade so the main face reads as
+  // "conducting N" instead of cascading to idle/sleeping while its agents
+  // work -- agent hooks write only their own orbital files, so nothing
+  // refreshes global state between SubagentStart and SubagentStop.
+  // Staleness is whatever isStale() already says, so a crashed parent whose
+  // child files have gone stale stops holding the face up.
+  liveChildCount() {
+    if (!this.mainSessionId) return 0;
+    let n = 0;
+    for (const face of this.faces.values()) {
+      if (face.parentSession === this.mainSessionId && !face.stopped && !face.isStale()) n++;
+    }
+    return n;
+  }
+
   _applySessionResults(excludeId, results) {
     const prevSize = this.faces.size;
     const prevKeys = new Set(this.faces.keys());
@@ -915,6 +965,18 @@ class OrbitalSystem {
     // Purge stale session files (async unlink — fire and forget)
     const now = Date.now();
     const survivingResults = [];
+
+    // Sessions that still show a sign of life. A child orbital only earns the
+    // long CHILD_ORPHAN_TIMEOUT while its parent is in here: every agent write
+    // heartbeats the parent's file, so a parent silent for STALE_MS has really
+    // gone and its ghost children must not keep animating fake work.
+    const freshIds = new Set();
+    for (const r of results) {
+      if (r.error || r.empty || !r.data) continue;
+      if (now - r.mtimeMs <= STALE_MS) {
+        freshIds.add(r.data.session_id || path.basename(r.file, '.json'));
+      }
+    }
 
     for (const r of results) {
       if (r.error || r.empty) { survivingResults.push(r); continue; }
@@ -933,8 +995,10 @@ class OrbitalSystem {
           }
         }
         // A live subagent orbital emits no hooks during a model turn — give
-        // child files the longer window before they are purged.
+        // child files the longer window before they are purged, but only while
+        // the conducting parent still shows a sign of life.
         if (r.data && r.data.parentSession && !r.data.stopped &&
+            freshIds.has(r.data.parentSession) &&
             now - r.mtimeMs <= CHILD_ORPHAN_TIMEOUT) {
           survivingResults.push(r); // Protected — subagent in a long model turn
           continue;
@@ -972,7 +1036,10 @@ class OrbitalSystem {
         mf.spawnProgress = 0;
         this.faces.set(id, mf);
       }
-      this.faces.get(id).updateFromFile(r.data, r.mtimeMs);
+      const mf = this.faces.get(id);
+      mf.updateFromFile(r.data, r.mtimeMs);
+      // Only children gate on this; a top-level session is always "alive".
+      mf.parentAlive = !r.data.parentSession || freshIds.has(r.data.parentSession);
     }
 
     // Remove faces not seen in files or stale in memory

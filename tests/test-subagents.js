@@ -25,8 +25,9 @@ const {
 } = require('../state-machine');
 const { writeJsonAtomic } = require('../shared');
 const {
-  MiniFace, OrbitalSystem, CHILD_ORPHAN_TIMEOUT, ORPHAN_TIMEOUT,
+  MiniFace, OrbitalSystem, CHILD_ORPHAN_TIMEOUT, ORPHAN_TIMEOUT, STALE_MS,
 } = require('../grid');
+const { idleCascade, SLEEP_TIMEOUT, THINKING_TIMEOUT } = require('../renderer');
 
 // Horizontal ellipsis, built without a literal glyph so this file stays ASCII.
 const ELLIPSIS = String.fromCharCode(0x2026);
@@ -413,6 +414,94 @@ describe('update-state -- active subagent ageing net', () => {
   });
 });
 
+// -- an agent event must never reset the stats owner's session ---------
+
+describe('update-state -- agent events never adopt the stats session', () => {
+  test("an agent of a non-owner parent leaves the owner's activeSubagents intact", () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('Q');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    // Owner Q is conducting one agent of its own.
+    writeJsonAtomic(sessionFile(sessionsDir, 'Q-agent-q1'), {
+      session_id: 'Q-agent-q1', state: 'coding', detail: 'work',
+      timestamp: Date.now(), stopped: false,
+      parentSession: 'Q', taskDescription: 'owner task', modelName: 'Explore',
+    });
+    writeJsonAtomic(statsFile, {
+      streak: 0, bestStreak: 0, brokenStreak: 0, brokenStreakAt: 0,
+      totalToolCalls: 7, totalErrors: 0,
+      records: { longestSession: 1234, mostSubagents: 1, mostFilesEdited: 0 },
+      session: {
+        id: 'Q', start: Date.now() - 60000, toolCalls: 7, filesEdited: [],
+        subagentCount: 1, commitCount: 0,
+        activeSubagents: [{
+          id: 'Q-agent-q1', agentId: 'q1', description: 'owner task',
+          taskDescription: 'owner task', agentType: 'Explore',
+          model: 'Explore', editor: 'claude', startedAt: Date.now() - 5000,
+        }],
+      },
+      recentMilestone: null,
+      daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
+      frequentFiles: {},
+      topLevelSessions: { Q: Date.now() },
+    });
+
+    // A different top-level session P has its own agent working.
+    runUpdateState('PreToolUse', {
+      session_id: 'P', hook_event_name: 'PreToolUse', cwd: process.cwd(),
+      agent_id: 'p1', agent_type: 'Plan',
+      tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    }, env);
+
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.session.id, 'Q',
+      "an agent event must not adopt stats.session from its parent's id");
+    assert.strictEqual(stats.session.activeSubagents.length, 1,
+      "the owner's activeSubagents must survive an unrelated agent event");
+    assert.strictEqual(stats.session.activeSubagents[0].id, 'Q-agent-q1');
+    assert.ok(stats.session.start > 0, "the owner's session records must survive");
+    assert.strictEqual(stats.daily.sessionCount, 1,
+      'no session reset means no spurious sessionCount increment');
+    // P's agent still gets its own orbital.
+    const pAgent = readJSON(sessionFile(sessionsDir, 'P-agent-p1'));
+    assert.strictEqual(pAgent.state, 'reading');
+    assert.strictEqual(pAgent.parentSession, 'P');
+    cleanup(tmp);
+  });
+});
+
+// -- family heartbeat --------------------------------------------------
+
+describe('update-state -- agent writes heartbeat the parent session file', () => {
+  test("an agent event refreshes the parent's file mtime without rewriting it", () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('p');
+    runUpdateState('SubagentStart', {
+      session_id: 'p', hook_event_name: 'SubagentStart', cwd: process.cwd(),
+      agent_id: 'a1', agent_type: 'Explore', invocation_prompt: 'long job',
+    }, env);
+
+    const parentPath = sessionFile(sessionsDir, 'p');
+    const before = readJSON(parentPath);
+    // Pretend the parent has been silently waiting on its agent for 10 minutes.
+    const old = new Date(Date.now() - 10 * 60000);
+    fs.utimesSync(parentPath, old, old);
+
+    runUpdateState('PreToolUse', {
+      session_id: 'p', hook_event_name: 'PreToolUse', cwd: process.cwd(),
+      agent_id: 'a1', agent_type: 'Explore',
+      tool_name: 'Grep', tool_input: { pattern: 'x' },
+    }, env);
+
+    const mtime = fs.statSync(parentPath).mtimeMs;
+    assert.ok(Date.now() - mtime < 2000,
+      `the parent's file should be touched by its agent's write, got ${Date.now() - mtime}ms old`);
+    const after = readJSON(parentPath);
+    assert.strictEqual(after.timestamp, before.timestamp,
+      'the heartbeat must touch the mtime, not rewrite the parent state');
+    assert.strictEqual(after.state, before.state);
+    cleanup(tmp);
+  });
+});
+
 // -- grid.js child staleness ------------------------------------------
 
 describe('grid.js -- child orbital staleness', () => {
@@ -453,19 +542,53 @@ describe('grid.js -- child orbital staleness', () => {
     assert.strictEqual(childFace(1000).agentType, 'Explore');
   });
 
-  test('_applySessionResults keeps a 5-minute-old child file', () => {
-    const os = new OrbitalSystem();
-    const mtimeMs = Date.now() - 5 * 60000;
-    os._applySessionResults('main-id', [{
+  test('a child whose parent has gone silent falls back to ORPHAN_TIMEOUT', () => {
+    const mf = childFace(5 * 60000);
+    mf.parentAlive = false;
+    assert.strictEqual(mf.isStale(), true,
+      "a ghost child of a crashed parent must not hold the long window");
+  });
+
+  // The parent heartbeat (every agent write touches the parent's file) is what
+  // makes "parent file fresh" a real liveness signal, so the purge can tell a
+  // waiting conductor from a crashed one.
+  function childResult(ageMs) {
+    return {
       file: 'p-agent-a1.json',
       data: {
         session_id: 'p-agent-a1', state: 'coding', stopped: false,
         parentSession: 'p', taskDescription: 'long job',
       },
-      mtimeMs,
-    }]);
+      mtimeMs: Date.now() - ageMs,
+    };
+  }
+  function parentResult(ageMs) {
+    return {
+      file: 'p.json',
+      data: { session_id: 'p', state: 'subagent', stopped: false },
+      mtimeMs: Date.now() - ageMs,
+    };
+  }
+
+  test('_applySessionResults keeps a 5-minute-old child under a fresh parent', () => {
+    const os = new OrbitalSystem();
+    os._applySessionResults('main-id', [parentResult(1000), childResult(5 * 60000)]);
     assert.ok(os.faces.has('p-agent-a1'),
       'a subagent in a long model turn must survive the mtime purge');
+    assert.strictEqual(os.faces.get('p-agent-a1').parentAlive, true);
+  });
+
+  test('_applySessionResults drops a 5-minute-old child under a silent parent', () => {
+    const os = new OrbitalSystem();
+    os._applySessionResults('main-id', [parentResult(10 * 60000), childResult(5 * 60000)]);
+    assert.ok(!os.faces.has('p-agent-a1'),
+      "a crashed parent's ghost child must not get the 15-minute window");
+  });
+
+  test('_applySessionResults drops a child whose parent file is gone entirely', () => {
+    const os = new OrbitalSystem();
+    os._applySessionResults('main-id', [childResult(5 * 60000)]);
+    assert.ok(!os.faces.has('p-agent-a1'));
   });
 
   test('_applySessionResults still drops a 5-minute-old top-level file', () => {
@@ -477,6 +600,145 @@ describe('grid.js -- child orbital staleness', () => {
       mtimeMs,
     }]);
     assert.ok(!os.faces.has('other'));
+  });
+
+  test('STALE_MS is the parent-freshness window and is shorter than the child one', () => {
+    assert.ok(STALE_MS < CHILD_ORPHAN_TIMEOUT);
+  });
+
+  test('updateFromFile takes a newer mtime when only the file was touched', () => {
+    const mf = new MiniFace('p-agent-a1');
+    const ts = Date.now() - 5 * 60000;
+    const data = { session_id: 'p-agent-a1', state: 'coding', timestamp: ts, parentSession: 'p' };
+    mf.updateFromFile(data, ts);
+    assert.strictEqual(mf.lastUpdate, ts);
+    // Same content, fresher mtime -- a heartbeat touch, not a rewrite.
+    const touched = Date.now();
+    mf.updateFromFile(data, touched);
+    assert.strictEqual(mf.lastUpdate, touched,
+      'a touched file must refresh lastUpdate so the face does not go stale under it');
+  });
+});
+
+// -- main face conducting hold ----------------------------------------
+
+describe('renderer -- idleCascade conducting hold', () => {
+  const base = { sessionActive: true, lingerMs: 0, fileState: 'idle' };
+
+  test('existing callers are unaffected (liveChildren defaults to 0)', () => {
+    assert.strictEqual(idleCascade({
+      ...base, state: 'idle', sinceChangeMs: SLEEP_TIMEOUT + 1,
+    }), 'sleeping');
+    assert.strictEqual(idleCascade({
+      ...base, state: 'thinking', sinceChangeMs: THINKING_TIMEOUT + 1, fileState: 'thinking',
+    }), 'idle');
+  });
+
+  test('idle is lifted to subagent while children are live', () => {
+    assert.strictEqual(idleCascade({
+      ...base, state: 'idle', sinceChangeMs: 100, liveChildren: 3,
+    }), 'subagent');
+  });
+
+  test('sleeping is lifted to subagent while children are live', () => {
+    assert.strictEqual(idleCascade({
+      ...base, state: 'sleeping', sinceChangeMs: 999999, liveChildren: 1,
+    }), 'subagent');
+  });
+
+  test('subagent holds instead of degrading to thinking or idle', () => {
+    assert.strictEqual(idleCascade({
+      ...base, state: 'subagent', sinceChangeMs: 999999, fileState: 'subagent', liveChildren: 2,
+    }), null);
+    assert.strictEqual(idleCascade({
+      ...base, state: 'subagent', sinceChangeMs: 999999, fileState: 'idle',
+      sessionActive: false, liveChildren: 2,
+    }), null);
+  });
+
+  test('a finished turn still shows its reward before conducting resumes', () => {
+    assert.strictEqual(idleCascade({
+      ...base, state: 'responding', sinceChangeMs: 0, sessionActive: false, liveChildren: 2,
+    }), 'happy');
+    // ...and the reward holds for its linger.
+    assert.strictEqual(idleCascade({
+      ...base, state: 'happy', sinceChangeMs: 1000, lingerMs: 5000, liveChildren: 2,
+    }), null);
+    // ...then falls to conducting rather than thinking/idle.
+    assert.strictEqual(idleCascade({
+      ...base, state: 'happy', sinceChangeMs: 5001, lingerMs: 5000, liveChildren: 2,
+    }), 'subagent');
+  });
+
+  test('real work states are never intercepted', () => {
+    assert.strictEqual(idleCascade({
+      ...base, state: 'coding', sinceChangeMs: 100, fileState: 'coding', liveChildren: 2,
+    }), null);
+  });
+
+  test('the hold releases when the last child retires', () => {
+    assert.strictEqual(idleCascade({
+      ...base, state: 'subagent', sinceChangeMs: 999999, fileState: 'subagent', liveChildren: 0,
+    }), 'thinking');
+    assert.strictEqual(idleCascade({
+      ...base, state: 'idle', sinceChangeMs: SLEEP_TIMEOUT + 1, liveChildren: 0,
+    }), 'sleeping');
+  });
+});
+
+describe('grid.js -- liveChildCount bounds the conducting hold', () => {
+  function systemWith(children) {
+    const os = new OrbitalSystem();
+    os.mainSessionId = 'p';
+    for (const c of children) {
+      const mf = new MiniFace(c.id);
+      const mtime = Date.now() - (c.ageMs || 0);
+      mf.updateFromFile({
+        session_id: c.id, state: 'coding', timestamp: mtime,
+        stopped: !!c.stopped, parentSession: c.parentSession,
+      }, mtime);
+      if (c.parentAlive === false) mf.parentAlive = false;
+      os.faces.set(c.id, mf);
+    }
+    return os;
+  }
+
+  test('counts live children of the main session', () => {
+    const os = systemWith([
+      { id: 'p-agent-a1', parentSession: 'p' },
+      { id: 'p-agent-a2', parentSession: 'p' },
+    ]);
+    assert.strictEqual(os.liveChildCount(), 2);
+  });
+
+  test('ignores stopped children', () => {
+    const os = systemWith([
+      { id: 'p-agent-a1', parentSession: 'p', stopped: true },
+      { id: 'p-agent-a2', parentSession: 'p' },
+    ]);
+    assert.strictEqual(os.liveChildCount(), 1);
+  });
+
+  test('ignores stale children of a crashed parent', () => {
+    const os = systemWith([
+      { id: 'p-agent-a1', parentSession: 'p', ageMs: 5 * 60000, parentAlive: false },
+    ]);
+    assert.strictEqual(os.liveChildCount(), 0,
+      'a stale ghost must not hold the main face at conducting');
+  });
+
+  test("ignores another session's children and top-level orbitals", () => {
+    const os = systemWith([
+      { id: 'q-agent-b1', parentSession: 'q' },
+      { id: 'other', parentSession: undefined },
+    ]);
+    assert.strictEqual(os.liveChildCount(), 0);
+  });
+
+  test('is zero when the main session is unknown', () => {
+    const os = systemWith([{ id: 'p-agent-a1', parentSession: 'p' }]);
+    os.mainSessionId = null;
+    assert.strictEqual(os.liveChildCount(), 0);
   });
 });
 

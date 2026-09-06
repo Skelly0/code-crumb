@@ -135,12 +135,23 @@ function _writeSubagentToolState(sub, state, detail, parentSessionId) {
 // with agent_id routing every entry owns a real file worth keeping alive.
 function _touchActiveSubagents(activeSubagents) {
   for (let i = 0; i < activeSubagents.length; i++) {
-    try {
-      const fp = path.join(SESSIONS_DIR, safeFilename(activeSubagents[i].id) + '.json');
-      const now = new Date();
-      fs.utimesSync(fp, now, now);
-    } catch {}
+    _touchSessionFile(activeSubagents[i].id);
   }
+}
+
+// Refresh one session file's mtime without rewriting it.
+// Used as the family heartbeat: a parent waiting on its agents fires no hooks
+// of its own, so its session file would go stale and the renderer could not
+// tell a live conductor from a crashed one. Every agent event stamps the
+// parent's file here, so "parent file fresh" means the family is alive -- and
+// a crashed parent goes stale on the normal schedule, taking its ghost
+// orbitals with it instead of letting them animate for CHILD_ORPHAN_TIMEOUT.
+function _touchSessionFile(sessionId) {
+  try {
+    const fp = path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json');
+    const now = new Date();
+    fs.utimesSync(fp, now, now);
+  } catch {}
 }
 
 // Persistent stats (streaks, records, session counters). normalizeStats
@@ -326,7 +337,12 @@ process.stdin.on('end', () => {
     // Initialize session if new (skip for known subagents to preserve parent
     // stats, and for parallel sessions so they don't wipe the conducting
     // owner's activeSubagents tracking mid-dispatch).
-    if (stats.session.id !== sessionId && !isKnownSubagent && !isParallelSession) {
+    // Agent events are excluded outright: they carry their PARENT's session_id,
+    // and when that parent is not the stats owner this reset would adopt it and
+    // wipe the owner's activeSubagents -- orphaning the owner's live orbitals
+    // and losing its session records, once per ping-pong between the two.
+    // A subagent's tool call is never a top-level turn boundary.
+    if (stats.session.id !== sessionId && !isAgentEvent && !isKnownSubagent && !isParallelSession) {
       // Save records from previous session before resetting
       if (stats.session.id && stats.session.start) {
         const dur = Date.now() - stats.session.start;
@@ -845,6 +861,9 @@ process.stdin.on('end', () => {
       } else {
         writeSessionState(writeSessionId, state, detail, stopped, extra);
       }
+      // Family heartbeat: an agent working proves its parent is alive, and the
+      // parent itself writes nothing while it waits. See _touchSessionFile.
+      if (isAgentEvent) _touchSessionFile(sessionId);
     }
     pruneFrequentFiles(stats.frequentFiles);
     writeStats(stats);
