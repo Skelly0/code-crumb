@@ -2897,187 +2897,220 @@ describe('state-machine.js -- toolToState for workState piggyback', () => {
 });
 
 // -- Subagent session detection (update-state.js core fix) --
+// Legacy path: a host whose subagents report under their own session id while
+// the owner is conducting. (Claude Code's agent_id routing is covered by
+// tests/test-subagents.js; the parallel-window half of the decision by
+// tests/test-adapters.js "parallel sessions vs subagents (#134)".)
 
 describe('update-state.js -- subagent session detection (isKnownSubagent)', () => {
-  // Helper: read update-state.js source for structural assertions
-  function readSrc() {
-    const fs = require('fs');
-    return fs.readFileSync(require('path').join(__dirname, '..', 'update-state.js'), 'utf8');
-  }
+  test('a subagent shows its own tool state and never touches the owner counters', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-A');
+    try {
+      seedSyntheticOrbital(sessionsDir, 'ownerA-sub-1', 'ownerA');
+      fsMod.writeFileSync(statsFile, JSON.stringify(
+        conductingStats('ownerA', 'ownerA-sub-1', Date.now() - 1000)), 'utf8');
 
-  test('isKnownSubagent detection block exists', () => {
-    const src = readSrc();
-    assert.ok(src.includes('let isKnownSubagent = false'),
-      'should declare isKnownSubagent variable');
-    assert.ok(src.includes('isKnownSubagent = true'),
-      'should set isKnownSubagent to true when conditions met');
+      runUpdateState('PreToolUse', {
+        session_id: 'sub-A', tool_name: 'Edit', tool_input: { file_path: '/w/sub.js' },
+      }, env);
+
+      const mine = readJSON(pathMod.join(sessionsDir, 'sub-A.json'));
+      assert.strictEqual(mine.state, 'coding',
+        'a subagent writes its own tool state -- conducting belongs to the owner');
+      assert.notStrictEqual(mine.detail, 'conducting 1');
+
+      const stats = readJSON(statsFile);
+      assert.strictEqual(stats.totalToolCalls, 5, 'only the owner bumps the global count');
+      assert.deepStrictEqual(stats.session.filesEdited, [],
+        'a subagent edit is not an owner edit');
+      assert.deepStrictEqual(stats.frequentFiles, {},
+        'nor does it enter the owner frequent-files map');
+    } finally { cleanup(tmp); }
   });
 
-  test('detection requires different session_id AND activeSubagents > 0', () => {
-    const src = readSrc();
-    assert.ok(src.includes('stats.session.id !== sessionId'),
-      'should check for different session_id');
-    assert.ok(src.includes('stats.session.activeSubagents && stats.session.activeSubagents.length > 0'),
-      'should check for non-empty activeSubagents');
+  test('a subagent commit does not bump the owner commitCount or the streak', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-B');
+    try {
+      seedSyntheticOrbital(sessionsDir, 'ownerB-sub-1', 'ownerB');
+      const stats = conductingStats('ownerB', 'ownerB-sub-1', Date.now() - 1000);
+      stats.streak = 4;
+      fsMod.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+
+      runUpdateState('PostToolUse', {
+        session_id: 'sub-B', tool_name: 'Bash',
+        tool_input: { command: 'git commit -m "sub work"' }, tool_response: {},
+      }, env);
+
+      const mine = readJSON(pathMod.join(sessionsDir, 'sub-B.json'));
+      assert.strictEqual(mine.state, 'proud');
+      assert.strictEqual(mine.detail, 'committed');
+      const after = readJSON(statsFile);
+      assert.strictEqual(after.session.commitCount, 0, 'the owner did not commit');
+      assert.strictEqual(after.streak, 4,
+        'a subagent result must not move the owner streak');
+    } finally { cleanup(tmp); }
   });
 
-  test('detection excludes lifecycle events via LIFECYCLE_EVENTS set', () => {
-    const src = readSrc();
-    const detectionBlock = src.split('let isKnownSubagent = false')[1].split('isKnownSubagent = true')[0];
-    assert.ok(detectionBlock.includes('LIFECYCLE_EVENTS.has(hookEvent)'),
-      'should use LIFECYCLE_EVENTS set to exclude lifecycle events');
-    // Verify the set contains the original 4 events
-    assert.ok(src.includes("'SessionStart'"), 'LIFECYCLE_EVENTS should contain SessionStart');
-    assert.ok(src.includes("'SessionEnd'"), 'LIFECYCLE_EVENTS should contain SessionEnd');
-    assert.ok(src.includes("'SubagentStart'"), 'LIFECYCLE_EVENTS should contain SubagentStart');
-    assert.ok(src.includes("'SubagentStop'"), 'LIFECYCLE_EVENTS should contain SubagentStop');
+  test('a subagent Stop leaves the owner session open', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-C');
+    try {
+      seedSyntheticOrbital(sessionsDir, 'ownerC-sub-1', 'ownerC');
+      const stats = conductingStats('ownerC', 'ownerC-sub-1', Date.now() - 1000);
+      stats.session.filesEdited = ['a.js', 'b.js'];
+      const startBefore = stats.session.start;
+      fsMod.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+
+      runUpdateState('Stop', { session_id: 'sub-C' }, env);
+
+      const after = readJSON(statsFile);
+      assert.strictEqual(after.session.id, 'ownerC', 'the owner keeps the stats session');
+      assert.strictEqual(after.session.start, startBefore,
+        'a subagent Stop must not close the owner session clock');
+      assert.strictEqual(after.records.mostFilesEdited, 0,
+        'nor bank the owner files-edited record');
+    } finally { cleanup(tmp); }
   });
 
-  test('session reset is skipped for agent events, known subagents and parallel sessions', () => {
-    const src = readSrc();
-    assert.ok(
-      src.includes('stats.session.id !== sessionId && !isAgentEvent && !isKnownSubagent && !isParallelSession) {'),
-      'session reset must be guarded by !isAgentEvent, !isKnownSubagent and !isParallelSession'
-    );
+  test('the synthetic orbital is retired even after tool state changed its face', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-D');
+    try {
+      // Propagation already moved this synthetic off 'spawning' before the real
+      // subagent's first hook arrived: retirement must not require 'spawning'.
+      seedSyntheticOrbital(sessionsDir, 'ownerD-sub-1', 'ownerD',
+        { state: 'coding', detail: 'edit foo' });
+      fsMod.writeFileSync(statsFile, JSON.stringify(
+        conductingStats('ownerD', 'ownerD-sub-1', Date.now() - 1000)), 'utf8');
+
+      runUpdateState('PreToolUse', {
+        session_id: 'sub-D', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+      }, env);
+
+      const synth = readJSON(pathMod.join(sessionsDir, 'ownerD-sub-1.json'));
+      assert.strictEqual(synth.stopped, true, 'first contact retires the synthetic');
+      assert.strictEqual(synth.state, 'happy');
+    } finally { cleanup(tmp); }
   });
 
-  test('PreToolUse propagation is skipped when isKnownSubagent', () => {
-    const src = readSrc();
-    // Find the PreToolUse propagation block
-    const preBlock = src.split("hookEvent === 'PreToolUse'")[1];
-    const preContent = preBlock.split("hookEvent === 'PostToolUse'")[0];
-    assert.ok(
-      preContent.includes('&& !isKnownSubagent'),
-      'PreToolUse propagation should be guarded by !isKnownSubagent'
-    );
+  test('a corrupt synthetic does not stop the next one being retired', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-E');
+    const CORRUPT = '{"session_id":"ownerE-sub-1","sta';
+    try {
+      fsMod.mkdirSync(sessionsDir, { recursive: true });
+      fsMod.writeFileSync(pathMod.join(sessionsDir, 'ownerE-sub-1.json'), CORRUPT, 'utf8');
+      seedSyntheticOrbital(sessionsDir, 'ownerE-sub-2', 'ownerE');
+      const stats = conductingStats('ownerE', 'ownerE-sub-2', Date.now() - 1000);
+      stats.session.activeSubagents.unshift({
+        id: 'ownerE-sub-1', description: 'broken', taskDescription: 'broken',
+        model: 'haiku', editor: 'claude', startedAt: Date.now() - 2000,
+      });
+      fsMod.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+
+      runUpdateState('PreToolUse', {
+        session_id: 'sub-E', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+      }, env);
+
+      assert.strictEqual(readJSON(pathMod.join(sessionsDir, 'ownerE-sub-2.json')).stopped, true,
+        'the retirement loop must survive an unreadable synthetic and carry on');
+      assert.strictEqual(
+        fsMod.readFileSync(pathMod.join(sessionsDir, 'ownerE-sub-1.json'), 'utf8'), CORRUPT,
+        'the unreadable file is left exactly as it was');
+    } finally { cleanup(tmp); }
   });
 
-  test('PostToolUse propagation is skipped when isKnownSubagent', () => {
-    const src = readSrc();
-    // Find the PostToolUse propagation block (after the PreToolUse one)
-    const postBlocks = src.split("hookEvent === 'PostToolUse'");
-    // The propagation guard is in the PostToolUse handler body
-    const postContent = postBlocks[1].split("hookEvent === 'Stop'")[0];
-    assert.ok(
-      postContent.includes('!isKnownSubagent'),
-      'PostToolUse propagation should be guarded by !isKnownSubagent'
-    );
+  test('retirement takes the oldest live synthetic first', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-F');
+    try {
+      seedSyntheticOrbital(sessionsDir, 'ownerF-sub-1', 'ownerF');
+      seedSyntheticOrbital(sessionsDir, 'ownerF-sub-2', 'ownerF');
+      const stats = conductingStats('ownerF', 'ownerF-sub-2', Date.now() - 1000);
+      stats.session.activeSubagents.unshift({
+        id: 'ownerF-sub-1', description: 'older', taskDescription: 'older',
+        model: 'haiku', editor: 'claude', startedAt: Date.now() - 3000,
+      });
+      fsMod.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+
+      runUpdateState('PreToolUse', {
+        session_id: 'sub-F', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+      }, env);
+
+      assert.strictEqual(readJSON(pathMod.join(sessionsDir, 'ownerF-sub-1.json')).stopped, true,
+        'the oldest live synthetic is the one this first contact belongs to');
+      assert.strictEqual(readJSON(pathMod.join(sessionsDir, 'ownerF-sub-2.json')).stopped, false,
+        'exactly one synthetic is retired per first contact');
+    } finally { cleanup(tmp); }
   });
 
-  test('parentSession is stamped on subagent extra when isKnownSubagent', () => {
-    const src = readSrc();
-    assert.ok(
-      src.includes('if (isKnownSubagent) {') && src.includes('extra.parentSession = stats.session.id'),
-      'should stamp parentSession from parent session id when isKnownSubagent'
-    );
+  test('with nobody conducting, a foreign session simply takes over the stats', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-G');
+    try {
+      const stats = conductingStats('ownerG', 'unused', Date.now());
+      stats.session.activeSubagents = [];
+      fsMod.mkdirSync(sessionsDir, { recursive: true });
+      fsMod.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+
+      runUpdateState('PreToolUse', {
+        session_id: 'sub-G', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+      }, env);
+
+      const after = readJSON(statsFile);
+      assert.strictEqual(after.session.id, 'sub-G',
+        'no active subagents means no subagent classification');
+      assert.strictEqual(after.session.toolCalls, 1, 'so its tool call counts');
+      assert.strictEqual(readJSON(pathMod.join(sessionsDir, 'sub-G.json')).parentSession, undefined,
+        'and it gets no parentSession stamp');
+    } finally { cleanup(tmp); }
   });
 
-  test('synthetic orbital cleanup retires non-stopped files (not just spawning)', () => {
-    const src = readSrc();
-    // The cleanup block should find non-stopped synthetics and mark them stopped.
-    // Must NOT require state === 'spawning' because _writeSubagentToolState
-    // changes the synthetic's state before the real subagent's first PreToolUse.
-    const cleanupBlock = src.split('Retire synthetic orbital')[1];
-    assert.ok(cleanupBlock, 'should have synthetic orbital cleanup comment');
-    const cleanupContent = cleanupBlock.split('} catch {}')[0];
-    assert.ok(!cleanupContent.includes("synthData.state === 'spawning'"),
-      'must NOT require spawning state — tool propagation changes it before retirement');
-    assert.ok(cleanupContent.includes('!synthData.stopped'),
-      'should check !synthData.stopped to retire any non-stopped synthetic');
-    assert.ok(cleanupContent.includes("stopped: true"),
-      'should mark synthetic as stopped');
+  test('a foreign SessionStart while conducting takes the session over', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-H1');
+    try {
+      seedSyntheticOrbital(sessionsDir, 'ownerH-sub-1', 'ownerH');
+      fsMod.writeFileSync(statsFile, JSON.stringify(
+        conductingStats('ownerH', 'ownerH-sub-1', Date.now() - 1000)), 'utf8');
+
+      runUpdateState('SessionStart', { session_id: 'sub-H1' }, env);
+
+      const after = readJSON(statsFile);
+      assert.strictEqual(after.session.id, 'sub-H1',
+        'SessionStart is a lifecycle event -- never rerouted as a subagent hook');
+      assert.deepStrictEqual(after.session.activeSubagents, []);
+    } finally { cleanup(tmp); }
   });
 
-  test('subagent Stop does not corrupt parent session (parentSession guard)', () => {
-    const src = readSrc();
-    // The parentSession guard at the global write section blocks subagents
-    assert.ok(
-      src.includes('if (mySession.parentSession) shouldWriteGlobal = false'),
-      'parentSession guard should block subagent global writes'
-    );
-    // isKnownSubagent stamps parentSession, so the guard catches it
-    assert.ok(
-      src.includes('extra.parentSession = stats.session.id'),
-      'isKnownSubagent sets parentSession so the guard activates'
-    );
+  test('a foreign PreCompact while conducting is not stamped as a subagent', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-H2');
+    try {
+      seedSyntheticOrbital(sessionsDir, 'ownerH-sub-1', 'ownerH');
+      fsMod.writeFileSync(statsFile, JSON.stringify(
+        conductingStats('ownerH', 'ownerH-sub-1', Date.now() - 1000)), 'utf8');
+
+      runUpdateState('PreCompact', { session_id: 'sub-H2', trigger: 'manual' }, env);
+
+      const mine = readJSON(pathMod.join(sessionsDir, 'sub-H2.json'));
+      assert.strictEqual(mine.state, 'thinking');
+      assert.strictEqual(mine.parentSession, undefined,
+        'PreCompact is in LIFECYCLE_EVENTS, so it is never rerouted');
+      assert.strictEqual(readJSON(statsFile).session.id, 'sub-H2');
+    } finally { cleanup(tmp); }
   });
 
-  test('Stop handler guards stat mutations with !isKnownSubagent', () => {
-    const src = readSrc();
-    const stopBlock = src.split("hookEvent === 'Stop'")[1];
-    const stopContent = stopBlock.split("else if (hookEvent ===")[0];
-    assert.ok(
-      stopContent.includes('stats.session.start && !isKnownSubagent'),
-      'Stop handler must guard session duration tracking with !isKnownSubagent'
-    );
-    assert.ok(
-      stopContent.includes('!isKnownSubagent && !isParallelSession && (stats.session.filesEdited'),
-      'Stop handler must guard filesEdited record with !isKnownSubagent and !isParallelSession'
-    );
-  });
+  test('a subagent PermissionRequest routes to its orbital, not the main face', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-I');
+    try {
+      seedSyntheticOrbital(sessionsDir, 'ownerI-sub-1', 'ownerI');
+      fsMod.writeFileSync(statsFile, JSON.stringify(
+        conductingStats('ownerI', 'ownerI-sub-1', Date.now() - 1000)), 'utf8');
 
-  test('PreToolUse guards stat counters with !isKnownSubagent', () => {
-    const src = readSrc();
-    const preBlock = src.split("hookEvent === 'PreToolUse'")[1];
-    const preContent = preBlock.split("hookEvent === 'PostToolUse'")[0];
-    // toolCalls and totalToolCalls should be inside the owner-only guard
-    assert.ok(
-      preContent.includes('if (!isKnownSubagent && !isParallelSession) {') &&
-      preContent.includes('stats.session.toolCalls++'),
-      'PreToolUse must guard toolCalls increment with !isKnownSubagent and !isParallelSession'
-    );
-  });
+      runUpdateState('PermissionRequest', { session_id: 'sub-I', tool_name: 'Bash' }, env);
 
-  test('PostToolUse guards commitCount and streak with !isKnownSubagent', () => {
-    const src = readSrc();
-    const postBlocks = src.split("hookEvent === 'PostToolUse'");
-    const postContent = postBlocks[1].split("hookEvent === 'Stop'")[0];
-    assert.ok(
-      postContent.includes('if (!isKnownSubagent) {') &&
-      postContent.includes('stats.session.commitCount'),
-      'PostToolUse must guard commitCount with !isKnownSubagent'
-    );
-    assert.ok(
-      postContent.includes('updateStreak(stats'),
-      'PostToolUse must call updateStreak inside !isKnownSubagent guard'
-    );
-  });
-
-  test('synthetic cleanup try-catch is inside the loop (not wrapping it)', () => {
-    const src = readSrc();
-    // Find the synthetic cleanup block
-    const cleanupBlock = src.split('Retire synthetic orbital')[1];
-    const cleanupContent = cleanupBlock.split('}\n    }')[0];
-    // The for loop should contain try, not be wrapped by it
-    assert.ok(
-      cleanupContent.includes('for (let i = 0') &&
-      cleanupContent.indexOf('for (') < cleanupContent.indexOf('try {'),
-      'try-catch should be inside the for loop, not wrapping it'
-    );
-  });
-
-  test('synthetic cleanup iterates forward (oldest first for concurrent subagents)', () => {
-    const src = readSrc();
-    const cleanupBlock = src.split('Retire synthetic orbital')[1];
-    const cleanupContent = cleanupBlock.split('}\n    }')[0];
-    assert.ok(
-      cleanupContent.includes('for (let i = 0; i < subs.length'),
-      'synthetic cleanup should iterate forward to retire oldest face first'
-    );
-    assert.ok(
-      !cleanupContent.includes('subs.length - 1; i >= 0; i--'),
-      'synthetic cleanup should NOT iterate backward'
-    );
-  });
-
-  test('isKnownSubagent detection comes before session reset', () => {
-    const src = readSrc();
-    const detectionIdx = src.indexOf('let isKnownSubagent = false');
-    const resetIdx = src.indexOf('stats.session.id !== sessionId && !isAgentEvent && !isKnownSubagent');
-    assert.ok(detectionIdx > 0, 'detection block should exist');
-    assert.ok(resetIdx > 0, 'guarded reset should exist');
-    assert.ok(detectionIdx < resetIdx,
-      'detection must come before the session reset check');
+      const mine = readJSON(pathMod.join(sessionsDir, 'sub-I.json'));
+      assert.strictEqual(mine.state, 'waiting');
+      assert.strictEqual(mine.detail, 'allow Bash?');
+      assert.strictEqual(mine.parentSession, 'ownerI',
+        'PermissionRequest stays OUT of LIFECYCLE_EVENTS so it lands on the orbital');
+      assert.strictEqual(readJSON(statsFile).session.id, 'ownerI',
+        'and it does not reset the conductor session');
+    } finally { cleanup(tmp); }
   });
 });
 
