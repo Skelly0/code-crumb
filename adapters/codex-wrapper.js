@@ -32,10 +32,7 @@ const {
 } = require('../state-machine');
 const { buildEditorSpawn } = require('../launch');
 const shared = require('../shared');
-
-// Task 4 adds withStatsLock to shared.js; until it lands the stats cycles run
-// unlocked, exactly as they did before.
-const withStatsLock = shared.withStatsLock || ((fn) => fn());
+const { withStatsLock } = shared;
 
 // -- Session setup -----------------------------------------------------
 

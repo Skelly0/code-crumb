@@ -3,13 +3,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js 18+](https://img.shields.io/badge/node-18%2B-brightgreen.svg)](https://nodejs.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-blue.svg)](#)
-[![1718 Tests](https://img.shields.io/badge/tests-1718-brightgreen.svg)](#)
+[![1965 Tests](https://img.shields.io/badge/tests-1965-brightgreen.svg)](#)
 
 A terminal tamagotchi that shows what your AI coding assistant is doing.
 
 ![Code Crumb proud state — crown accessory, 43 streak, diff info, neon theme](images/proud-crown-diffinfo.png)
 
-Code Crumb hooks into AI coding tool lifecycle events and displays an animated ASCII face that reacts in real time — blinking, searching, coding, celebrating, and occasionally glitching when things go wrong. 23 expressive states, 15 particle effects, 6 color palettes, orbital subagent tracking, streak counters, and you can pet it.
+Code Crumb hooks into AI coding tool lifecycle events and displays an animated ASCII face that reacts in real time — blinking, searching, coding, celebrating, and occasionally glitching when things go wrong. 23 expressive states, 16 particle effects, 6 color palettes, orbital subagent tracking, streak counters, and you can pet it.
 
 **Supported tools:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex), [OpenCode](https://github.com/sst/opencode), [OpenClaw/Pi](https://github.com/anthropics/claw) — and anything that can pipe JSON events.
 
@@ -76,9 +76,9 @@ node code-crumb/renderer.js   # in a separate terminal
 ```bash
 git clone https://github.com/Skelly0/code-crumb.git
 
-node code-crumb/setup.js codex        # Codex CLI
-node code-crumb/setup.js opencode     # OpenCode
-node code-crumb/setup.js openclaw     # OpenClaw/Pi
+node code-crumb/setup.js codex              # Codex CLI (native hooks)
+node code-crumb/setup.js opencode --install # OpenCode (installs the shipped plugin)
+node code-crumb/setup.js openclaw           # OpenClaw/Pi
 
 node code-crumb/renderer.js           # in a separate terminal
 ```
@@ -135,6 +135,10 @@ The face has 23 distinct states — each with unique eyes, mouth, particles, and
 
 Reward faces (happy, proud, satisfied, relieved) are guaranteed at least 1.8s on screen before the next tool takes over; errors always preempt and hold for 4s. Work faces update live as tools run.
 
+**A tool that runs for a long time keeps its work face.** A single `Bash` can run for minutes with no further event, so instead of drifting back to *thinking* the face holds — the detail line counts up (`still running … 42s`) and after 20 seconds the face starts to sweat.
+
+**If Code Crumb has been waiting on you for more than 30 seconds it gets louder** — big bold question marks, a counter on the detail line, a pulsing status line, and a flashing terminal title so you notice from another window.
+
 ![Sleeping state with Zzz particles and thought bubble](images/sleeping.png)
 
 ![Error state — X X eyes, merge conflict, broken streak](images/error-merge-conflict.png)
@@ -167,9 +171,10 @@ When your session spawns subagents (e.g. Claude Code's `Task` tool), mini-faces 
 
 ![Orbital subagents — four mini-faces orbiting the main face in neon theme](images/orbital-neon-thinking.png)
 
+- **Every Claude Code subagent gets its own orbital**, labelled from its prompt (or its agent type — `Explore`, `Plan`, a custom agent name)
 - Elliptical orbits, slowly rotating as a constellation
 - Faint dotted connection lines pulse outward from the main face
-- The main face adopts a **conducting** expression — eyes scanning, stream particles radiating
+- The main face adopts a **conducting** expression — eyes scanning, stream particles radiating — and holds it for as long as agents are alive, instead of dozing off while they work
 - Up to 8 orbitals; graceful degradation on small terminals
 - Sessions appear when subagents start, linger briefly after they stop, then fade
 - Toggle with `o`
@@ -238,7 +243,7 @@ Any key closes the help overlay or the session list. `t` is disabled when `NO_CO
 
 1. **Hooks/adapters** fire on lifecycle events (21 for Claude Code: your prompt, tool use, Stop, notifications, subagents, sessions, compaction, permissions, and more)
 2. **`update-state.js`** maps tool names and results to face states and writes JSON state files (atomically — the renderer never sees a half-written file)
-3. **Session IDs** isolate the main session from subagent sessions (orbital mini-faces)
+3. **Session IDs** isolate the main session from subagent sessions (orbital mini-faces). Claude Code subagents report under the parent's session id, so they are separated by `agent_id` and each gets its own orbital file
 4. **`renderer.js`** watches for changes and animates at 15fps
 
 ## Editor Integration
@@ -254,21 +259,47 @@ Any key closes the help overlay or the session list. `t` is disabled when `NO_CO
 
 ### Codex CLI
 
-Two adapter modes since Codex doesn't have a hook system:
+Codex has **native hooks** now, so it uses the same handler Claude Code does. That is the primary integration:
 
-| Mode | Setup | Granularity |
-|---|---|---|
-| **Notify** | `setup.js codex` | Turn-level (completion only) |
-| **Wrapper** | `launch.js --editor codex` | Tool-level (full reactions) |
+```bash
+node setup.js codex        # writes ~/.codex/hooks.json (backing it up first)
+```
 
-The wrapper gives richer reactions but only works with `codex exec` (non-interactive).
+Codex asks for a one-time trust confirmation the first time hooks fire; approve it and you're done. This works in interactive TUI sessions.
 
-> [!IMPORTANT]
-> The wrapper mode requires `codex exec` — it won't work in interactive Codex sessions. Use notify mode if you need interactive support.
+| Mode | Setup | Granularity | Works with |
+|---|---|---|---|
+| **Hooks** (recommended) | `setup.js codex` | Tool-level | Interactive + `codex exec` |
+| **Wrapper** | `launch.js --editor codex` | Tool-level | `codex exec` only — no trust prompt |
+| **Notify** (legacy) | `setup.js codex-notify` | Turn-level (completion only) | Any |
+
+Codex fires 10 of the 21 lifecycle events (`PreToolUse`, `PostToolUse`, `PermissionRequest`, `PreCompact`, `SessionStart`, `SessionEnd`, `SubagentStart`, `SubagentStop`, `UserPromptSubmit`, `Stop`) — it has no `Notification` and no `PostToolUseFailure`, and setup registers exactly the ten it does fire. The wrapper parses `codex exec --json` against codex-cli 0.146's ThreadEvent schema.
+
+> [!NOTE]
+> Upgrading from an older Code Crumb? Re-run `node setup.js codex`. A hooks file migrated from `~/.claude/settings.json` by hand has no `--editor codex` tag (so Codex sessions render as "claude") and may register a `Notification` event Codex never fires. Re-running rewrites every entry and prunes the unsupported one.
 
 ### OpenCode
 
-Uses OpenCode's plugin system. Run `node setup.js opencode` for integration instructions — creates a plugin file that pipes events to the adapter.
+Code Crumb ships a real OpenCode plugin. Install it and start the renderer:
+
+```bash
+node setup.js opencode --install     # adds the plugin to ~/.config/opencode/opencode.json
+node renderer.js                     # in a separate terminal
+```
+
+Or add it by hand — note the config key is `plugin`, **not** `plugins`:
+
+```json
+{ "plugin": ["/absolute/path/to/code-crumb/adapters/opencode-plugin.mjs"] }
+```
+
+`node setup.js opencode --uninstall` removes the entry again.
+
+> [!WARNING]
+> If you followed the old instructions you have a hand-written `~/.config/opencode/plugins/code-crumb.js` and a `"plugin": ["./plugins/code-crumb.js"]` entry. **Delete both.** That file targets an API OpenCode no longer has — it never receives a session id and its tool input is always empty, which is what produced phantom orbitals (#120). Leaving the old entry alongside the new one makes every event fire twice.
+
+> [!TIP]
+> If `node` is not on `PATH` inside OpenCode, set `CODE_CRUMB_NODE` to the node binary — `process.execPath` inside OpenCode is the Bun binary, so the plugin cannot use it.
 
 ### OpenClaw/Pi
 
@@ -282,7 +313,8 @@ Uses Pi's extension system. Run `node setup.js openclaw` for instructions. The a
 |---|---|---|
 | `CODE_CRUMB_STATE` | `~/.code-crumb-state` | Override state file path |
 | `CODE_CRUMB_MODEL` | `claude` | Display name in status line |
-| `CODE_CRUMB_EDITOR` | `claude` (adapters set their own) | Editor tag shown in the session list |
+| `CODE_CRUMB_EDITOR` | `claude` (adapters set their own) | Editor tag shown in the session list; beats the `--editor` hook argument |
+| `CODE_CRUMB_NODE` | `node` | Node binary the OpenCode plugin spawns for the adapter |
 | `CLAUDE_SESSION_ID` | `<editor>-<parent PID>` | Session identifier |
 | `NO_COLOR` | unset | Disable colour output (also disables the `t` key) |
 | `MINIMAL_BOOT` | unset | Start in minimal mode (same as `--minimal`) |
@@ -383,7 +415,7 @@ Or: `cd code-crumb && npm link`
 | `face.js` | ClaudeFace class — state machine and rendering |
 | `grid.js` | MiniFace + OrbitalSystem — subagent orbits |
 | `animations.js` | Eye/mouth animation functions |
-| `particles.js` | ParticleSystem — 15 visual effect styles |
+| `particles.js` | ParticleSystem — 16 visual effect styles |
 | `themes.js` | ANSI codes, palettes, color math, thought bubbles |
 | `state-machine.js` | Tool mapping, error detection, streaks |
 | `shared.js` | Shared constants, paths, utilities |
@@ -391,7 +423,8 @@ Or: `cd code-crumb && npm link`
 | `accessories.js` | Accessory definitions (hats, glasses, ears) and rendering |
 | `adapters/base-adapter.js` | Base adapter class with shared functionality |
 | `adapters/codex-wrapper.js` | Wraps `codex exec --json` for tool-level events |
-| `adapters/codex-notify.js` | Handles Codex `notify` config events |
+| `adapters/codex-notify.js` | Handles Codex's legacy `notify` config events |
+| `adapters/opencode-plugin.mjs` | The shipped OpenCode plugin (ESM) |
 | `adapters/opencode-adapter.js` | OpenCode plugin event adapter |
 | `adapters/openclaw-adapter.js` | OpenClaw/Pi event adapter |
 | `adapters/engmux-adapter.js` | engmux agent dispatcher event adapter |
@@ -407,11 +440,14 @@ Or: `cd code-crumb && npm link`
 
 **Claude Code:** `node setup.js uninstall` removes the manual hooks (or `claude plugin uninstall code-crumb` for the plugin)
 
-**Codex:** Remove the `notify` line from `~/.codex/config.toml`
+**Codex:** `node setup.js uninstall` removes the Codex hooks from `~/.codex/hooks.json` as well as the Claude Code ones. For the legacy notify mode, remove the `notify` line from `~/.codex/config.toml`.
+
+**OpenCode:** `node setup.js opencode --uninstall` removes the plugin entry from `~/.config/opencode/opencode.json`.
 
 **Clean up state files:**
 ```bash
 rm ~/.code-crumb-state ~/.code-crumb-stats.json ~/.code-crumb.pid ~/.code-crumb-prefs.json
+rm -f ~/.code-crumb-spawn.lock ~/.code-crumb-stats.lock
 rm -rf ~/.code-crumb-sessions
 ```
 

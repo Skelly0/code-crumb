@@ -21,11 +21,7 @@
 const {
   writeSessionState, guardedWriteState, readStats, writeStats, initSession, buildExtra,
 } = require('./base-adapter');
-const shared = require('../shared');
-
-// Task 4 adds withStatsLock to shared.js; until it lands the stats cycle runs
-// unlocked, exactly as it did before.
-const withStatsLock = shared.withStatsLock || ((fn) => fn());
+const { withStatsLock } = require('../shared');
 
 // -- Parse the notify JSON argument ----------------------------------
 
