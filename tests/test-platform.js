@@ -949,4 +949,180 @@ describe('platform -- update-state.js --editor flag', () => {
   });
 });
 
+// -- setup.js: OpenCode ---------------------------------------------------------
+// OpenCode's config key is "plugin" (singular). The old setup printed a
+// snippet telling people to write "plugins", which OpenCode ignores.
+
+describe('platform -- setupOpenCode writes a real OpenCode config', () => {
+  const PLUGIN = '/repo/adapters/opencode-plugin.mjs';
+  const quiet = { log: () => {} };
+  function env() {
+    const dir = tmpDir('crumb-opencode-');
+    return { dir, configPath: path.join(dir, '.config', 'opencode', 'opencode.json') };
+  }
+
+  test('exports the installer and the uninstaller', () => {
+    assert.strictEqual(typeof setup.setupOpenCode, 'function');
+    assert.strictEqual(typeof setup.uninstallOpenCode, 'function');
+  });
+
+  test('without --install it only prints: no config file is created', () => {
+    const { dir, configPath } = env();
+    try {
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, ...quiet });
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(r.modified, false);
+      assert.strictEqual(fs.existsSync(configPath), false);
+    } finally { cleanup(dir); }
+  });
+
+  test('install creates the config with the plugin key (never "plugins")', () => {
+    const { dir, configPath } = env();
+    try {
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(r.modified, true);
+      assert.strictEqual(r.added, 1);
+      const c = readJSON(configPath);
+      assert.deepStrictEqual(c.plugin, [PLUGIN]);
+      assert.strictEqual(c.plugins, undefined, 'OpenCode reads "plugin", not "plugins"');
+      assert.strictEqual(c.$schema, 'https://opencode.ai/config.json');
+    } finally { cleanup(dir); }
+  });
+
+  test('install merges into an existing config without touching other keys', () => {
+    const { dir, configPath } = env();
+    try {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify({
+        $schema: 'https://opencode.ai/config.json',
+        model: 'anthropic/claude-sonnet-4',
+        plugin: ['./plugins/other.js'],
+      }), 'utf8');
+      setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      const c = readJSON(configPath);
+      assert.strictEqual(c.model, 'anthropic/claude-sonnet-4');
+      assert.deepStrictEqual(c.plugin, ['./plugins/other.js', PLUGIN]);
+    } finally { cleanup(dir); }
+  });
+
+  test('re-running install is idempotent', () => {
+    const { dir, configPath } = env();
+    try {
+      setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.strictEqual(r.modified, false);
+      assert.deepStrictEqual(readJSON(configPath).plugin, [PLUGIN]);
+    } finally { cleanup(dir); }
+  });
+
+  test('a moved repo replaces the stale plugin entry instead of adding a second one', () => {
+    const { dir, configPath } = env();
+    try {
+      setup.setupOpenCode({ configPath, pluginPath: '/old/place/adapters/opencode-plugin.mjs', install: true, ...quiet });
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.strictEqual(r.replaced, 1);
+      assert.deepStrictEqual(readJSON(configPath).plugin, [PLUGIN]);
+    } finally { cleanup(dir); }
+  });
+
+  test('a [path, options] tuple entry is recognised as ours', () => {
+    const { dir, configPath } = env();
+    try {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify({ plugin: [[PLUGIN, { verbose: true }]] }), 'utf8');
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.strictEqual(r.modified, false);
+      assert.deepStrictEqual(readJSON(configPath).plugin, [[PLUGIN, { verbose: true }]]);
+    } finally { cleanup(dir); }
+  });
+
+  test('a corrupt opencode.json aborts: nothing written, no backup made', () => {
+    const { dir, configPath } = env();
+    try {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, '{ "plugin": [ "x", ] }', 'utf8');
+      const before = fs.readFileSync(configPath, 'utf8');
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.strictEqual(r.ok, false);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), before, 'file must be byte-identical');
+      assert.strictEqual(fs.existsSync(configPath + '.bak'), false);
+    } finally { cleanup(dir); }
+  });
+
+  test('a config that is not an object is treated as corrupt', () => {
+    const { dir, configPath } = env();
+    try {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, '"nope"', 'utf8');
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.strictEqual(r.ok, false);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), '"nope"');
+    } finally { cleanup(dir); }
+  });
+
+  test('a backup of the previous config is written before modifying', () => {
+    const { dir, configPath } = env();
+    try {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      const original = JSON.stringify({ model: 'x' });
+      fs.writeFileSync(configPath, original, 'utf8');
+      setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.strictEqual(fs.readFileSync(configPath + '.bak', 'utf8'), original);
+    } finally { cleanup(dir); }
+  });
+
+  test('uninstallOpenCode removes only our entry and drops an empty plugin array', () => {
+    const { dir, configPath } = env();
+    try {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify({ model: 'x', plugin: ['./plugins/other.js'] }), 'utf8');
+      setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      const r = setup.uninstallOpenCode({ configPath, ...quiet });
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(r.removed, 1);
+      const c = readJSON(configPath);
+      assert.deepStrictEqual(c.plugin, ['./plugins/other.js']);
+      assert.strictEqual(c.model, 'x');
+
+      // Removing the last entry drops the key entirely.
+      fs.writeFileSync(configPath, JSON.stringify({ plugin: [PLUGIN] }), 'utf8');
+      const r2 = setup.uninstallOpenCode({ configPath, ...quiet });
+      assert.strictEqual(r2.removed, 1);
+      assert.strictEqual(readJSON(configPath).plugin, undefined);
+    } finally { cleanup(dir); }
+  });
+
+  test('uninstallOpenCode on a config without our entry changes nothing', () => {
+    const { dir, configPath } = env();
+    try {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      const original = JSON.stringify({ plugin: ['./plugins/other.js'] });
+      fs.writeFileSync(configPath, original, 'utf8');
+      const r = setup.uninstallOpenCode({ configPath, ...quiet });
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(r.removed, 0);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), original);
+    } finally { cleanup(dir); }
+  });
+
+  test('uninstallOpenCode on a corrupt file aborts without writing', () => {
+    const { dir, configPath } = env();
+    try {
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, '{oops', 'utf8');
+      const r = setup.uninstallOpenCode({ configPath, ...quiet });
+      assert.strictEqual(r.ok, false);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), '{oops');
+    } finally { cleanup(dir); }
+  });
+
+  test('the printed instructions no longer carry the broken inline snippet', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'setup.js'), 'utf8');
+    assert.ok(!src.includes('"plugins"'), 'the "plugins" key does not exist in OpenCode');
+    assert.ok(!src.includes('lastMessageContent'), 'the hand-written snippet is replaced by the shipped plugin');
+    assert.ok(src.includes('opencode-plugin.mjs'));
+  });
+});
+
 module.exports = suite;

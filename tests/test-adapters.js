@@ -256,14 +256,17 @@ describe('adapters -- opencode-adapter', () => {
     cleanup(tmp);
   });
 
-  test('session.created writes waiting state', () => {
+  // A brand new session is starting, not waiting on the user: `waiting` is
+  // the face for "it needs you", and OpenCode has real events for that now
+  // (permission.asked / permission.ask).
+  test('session.created writes starting state', () => {
     const { tmp, stateFile, env } = makeTempEnv('oc-8');
     runStdinAdapter(ADAPTER, {
       type: 'session.created',
       session_id: 'oc-8',
     }, env);
     const state = readJSON(stateFile);
-    assert.strictEqual(state.state, 'waiting');
+    assert.strictEqual(state.state, 'starting');
     assert.strictEqual(state.detail, 'session started');
     cleanup(tmp);
   });
@@ -353,6 +356,378 @@ describe('adapters -- opencode-adapter', () => {
     }, env);
     const stats = readJSON(statsFile);
     assert.ok(stats.totalToolCalls >= 2, `expected >= 2 tool calls, got ${stats.totalToolCalls}`);
+    cleanup(tmp);
+  });
+});
+
+// -- opencode-plugin.mjs (the shipped OpenCode plugin) ----------------
+// OpenCode loads the plugin inside its own Bun runtime, so translate() is
+// kept pure: the whole payload contract can be checked from Node without a
+// Bun child process. Shapes below are the real 1.18 ones (Hooks in
+// @opencode-ai/plugin, Event in @opencode-ai/sdk).
+
+describe('adapters -- opencode-plugin translate()', () => {
+  const PLUGIN_FILE = path.join(ADAPTERS_DIR, 'opencode-plugin.mjs');
+  // The plugin resolves its node binary once, at import time.
+  process.env.CODE_CRUMB_NODE = NODE;
+  const loadModule = () => import(require('url').pathToFileURL(PLUGIN_FILE).href);
+  // translate() rides on the factory rather than being its own export: see
+  // "every export is a plugin factory" below.
+  const load = async () => ({ translate: (await loadModule()).CodeCrumbPlugin.translate });
+  const bus = (type, properties) => ({ event: { type, properties } });
+
+  test.async('session.created reads properties.info.id', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('session.created', { info: { id: 'ses_1' } }));
+    assert.strictEqual(out.type, 'session.created');
+    assert.strictEqual(out.sessionId, 'ses_1');
+  });
+
+  test.async('session.idle reads properties.sessionID', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('session.idle', { sessionID: 'ses_1' }));
+    assert.deepStrictEqual(out, { type: 'session.idle', sessionId: 'ses_1' });
+  });
+
+  test.async('session.error flattens the SDK error object to text', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('session.error', {
+      sessionID: 'ses_1',
+      error: { name: 'UnknownError', data: { message: 'connection lost' } },
+    }));
+    assert.strictEqual(out.type, 'session.error');
+    assert.strictEqual(out.sessionId, 'ses_1');
+    assert.strictEqual(out.error, 'connection lost');
+  });
+
+  test.async('session.error falls back to the error name when there is no message', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('session.error', { error: { name: 'MessageAbortedError', data: {} } }));
+    assert.strictEqual(out.error, 'MessageAbortedError');
+  });
+
+  test.async('permission.asked becomes a waiting payload', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('permission.asked', {
+      sessionID: 'ses_1', type: 'bash', title: 'rm -rf build',
+    }));
+    assert.strictEqual(out.type, 'permission.asked');
+    assert.strictEqual(out.sessionId, 'ses_1');
+    assert.strictEqual(out.title, 'rm -rf build');
+  });
+
+  test.async('permission.replied carries the response', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('permission.replied', {
+      sessionID: 'ses_1', permissionID: 'p1', response: 'always',
+    }));
+    assert.strictEqual(out.type, 'permission.replied');
+    assert.strictEqual(out.response, 'always');
+  });
+
+  test.async('a reasoning part becomes thinking', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('message.part.updated', {
+      part: { type: 'reasoning', sessionID: 'ses_1', text: 'weighing options' },
+    }));
+    assert.strictEqual(out.type, 'thinking');
+    assert.strictEqual(out.sessionId, 'ses_1');
+  });
+
+  test.async('a failed tool part becomes tool.error (tool.execute.after never fires for it)', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('message.part.updated', {
+      part: {
+        type: 'tool', sessionID: 'ses_1', callID: 'c1', tool: 'bash',
+        state: { status: 'error', input: { command: 'exit 1' }, error: 'exit code 1' },
+      },
+    }));
+    assert.strictEqual(out.type, 'tool.error');
+    assert.strictEqual(out.sessionId, 'ses_1');
+    assert.strictEqual(out.tool, 'bash');
+    assert.deepStrictEqual(out.toolInput, { command: 'exit 1' });
+    assert.strictEqual(out.error, 'exit code 1');
+  });
+
+  test.async('a text part is ignored', async () => {
+    const { translate } = await load();
+    assert.strictEqual(translate('event', bus('message.part.updated', {
+      part: { type: 'text', sessionID: 'ses_1', text: 'hello' },
+    })), null);
+  });
+
+  test.async('a completed tool part is ignored (tool.execute.after covers it)', async () => {
+    const { translate } = await load();
+    assert.strictEqual(translate('event', bus('message.part.updated', {
+      part: { type: 'tool', sessionID: 'ses_1', tool: 'read', state: { status: 'completed', input: {}, output: 'x' } },
+    })), null);
+  });
+
+  test.async('unknown bus events and a missing event object are ignored', async () => {
+    const { translate } = await load();
+    assert.strictEqual(translate('event', bus('lsp.updated', {})), null);
+    assert.strictEqual(translate('event', {}), null);
+    assert.strictEqual(translate('event', null), null);
+  });
+
+  test.async('tool.execute.before reads args from OUTPUT, not input', async () => {
+    const { translate } = await load();
+    const out = translate('tool.execute.before',
+      { tool: 'edit', sessionID: 'ses_1', callID: 'c1' },
+      { args: { filePath: 'a.js' } });
+    assert.strictEqual(out.type, 'tool.execute.before');
+    assert.strictEqual(out.sessionId, 'ses_1');
+    assert.strictEqual(out.tool, 'edit');
+    assert.strictEqual(out.toolInput.filePath, 'a.js');
+    assert.strictEqual(out.callID, 'c1');
+  });
+
+  test.async('tool.execute.before survives a missing output object', async () => {
+    const { translate } = await load();
+    const out = translate('tool.execute.before', { tool: 'edit', sessionID: 'ses_1', callID: 'c1' });
+    assert.deepStrictEqual(out.toolInput, {});
+  });
+
+  test.async('tool.execute.after reads args from input and caps the output text', async () => {
+    const { translate } = await load();
+    const out = translate('tool.execute.after',
+      { tool: 'bash', sessionID: 'ses_1', callID: 'c1', args: { command: 'echo hi' } },
+      { title: 'echo hi', output: 'x'.repeat(9000), metadata: {} });
+    assert.strictEqual(out.type, 'tool.execute.after');
+    assert.deepStrictEqual(out.toolInput, { command: 'echo hi' });
+    assert.strictEqual(out.title, 'echo hi');
+    assert.strictEqual(out.output.length, 4000, 'tool output must never be embedded whole');
+  });
+
+  test.async('tool.execute.after with a non-string output yields empty text', async () => {
+    const { translate } = await load();
+    const out = translate('tool.execute.after',
+      { tool: 'read', sessionID: 'ses_1', callID: 'c1', args: {} },
+      { title: 'read', output: { not: 'a string' }, metadata: {} });
+    assert.strictEqual(out.output, '');
+  });
+
+  test.async('the permission.ask hook maps to the same waiting payload', async () => {
+    const { translate } = await load();
+    const out = translate('permission.ask',
+      { id: 'p1', type: 'bash', sessionID: 'ses_1', title: 'rm -rf build', metadata: {} },
+      { status: 'ask' });
+    assert.strictEqual(out.type, 'permission.asked');
+    assert.strictEqual(out.sessionId, 'ses_1');
+    assert.strictEqual(out.title, 'rm -rf build');
+  });
+
+  test.async('an unknown hook name is ignored', async () => {
+    const { translate } = await load();
+    assert.strictEqual(translate('chat.params', {}, {}), null);
+  });
+
+  // OpenCode calls every named export as a plugin factory and then reads
+  // .config / .dispose off the result. A second export (even a pure helper)
+  // returns something that is not a Hooks object and breaks plugin loading
+  // with "null is not an object" -- verified against opencode 1.18.21.
+  test.async('exports exactly one thing, and it is a plugin factory', async () => {
+    const mod = await loadModule();
+    const names = Object.keys(mod);
+    assert.deepStrictEqual(names, ['CodeCrumbPlugin'], `unexpected exports: ${names.join(', ')}`);
+    assert.strictEqual(typeof mod.CodeCrumbPlugin, 'function');
+    assert.strictEqual(typeof mod.CodeCrumbPlugin.translate, 'function', 'translate must stay reachable for tests');
+  });
+
+  test.async('CodeCrumbPlugin resolves to the four hooks OpenCode calls', async () => {
+    const { CodeCrumbPlugin } = await loadModule();
+    const hooks = await CodeCrumbPlugin({ project: {}, directory: '.', worktree: '.' });
+    for (const key of ['event', 'tool.execute.before', 'tool.execute.after', 'permission.ask']) {
+      assert.strictEqual(typeof hooks[key], 'function', `missing hook ${key}`);
+    }
+    // Hooks must resolve even when nothing can be sent (unknown event).
+    await hooks.event({ event: { type: 'lsp.updated', properties: {} } });
+  });
+
+  // Measured against opencode 1.18.21: `opencode run` exits the instant the
+  // turn ends, and a child spawned microseconds earlier dies with it -- the
+  // session.idle write never landed, so the face stayed on thinking and the
+  // global state file stayed owned by a session that never said stopped.
+  test.async('the session.idle write has landed by the time the hook resolves', async () => {
+    const { CodeCrumbPlugin } = await loadModule();
+    const hooks = await CodeCrumbPlugin();
+    const home = process.env.USERPROFILE || process.env.HOME;
+    const sid = `plug-idle-${process.pid}`;
+    const file = path.join(home, '.code-crumb-sessions', `${sid}.json`);
+    try { fs.unlinkSync(file); } catch {}
+
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: sid } } });
+
+    assert.ok(fs.existsSync(file), 'turn-end write must not be left in flight');
+    const s = readJSON(file);
+    assert.strictEqual(s.state, 'happy');
+    assert.strictEqual(s.stopped, true);
+  });
+});
+
+describe('adapters -- opencode-plugin structure', () => {
+  const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'opencode-plugin.mjs'), 'utf8');
+  // Comments talk about what the plugin must NOT do, so assert on code only.
+  const code = src.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+
+  test('spawns a real node, not process.execPath (which is bun inside OpenCode)', () => {
+    assert.ok(!code.includes('process.execPath'), 'process.execPath is the bun binary under OpenCode');
+    assert.ok(code.includes('CODE_CRUMB_NODE'), 'the node binary must be overridable');
+  });
+
+  test('no exec timeout short enough to kill a cold node start', () => {
+    assert.ok(!code.includes('execSync'), 'execSync with a 200ms cap killed writes mid-flight');
+    const caps = [...code.matchAll(/timeout:\s*(\w+)/g)].map(m => m[1]);
+    for (const cap of caps) {
+      const value = cap === 'SYNC_CAP_MS' ? 5000 : Number(cap);
+      assert.ok(value >= 1000, `spawn timeout ${cap} is shorter than a cold node start`);
+    }
+    assert.ok(code.includes('windowsHide'), 'no console flash on Windows');
+  });
+
+  test('only the turn-end payloads block: ordinary tool events stay fire-and-forget', () => {
+    assert.ok(/SYNC_TYPES = new Set\(\['session.idle', 'session.error'\]\)/.test(code),
+      'the synchronous set must stay limited to the writes that race process exit');
+    assert.ok(/if \(SYNC_TYPES\.has\(payload\.type\)\)/.test(code),
+      'everything else must go through the async spawn');
+  });
+
+  test('never throws out of a hook', () => {
+    assert.ok(/catch/.test(src), 'send() must swallow its own failures');
+    assert.ok(src.includes("child.on('error'"), 'a failed spawn must not reject');
+  });
+});
+
+// -- opencode-adapter: payloads produced by the shipped plugin ---------
+
+describe('adapters -- opencode-adapter (plugin payloads)', () => {
+  const ADAPTER = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+
+  test('tool.execute.before with an OpenCode filePath arg writes coding and tracks the file', () => {
+    const { tmp, stateFile, statsFile, env } = makeTempEnv('oc-plug-1');
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.before', sessionId: 'ses_1', callID: 'c1',
+      tool: 'edit', toolInput: { filePath: 'a.js' },
+    }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'coding');
+    assert.strictEqual(state.detail, 'editing a.js');
+    assert.strictEqual(state.sessionId, 'ses_1');
+    const stats = readJSON(statsFile);
+    assert.ok(stats.frequentFiles && stats.frequentFiles['a.js'] >= 1,
+      `frequentFiles should track a.js, got ${JSON.stringify(stats.frequentFiles)}`);
+    cleanup(tmp);
+  });
+
+  test('the payload session id wins over the opencode-<ppid> fallback', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-2');
+    delete env.CLAUDE_SESSION_ID;
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.before', sessionId: 'ses_1', tool: 'bash', toolInput: { command: 'ls' },
+    }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.sessionId, 'ses_1');
+    assert.ok(!/^opencode-\d+$/.test(state.sessionId), 'must not fall back to a ppid-derived id');
+    cleanup(tmp);
+  });
+
+  test('tool.execute.after writes a completion state', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-3');
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.after', sessionId: 'ses_1', tool: 'bash',
+      toolInput: { command: 'echo hi' }, title: 'echo hi', output: 'hi',
+    }, env);
+    const state = readJSON(stateFile);
+    assert.ok(['happy', 'satisfied', 'proud', 'relieved'].includes(state.state),
+      `expected completion state, got "${state.state}"`);
+    cleanup(tmp);
+  });
+
+  test('tool.error writes the error face with the error text', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-4');
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.error', sessionId: 'ses_1', tool: 'bash',
+      toolInput: { command: 'exit 1' }, error: 'exit code 1',
+    }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'error');
+    cleanup(tmp);
+  });
+
+  test('session.created writes the starting face', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-5');
+    runStdinAdapter(ADAPTER, { type: 'session.created', sessionId: 'ses_1' }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'starting');
+    assert.strictEqual(state.detail, 'session started');
+    assert.strictEqual(state.sessionId, 'ses_1');
+    cleanup(tmp);
+  });
+
+  test('session.idle still stops the session', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-6');
+    runStdinAdapter(ADAPTER, { type: 'session.idle', sessionId: 'ses_1' }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'happy');
+    assert.strictEqual(state.detail, 'all done!');
+    assert.strictEqual(state.stopped, true);
+    cleanup(tmp);
+  });
+
+  test('session.error carries the flattened error text into the detail', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-7');
+    runStdinAdapter(ADAPTER, {
+      type: 'session.error', sessionId: 'ses_1', error: 'connection lost',
+    }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'error');
+    assert.ok(state.detail.includes('connection lost'), `detail was "${state.detail}"`);
+    cleanup(tmp);
+  });
+
+  test('thinking writes the thinking face', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-8');
+    runStdinAdapter(ADAPTER, { type: 'thinking', sessionId: 'ses_1' }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'thinking');
+    cleanup(tmp);
+  });
+
+  test('permission.asked waits with the allow? detail that spawns question particles', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-9');
+    runStdinAdapter(ADAPTER, {
+      type: 'permission.asked', sessionId: 'ses_1', title: 'rm -rf build',
+    }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'waiting');
+    assert.strictEqual(state.detail, 'allow?');
+    cleanup(tmp);
+  });
+
+  test('permission.replied returns to satisfied', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-10');
+    runStdinAdapter(ADAPTER, {
+      type: 'permission.replied', sessionId: 'ses_1', response: 'once',
+    }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'satisfied');
+    assert.strictEqual(state.detail, 'got your answer');
+    cleanup(tmp);
+  });
+
+  test('one OpenCode turn produces exactly one session file', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('oc-plug-11');
+    delete env.CLAUDE_SESSION_ID;
+    for (const payload of [
+      { type: 'session.created', sessionId: 'ses_1' },
+      { type: 'thinking', sessionId: 'ses_1' },
+      { type: 'tool.execute.before', sessionId: 'ses_1', tool: 'bash', toolInput: { command: 'ls' } },
+      { type: 'tool.execute.after', sessionId: 'ses_1', tool: 'bash', toolInput: { command: 'ls' }, output: 'a.js' },
+      { type: 'session.idle', sessionId: 'ses_1' },
+    ]) runStdinAdapter(ADAPTER, payload, env);
+    const files = fs.readdirSync(sessionsDir);
+    assert.deepStrictEqual(files, ['ses_1.json'],
+      `expected a single ses_1 session file, got ${files.join(', ')}`);
     cleanup(tmp);
   });
 });
@@ -2381,10 +2756,10 @@ describe('bug fix structural tests', () => {
       'toolInput must not be set to data.input (the full wrapper object)');
   });
 
-  test('opencode-adapter.js uses data.tool_input || toolArgs pattern for toolInput', () => {
+  test('opencode-adapter.js unwraps the tool args instead of taking the wrapper', () => {
     const src = fs.readFileSync(OPENCODE_ADAPTER, 'utf8');
-    assert.ok(src.includes('data.tool_input || toolArgs'),
-      'toolInput should prefer data.tool_input, falling back to the unwrapped toolArgs');
+    assert.ok(/data\.toolInput \|\| data\.tool_input \|\| opencodeInput\.args/.test(src),
+      'toolInput should prefer the flat plugin field, then tool_input, then the unwrapped args');
   });
 
   // Bug #4 -- SubagentStop only splices when idx >= 0
@@ -2565,6 +2940,7 @@ describe('adapters -- adapter files all exist', () => {
     'codex-wrapper.js',
     'codex-notify.js',
     'opencode-adapter.js',
+    'opencode-plugin.mjs',
     'openclaw-adapter.js',
     'engmux-adapter.js',
   ];

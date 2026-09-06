@@ -11,14 +11,18 @@
 // |    node setup.js uninstall    (remove Claude + Codex hooks)    |
 // |    node setup.js codex        (Codex CLI native hooks)         |
 // |    node setup.js codex-notify (Codex legacy notify channel)    |
-// |    node setup.js opencode     (OpenCode)                       |
+// |    node setup.js opencode     (OpenCode -- print instructions) |
+// |    node setup.js opencode --install                            |
+// |                               (write opencode.json for real)   |
 // |    node setup.js openclaw     (OpenClaw / Pi)                  |
 // |    node setup.js --autolaunch (only flip the autolaunch pref)  |
 // |                                                                |
-// |  The Claude Code and Codex installers are also modules:        |
-// |  setupClaude() / uninstallClaude() / setupCodex() /            |
-// |  uninstallCodex() take { settingsPath | hooksPath, log } so    |
-// |  tests never touch a real settings.json or hooks.json.         |
+// |  Every installer is also a module: setupClaude() /             |
+// |  uninstallClaude() / setupCodex() / uninstallCodex() take      |
+// |  { settingsPath | hooksPath, log }, and setupOpenCode() /      |
+// |  uninstallOpenCode() take { configPath, pluginPath, install,   |
+// |  log } -- so tests never touch a real settings.json,           |
+// |  hooks.json or opencode.json.                                  |
 // +================================================================+
 
 const fs = require('fs');
@@ -88,20 +92,22 @@ function hasExactCommand(entry, command) {
   return !!entry?.hooks?.some(hh => typeof hh?.command === 'string' && hh.command === command);
 }
 
-// Read settings.json. A missing file means "start fresh"; anything else that
-// goes wrong (unreadable, invalid JSON, not an object) means "do not touch
-// it" -- the old behaviour silently replaced a broken settings.json with just
-// our hooks, wiping permissions, env, MCP servers and everything else.
-function readSettings(settingsPath, log, label = 'Claude settings') {
+// Read a JSON config file. A missing file means "start fresh"; anything else
+// that goes wrong (unreadable, invalid JSON, not an object) means "do not
+// touch it" -- the old behaviour silently replaced a broken settings.json
+// with just our hooks, wiping permissions, env, MCP servers and everything
+// else. One helper for all three installers: Claude settings.json, Codex
+// hooks.json and OpenCode opencode.json. `label` names the file in the log.
+function readJsonConfig(filePath, log, label) {
   let raw;
   try {
-    raw = fs.readFileSync(settingsPath, 'utf8');
+    raw = fs.readFileSync(filePath, 'utf8');
   } catch (err) {
     if (err && err.code === 'ENOENT') {
-      log('  [..] No existing settings found, creating new');
+      log(`  [..] No existing ${label} found, creating new`);
       return { settings: {}, existed: false, raw: null };
     }
-    log(`  [!!] Could not read ${settingsPath}: ${err.message}`);
+    log(`  [!!] Could not read ${filePath}: ${err.message}`);
     log('       Leaving it untouched. Fix or move the file, then re-run setup.');
     return { error: err };
   }
@@ -109,13 +115,13 @@ function readSettings(settingsPath, log, label = 'Claude settings') {
   try {
     settings = JSON.parse(raw);
   } catch (err) {
-    log(`  [!!] ${settingsPath} is not valid JSON (${err.message}).`);
+    log(`  [!!] ${filePath} is not valid JSON (${err.message}).`);
     log('       Leaving it untouched so nothing is lost. Fix the file, then re-run setup.');
     return { error: err };
   }
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
-    log(`  [!!] ${settingsPath} is not a JSON object. Leaving it untouched.`);
-    return { error: new Error('settings.json is not an object') };
+    log(`  [!!] ${filePath} is not a JSON object. Leaving it untouched.`);
+    return { error: new Error(`${label} is not an object`) };
   }
   log(`  [ok] Found existing ${label}`);
   return { settings, existed: true, raw };
@@ -186,7 +192,7 @@ function setupClaude(opts = {}) {
   log(`  Home:     ${HOME}`);
   log(`  Hook:     ${hookPath}\n`);
 
-  const read = readSettings(settingsPath, log);
+  const read = readJsonConfig(settingsPath, log, 'Claude settings');
   if (read.error) return { ok: false, modified: false, added: 0, replaced: 0, error: read.error };
   const { settings, existed, raw } = read;
 
@@ -240,7 +246,7 @@ function uninstallClaude(opts = {}) {
   log('\n  Code Crumb Uninstall (Claude Code)');
   log('  ' + '='.repeat(40) + '\n');
 
-  const read = readSettings(settingsPath, log);
+  const read = readJsonConfig(settingsPath, log, 'Claude settings');
   if (read.error) return { ok: false, removed: 0, error: read.error };
   const { settings, existed, raw } = read;
 
@@ -342,7 +348,7 @@ function setupCodex(opts = {}) {
   log(`  Home:     ${HOME}`);
   log(`  Hook:     ${hookPath}\n`);
 
-  const read = readSettings(hooksPath, log, 'Codex hooks');
+  const read = readJsonConfig(hooksPath, log, 'Codex hooks');
   if (read.error) return { ok: false, modified: false, added: 0, replaced: 0, pruned: 0, error: read.error };
   const { settings, existed, raw } = read;
 
@@ -412,7 +418,7 @@ function uninstallCodex(opts = {}) {
   log('\n  Code Crumb Uninstall (Codex CLI)');
   log('  ' + '='.repeat(40) + '\n');
 
-  const read = readSettings(hooksPath, log, 'Codex hooks');
+  const read = readJsonConfig(hooksPath, log, 'Codex hooks');
   if (read.error) return { ok: false, removed: 0, error: read.error };
   const { settings, existed, raw } = read;
 
@@ -514,113 +520,174 @@ function setupCodexNotify() {
 }
 
 // -- OpenCode Setup --------------------------------------------------
+// OpenCode's config key is `plugin` (singular) and plugins are ESM modules
+// loaded by its own Bun runtime, so Code Crumb ships the real plugin at
+// adapters/opencode-plugin.mjs instead of asking anyone to paste a snippet.
 
-function setupOpenCode() {
-  const adapterPath = path.resolve(__dirname, 'adapters', 'opencode-adapter.js').replace(/\\/g, '/');
+const OPENCODE_SCHEMA = 'https://opencode.ai/config.json';
+const DEFAULT_OPENCODE_CONFIG = path.join(HOME, '.config', 'opencode', 'opencode.json');
+const DEFAULT_OPENCODE_PLUGIN = path.resolve(__dirname, 'adapters', 'opencode-plugin.mjs').replace(/\\/g, '/');
+
+// A config entry is `string` or `[string, options]`.
+function pluginEntryPath(entry) {
+  if (typeof entry === 'string') return entry;
+  if (Array.isArray(entry) && typeof entry[0] === 'string') return entry[0];
+  return '';
+}
+
+// Our plugin at any path -- the repo may have moved since it was registered.
+function isOurPlugin(entry) {
+  return pluginEntryPath(entry).replace(/\\/g, '/').includes('adapters/opencode-plugin.mjs');
+}
+
+function printOpenCodeUsage(configPath, pluginPath, log) {
   const rendererPath = path.resolve(__dirname, 'renderer.js').replace(/\\/g, '/');
+  const rule = '\u2500'.repeat(42);
+  const arrow = '\u2192';
+  log(`
+  ${rule}
 
-  console.log('\n  Code Crumb Setup (OpenCode)');
-  console.log('  ' + '='.repeat(40) + '\n');
-  console.log(`  Platform: ${process.platform}`);
-  console.log(`  Home:     ${HOME}`);
-  console.log(`  Adapter:  ${adapterPath}\n`);
+  Code Crumb ships the OpenCode plugin itself:
+    ${pluginPath}
 
-  console.log(`
-  ${'─'.repeat(42)}
+  1. Register it:
+       node setup.js opencode --install
+     or add it by hand to ${configPath}:
+       {
+         "$schema": "${OPENCODE_SCHEMA}",
+         "plugin": ["${pluginPath}"]
+       }
+     The key is plugin, singular -- OpenCode ignores a plural one.
 
-  OpenCode uses a plugin system to emit events. Create a plugin
-  that pipes events to the Code Crumb adapter.
+  2. Start the renderer:
+       node "${rendererPath}"
 
-  STEP 1: Create the plugin file
-  ${'─'.repeat(38)}
+  3. Use OpenCode normally -- the face reacts to every tool.
 
-  Create: ~/.config/opencode/plugins/code-crumb.js
+  Events handled:
+    session.created      ${arrow} starting face
+    reasoning parts      ${arrow} thinking face
+    tool.execute.before  ${arrow} reading / editing / running / searching
+    tool.execute.after   ${arrow} happy / satisfied / relieved
+    a tool that throws   ${arrow} error face (after never fires for those)
+    permission.asked     ${arrow} waiting, "allow?"
+    permission.replied   ${arrow} satisfied
+    session.idle         ${arrow} happy, turn over
+    session.error        ${arrow} error face
 
-    const { execSync } = require('child_process');
-    const adapter = '${adapterPath}';
+  Upgrading: if you still have a hand-written
+  ~/.config/opencode/plugins/code-crumb.js, delete it and remove its config
+  entry. It targets an API OpenCode no longer has, so its session ids never
+  arrive and its tool input is always empty.
 
-    function send(payload) {
-      try {
-        execSync(\`node "\${adapter}"\`,
-          { input: JSON.stringify(payload), timeout: 200, stdio: ['pipe','ignore','ignore'],
-            env: { ...process.env, CLAUDE_SESSION_ID: payload.session_id || '' } });
-      } catch {}
-    }
+  The plugin runs under Bun and spawns node for the adapter. If node is not
+  on PATH there, set CODE_CRUMB_NODE to its full path.
 
-    export const CodeCrumbPlugin = async ({ project, client, $, directory, worktree }) => {
-      let lastMessageContent = '';
-      let toolsCalledThisTurn = false;
-      let sessionId = '';
-      return {
-        'session.created': async (input, output) => {
-          toolsCalledThisTurn = false;
-          sessionId = input.sessionId || '';
-          send({ type: 'session.created', session_id: sessionId });
-        },
-        'message.part.updated': async (input, output) => {
-          const content = input.part?.content || '';
-          const role = input.part?.role || '';
-          if (content !== lastMessageContent) {
-            lastMessageContent = content;
-            const isThinking = role === 'assistant' && !toolsCalledThisTurn && content.length > 0;
-            const thinkingText = isThinking
-              ? (content.split(' ').slice(0, 3).join(' ') || 'analyzing')
-              : '';
-            send({
-              type: 'message.part.updated',
-              session_id: sessionId,
-              content: content.substring(0, 500),
-              role,
-              is_thinking: isThinking,
-              thinking: thinkingText,
-              tools_called: toolsCalledThisTurn
-            });
-          }
-        },
-        'tool.execute.before': async (input, output) => {
-          toolsCalledThisTurn = true;
-          send({ type: 'tool.execute.before', session_id: sessionId, input: { tool: input.tool, args: input.args } });
-        },
-        'tool.execute.after': async (input, output) => {
-          send({ type: 'tool.execute.after', session_id: sessionId, input: { tool: input.tool, args: input.args }, output });
-        },
-        'session.idle': async (input, output) => {
-          toolsCalledThisTurn = false;
-          send({ type: 'session.idle', session_id: sessionId });
-        },
-        'session.error': async (input, output) => {
-          send({ type: 'session.error', session_id: sessionId, output: { error: input.error || 'Session error' } });
-        },
-      };
-    };
+  To remove the plugin entry again:
+    node setup.js opencode --uninstall
 
-  STEP 2: Load the plugin
-  ${'─'.repeat(38)}
-
-  Add to ~/.config/opencode/opencode.json:
-
-    {
-      "plugins": ["./plugins/code-crumb.js"]
-    }
-
-  STEP 3: Run the renderer
-  ${'─'.repeat(38)}
-
-  Start the renderer before using OpenCode:
-    node "${rendererPath}"
-
-  Then use OpenCode normally -- the face will react to tools!
-
-  OpenCode events handled:
-    session.created       → shows waiting face (session started)
-    message.part.updated  → shows thinking face when AI is analyzing
-    tool.execute.before   → shows tool activity (reading/editing/running)
-    tool.execute.after    → shows outcome (happy/error/relieved)
-    session.idle          → shows happy face (all done)
-    session.error         → shows error face
-
-  ${'─'.repeat(42)}
+  ${rule}
 `);
+}
+
+// Register the plugin in opencode.json (with --install), or just print the
+// instructions. opts: { configPath, pluginPath, install, log, quiet }
+// Returns { ok, modified, added, replaced, error? }.
+function setupOpenCode(opts = {}) {
+  const configPath = opts.configPath || DEFAULT_OPENCODE_CONFIG;
+  const pluginPath = opts.pluginPath || DEFAULT_OPENCODE_PLUGIN;
+  const log = opts.log || console.log;
+  const install = !!opts.install;
+
+  log('\n  Code Crumb Setup (OpenCode)');
+  log('  ' + '='.repeat(40) + '\n');
+  log(`  Platform: ${process.platform}`);
+  log(`  Home:     ${HOME}`);
+  log(`  Plugin:   ${pluginPath}`);
+  log(`  Config:   ${configPath}\n`);
+
+  if (!install) {
+    log('  Nothing written (pass --install to register the plugin).');
+    if (!opts.quiet) printOpenCodeUsage(configPath, pluginPath, log);
+    return { ok: true, modified: false, added: 0, replaced: 0 };
+  }
+
+  const read = readJsonConfig(configPath, log, 'OpenCode config');
+  if (read.error) return { ok: false, modified: false, added: 0, replaced: 0, error: read.error };
+  const { settings: config, existed, raw } = read;
+
+  if (!config.$schema) config.$schema = OPENCODE_SCHEMA;
+  if (!Array.isArray(config.plugin)) config.plugin = [];
+  if (config.plugins) {
+    log('  [!!] Found a plural plugins key. OpenCode reads plugin (singular);');
+    log('       the plural one does nothing. Leaving it in place.');
+  }
+
+  let added = 0;
+  let replaced = 0;
+  if (config.plugin.some(e => pluginEntryPath(e) === pluginPath)) {
+    log('  [ok] Plugin already registered');
+  } else if (config.plugin.some(isOurPlugin)) {
+    // A Code Crumb entry at a different path: the repo moved.
+    config.plugin = config.plugin.filter(e => !isOurPlugin(e)).concat(pluginPath);
+    replaced = 1;
+    log('  ~ Updated the plugin path');
+  } else {
+    config.plugin.push(pluginPath);
+    added = 1;
+    log('  + Registered the Code Crumb plugin');
+  }
+
+  const legacy = config.plugin.filter(e => !isOurPlugin(e) && /code-crumb/i.test(pluginEntryPath(e)));
+  for (const entry of legacy) {
+    log(`  [!!] Old hand-written entry still listed: ${pluginEntryPath(entry)}`);
+    log('       Remove it -- two plugins means every event fires twice.');
+  }
+
+  const modified = added + replaced > 0;
+  if (modified) {
+    if (!writeSettings(configPath, config, existed, raw, log)) {
+      return { ok: false, modified: false, added, replaced, error: new Error('write failed') };
+    }
+    log(`\n  Plugin registered in ${configPath}`);
+  } else {
+    log('\n  Config already up to date');
+  }
+
+  if (!opts.quiet) printOpenCodeUsage(configPath, pluginPath, log);
+  return { ok: true, modified, added, replaced };
+}
+
+// Remove every Code Crumb plugin entry (any path) and drop the key if it
+// ends up empty. opts: { configPath, log }. Returns { ok, removed, error? }.
+function uninstallOpenCode(opts = {}) {
+  const configPath = opts.configPath || DEFAULT_OPENCODE_CONFIG;
+  const log = opts.log || console.log;
+
+  log('\n  Code Crumb Uninstall (OpenCode)');
+  log('  ' + '='.repeat(40) + '\n');
+
+  const read = readJsonConfig(configPath, log, 'OpenCode config');
+  if (read.error) return { ok: false, removed: 0, error: read.error };
+  const { settings: config, existed, raw } = read;
+
+  let removed = 0;
+  if (Array.isArray(config.plugin)) {
+    const kept = config.plugin.filter(e => !isOurPlugin(e));
+    removed = config.plugin.length - kept.length;
+    if (kept.length) config.plugin = kept;
+    else delete config.plugin;
+  }
+
+  if (removed === 0) {
+    log('  [ok] No Code Crumb plugin entry found -- nothing to do');
+    return { ok: true, removed: 0 };
+  }
+  if (!writeSettings(configPath, config, existed, raw, log)) {
+    return { ok: false, removed: 0, error: new Error('write failed') };
+  }
+  log(`  - Removed ${removed} Code Crumb plugin entry from ${configPath}\n`);
+  return { ok: true, removed };
 }
 
 // -- OpenClaw / Pi Setup ---------------------------------------------
@@ -706,7 +773,8 @@ function enableAutolaunch(log = console.log) {
 
 function printUsage() {
   console.log('  Supported editors: claude, codex, codex-notify, opencode, openclaw');
-  console.log('  Usage: node setup.js [claude|codex|codex-notify|opencode|openclaw|uninstall] [--autolaunch]\n');
+  console.log('  Usage: node setup.js [claude|codex|codex-notify|opencode|openclaw|uninstall] [--autolaunch]');
+  console.log('         node setup.js opencode [--install|--uninstall]\n');
 }
 
 function main() {
@@ -750,9 +818,15 @@ function main() {
     case 'notify':
       setupCodexNotify();
       break;
-    case 'opencode':
-      setupOpenCode();
+    case 'opencode': {
+      if (flags.includes('--uninstall')) {
+        const r = uninstallOpenCode();
+        process.exit(r.ok ? 0 : 1);
+      }
+      const r = setupOpenCode({ install: flags.includes('--install') });
+      if (!r.ok) process.exit(1);
       break;
+    }
     case 'openclaw':
     case 'claw':
     case 'pi':
@@ -788,6 +862,8 @@ if (require.main === module) {
 module.exports = {
   setupClaude,
   uninstallClaude,
+  setupOpenCode,
+  uninstallOpenCode,
   buildFaceHooks,
   setupCodex,
   uninstallCodex,
@@ -798,4 +874,6 @@ module.exports = {
   DEFAULT_HOOK_PATH,
   DEFAULT_SETTINGS_PATH,
   DEFAULT_CODEX_HOOKS_PATH,
+  DEFAULT_OPENCODE_CONFIG,
+  DEFAULT_OPENCODE_PLUGIN,
 };
