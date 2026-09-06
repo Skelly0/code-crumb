@@ -3117,26 +3117,18 @@ describe('update-state.js -- subagent session detection (isKnownSubagent)', () =
 // -- New Hook Events (PreCompact, PostCompact, PermissionRequest, etc.) ------
 
 describe('update-state.js -- new hook event handlers', () => {
-  function readSrc() {
-    const fs = require('fs');
-    return fs.readFileSync(require('path').join(__dirname, '..', 'update-state.js'), 'utf8');
-  }
+  const NEW_EVENTS = [
+    'PreCompact', 'PostCompact', 'PermissionRequest', 'Setup',
+    'Elicitation', 'ElicitationResult', 'ConfigChange',
+    'InstructionsLoaded', 'StopFailure',
+  ];
 
-  function readHooks() {
-    const fs = require('fs');
-    return JSON.parse(fs.readFileSync(require('path').join(__dirname, '..', 'hooks', 'hooks.json'), 'utf8'));
-  }
-
-  // -- Hook registration tests --
+  // -- Registration. hooks.json is shipped configuration, not implementation:
+  // reading it is reading the artifact, so these stay data assertions.
 
   test('hooks.json registers all 9 new events', () => {
-    const hooks = readHooks();
-    const newEvents = [
-      'PreCompact', 'PostCompact', 'PermissionRequest', 'Setup',
-      'Elicitation', 'ElicitationResult', 'ConfigChange',
-      'InstructionsLoaded', 'StopFailure',
-    ];
-    for (const event of newEvents) {
+    const hooks = readJSON(pathMod.join(__dirname, '..', 'hooks', 'hooks.json'));
+    for (const event of NEW_EVENTS) {
       assert.ok(hooks.hooks[event], `hooks.json should register ${event}`);
       assert.strictEqual(hooks.hooks[event][0].hooks[0].type, 'command');
       assert.ok(
@@ -3147,175 +3139,99 @@ describe('update-state.js -- new hook event handlers', () => {
   });
 
   test('hooks.json does NOT register WorktreeCreate or WorktreeRemove', () => {
-    const hooks = readHooks();
+    const hooks = readJSON(pathMod.join(__dirname, '..', 'hooks', 'hooks.json'));
     assert.strictEqual(hooks.hooks.WorktreeCreate, undefined,
       'WorktreeCreate would replace default worktree behavior -- must not be registered');
     assert.strictEqual(hooks.hooks.WorktreeRemove, undefined,
       'WorktreeRemove would replace default worktree behavior -- must not be registered');
   });
 
-  // -- LIFECYCLE_EVENTS guard tests --
+  // -- What each handler actually writes ------------------------------
 
-  test('LIFECYCLE_EVENTS set exists and contains system-level events', () => {
-    const src = readSrc();
-    assert.ok(src.includes('const LIFECYCLE_EVENTS = new Set('),
-      'LIFECYCLE_EVENTS Set should exist');
-    const expected = [
-      'SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop',
-      'PreCompact', 'PostCompact', 'Setup', 'ConfigChange',
-      'InstructionsLoaded', 'StopFailure',
-    ];
-    for (const event of expected) {
-      assert.ok(src.includes(`'${event}'`),
-        `LIFECYCLE_EVENTS should contain '${event}'`);
-    }
+  // One owner session, no subagents: these are plain lifecycle events on the
+  // session that owns the stats, with counters already at 5 so "did not
+  // inflate the counters" is an assertion and not a tautology.
+  function seedOwner(statsFile, id) {
+    const stats = conductingStats(id, 'unused', Date.now());
+    stats.session.activeSubagents = [];
+    stats.streak = 3;
+    fsMod.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+  }
+
+  const cases = [
+    ['PreCompact', { trigger: 'manual' }, 'thinking', 'compacting memory'],
+    ['PreCompact', {}, 'thinking', 'auto-compacting'],
+    ['PostCompact', {}, 'satisfied', 'memory compacted'],
+    ['PermissionRequest', { tool_name: 'Bash' }, 'waiting', 'allow Bash?'],
+    ['PermissionRequest', {}, 'waiting', 'needs permission'],
+    ['Setup', { trigger: 'maintenance' }, 'starting', 'maintenance'],
+    ['Setup', {}, 'starting', 'setting up'],
+    ['Elicitation', { mcp_server_name: 'a-very-long-mcp-server-name' },
+      'waiting', 'a-very-long-mcp-serv: needs input'],
+    ['ElicitationResult', { action: 'accept' }, 'satisfied', 'input received'],
+    ['ElicitationResult', { action: 'decline' }, 'relieved', 'input declined'],
+    ['ElicitationResult', { action: 'cancel' }, 'relieved', 'input cancelled'],
+    ['ConfigChange', { file_path: '/a/b/settings.json' }, 'reading', 'config: settings.json'],
+    ['InstructionsLoaded', { file_path: '/x/CLAUDE.md' }, 'reading', 'CLAUDE.md'],
+    ['StopFailure', { error: 'rate_limit' }, 'error', 'rate limited!'],
+  ];
+
+  let caseNo = 0;
+  for (const [event, payload, state, detail] of cases) {
+    const id = 'newev-' + (caseNo++);
+    test(`${event} ${JSON.stringify(payload)} -> ${state} / ${detail}`, () => {
+      const { tmp, stateFile, statsFile, env } = makeTempEnv(id);
+      try {
+        seedOwner(statsFile, id);
+        runUpdateState(event, { session_id: id, ...payload }, env);
+        const st = readJSON(stateFile);
+        assert.strictEqual(st.state, state);
+        assert.strictEqual(st.detail, detail);
+        const stats = readJSON(statsFile);
+        assert.strictEqual(stats.session.toolCalls, 5,
+          'a lifecycle event is not a tool call');
+        assert.strictEqual(stats.totalToolCalls, 5,
+          'and does not inflate the global count either');
+      } finally { cleanup(tmp); }
+    });
+  }
+
+  test('StopFailure breaks the streak and counts an error', () => {
+    const { tmp, statsFile, env } = makeTempEnv('stopfail-1');
+    try {
+      seedOwner(statsFile, 'stopfail-1');
+      runUpdateState('StopFailure', { session_id: 'stopfail-1', error: 'rate_limit' }, env);
+      const stats = readJSON(statsFile);
+      assert.strictEqual(stats.streak, 0, 'an API failure breaks the streak');
+      assert.strictEqual(stats.brokenStreak, 3, 'and remembers what it broke');
+      assert.strictEqual(stats.totalErrors, 1);
+    } finally { cleanup(tmp); }
   });
 
-  test('LIFECYCLE_EVENTS does NOT contain per-session interactive events', () => {
-    const src = readSrc();
-    // Extract just the LIFECYCLE_EVENTS Set definition
-    const setStart = src.indexOf('const LIFECYCLE_EVENTS = new Set(');
-    const setEnd = src.indexOf(']);', setStart);
-    const setBlock = src.slice(setStart, setEnd);
-    assert.ok(!setBlock.includes("'PermissionRequest'"),
-      'PermissionRequest should route to orbital files in subagent context');
-    assert.ok(!setBlock.includes("'Elicitation'"),
-      'Elicitation should route to orbital files in subagent context');
-    assert.ok(!setBlock.includes("'ElicitationResult'"),
-      'ElicitationResult should route to orbital files in subagent context');
-  });
+  // -- Catch path: unparseable stdin still lands a sane face -----------
 
-  test('isKnownSubagent guard uses LIFECYCLE_EVENTS.has()', () => {
-    const src = readSrc();
-    assert.ok(src.includes('!LIFECYCLE_EVENTS.has(hookEvent)'),
-      'isKnownSubagent guard should use the LIFECYCLE_EVENTS Set');
-  });
-
-  // -- Try-block handler tests --
-
-  test('PreCompact handler sets thinking state with trigger-aware detail', () => {
-    const src = readSrc();
-    assert.ok(src.includes("hookEvent === 'PreCompact'"), 'PreCompact handler should exist');
-    const block = src.split("hookEvent === 'PreCompact'")[1].split('else if')[0];
-    assert.ok(block.includes("state = 'thinking'"), 'PreCompact should set thinking state');
-    assert.ok(block.includes('data.trigger'), 'PreCompact should check trigger field');
-    assert.ok(block.includes('compacting memory'), 'manual trigger should show compacting memory');
-    assert.ok(block.includes('auto-compacting'), 'auto trigger should show auto-compacting');
-  });
-
-  test('PostCompact handler sets satisfied state', () => {
-    const src = readSrc();
-    assert.ok(src.includes("hookEvent === 'PostCompact'"), 'PostCompact handler should exist');
-    const block = src.split("hookEvent === 'PostCompact'")[1].split('else if')[0];
-    assert.ok(block.includes("state = 'satisfied'"), 'PostCompact should set satisfied state');
-    assert.ok(block.includes('memory compacted'), 'PostCompact should show memory compacted');
-  });
-
-  test('PermissionRequest handler includes tool_name in detail', () => {
-    const src = readSrc();
-    assert.ok(src.includes("hookEvent === 'PermissionRequest'"), 'PermissionRequest handler should exist');
-    const block = src.split("hookEvent === 'PermissionRequest'")[1].split('else if')[0];
-    assert.ok(block.includes("state = 'waiting'"), 'PermissionRequest should set waiting state');
-    assert.ok(block.includes('data.tool_name'), 'PermissionRequest should extract tool_name');
-    assert.ok(block.includes('allow'), 'detail should include allow prefix');
-  });
-
-  test('Setup handler distinguishes init vs maintenance', () => {
-    const src = readSrc();
-    assert.ok(src.includes("hookEvent === 'Setup'"), 'Setup handler should exist');
-    const block = src.split("hookEvent === 'Setup'")[1].split('else if')[0];
-    assert.ok(block.includes("state = 'starting'"), 'Setup should set starting state');
-    assert.ok(block.includes('data.trigger'), 'Setup should check trigger field');
-    assert.ok(block.includes('maintenance'), 'Setup should handle maintenance trigger');
-  });
-
-  test('Elicitation handler includes server name (truncated)', () => {
-    const src = readSrc();
-    assert.ok(src.includes("hookEvent === 'Elicitation'"), 'Elicitation handler should exist');
-    const block = src.split("hookEvent === 'Elicitation'")[1].split('else if')[0];
-    assert.ok(block.includes("state = 'waiting'"), 'Elicitation should set waiting state');
-    assert.ok(block.includes('data.mcp_server_name'), 'Elicitation should extract server name');
-    assert.ok(block.includes('slice(0, 20)'), 'server name should be truncated');
-    assert.ok(block.includes('needs input'), 'detail should include needs input');
-  });
-
-  test('ElicitationResult branches on action (accept/decline/cancel)', () => {
-    const src = readSrc();
-    assert.ok(src.includes("hookEvent === 'ElicitationResult'"), 'ElicitationResult handler should exist');
-    const block = src.split("hookEvent === 'ElicitationResult'")[1].split('else if (hookEvent')[0];
-    assert.ok(block.includes('data.action'), 'ElicitationResult should check action field');
-    assert.ok(block.includes("state = 'satisfied'"), 'accept should set satisfied state');
-    assert.ok(block.includes("state = 'relieved'"), 'decline/cancel should set relieved state');
-    assert.ok(block.includes('input declined'), 'decline should show input declined');
-    assert.ok(block.includes('input cancelled'), 'cancel should show input cancelled');
-  });
-
-  test('ConfigChange handler extracts basename from file_path', () => {
-    const src = readSrc();
-    assert.ok(src.includes("hookEvent === 'ConfigChange'"), 'ConfigChange handler should exist');
-    const block = src.split("hookEvent === 'ConfigChange'")[1].split('else if')[0];
-    assert.ok(block.includes("state = 'reading'"), 'ConfigChange should set reading state');
-    assert.ok(block.includes('path.basename'), 'ConfigChange should extract basename');
-    assert.ok(block.includes('config:'), 'detail should include config: prefix');
-  });
-
-  test('InstructionsLoaded handler extracts basename', () => {
-    const src = readSrc();
-    assert.ok(src.includes("hookEvent === 'InstructionsLoaded'"), 'InstructionsLoaded handler should exist');
-    const block = src.split("hookEvent === 'InstructionsLoaded'")[1].split('else if')[0];
-    assert.ok(block.includes("state = 'reading'"), 'InstructionsLoaded should set reading state');
-    assert.ok(block.includes('path.basename'), 'InstructionsLoaded should extract basename');
-  });
-
-  test('StopFailure handler maps error types and breaks streak', () => {
-    const src = readSrc();
-    assert.ok(src.includes("hookEvent === 'StopFailure'"), 'StopFailure handler should exist');
-    const block = src.split("hookEvent === 'StopFailure'")[1].split('else if (hookEvent')[0];
-    assert.ok(block.includes("state = 'error'"), 'StopFailure should set error state');
-    assert.ok(block.includes('rate_limit'), 'should handle rate_limit');
-    assert.ok(block.includes('server_error'), 'should handle server_error');
-    assert.ok(block.includes('updateStreak(stats, true)'), 'StopFailure should break streak');
-    assert.ok(block.includes('!isKnownSubagent'), 'streak update should be guarded by !isKnownSubagent');
-  });
-
-  // -- Catch-block fallback tests --
-
-  test('all 9 new events have fallback handlers in catch block', () => {
-    const src = readSrc();
-    // The main catch block has a unique comment about JSON parse failures
-    const catchBlock = src.split('JSON parse may fail')[1] || '';
-    assert.ok(catchBlock.length > 0, 'main catch block should exist');
-    const newEvents = [
-      'PreCompact', 'PostCompact', 'PermissionRequest', 'Setup',
-      'Elicitation', 'ElicitationResult', 'ConfigChange',
-      'InstructionsLoaded', 'StopFailure',
-    ];
-    for (const event of newEvents) {
-      assert.ok(catchBlock.includes(`hookEvent === '${event}'`),
-        `catch block should have fallback handler for ${event}`);
-    }
-  });
-
-  // -- No stats inflation tests --
-
-  test('new lifecycle events do not increment toolCalls', () => {
-    const src = readSrc();
-    const lifecycleEvents = [
-      'PreCompact', 'PostCompact', 'PermissionRequest', 'Setup',
-      'Elicitation', 'ElicitationResult', 'ConfigChange', 'InstructionsLoaded',
-    ];
-    for (const event of lifecycleEvents) {
-      const parts = src.split(`hookEvent === '${event}'`);
-      // Get the handler block (between this event and the next else if)
-      if (parts.length > 1) {
-        const block = parts[1].split('else if')[0];
-        assert.ok(!block.includes('stats.session.toolCalls'),
-          `${event} handler should not modify toolCalls`);
-        assert.ok(!block.includes('stats.totalToolCalls'),
-          `${event} handler should not modify totalToolCalls`);
-      }
-    }
-  });
+  const fallbacks = [
+    ['PreCompact', 'thinking', 'compacting memory'],
+    ['PostCompact', 'satisfied', 'memory compacted'],
+    ['PermissionRequest', 'waiting', 'needs permission'],
+    ['Setup', 'starting', 'setting up'],
+    ['Elicitation', 'waiting', 'needs input'],
+    ['ElicitationResult', 'satisfied', 'input received'],
+    ['ConfigChange', 'reading', 'config updated'],
+    ['InstructionsLoaded', 'reading', 'loading instructions'],
+    ['StopFailure', 'error', 'API error'],
+  ];
+  for (const [event, state, detail] of fallbacks) {
+    test(`empty stdin: ${event} -> ${state} / ${detail}`, () => {
+      const { tmp, stateFile, env } = makeTempEnv('fb-' + event);
+      try {
+        runUpdateStateRaw(event, '', env);
+        const st = readJSON(stateFile);
+        assert.strictEqual(st.state, state);
+        assert.strictEqual(st.detail, detail);
+      } finally { cleanup(tmp); }
+    });
+  }
 });
 
 describe('state-machine -- buildSubagentSessionState editor field', () => {
@@ -3407,56 +3323,40 @@ describe('state-machine.js -- pruneTopLevelSessions (#134)', () => {
 });
 
 // -- Parallel session classification wiring (#134) -------------------------
+// The registry/birthtime decision table is unit-tested above
+// (classifyForeignSession / pruneTopLevelSessions) and the end-to-end
+// PreToolUse cases -- registered window, birthtime window, subagent
+// regression, stale-stamp healing, teammate exemption, SessionStart
+// registration -- live in tests/test-adapters.js "parallel sessions vs
+// subagents (#134)". What is left to pin here is the PostToolUse half of the
+// propagation guard, which no other test exercises.
 
 describe('update-state.js -- parallel session wiring (#134)', () => {
-  function readSrc() {
-    const fs = require('fs');
-    return fs.readFileSync(require('path').join(__dirname, '..', 'update-state.js'), 'utf8');
-  }
+  test('a parallel window PostToolUse does not paint the subagent orbital', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('par-post-1');
+    try {
+      seedSyntheticOrbital(sessionsDir, 'owner-1-sub-1', 'owner-1');
+      fsMod.writeFileSync(statsFile, JSON.stringify(conductingStats(
+        'owner-1', 'owner-1-sub-1', Date.now() - 1000,
+        { 'par-post-1': Date.now() })), 'utf8');
 
-  test('classifier declares isParallelSession alongside isKnownSubagent', () => {
-    const src = readSrc();
-    assert.ok(src.includes('let isParallelSession = false'),
-      'should declare isParallelSession variable');
-    assert.ok(src.includes('classifyForeignSession({ registryHit, fileBornAt, earliestSubagentStart })'),
-      'should delegate the decision to classifyForeignSession');
-  });
+      runUpdateState('PostToolUse', {
+        session_id: 'par-post-1', tool_name: 'Bash',
+        tool_input: { command: 'ls' }, tool_response: {},
+      }, env);
 
-  test('classifier consults the top-level registry and file birthtime', () => {
-    const src = readSrc();
-    assert.ok(src.includes('stats.topLevelSessions[sessionId]'),
-      'should check the top-level session registry');
-    assert.ok(src.includes('birthtimeMs'),
-      'should consult the session file birthtime');
-  });
+      const synth = readJSON(pathMod.join(sessionsDir, 'owner-1-sub-1.json'));
+      assert.strictEqual(synth.state, 'spawning',
+        'an unrelated window result must not land on the subagent orbital');
+      assert.strictEqual(synth.stopped, false,
+        'nor retire it');
 
-  test('SessionStart registers the session and prunes the registry', () => {
-    const src = readSrc();
-    const block = src.split("hookEvent === 'SessionStart'")[1].split('else if')[0];
-    assert.ok(block.includes('stats.topLevelSessions[sessionId] = Date.now()'),
-      'SessionStart should register the session as top-level');
-    assert.ok(block.includes('pruneTopLevelSessions('),
-      'SessionStart should prune the registry');
-  });
-
-  test('tool propagation blocks are guarded by !isParallelSession and !isAgentEvent', () => {
-    const src = readSrc();
-    const matches = src.match(
-      /!SUBAGENT_TOOLS\.test\(toolName\)\s*&&\s*!isKnownSubagent && !isParallelSession && !isAgentEvent/g) || [];
-    assert.strictEqual(matches.length, 2,
-      'both PreToolUse and PostToolUse propagation must exclude parallel sessions and agent events');
-  });
-
-  test('healing strips stale parentSession/taskDescription for top-level sessions', () => {
-    const src = readSrc();
-    assert.ok(src.includes('isParallelSession || stats.session.id === sessionId'),
-      'healing should trigger for parallel sessions and the stats owner');
-    assert.ok(src.includes('delete extra.parentSession'),
-      'healing should strip parentSession');
-    assert.ok(src.includes('delete extra.taskDescription'),
-      'healing should strip taskDescription');
-    assert.ok(src.includes('!extra.isTeammate'),
-      'teammates must keep their legitimately-set fields');
+      const mine = readJSON(pathMod.join(sessionsDir, 'par-post-1.json'));
+      assert.notStrictEqual(mine.state, 'subagent',
+        'the parallel window is not conducting anything');
+      assert.strictEqual(readJSON(statsFile).session.id, 'owner-1',
+        'and it does not steal the stats session');
+    } finally { cleanup(tmp); }
   });
 });
 
