@@ -3,19 +3,23 @@
 
 // +================================================================+
 // |  Code Crumb Test Suite - Adapter coverage                      |
-// |  Tests for codex-notify, opencode-adapter, openclaw-adapter,   |
-// |  and codex-wrapper (structure only — requires codex binary).   |
+// |  Tests for codex-notify, codex-wrapper, opencode-adapter,      |
+// |  opencode-plugin, openclaw-adapter and engmux-adapter.         |
 // |                                                                |
 // |  Adapters are scripts, not libraries, so we test them by       |
 // |  spawning child processes with controlled env/stdin/argv and   |
-// |  verifying the state files they write.                         |
+// |  verifying the state files they write. A handful of tests are  |
+// |  named `source:` -- those assert on the file text on purpose,  |
+// |  because what they guard has no observable outside the render  |
+// |  loop or needs a CLI the suite cannot supply portably. Every   |
+// |  one carries a comment saying why. Nothing else greps source.  |
 // +================================================================+
 
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-const { execFileSync, execSync, spawn } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
@@ -1979,6 +1983,12 @@ describe('adapters -- engmux-adapter', () => {
 });
 
 // -- Bug fix regression tests -------------------------------------------
+// The `source:`-prefixed tests below, and the layout-constant ones, are kept
+// deliberately: they are lint rules for code whose only effect is on drawn
+// pixels inside the 15fps render loop (grid.js padding and exclusion zones,
+// renderer.js try/catch and PID-guard branches, the particles TTY fallbacks
+// that only differ on a real terminal). Everything with an observable file
+// or object has been converted.
 
 describe('bug fix regressions', () => {
   test('renderer.js has no duplicate const minimal', () => {
@@ -2796,7 +2806,6 @@ describe('bug fix structural tests', () => {
   const BASE_ADAPTER = path.join(ADAPTERS_DIR, 'base-adapter.js');
   const OPENCODE_ADAPTER = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
   const PARTICLES = path.join(__dirname, '..', 'particles.js');
-  const FACE = path.join(__dirname, '..', 'face.js');
 
   // Bug #1 -- Windows Terminal fallback probes with execSync('where wt')
   test('update-state.js probes for wt with "where wt" before spawning', () => {
@@ -3057,7 +3066,6 @@ describe('adapters -- every adapter file exists and parses', () => {
 
 describe('editor PID liveness tracking', () => {
   const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-  const updateStateSrc = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
 
   test('codex-notify publishes the parent PID (posix only -- omitted on win32 like update-state.js)', () => {
     const { tmp, stateFile, env } = makeTempEnv('pid-1');
