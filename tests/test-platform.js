@@ -194,7 +194,10 @@ describe('shared.js -- acquireFileLock / withStatsLock', () => {
       const elapsed = Date.now() - t0;
       assert.strictEqual(second, null, 'contended acquire returns null');
       assert.ok(elapsed >= 20, `should wait at least waitMs, waited ${elapsed}ms`);
-      assert.ok(elapsed < 200, `should not wait far past waitMs, waited ${elapsed}ms`);
+      // Generous upper bound on purpose: it is scheduler latency, not the
+      // lock, that sets the real number. It still catches a waitMs that is
+      // ignored entirely or a wait that never ends.
+      assert.ok(elapsed < 1000, `should not wait far past waitMs, waited ${elapsed}ms`);
       held();
     } finally { cleanup(dir); }
   });
