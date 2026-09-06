@@ -37,9 +37,13 @@ const LONG_TOOL_HOLD_MS = 600000; // 10 min: the longest a single tool call can 
 // The `waiting` hold below is uncapped in display time, so it needs a bound of
 // its own -- and it cannot borrow the crash machinery: on win32 update-state.js
 // writes no `pid`, so `editorDead` never arms, and a hard-closed terminal never
-// gets to write `stopped`. State-file staleness is the one signal available on
-// every platform. 30 min is 3x LONG_TOOL_HOLD_MS -- far past any plausible
-// "reading the permission prompt" pause, short of stranding the face for hours.
+// gets to write `stopped`. What is left is the editor's own write cadence: a
+// live editor keeps stamping new timestamps into the state file, a dead one
+// does not. The hold ends once no NEW write has arrived for this long (see
+// noteNewWrite -- the age must not be measured from a read, because checkState
+// re-reads the unchanged file every 2s). 30 min is 3x LONG_TOOL_HOLD_MS -- far
+// past any plausible "reading the permission prompt" pause, short of leaving
+// the face shouting at an empty desk all night.
 const WAIT_HOLD_STALE_MS = 1800000;
 
 // -- Hoisted sets for checkState() hot path ---------------------------
@@ -58,7 +62,8 @@ const FRESH_READ_STATES = new Set(['thinking', ...ACTIVE_WORK_STATES, ...COMPLET
 //   sessionActive Stop has not fired and the editor PID is not known dead
 //   lingerMs      COMPLETION_LINGER for the current state (0 when it has none)
 //   fileState     the state last applied from the state file
-//   fileAgeMs     how long since the main session last wrote (0 when unknown)
+//   fileAgeMs     how long since the main session produced a NEW write
+//                 (0 when unknown -- treated as fresh)
 function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState, fileAgeMs }) {
   if (state === 'starting') return sinceChangeMs > 2500 ? 'idle' : null;
   if (state === 'responding' && !sessionActive) return 'happy';
@@ -71,9 +76,9 @@ function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState,
   // Waiting on the user is real whether or not the turn has ended -- an
   // idle_prompt notification arrives *after* Stop. So this hold ignores
   // sessionActive and never expires on display time: the face waits as long as
-  // the user does. It ends only when the state file itself goes stale, which is
-  // the only crash signal that exists on every platform (see WAIT_HOLD_STALE_MS).
-  // Degrade to idle, not thinking -- nothing was ever running.
+  // the user does. It ends only once the editor has stopped producing new
+  // writes for WAIT_HOLD_STALE_MS -- the one crash signal that works on every
+  // platform. Degrade to idle, not thinking: nothing was ever running.
   if (state === 'waiting' && fileState === 'waiting') {
     return (fileAgeMs || 0) > WAIT_HOLD_STALE_MS ? 'idle' : null;
   }
@@ -82,6 +87,25 @@ function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState,
   if (ACTIVE_WORK_STATES.has(state) && state !== 'responding' && sessionActive
       && fileState === state && sinceChangeMs <= LONG_TOOL_HOLD_MS) return null;
   return sinceChangeMs > IDLE_TIMEOUT ? (sessionActive ? 'thinking' : 'idle') : null;
+}
+
+// -- Write clock -----------------------------------------------------
+// Pure: when did the main session last produce a genuinely NEW write?
+//
+// This exists because "when did we last read the file" is a trap. checkState()
+// re-reads the *unchanged* state file every 2s (the `forceRead` path, there to
+// beat NTFS's 1-second mtime granularity), so any clock stamped on a read sits
+// at ~2s forever, even for an editor that died an hour ago. Only the write's
+// own JSON timestamp advancing proves the editor is alive.
+//
+//   ts      timestamp of the write just read
+//   lastTs  the newest timestamp applied so far
+//   now     current time
+//   lastAt  the stamp to keep if this is not a new write
+// Returns the stamp to keep. 0 means "no write seen yet" -- callers treat that
+// as fresh rather than infinitely stale.
+function noteNewWrite(ts, lastTs, now, lastAt) {
+  return ts > lastTs ? now : lastAt;
 }
 
 // -- Terminal title -------------------------------------------------
@@ -210,6 +234,7 @@ function runUnifiedMode() {
   let editorDead = false;     // Armed PID found dead — session presumed crashed
   let lastAppliedTimestamp = 0; // Dedup: skip re-applying state with same timestamp
   let lastAppliedState = null;  // State named by that write -- "is this tool still running?"
+  let lastNewWriteAt = 0;       // When a NEW write last arrived (not a re-read) -- see noteNewWrite
   function checkState() {
     const now = Date.now();
     let cachedStateData = null; // Cache readState() to avoid duplicate fs.readFileSync
@@ -327,6 +352,11 @@ function runUnifiedMode() {
         // A write newer than anything we've applied proves the editor is
         // alive — overrides a false PID death (e.g. PID reuse).
         if (editorDead && ts > lastAppliedTimestamp) editorDead = false;
+        // Same proof, kept as a clock: this is the ONLY place the write clock
+        // moves. lastMainUpdate above cannot serve -- it is refreshed by every
+        // forced re-read of the unchanged file. Stamped before the swap guard
+        // so a write during a transition still counts as the editor breathing.
+        lastNewWriteAt = noteNewWrite(ts, lastAppliedTimestamp, now, lastNewWriteAt);
 
         // Don't apply incoming state while a swap transition is animating —
         // the face should dissolve with its current state until the swap frame.
@@ -410,7 +440,7 @@ function runUnifiedMode() {
       sessionActive,
       lingerMs: COMPLETION_LINGER[face.state] || 0,
       fileState: lastAppliedState,
-      fileAgeMs: now - lastMainUpdate,
+      fileAgeMs: lastNewWriteAt ? now - lastNewWriteAt : 0,
     });
     if (next) face.setState(next);
   }
@@ -806,7 +836,8 @@ if (require.main === module) {
     IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
     PALETTES, PALETTE_NAMES,
     readState, ACTIVE_WORK_STATES, COMPLETION_STATES, FRESH_READ_STATES,
-    idleCascade, buildTitle, IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
+    idleCascade, buildTitle, noteNewWrite,
+    IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
     LONG_TOOL_HOLD_MS, WAIT_HOLD_STALE_MS,
   };
 }

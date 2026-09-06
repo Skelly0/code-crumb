@@ -561,7 +561,7 @@ describe('emotions -- catch-path parity for team events', () => {
 // -- The renderer's timeout cascade -------------------------------------
 
 const {
-  idleCascade, buildTitle, LONG_TOOL_HOLD_MS, WAIT_HOLD_STALE_MS,
+  idleCascade, buildTitle, noteNewWrite, LONG_TOOL_HOLD_MS, WAIT_HOLD_STALE_MS,
   IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
 } = require('../renderer');
 
@@ -704,15 +704,6 @@ describe('emotions -- the waiting hold is bounded by state-file staleness', () =
     assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: 600000, sessionActive: true, lingerMs: 0, fileState: 'waiting', fileAgeMs: WAIT_HOLD_STALE_MS }), null);
   });
 
-  test('a fresh write resets the clock', () => {
-    const args = { state: 'waiting', sinceChangeMs: 600000, sessionActive: true, lingerMs: 0, fileState: 'waiting' };
-    // Gone stale: the hold ends.
-    assert.strictEqual(idleCascade({ ...args, fileAgeMs: stale }), 'idle');
-    // The editor writes again (the renderer refreshes lastMainUpdate on every
-    // own-session read, so the age collapses) -- the hold is back.
-    assert.strictEqual(idleCascade({ ...args, fileAgeMs: 0 }), null);
-  });
-
   test('an omitted fileAgeMs is treated as fresh', () => {
     assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: 600000, sessionActive: true, lingerMs: 0, fileState: 'waiting' }), null);
   });
@@ -729,10 +720,101 @@ describe('emotions -- the waiting hold is bounded by state-file staleness', () =
       'the wait bound must outlast the longest sanctioned work hold');
   });
 
-  test('the renderer feeds it the age of the last main-session write', () => {
+});
+
+// The bound above is only as good as the clock it is keyed on. The first
+// version keyed it on `lastMainUpdate`, which the renderer refreshes on every
+// READ -- and it re-reads the unchanged state file every 2s (`forceRead`), so
+// the age never exceeded ~2s and the bound could never fire. `noteNewWrite` is
+// the clock, factored out precisely so that failure mode is testable without a
+// live renderer.
+describe('emotions -- the write clock behind the waiting bound', () => {
+  test('a newer write timestamp advances the stamp', () => {
+    assert.strictEqual(noteNewWrite(2000, 1000, 50000, 40000), 50000);
+  });
+
+  test('an unchanged timestamp does NOT advance the stamp -- this is the forced re-read', () => {
+    assert.strictEqual(noteNewWrite(1000, 1000, 50000, 40000), 40000);
+  });
+
+  test('an out-of-order (older) write does not advance the stamp', () => {
+    assert.strictEqual(noteNewWrite(500, 1000, 50000, 40000), 40000);
+  });
+
+  test('before the first write the stamp stays unset', () => {
+    assert.strictEqual(noteNewWrite(0, 0, 50000, 0), 0);
+  });
+
+  // This is the round-1 defect, reproduced against the real functions: drive
+  // the exact loop the renderer runs against an unchanged file, then feed the
+  // resulting age to the real idleCascade.
+  test('a crashed editor: 30 min of 2s forced re-reads let the bound fire', () => {
+    const ts = 1000;           // the state file never changes again
+    let stamp = 0;
+    let now = 0;
+    stamp = noteNewWrite(ts, 0, now, stamp);   // the last real write
+    const firstStamp = stamp;
+    // 1800 forced re-reads, 2s apart -- one hour of a hard-closed terminal.
+    for (let i = 0; i < 1800; i++) {
+      now += 2000;
+      stamp = noteNewWrite(ts, ts, now, stamp);
+    }
+    assert.strictEqual(stamp, firstStamp, 'forced re-reads must not move the clock');
+    const age = now - stamp;
+    assert.ok(age > WAIT_HOLD_STALE_MS, `age ${age} should exceed the bound`);
+    assert.strictEqual(
+      idleCascade({ state: 'waiting', sinceChangeMs: age, sessionActive: true, lingerMs: 0, fileState: 'waiting', fileAgeMs: age }),
+      'idle', 'the bound must actually fire for a crashed editor');
+  });
+
+  // The converse: a live editor keeps the hold alive indefinitely.
+  test('a live editor: a new write every 30s holds the wait for an hour', () => {
+    let ts = 1000;
+    let stamp = 0;
+    let now = 0;
+    stamp = noteNewWrite(ts, 0, now, stamp);
+    let prevTs = ts;
+    for (let i = 0; i < 120; i++) {          // 120 x 30s = 1 hour
+      for (let r = 0; r < 15; r++) {          // 15 forced re-reads between writes
+        now += 2000;
+        stamp = noteNewWrite(ts, prevTs, now, stamp);
+      }
+      prevTs = ts;
+      ts += 30000;
+      now += 0;
+      stamp = noteNewWrite(ts, prevTs, now, stamp);
+      const age = now - stamp;
+      assert.ok(age <= WAIT_HOLD_STALE_MS, `age ${age} should stay inside the bound`);
+      assert.strictEqual(
+        idleCascade({ state: 'waiting', sinceChangeMs: now, sessionActive: true, lingerMs: 0, fileState: 'waiting', fileAgeMs: age }),
+        null, 'a live editor must keep the wait held');
+    }
+  });
+
+  test('a fresh write resets the clock after it has gone stale', () => {
+    const args = { state: 'waiting', sinceChangeMs: 600000, sessionActive: true, lingerMs: 0, fileState: 'waiting' };
+    let stamp = noteNewWrite(1000, 0, 0, 0);
+    let now = WAIT_HOLD_STALE_MS + 5000;
+    assert.strictEqual(idleCascade({ ...args, fileAgeMs: now - stamp }), 'idle');
+    // The editor comes back and writes a genuinely newer timestamp.
+    stamp = noteNewWrite(2000, 1000, now, stamp);
+    assert.strictEqual(stamp, now, 'a real write must move the clock');
+    assert.strictEqual(idleCascade({ ...args, fileAgeMs: now - stamp }), null);
+  });
+
+  // Source-level guard with teeth: the round-1 bug was not a missing string,
+  // it was the clock being refreshed somewhere else. Pin the wiring.
+  test('the renderer keys the bound on the write clock, never on the read marker', () => {
     const src = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8');
-    assert.ok(/fileAgeMs: now - lastMainUpdate,/.test(src),
-      'checkState should pass the age of the last own-session write to idleCascade');
+    assert.ok(!/fileAgeMs:\s*now - lastMainUpdate/.test(src),
+      'lastMainUpdate is refreshed by every forced re-read -- it must not key the bound');
+    assert.ok(/lastNewWriteAt = noteNewWrite\(/.test(src),
+      'the write clock should be advanced through noteNewWrite');
+    // Declaration + exactly one assignment. A second assignment site is how the
+    // read-path refresh would creep back in.
+    const assignments = src.match(/lastNewWriteAt =/g) || [];
+    assert.strictEqual(assignments.length, 2,
+      'lastNewWriteAt should have its declaration and exactly one assignment site');
   });
 });
 
