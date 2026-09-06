@@ -457,6 +457,14 @@ function runHook(event, payload, env) {
   }
 }
 
+// Raw-stdin variant: runHook above JSON-stringifies, so '' arrives as '""'
+// and still parses. The catch path only opens for stdin that is not JSON.
+function runHookRaw(event, input, env) {
+  execFileSync(process.execPath, [UPDATE_STATE, event], {
+    input, env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+}
+
 describe('emotions -- UserPromptSubmit tells the face Claude has started thinking', () => {
   test('hooks.json registers UserPromptSubmit', () => {
     const hooks = readJSON(path.join(ROOT, 'hooks', 'hooks.json')).hooks;
@@ -464,8 +472,14 @@ describe('emotions -- UserPromptSubmit tells the face Claude has started thinkin
     assert.ok(hooks.UserPromptSubmit[0].hooks[0].command.includes('update-state.js'));
   });
   test('setup.js installs UserPromptSubmit', () => {
-    const src = fs.readFileSync(path.join(ROOT, 'setup.js'), 'utf8');
-    assert.ok(src.includes("'UserPromptSubmit'"));
+    const setup = require('../setup');
+    assert.ok(setup.HOOK_EVENTS.includes('UserPromptSubmit'),
+      'the installer event list must carry UserPromptSubmit');
+    const built = setup.buildFaceHooks('/somewhere/update-state.js');
+    assert.ok(built.UserPromptSubmit, 'settings.json block missing UserPromptSubmit');
+    assert.strictEqual(built.UserPromptSubmit[0].hooks[0].type, 'command');
+    assert.ok(built.UserPromptSubmit[0].hooks[0].command.includes('update-state.js" UserPromptSubmit'),
+      'the installed command must pass the event name through');
   });
   test('writes thinking / reading your message', () => {
     const { tmp, stateFile, env } = makeTempEnv('ups-1');
@@ -549,13 +563,23 @@ describe('emotions -- an edit diff is counted from structuredPatch', () => {
 });
 
 describe('emotions -- catch-path parity for team events', () => {
-  test('update-state.js fallback chain handles TeammateIdle and TaskCompleted', () => {
-    const src = fs.readFileSync(UPDATE_STATE, 'utf8');
-    const catchPath = src.slice(src.indexOf("let fallbackState = 'thinking'"));
-    assert.ok(catchPath.includes("hookEvent === 'TeammateIdle'"), 'TeammateIdle missing from catch path');
-    assert.ok(catchPath.includes("hookEvent === 'TaskCompleted'"), 'TaskCompleted missing from catch path');
-    assert.ok(catchPath.includes("hookEvent === 'UserPromptSubmit'"), 'UserPromptSubmit missing from catch path');
-  });
+  // Unparseable stdin must still land the same face the try path would.
+  const cases = [
+    ['TeammateIdle', 'waiting', 'teammate idle'],
+    ['TaskCompleted', 'happy', 'task done'],
+    ['UserPromptSubmit', 'thinking', 'reading your message'],
+  ];
+  for (const [event, state, detail] of cases) {
+    test(`empty stdin: ${event} -> ${state} / ${detail}`, () => {
+      const { tmp, stateFile, env } = makeTempEnv('catch-' + event);
+      try {
+        runHookRaw(event, '', env);
+        const st = readJSON(stateFile);
+        assert.strictEqual(st.state, state);
+        assert.strictEqual(st.detail, detail);
+      } finally { cleanup(tmp); }
+    });
+  }
 });
 
 // -- The renderer's timeout cascade -------------------------------------
