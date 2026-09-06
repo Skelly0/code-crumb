@@ -386,6 +386,24 @@ describe('adapters -- opencode-plugin translate()', () => {
     part: { type: 'reasoning', sessionID, text: 'weighing options' },
   });
 
+  // Run fn() with the plugin pointed at a node binary that does not exist,
+  // so a test about hook behaviour never starts a real adapter. The plugin
+  // reads CODE_CRUMB_NODE per spawn, and a hook runs its whole body
+  // synchronously (an async function only yields at an await, and there is
+  // none before the spawn) -- so fn() must make its calls and hand back the
+  // promises, which are awaited after the env is restored. Nothing else can
+  // observe the swap in between.
+  const withoutSpawning = (fn) => {
+    const realNode = process.env.CODE_CRUMB_NODE;
+    process.env.CODE_CRUMB_NODE = path.join(ADAPTERS_DIR, 'no-such-node-binary');
+    try {
+      return fn();
+    } finally {
+      if (realNode === undefined) delete process.env.CODE_CRUMB_NODE;
+      else process.env.CODE_CRUMB_NODE = realNode;
+    }
+  };
+
   test.async('session.created reads properties.info.id', async () => {
     const { translate } = await load();
     const out = translate('event', bus('session.created', { info: { id: 'ses_1' } }));
@@ -554,6 +572,24 @@ describe('adapters -- opencode-plugin translate()', () => {
     await hooks.event({ event: { type: 'lsp.updated', properties: {} } });
   });
 
+  // Proves the two tests below really do start nothing: the plugin reads
+  // CODE_CRUMB_NODE per spawn, so a bogus binary disarms delivery. (If it
+  // were captured at import instead, those tests would quietly go on
+  // spawning real adapters and still pass.)
+  test.async('CODE_CRUMB_NODE is honoured per spawn, so a bogus binary starts nothing', async () => {
+    const { CodeCrumbPlugin } = await loadIsolated('nospawn');
+    const hooks = await CodeCrumbPlugin();
+    const home = process.env.USERPROFILE || process.env.HOME;
+    const sid = `plug-nospawn-${process.pid}`;
+    const file = path.join(home, '.code-crumb-sessions', `${sid}.json`);
+    try { fs.unlinkSync(file); } catch {}
+
+    // session.idle takes the synchronous path: a real adapter would have
+    // written the session file by the time the hook resolves.
+    await withoutSpawning(() => hooks.event(bus('session.idle', { sessionID: sid })));
+    assert.strictEqual(fs.existsSync(file), false, 'no adapter may run with a bogus node binary');
+  });
+
   // OpenCode awaits the tool.execute.* hooks, so anything that escapes a
   // hook surfaces inside the editor. Every hook must be total, whatever it
   // is handed: missing arguments, a null event, a getter that throws, or a
@@ -576,19 +612,27 @@ describe('adapters -- opencode-plugin translate()', () => {
       { event: { type: 'message.part.updated', properties: { part: null } } },
       landmine,
     ];
-    for (const c of cases) {
-      for (const name of names) {
-        const result = await hooks[name](c, c);
-        assert.strictEqual(typeof result, 'boolean', `${name} must resolve, not reject`);
-      }
-    }
-
     // JSON.stringify throws on a cycle: that must be dropped, not raised.
     const cyclic = { args: {} };
     cyclic.args.self = cyclic;
-    assert.strictEqual(
-      await hooks['tool.execute.before']({ sessionID: 'ses_1', tool: 'edit', callID: 'c1' }, cyclic),
-      false, 'an unserialisable payload must be dropped');
+
+    // Most of these payloads survive translate() and would reach the spawn:
+    // the assertions are about totality, not about starting 21 real adapters.
+    const pending = withoutSpawning(() => {
+      const calls = [];
+      for (const c of cases) {
+        for (const name of names) calls.push([name, hooks[name](c, c)]);
+      }
+      calls.push(['cyclic', hooks['tool.execute.before']({ sessionID: 'ses_1', tool: 'edit', callID: 'c1' }, cyclic)]);
+      return calls;
+    });
+
+    for (const [name, promise] of pending) {
+      const result = await promise;
+      assert.strictEqual(typeof result, 'boolean', `${name} must resolve, not reject`);
+    }
+    assert.strictEqual(await pending[pending.length - 1][1], false,
+      'an unserialisable payload must be dropped');
   });
 
   // A reasoning part is republished on every streaming delta. One cold Node
@@ -598,18 +642,20 @@ describe('adapters -- opencode-plugin translate()', () => {
     const { CodeCrumbPlugin } = await loadIsolated('throttle');
     const hooks = await CodeCrumbPlugin();
 
-    let sent = 0;
-    for (let i = 0; i < 20; i++) {
-      if (await hooks.event(reasoning('ses_burst'))) sent++;
-    }
-    assert.strictEqual(sent, 1, 'one send per burst, not one per delta');
-
-    // The throttle is per session, and only reasoning is throttled.
-    assert.strictEqual(await hooks.event(reasoning('ses_other')), true,
-      'another session must not inherit the first one\'s throttle');
     const before = { sessionID: 'ses_burst', tool: 'read', callID: 'c1' };
-    assert.strictEqual(await hooks['tool.execute.before'](before, { args: {} }), true);
-    assert.strictEqual(await hooks['tool.execute.before'](before, { args: {} }), true,
+    const calls = withoutSpawning(() => ({
+      burst: Array.from({ length: 20 }, () => hooks.event(reasoning('ses_burst'))),
+      // The throttle is per session, and only reasoning is throttled.
+      otherSession: hooks.event(reasoning('ses_other')),
+      tools: [hooks['tool.execute.before'](before, { args: {} }),
+        hooks['tool.execute.before'](before, { args: {} })],
+    }));
+
+    const sent = (await Promise.all(calls.burst)).filter(Boolean).length;
+    assert.strictEqual(sent, 1, 'one send per burst, not one per delta');
+    assert.strictEqual(await calls.otherSession, true,
+      'another session must not inherit the first one\'s throttle');
+    assert.deepStrictEqual(await Promise.all(calls.tools), [true, true],
       'tool events are never collapsed');
   });
 

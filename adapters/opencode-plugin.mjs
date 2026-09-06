@@ -34,7 +34,11 @@ const ADAPTER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'opencod
 // process.execPath is the Bun binary in here, and the adapter is plain
 // CommonJS Node code -- resolve node explicitly. A bare `node` is a real
 // executable on every platform (never a .cmd shim), so no shell is needed.
-const NODE = process.env.CODE_CRUMB_NODE || 'node';
+// Read per spawn, not at import: OpenCode loads a plugin once when it
+// starts, so a variable captured here would outlive any change to it.
+function nodeBinary() {
+  return process.env.CODE_CRUMB_NODE || 'node';
+}
 
 // Never embed tool output in a state file: the adapter only needs enough
 // text for the error forensics.
@@ -173,8 +177,9 @@ function send(payload) {
   try {
     if (throttled(payload, Date.now())) return false;
     const json = JSON.stringify(payload);
+    const node = nodeBinary();
     if (SYNC_TYPES.has(payload.type)) {
-      spawnSync(NODE, [ADAPTER], {
+      spawnSync(node, [ADAPTER], {
         input: json,
         stdio: ['pipe', 'ignore', 'ignore'],
         windowsHide: true,
@@ -182,7 +187,7 @@ function send(payload) {
       });
       return true;
     }
-    const child = spawn(NODE, [ADAPTER], {
+    const child = spawn(node, [ADAPTER], {
       stdio: ['pipe', 'ignore', 'ignore'],
       windowsHide: true,
     });
