@@ -543,8 +543,12 @@ function runUnifiedMode() {
       );
     } catch {}
 
-    // Adopt the new session as main
+    // Adopt the new session as main. Every path that changes which session is
+    // main must also forget the file state the hold is keyed on -- a manual
+    // promotion pins the session, so a stale work state would otherwise hold
+    // the promoted face for the full LONG_TOOL_HOLD_MS.
     mainSessionId = newId;
+    lastAppliedState = null;
 
     // Read the new main's session file and apply state
     try {

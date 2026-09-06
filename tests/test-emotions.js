@@ -631,6 +631,21 @@ describe('emotions -- the timeout cascade keeps its pre-existing branches', () =
     assert.strictEqual(idleCascade({ state: 'error', sinceChangeMs: IDLE_TIMEOUT - 1, sessionActive: false, lingerMs: 0, fileState: 'error' }), null);
   });
 
+  // _executeSwap is a closure inside runUnifiedMode(), so this is a source-level
+  // check: every path that changes which session is main must clear the file
+  // state the hold is keyed on, or a promoted face inherits the old main's tool.
+  test('every path that changes the main session clears lastAppliedState', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8');
+    const swap = src.slice(src.indexOf('function _executeSwap()'));
+    const body = swap.slice(0, swap.indexOf('\n  function '));
+    assert.ok(body.includes('mainSessionId = newId;'), 'swap should adopt the new session id');
+    assert.ok(body.includes('lastAppliedState = null;'),
+      '_executeSwap must clear lastAppliedState when it changes the main session');
+    const adopt = src.slice(src.indexOf('// New editor session'));
+    assert.ok(adopt.slice(0, 300).includes('lastAppliedState = null;'),
+      'session adoption must clear lastAppliedState');
+  });
+
   test('the renderer still exports the timeout constants it cascades on', () => {
     assert.strictEqual(IDLE_TIMEOUT, 8000);
     assert.strictEqual(THINKING_TIMEOUT, 45000);
