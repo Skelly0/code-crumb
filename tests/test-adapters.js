@@ -1207,122 +1207,106 @@ describe('adapters -- openclaw-adapter', () => {
 
 // -- codex-wrapper.js (structural tests) -----------------------------
 
-describe('adapters -- codex-wrapper (structural)', () => {
+describe('adapters -- codex-wrapper bootstrap guard', () => {
   const ADAPTER = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
 
-  test('adapter file exists', () => {
-    assert.ok(fs.existsSync(ADAPTER), 'codex-wrapper.js should exist');
+  test('requiring the wrapper starts no codex and writes no state', () => {
+    // Without the require.main guard, a plain require spawns `codex exec`
+    // and takes over the global state file -- which is exactly what the
+    // in-process classifyItem block below would trip over.
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('wrapper-require');
+    execFileSync(NODE, ['-e', 'require(process.argv[1]);', ADAPTER], {
+      env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    assert.ok(!fs.existsSync(stateFile), 'a bare require must not write global state');
+    assert.ok(!fs.existsSync(sessionsDir), 'a bare require must not create an orbital');
+    cleanup(tmp);
   });
 
-  test('adapter file starts with use strict', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'use strict'"), 'should have use strict');
-  });
-
-  test('adapter imports shared.js dependencies', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(
-      src.includes("require('../shared')") || src.includes("require('./base-adapter')"),
-      'should import shared or base-adapter'
-    );
-    assert.ok(
-      src.includes("require('../state-machine')") || src.includes("require('./base-adapter')"),
-      'should import state-machine or base-adapter'
-    );
-  });
-
-  test('adapter has handleEvent function', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('function handleEvent'), 'should define handleEvent');
-  });
-
-  test('adapter handles item.started events', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'item.started'"), 'should handle item.started');
-  });
-
-  test('adapter handles item.updated events', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'item.updated'"), 'should handle item.updated');
-  });
-
-  test('adapter no longer looks for the item.created/tool_use schema', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(!src.includes("'item.created'"), 'item.created does not exist in codex 0.146');
-    assert.ok(!src.includes("'tool_use'"), 'tool_use is not a codex item type');
-  });
-
-  test('adapter handles item.completed events', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'item.completed'"), 'should handle item.completed');
-  });
-
-  test('adapter handles turn.completed events', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'turn.completed'"), 'should handle turn.completed');
-  });
-
-  test('adapter handles turn.failed events', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'turn.failed'"), 'should handle turn.failed');
-  });
-
-  test('adapter handles turn.started events', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'turn.started'"), 'should handle turn.started');
-  });
-
-  test('adapter maps codex collaboration items onto the subagent face', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('collab_tool_call'), 'should handle collab_tool_call');
-    assert.ok(src.includes('collab_agent_tool_call'), 'should handle collab_agent_tool_call');
-  });
-
-  test('adapter spawns codex through buildEditorSpawn (Windows .cmd shims)', () => {
+  // Kept as a source check: the wrapper spawns the real `codex` binary, and
+  // on Windows that is a .cmd shim node refuses to exec without shell:true.
+  // The fake-codex block below proves the shim path works, but only when the
+  // suite happens to run on win32 -- posix CI would never notice a regression.
+  test('source: codex is spawned through buildEditorSpawn (Windows .cmd shims)', () => {
     const src = fs.readFileSync(ADAPTER, 'utf8');
     assert.ok(src.includes('buildEditorSpawn'), 'should use buildEditorSpawn');
     assert.ok(!/spawn\(\s*'codex'/.test(src), 'should not spawn the bare codex name');
-  });
-
-  test('adapter bootstrap is behind a require.main guard', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('require.main === module'), 'should guard the CLI bootstrap');
-    assert.ok(/module\.exports\s*=/.test(src), 'should export its pure helpers');
-  });
-
-  test('adapter defaults model name to codex', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("|| 'codex'"), 'should default to codex');
   });
 });
 
 // -- codex-notify.js (structural tests) ------------------------------
 
-describe('adapters -- codex-notify (structural)', () => {
+describe('adapters -- codex-notify guards and unknown events', () => {
   const ADAPTER = path.join(ADAPTERS_DIR, 'codex-notify.js');
 
-  test('adapter file exists', () => {
-    assert.ok(fs.existsSync(ADAPTER), 'codex-notify.js should exist');
+  function runNotify(event, env) {
+    try {
+      execFileSync(NODE, [ADAPTER, JSON.stringify(event)], {
+        env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+  }
+
+  test('approval-requested is not a codex notify event -- it falls through to thinking', () => {
+    // The handler used to special-case it; codex never emits it, so it must
+    // take the same unknown-type path as any future event name.
+    const { tmp, stateFile, env } = makeTempEnv('notify-approval');
+    runNotify({ type: 'approval-requested', 'thread-id': 'notify-approval' }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'thinking');
+    assert.strictEqual(state.detail, 'approval-requested');
+    cleanup(tmp);
   });
 
-  test('adapter file starts with use strict', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'use strict'"), 'should have use strict');
+  test('another live session keeps the global state file; the orbital is still written', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('notify-guard');
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'coding', detail: 'editing app.js', sessionId: 'someone-else',
+      stopped: false, timestamp: Date.now(),
+    }), 'utf8');
+
+    runNotify({ type: 'agent-turn-complete', 'thread-id': 'notify-guard' }, env);
+
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.sessionId, 'someone-else',
+      'a live owner must not be evicted from the global state file');
+    assert.strictEqual(state.state, 'coding');
+    const session = readJSON(path.join(sessionsDir, 'notify-guard.json'));
+    assert.strictEqual(session.state, 'happy',
+      'the guarded session still gets its own orbital file');
+    cleanup(tmp);
   });
 
-  test('handles the only notify event codex emits', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'agent-turn-complete'"), 'should handle agent-turn-complete');
-    assert.ok(!src.includes("'approval-requested'"),
-      'codex never emits approval-requested -- unknown types fall through to thinking');
+  test('a stopped owner releases the global state file to the codex thread', () => {
+    const { tmp, stateFile, env } = makeTempEnv('notify-takeover');
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'happy', detail: 'all done!', sessionId: 'someone-else',
+      stopped: true, timestamp: Date.now(),
+    }), 'utf8');
+
+    runNotify({ type: 'agent-turn-complete', 'thread-id': 'notify-takeover' }, env);
+
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.sessionId, 'notify-takeover');
+    assert.strictEqual(state.state, 'happy');
+    cleanup(tmp);
   });
 
-  test('guards global state file against other sessions', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(
-      src.includes('shouldWriteGlobal') || src.includes('guardedWriteState'),
-      'should guard global writes'
-    );
+  test('the editor provenance of the session owner survives a notify write', () => {
+    const { tmp, stateFile, env } = makeTempEnv('notify-editor');
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'thinking', detail: '', sessionId: 'notify-editor',
+      editor: 'opencode', stopped: false, timestamp: Date.now(),
+    }), 'utf8');
+
+    runNotify({ type: 'agent-turn-complete', 'thread-id': 'notify-editor' }, env);
+
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.editor, 'opencode',
+      "the owner's editor tag must not be relabelled codex mid-session");
+    cleanup(tmp);
   });
 });
 
@@ -1708,8 +1692,44 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     const state = readJSON(stateFile);
     assert.strictEqual(state.sessionId, 'codex-abc');
     assert.strictEqual(state.editor, 'codex');
+    assert.strictEqual(state.modelName, 'codex', 'the status line says "codex is ..." by default');
+    // The wrapper is long-lived, so it publishes its OWN pid, not its parent's.
+    assert.strictEqual(typeof state.pid, 'number');
+    assert.ok(state.pid > 0 && state.pid !== process.pid,
+      `pid should be the wrapper process, not the test runner (${process.pid})`);
     const files = fs.readdirSync(sessionsDir);
     assert.deepStrictEqual(files, ['codex-abc.json'], 'exactly one orbital, named for the thread');
+    cleanup(tmp);
+  });
+
+  test('item.updated refreshes the face without counting the tool twice', () => {
+    const { tmp, stateFile, statsFile } = runFakeCodex([
+      { type: 'thread.started', thread_id: 'upd' },
+      { type: 'turn.started' },
+      { type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } },
+      { type: 'item.updated', item: { id: 'i1', type: 'command_execution', command: 'npm run lint', status: 'in_progress' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.ok(state.detail.includes('npm run lint'),
+      `the updated command should reach the face, got "${state.detail}"`);
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.session.toolCalls, 1,
+      'item.started + item.updated is one tool call, not two');
+    cleanup(tmp);
+  });
+
+  test('the pre-0.146 item.created / tool_use schema is ignored, not misread', () => {
+    // codex 0.146 emits item.started|updated|completed with typed items; the
+    // old guess (item.created carrying a tool_use item) must move nothing.
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'thread.started', thread_id: 'old' },
+      { type: 'item.created', item: { id: 'i1', type: 'tool_use', name: 'Bash', input: { command: 'npm test' } } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'starting',
+      `the face must stay on the thread.started frame, got "${state.state}"`);
+    assert.ok(!/npm test/.test(state.detail || ''),
+      'no tool detail should be derived from the old schema');
     cleanup(tmp);
   });
 
