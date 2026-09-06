@@ -14,6 +14,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 const { execFileSync, execSync, spawn } = require('child_process');
 
 const suite = require('./_harness').createSuite();
@@ -1815,65 +1816,101 @@ describe('adapters -- openclaw normalisePiEvent coverage', () => {
 
 // -- engmux-adapter.js (structural) ------------------------------------
 
-describe('adapters -- engmux-adapter (structural)', () => {
+describe('adapters -- engmux-adapter', () => {
   const ADAPTER = path.join(ADAPTERS_DIR, 'engmux-adapter.js');
+  // Requiring the adapter must not start a dispatch: the runtime lives behind
+  // a require.main guard, so a bare require only hands back the arg parsers.
+  const engmux = require('../adapters/engmux-adapter');
 
-  test('adapter file exists', () => {
-    assert.ok(fs.existsSync(ADAPTER));
+  // Runs one dispatch to completion with a stand-in for the python
+  // interpreter and returns the orbital session file it left behind.
+  function runEngmux(args, python) {
+    const base = makeTempEnv('engmux-parent');
+    const env = { ...base.env, ENGMUX_PYTHON: python };
+    try {
+      execFileSync(NODE, [ADAPTER, ...args], {
+        env, timeout: 20000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      // The adapter exits with the child's code; only a killed adapter matters.
+      if (e.status === null || e.status === undefined) throw e;
+    }
+    const files = fs.existsSync(base.sessionsDir) ? fs.readdirSync(base.sessionsDir) : [];
+    const session = files.length
+      ? readJSON(path.join(base.sessionsDir, files[0]))
+      : null;
+    cleanup(base.tmp);
+    return { files, session };
+  }
+
+  test('requiring the adapter exports its arg parsers and starts no dispatch', () => {
+    assert.strictEqual(typeof engmux.extractModel, 'function');
+    assert.strictEqual(typeof engmux.extractEngine, 'function');
   });
 
-  test('adapter file starts with use strict', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'use strict'"));
+  test('extractModel takes -m / --model and strips the provider prefix', () => {
+    assert.strictEqual(engmux.extractModel(['-m', 'opencode/big-pickle']), 'big-pickle');
+    assert.strictEqual(engmux.extractModel(['--model', 'anthropic/claude-opus']), 'claude-opus');
+    assert.strictEqual(engmux.extractModel(['-m', 'plain-name']), 'plain-name');
+    assert.strictEqual(engmux.extractModel(['-E', 'opencode', 'do X']), 'engmux',
+      'no -m falls back to the adapter name');
+    assert.strictEqual(engmux.extractModel(['-m']), 'engmux', 'a dangling -m is not a model');
   });
 
-  test('adapter imports base-adapter writeSessionState', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("require('./base-adapter')"));
-    assert.ok(src.includes('writeSessionState'));
+  test('extractEngine takes -E / --engine as the editor provenance', () => {
+    assert.strictEqual(engmux.extractEngine(['-E', 'opencode']), 'opencode');
+    assert.strictEqual(engmux.extractEngine(['--engine', 'claude']), 'claude');
+    assert.strictEqual(engmux.extractEngine(['-m', 'opencode/x', 'do X']), 'engmux',
+      'no -E falls back to the adapter name');
+    assert.strictEqual(engmux.extractEngine(['--engine']), 'engmux',
+      'a dangling --engine is not an engine');
   });
 
-  test('adapter uses spawn for child process', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("require('child_process')"));
-    assert.ok(src.includes('spawn'));
+  test('a dispatch writes one orbital carrying model, engine and parent session', () => {
+    // ENGMUX_PYTHON points at node, which rejects `-m`: the child exits
+    // non-zero, which drives the real spawn + close path to the error branch.
+    const { files, session } = runEngmux(
+      ['-E', 'opencode', '-m', 'opencode/big-pickle', '-e', 'medium', 'do X'], NODE);
+    assert.strictEqual(files.length, 1, `one orbital per dispatch, got ${files.join(', ')}`);
+    assert.strictEqual(session.modelName, 'big-pickle', 'the -m value labels the orbital');
+    assert.strictEqual(session.editor, 'opencode', 'the -E value is the editor provenance');
+    assert.strictEqual(session.parentSession, 'engmux-parent',
+      "the dispatcher's CLAUDE_SESSION_ID becomes the parent");
+    assert.ok(session.sessionId.startsWith('engmux-'), session.sessionId);
+    assert.strictEqual(session.state, 'error', 'a failed dispatch ends on the error face');
+    assert.strictEqual(session.stopped, true, 'the orbital is retired when the dispatch ends');
+    assert.ok(session.detail, 'the failure is described');
   });
 
-  test('adapter cycles through SUB_STATES', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('SUB_STATES'));
-    assert.ok(src.includes('thinking'));
-    assert.ok(src.includes('coding'));
-    assert.ok(src.includes('searching'));
+  test('a python that cannot be spawned still retires the orbital with an error', () => {
+    const { session } = runEngmux(['-E', 'claude', 'do X'],
+      path.join(__dirname, 'no-such-python-binary'));
+    assert.strictEqual(session.state, 'error');
+    assert.strictEqual(session.stopped, true);
+    assert.ok(session.detail, 'the spawn failure message is shown');
   });
 
-  test('adapter writes spawning state on start', () => {
+  // Kept as source checks: what is left of the runtime is timer- and
+  // child-driven (an 8s work-state cycle, the initial spawning write that the
+  // final write overwrites, and the JSON stdout passthrough). Observing any of
+  // it needs a working `python -m engmux`, which the suite cannot supply
+  // portably -- there is no fake interpreter that node can spawn on win32
+  // without a shell.
+  test('source: the running dispatch cycles through work states', () => {
     const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'spawning'"));
+    assert.ok(src.includes('SUB_STATES'), 'a cycling state list');
+    for (const s of ['thinking', 'coding', 'searching']) {
+      assert.ok(src.includes(`'${s}'`), `${s} should be one of the cycled states`);
+    }
+    assert.ok(src.includes('setInterval('), 'cycling is timer-driven');
+    assert.ok(src.includes("writeState('spawning'"),
+      'the orbital appears before the child starts');
   });
 
-  test('adapter writes happy on success and error on failure', () => {
+  test('source: engmux JSON stdout is passed through unchanged', () => {
     const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'happy'"));
-    assert.ok(src.includes("'error'"));
-  });
-
-  test('adapter sets parentSession from env', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('PARENT_SESSION'));
-    assert.ok(src.includes('parentSession'));
-  });
-
-  test('adapter extracts model name from -m flag', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('extractModel'));
-    // Strips prefix like "opencode/"
-    assert.ok(src.includes("replace(/^[^/]+\\//"));
-  });
-
-  test('adapter passes through engmux JSON stdout', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('process.stdout.write(stdout)'));
+    assert.ok(src.includes('process.stdout.write(stdout)'),
+      "the caller must still receive engmux's own JSON result");
   });
 });
 
@@ -2996,60 +3033,14 @@ describe('adapters -- base-adapter structure', () => {
   });
 });
 
-// -- engmux adapter structure -----------------------------------------
+// -- adapter files: exist, parse, declare strict mode --------------------
+// One gate for every adapter, replacing the per-adapter "file exists" /
+// "starts with use strict" / "is a valid Node.js script" copies. Parsing is
+// done in-process with vm.Script (compile, never run) so this costs no
+// subprocesses; opencode-plugin.mjs is ESM and is really imported by the
+// "opencode-plugin translate()" block above, which is a stronger check.
 
-describe('adapters -- engmux adapter structure', () => {
-  test('engmux-adapter.js file can be read without error', () => {
-    const adapterPath = path.join(ADAPTERS_DIR, 'engmux-adapter.js');
-    assert.ok(fs.existsSync(adapterPath), 'engmux-adapter.js should exist');
-    assert.doesNotThrow(() => fs.readFileSync(adapterPath, 'utf8'));
-  });
-
-  test('engmux-adapter.js is a valid Node.js script', () => {
-    const adapterPath = path.join(ADAPTERS_DIR, 'engmux-adapter.js');
-    const src = fs.readFileSync(adapterPath, 'utf8');
-    assert.ok(src.includes("'use strict'"), 'should use strict mode');
-    assert.ok(src.includes("require('./base-adapter')"), 'should require base-adapter');
-  });
-
-  test('engmux-adapter.js uses writeSessionState from base-adapter', () => {
-    const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'engmux-adapter.js'), 'utf8');
-    assert.ok(src.includes('writeSessionState'), 'should use writeSessionState');
-  });
-});
-
-// -- codex-wrapper structure ------------------------------------------
-
-describe('adapters -- codex-wrapper structure', () => {
-  test('codex-wrapper.js file exists and is readable', () => {
-    const adapterPath = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
-    assert.ok(fs.existsSync(adapterPath), 'codex-wrapper.js should exist');
-    assert.doesNotThrow(() => fs.readFileSync(adapterPath, 'utf8'));
-  });
-
-  test('codex-wrapper.js is a valid Node.js script', () => {
-    const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'codex-wrapper.js'), 'utf8');
-    assert.ok(src.includes("'use strict'"), 'should use strict mode');
-    assert.ok(src.includes("require('./base-adapter')"), 'should require base-adapter');
-  });
-
-  test('codex-wrapper.js imports expected base-adapter functions', () => {
-    const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'codex-wrapper.js'), 'utf8');
-    assert.ok(src.includes('writeSessionState'), 'should import writeSessionState');
-    assert.ok(src.includes('readStats'), 'should import readStats');
-    assert.ok(src.includes('writeStats'), 'should import writeStats');
-    assert.ok(src.includes('guardedWriteState'), 'should import guardedWriteState');
-    assert.ok(src.includes('initSession'), 'should import initSession');
-    assert.ok(src.includes('buildExtra'), 'should import buildExtra');
-    assert.ok(src.includes('handleToolStart'), 'should import handleToolStart');
-    assert.ok(src.includes('handleToolEnd'), 'should import handleToolEnd');
-    assert.ok(src.includes('processJsonlStream'), 'should import processJsonlStream');
-  });
-});
-
-// -- adapter files all exist ------------------------------------------
-
-describe('adapters -- adapter files all exist', () => {
+describe('adapters -- every adapter file exists and parses', () => {
   const adapterFiles = [
     'base-adapter.js',
     'codex-wrapper.js',
@@ -3061,9 +3052,18 @@ describe('adapters -- adapter files all exist', () => {
   ];
 
   for (const file of adapterFiles) {
-    test(`${file} exists in adapters directory`, () => {
+    test(`${file} exists, and parses under strict mode`, () => {
       const fullPath = path.join(ADAPTERS_DIR, file);
       assert.ok(fs.existsSync(fullPath), `${file} should exist at ${fullPath}`);
+      const src = fs.readFileSync(fullPath, 'utf8');
+      if (file.endsWith('.mjs')) {
+        // ESM is strict by definition and is parsed by the real import above.
+        assert.ok(/\bexport\b/.test(src), `${file} should export something`);
+        return;
+      }
+      assert.ok(src.includes("'use strict'"), `${file} should declare strict mode`);
+      assert.doesNotThrow(() => new vm.Script(src, { filename: fullPath }),
+        `${file} should parse`);
     });
   }
 });
