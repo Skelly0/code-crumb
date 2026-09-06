@@ -4,7 +4,7 @@
 // +================================================================+
 // |  Code Crumb Hook -- writes state for the face renderer         |
 // |  Called by editor hooks via stdin JSON                         |
-// |  Usage: node update-state.js <event>                           |
+// |  Usage: node update-state.js [--editor <name>] <event>         |
 // |  Events: PreToolUse, PostToolUse, PostToolUseFailure, Stop,    |
 // |          Notification, UserPromptSubmit, SubagentStart,        |
 // |          SubagentStop, TeammateIdle, TaskCompleted,            |
@@ -30,14 +30,37 @@ const {
   classifyForeignSession, pruneTopLevelSessions,
 } = require('./state-machine');
 
-// Event type passed as CLI argument (cross-platform -- no env var tricks)
-const hookEvent = process.argv[2] || '';
+// Argv: `[--editor <name>] <Event>` (cross-platform -- no env var tricks).
+// Codex's native hooks and Claude Code's share this script, so the installer
+// tags each command with the editor it serves. Unknown flags are ignored so a
+// future `--flag` never gets mistaken for the event name.
+function parseHookArgs(argv) {
+  let editor = '';
+  const positionals = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--editor') { editor = argv[i + 1] || ''; i++; continue; }
+    if (arg.startsWith('--editor=')) { editor = arg.slice('--editor='.length); continue; }
+    if (arg.startsWith('--')) continue;
+    positionals.push(arg);
+  }
+  return { editor, event: positionals[0] || '' };
+}
 
-// Editor provenance — which agent CLI this hook serves (distinct from modelName)
-const EDITOR = process.env.CODE_CRUMB_EDITOR || 'claude';
+const HOOK_ARGS = parseHookArgs(process.argv.slice(2));
+
+// Editor provenance — which agent CLI this hook serves (distinct from
+// modelName). Must be resolved before FALLBACK_SESSION_ID, which embeds it.
+const EDITOR = process.env.CODE_CRUMB_EDITOR || HOOK_ARGS.editor || 'claude';
+// Display name default follows the editor: a codex hook says "codex is coding".
+const DEFAULT_MODEL_NAME = EDITOR;
 // Single shared fallback ID — the try and catch paths MUST mint the same
 // ID or a session crossing the boundary splits into two orbitals.
 const FALLBACK_SESSION_ID = `${EDITOR}-${process.ppid}`;
+
+// Filled in from the payload's hook_event_name when no event positional was
+// passed (some hosts pass the event only in the JSON).
+let hookEvent = HOOK_ARGS.event;
 
 // -- File I/O --------------------------------------------------------
 
@@ -194,6 +217,8 @@ process.stdin.on('end', () => {
 
   try {
     const data = JSON.parse(input);
+    // Codex (and any host that omits the argv event) names it in the payload
+    if (!hookEvent) hookEvent = data.hook_event_name || '';
     const toolName = data.tool_name || '';
     const toolInput = data.tool_input || {};
     const toolResponse = normalizeToolResponse(data);
@@ -603,8 +628,8 @@ process.stdin.on('end', () => {
       }
     }
 
-    // Model name: from event data, env var, or default to 'claude'
-    const modelName = data.model_name || process.env.CODE_CRUMB_MODEL || 'claude';
+    // Model name: from event data, env var, or the editor this hook serves
+    const modelName = data.model_name || process.env.CODE_CRUMB_MODEL || DEFAULT_MODEL_NAME;
 
     // Build extra data for state files
     const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
@@ -779,7 +804,7 @@ process.stdin.on('end', () => {
     // SessionStart always takes over global state — explicit new-session signal
     if (hookEvent === 'SessionStart') shouldWriteGlobal = true;
 
-    const fallbackExtra = { sessionId: fallbackSessionId, modelName: process.env.CODE_CRUMB_MODEL || 'claude', editor: EDITOR };
+    const fallbackExtra = { sessionId: fallbackSessionId, modelName: process.env.CODE_CRUMB_MODEL || DEFAULT_MODEL_NAME, editor: EDITOR };
 
     let fallbackState = 'thinking';
     let fallbackDetail = '';

@@ -90,22 +90,6 @@ describe('adapters -- codex-notify', () => {
     cleanup(tmp);
   });
 
-  test('approval-requested writes waiting state', () => {
-    const { tmp, stateFile, env } = makeTempEnv('notify-3');
-    const event = { type: 'approval-requested', 'thread-id': 'notify-3' };
-    try {
-      execFileSync(NODE, [ADAPTER, JSON.stringify(event)], {
-        env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
-    const state = readJSON(stateFile);
-    assert.strictEqual(state.state, 'waiting');
-    assert.strictEqual(state.detail, 'needs approval');
-    cleanup(tmp);
-  });
-
   test('unknown event type writes thinking state', () => {
     const { tmp, stateFile, env } = makeTempEnv('notify-4');
     const event = { type: 'some-new-event', 'thread-id': 'notify-4' };
@@ -761,9 +745,20 @@ describe('adapters -- codex-wrapper (structural)', () => {
     assert.ok(src.includes('function handleEvent'), 'should define handleEvent');
   });
 
-  test('adapter handles item.created events', () => {
+  test('adapter handles item.started events', () => {
     const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'item.created'"), 'should handle item.created');
+    assert.ok(src.includes("'item.started'"), 'should handle item.started');
+  });
+
+  test('adapter handles item.updated events', () => {
+    const src = fs.readFileSync(ADAPTER, 'utf8');
+    assert.ok(src.includes("'item.updated'"), 'should handle item.updated');
+  });
+
+  test('adapter no longer looks for the item.created/tool_use schema', () => {
+    const src = fs.readFileSync(ADAPTER, 'utf8');
+    assert.ok(!src.includes("'item.created'"), 'item.created does not exist in codex 0.146');
+    assert.ok(!src.includes("'tool_use'"), 'tool_use is not a codex item type');
   });
 
   test('adapter handles item.completed events', () => {
@@ -786,10 +781,22 @@ describe('adapters -- codex-wrapper (structural)', () => {
     assert.ok(src.includes("'turn.started'"), 'should handle turn.started');
   });
 
-  test('adapter tracks subagent sessions', () => {
+  test('adapter maps codex collaboration items onto the subagent face', () => {
     const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('activeSubagents'), 'should track subagents');
-    assert.ok(src.includes('SUBAGENT_TOOLS'), 'should use SUBAGENT_TOOLS pattern');
+    assert.ok(src.includes('collab_tool_call'), 'should handle collab_tool_call');
+    assert.ok(src.includes('collab_agent_tool_call'), 'should handle collab_agent_tool_call');
+  });
+
+  test('adapter spawns codex through buildEditorSpawn (Windows .cmd shims)', () => {
+    const src = fs.readFileSync(ADAPTER, 'utf8');
+    assert.ok(src.includes('buildEditorSpawn'), 'should use buildEditorSpawn');
+    assert.ok(!/spawn\(\s*'codex'/.test(src), 'should not spawn the bare codex name');
+  });
+
+  test('adapter bootstrap is behind a require.main guard', () => {
+    const src = fs.readFileSync(ADAPTER, 'utf8');
+    assert.ok(src.includes('require.main === module'), 'should guard the CLI bootstrap');
+    assert.ok(/module\.exports\s*=/.test(src), 'should export its pure helpers');
   });
 
   test('adapter defaults model name to codex', () => {
@@ -812,10 +819,11 @@ describe('adapters -- codex-notify (structural)', () => {
     assert.ok(src.includes("'use strict'"), 'should have use strict');
   });
 
-  test('handles three event types', () => {
+  test('handles the only notify event codex emits', () => {
     const src = fs.readFileSync(ADAPTER, 'utf8');
     assert.ok(src.includes("'agent-turn-complete'"), 'should handle agent-turn-complete');
-    assert.ok(src.includes("'approval-requested'"), 'should handle approval-requested');
+    assert.ok(!src.includes("'approval-requested'"),
+      'codex never emits approval-requested -- unknown types fall through to thinking');
   });
 
   test('guards global state file against other sessions', () => {
@@ -824,6 +832,366 @@ describe('adapters -- codex-notify (structural)', () => {
       src.includes('shouldWriteGlobal') || src.includes('guardedWriteState'),
       'should guard global writes'
     );
+  });
+});
+
+// -- codex-wrapper.js: the real `codex exec --json` schema -------------
+// Codex 0.146 emits thread.started / turn.* / item.started|updated|completed
+// with typed items (command_execution, file_change, mcp_tool_call, ...).
+// classifyItem is pure and tested in-process; anything that writes a state
+// file goes through a subprocess with its own temp HOME, because shared.js
+// fixes its paths at first require.
+
+describe('adapters -- codex-wrapper classifyItem (real ThreadEvent schema)', () => {
+  const wrapper = require('../adapters/codex-wrapper');
+
+  test('requiring the wrapper exports its pure helpers and spawns nothing', () => {
+    assert.strictEqual(typeof wrapper.classifyItem, 'function', 'classifyItem exported');
+    assert.strictEqual(typeof wrapper.handleEvent, 'function', 'handleEvent exported');
+  });
+
+  test('command_execution start maps to the Bash tool with its command', () => {
+    const c = wrapper.classifyItem({ id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' }, 'started');
+    assert.strictEqual(c.toolName, 'Bash');
+    assert.strictEqual(c.toolInput.command, 'npm test');
+  });
+
+  test('command_execution completion carries output, exit code and failure flag', () => {
+    const c = wrapper.classifyItem({
+      id: 'i1', type: 'command_execution', command: 'npm test',
+      aggregated_output: 'FAIL', exit_code: 1, status: 'failed',
+    }, 'completed');
+    assert.strictEqual(c.toolName, 'Bash');
+    assert.strictEqual(c.toolResponse.stdout, 'FAIL');
+    assert.strictEqual(c.toolResponse.exitCode, 1);
+    assert.strictEqual(c.toolResponse.isError, true);
+  });
+
+  test('a declined command is relief, not an error', () => {
+    const c = wrapper.classifyItem({
+      id: 'i1', type: 'command_execution', command: 'rm -rf /', status: 'declined',
+    }, 'completed');
+    assert.strictEqual(c.state, 'relieved');
+    assert.strictEqual(c.detail, 'command declined');
+  });
+
+  test('file_change start maps to the Edit tool with the first path', () => {
+    const c = wrapper.classifyItem({
+      id: 'i2', type: 'file_change', status: 'in_progress',
+      changes: [{ path: '/repo/a.js', kind: 'update' }, { path: '/repo/b.js', kind: 'add' }],
+    }, 'started');
+    assert.strictEqual(c.toolName, 'Edit');
+    assert.strictEqual(c.toolInput.file_path, '/repo/a.js');
+    assert.deepStrictEqual(c.filePaths, ['/repo/a.js', '/repo/b.js']);
+  });
+
+  test('file_change completion is proud, and counts multiple files', () => {
+    const one = wrapper.classifyItem({
+      id: 'i2', type: 'file_change', status: 'completed',
+      changes: [{ path: '/repo/a.js', kind: 'update' }],
+    }, 'completed');
+    assert.strictEqual(one.state, 'proud');
+    assert.strictEqual(one.detail, 'saved a.js');
+
+    const two = wrapper.classifyItem({
+      id: 'i2', type: 'file_change', status: 'completed',
+      changes: [{ path: '/repo/a.js', kind: 'update' }, { path: '/repo/b.js', kind: 'add' }],
+    }, 'completed');
+    assert.strictEqual(two.state, 'proud');
+    assert.strictEqual(two.detail, 'saved 2 files');
+  });
+
+  test('a failed file_change is an error', () => {
+    const c = wrapper.classifyItem({
+      id: 'i2', type: 'file_change', status: 'failed',
+      changes: [{ path: '/repo/a.js', kind: 'update' }],
+    }, 'completed');
+    assert.strictEqual(c.state, 'error');
+    assert.strictEqual(c.detail, 'edit failed');
+  });
+
+  test('mcp_tool_call becomes an mcp__server__tool name for the verb classifier', () => {
+    const c = wrapper.classifyItem({
+      id: 'i3', type: 'mcp_tool_call', server: 'github', tool: 'list_issues',
+      arguments: { repo: 'x' }, status: 'in_progress',
+    }, 'started');
+    assert.strictEqual(c.toolName, 'mcp__github__list_issues');
+    assert.deepStrictEqual(c.toolInput, { repo: 'x' });
+  });
+
+  test('an mcp_tool_call error is reported as an error', () => {
+    const c = wrapper.classifyItem({
+      id: 'i3', type: 'mcp_tool_call', server: 'github', tool: 'list_issues',
+      error: 'not authorised', status: 'failed',
+    }, 'completed');
+    assert.strictEqual(c.toolResponse.isError, true);
+  });
+
+  test('web_search maps to the WebSearch tool', () => {
+    const c = wrapper.classifyItem({ id: 'i4', type: 'web_search', query: 'node 18 fs' }, 'started');
+    assert.strictEqual(c.toolName, 'WebSearch');
+    assert.strictEqual(c.toolInput.query, 'node 18 fs');
+  });
+
+  test('collab items delegate and finish as an agent', () => {
+    for (const type of ['collab_tool_call', 'collab_agent_tool_call']) {
+      const started = wrapper.classifyItem({ id: 'i5', type, status: 'in_progress' }, 'started');
+      assert.strictEqual(started.toolName, 'Task', type);
+      assert.strictEqual(started.toolInput.description, 'delegating', type);
+      const done = wrapper.classifyItem({ id: 'i5', type, status: 'completed' }, 'completed');
+      assert.strictEqual(done.toolName, 'Task', type);
+    }
+  });
+
+  test('todo_list and plan_update are planning, then a plan update', () => {
+    for (const type of ['todo_list', 'plan_update']) {
+      const started = wrapper.classifyItem({ id: 'i6', type }, 'started');
+      assert.strictEqual(started.toolName, 'TodoWrite', type);
+      const done = wrapper.classifyItem({ id: 'i6', type }, 'completed');
+      assert.strictEqual(done.state, 'satisfied', type);
+      assert.strictEqual(done.detail, 'plan updated', type);
+    }
+  });
+
+  test('context_compaction is thinking, then satisfied', () => {
+    const started = wrapper.classifyItem({ id: 'i7', type: 'context_compaction' }, 'started');
+    assert.strictEqual(started.state, 'thinking');
+    assert.strictEqual(started.detail, 'compacting memory');
+    const done = wrapper.classifyItem({ id: 'i7', type: 'context_compaction' }, 'completed');
+    assert.strictEqual(done.state, 'satisfied');
+    assert.strictEqual(done.detail, 'memory compacted');
+  });
+
+  test('reasoning thinks without touching the detail line', () => {
+    const c = wrapper.classifyItem({ id: 'i8', type: 'reasoning', text: 'hmm' }, 'completed');
+    assert.strictEqual(c.state, 'thinking');
+    assert.strictEqual(c.detail, undefined, 'no detail means "keep what is on screen"');
+    assert.ok(!c.toolName, 'reasoning is not a tool call');
+  });
+
+  test('agent_message responds', () => {
+    const c = wrapper.classifyItem({ id: 'i9', type: 'agent_message', text: 'done' }, 'completed');
+    assert.strictEqual(c.state, 'responding');
+    assert.ok(!c.toolName, 'a message is not a tool call');
+  });
+
+  test('unknown item types are executed by their humanised name', () => {
+    for (const type of ['image_generation', 'image_view', 'dynamic_tool_call', 'brand_new_thing']) {
+      const started = wrapper.classifyItem({ id: 'i10', type }, 'started');
+      assert.strictEqual(started.state, 'executing', type);
+      assert.ok(started.detail && !started.detail.includes('_'), `${type} detail should be humanised`);
+      const done = wrapper.classifyItem({ id: 'i10', type }, 'completed');
+      assert.strictEqual(done.state, 'satisfied', type);
+      assert.strictEqual(done.detail, 'done', type);
+    }
+  });
+
+  test('item type "error" is a codex diagnostic, not a face state', () => {
+    // Live capture: codex reports warnings ("Skill descriptions were shortened",
+    // "clamping SessionEnd hook timeout") as item.completed items of type error.
+    const c = wrapper.classifyItem({ id: 'i11', type: 'error', message: 'skill descriptions were shortened' }, 'completed');
+    assert.strictEqual(c, null);
+  });
+
+  test('a malformed item never throws', () => {
+    assert.strictEqual(wrapper.classifyItem(null, 'started'), null);
+    assert.strictEqual(wrapper.classifyItem({}, 'completed'), null);
+  });
+});
+
+describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
+  const WRAPPER = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
+
+  // Replays a fixture through the wrapper's real spawn path: on Windows the
+  // fake is a .cmd shim, which only starts if the wrapper passes shell:true
+  // (Node refuses to spawn .cmd otherwise), so this also covers the Windows
+  // spawn fix.
+  const FAKE_SRC = [
+    "'use strict';",
+    "const fs = require('fs');",
+    "const text = fs.readFileSync(process.env.CODEX_FAKE_FIXTURE, 'utf8');",
+    "for (const line of text.split('\\n')) {",
+    "  if (line.trim()) process.stdout.write(line + '\\n');",
+    "}",
+    '',
+  ].join('\n');
+
+  function runFakeCodex(events) {
+    const base = makeTempEnv('codex-thread');
+    const binDir = path.join(base.tmp, 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+
+    const fixture = path.join(base.tmp, 'fixture.jsonl');
+    fs.writeFileSync(fixture, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+    fs.writeFileSync(path.join(binDir, 'codex-fake.js'), FAKE_SRC, 'utf8');
+
+    if (process.platform === 'win32') {
+      fs.writeFileSync(path.join(binDir, 'codex.cmd'), '@node "%~dp0codex-fake.js" %*\r\n', 'utf8');
+    } else {
+      const sh = path.join(binDir, 'codex');
+      fs.writeFileSync(sh, '#!/bin/sh\nexec node "$(dirname "$0")/codex-fake.js" "$@"\n', 'utf8');
+      fs.chmodSync(sh, 0o755);
+    }
+
+    const env = { ...base.env, CODEX_FAKE_FIXTURE: fixture };
+    // Windows env keys are case-insensitive; a stray Path AND PATH confuses the child.
+    for (const k of Object.keys(env)) if (/^path$/i.test(k)) delete env[k];
+    env.PATH = binDir + path.delimiter + (process.env.PATH || '');
+    delete env.CLAUDE_SESSION_ID; // the codex thread id owns the session identity
+
+    try {
+      execFileSync(NODE, [WRAPPER, 'a prompt'], {
+        env, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+    return base;
+  }
+
+  test('a running npm test shows the testing face', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'thread.started', thread_id: 't1' },
+      { type: 'turn.started' },
+      { type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'testing');
+    assert.ok(state.detail.includes('npm test'), state.detail);
+    assert.strictEqual(state.editor, 'codex');
+    cleanup(tmp);
+  });
+
+  test('a failing command ends on the error face', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } },
+      { type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'npm test', aggregated_output: 'FAIL', exit_code: 1, status: 'failed' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'error');
+    cleanup(tmp);
+  });
+
+  test('a clean exit code is relief', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'ls -la', status: 'in_progress' } },
+      { type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'ls -la', aggregated_output: 'a\nb', exit_code: 0, status: 'completed' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'relieved');
+    cleanup(tmp);
+  });
+
+  test('a declined command shows relieved / command declined', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'rm -rf /', status: 'declined' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'relieved');
+    assert.strictEqual(state.detail, 'command declined');
+    cleanup(tmp);
+  });
+
+  test('a file_change codes, then is proud of every file it saved', () => {
+    const changes = [{ path: '/repo/a.js', kind: 'update' }, { path: '/repo/b.js', kind: 'add' }];
+    const start = runFakeCodex([
+      { type: 'item.started', item: { id: 'i2', type: 'file_change', changes, status: 'in_progress' } },
+    ]);
+    const coding = readJSON(start.stateFile);
+    assert.strictEqual(coding.state, 'coding');
+    assert.strictEqual(coding.detail, 'editing a.js');
+    cleanup(start.tmp);
+
+    const { tmp, stateFile, statsFile } = runFakeCodex([
+      { type: 'item.started', item: { id: 'i2', type: 'file_change', changes, status: 'in_progress' } },
+      { type: 'item.completed', item: { id: 'i2', type: 'file_change', changes, status: 'completed' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'proud');
+    assert.strictEqual(state.detail, 'saved 2 files');
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.session.filesEdited.length, 2, 'both changed files are tracked');
+    cleanup(tmp);
+  });
+
+  test('an mcp tool reads, then reports the server as done', () => {
+    const item = { id: 'i3', type: 'mcp_tool_call', server: 'github', tool: 'list_issues', arguments: {} };
+    const start = runFakeCodex([
+      { type: 'item.started', item: { ...item, status: 'in_progress' } },
+    ]);
+    assert.strictEqual(readJSON(start.stateFile).state, 'reading');
+    cleanup(start.tmp);
+
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'item.started', item: { ...item, status: 'in_progress' } },
+      { type: 'item.completed', item: { ...item, status: 'completed', result: 'ok' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'satisfied');
+    assert.strictEqual(state.detail, 'github done');
+    cleanup(tmp);
+  });
+
+  test('a web search shows the searching face', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'item.started', item: { id: 'i4', type: 'web_search', query: 'node 18 fs' } },
+    ]);
+    assert.strictEqual(readJSON(stateFile).state, 'searching');
+    cleanup(tmp);
+  });
+
+  test('a collaboration item shows the subagent face', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'item.started', item: { id: 'i5', type: 'collab_tool_call', status: 'in_progress' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'subagent');
+    assert.strictEqual(state.detail, 'delegating');
+    cleanup(tmp);
+  });
+
+  test('turn.failed shows the error with its message and stops the session', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'turn.started' },
+      { type: 'turn.failed', error: { message: 'boom' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'error');
+    assert.strictEqual(state.detail, 'boom');
+    assert.strictEqual(state.stopped, true);
+    cleanup(tmp);
+  });
+
+  test('thread.started names the session after the codex thread', () => {
+    const { tmp, stateFile, sessionsDir } = runFakeCodex([
+      { type: 'thread.started', thread_id: 'abc' },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.sessionId, 'codex-abc');
+    assert.strictEqual(state.editor, 'codex');
+    const files = fs.readdirSync(sessionsDir);
+    assert.deepStrictEqual(files, ['codex-abc.json'], 'exactly one orbital, named for the thread');
+    cleanup(tmp);
+  });
+
+  test('a whole captured turn ends on responding / stopped', () => {
+    // Shape taken from a live `codex exec --json` capture (codex-cli 0.146.0).
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'thread.started', thread_id: 'live' },
+      { type: 'item.completed', item: { id: 'item_0', type: 'error', message: 'clamping SessionEnd hook timeout to 3s' } },
+      { type: 'turn.started' },
+      { type: 'item.completed', item: { id: 'item_2', type: 'agent_message', text: 'running it' } },
+      { type: 'item.started', item: { id: 'item_3', type: 'command_execution', command: 'pwsh -Command echo hi', aggregated_output: '', exit_code: null, status: 'in_progress' } },
+      { type: 'item.completed', item: { id: 'item_3', type: 'command_execution', command: 'pwsh -Command echo hi', aggregated_output: 'hi', exit_code: 0, status: 'completed' } },
+      { type: 'item.completed', item: { id: 'item_4', type: 'agent_message', text: 'done' } },
+      { type: 'turn.completed', usage: { input_tokens: 47463, output_tokens: 118 } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'responding');
+    assert.strictEqual(state.detail, 'wrapping up');
+    assert.strictEqual(state.stopped, true);
+    assert.strictEqual(state.sessionId, 'codex-live');
+    cleanup(tmp);
   });
 });
 
@@ -2287,7 +2655,7 @@ describe('adapters -- editor provenance field', () => {
     assert.ok(read('opencode-adapter.js').includes("defaultEditor: 'opencode'"));
     assert.ok(read('openclaw-adapter.js').includes("defaultEditor: 'openclaw'"));
     assert.ok(read('codex-notify.js').includes('editor'));
-    assert.ok(read('codex-wrapper.js').includes("editor: 'codex'"));
+    assert.ok(read('codex-wrapper.js').includes("const EDITOR = 'codex'"));
     assert.ok(read('engmux-adapter.js').includes('extractEngine'));
   });
 
@@ -2298,7 +2666,8 @@ describe('adapters -- editor provenance field', () => {
 
   test('update-state.js: editor invariants', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
-    assert.ok(src.includes("process.env.CODE_CRUMB_EDITOR || 'claude'"), 'editor resolution');
+    // env > --editor <name> > 'claude', resolved before FALLBACK_SESSION_ID
+    assert.ok(src.includes("process.env.CODE_CRUMB_EDITOR || HOOK_ARGS.editor || 'claude'"), 'editor resolution');
     assert.ok(src.includes("'editor'"), 'editor in STICKY_FIELDS');
     assert.ok(src.includes('FALLBACK_SESSION_ID'), 'single shared fallback id expression');
     assert.ok(src.includes("process.platform !== 'win32'"), 'win32 transient-shim pid omission');

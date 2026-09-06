@@ -402,10 +402,16 @@ describe('platform -- processStdinEvent separates parse errors from handler erro
 
 describe('platform -- adapter source hygiene', () => {
   const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
-  test('codex-wrapper no longer blanks the subagent cwd or imports unused path', () => {
+  test('codex-wrapper does not blank the cwd and imports nothing it does not use', () => {
     const src = read('adapters/codex-wrapper.js');
-    assert.ok(!src.includes("cwd: ''"), "subExtra must not set cwd: ''");
-    assert.ok(!src.includes("require('path')"), 'unused path import');
+    assert.ok(!src.includes("cwd: ''"), "session writes must not set cwd: ''");
+    // path came back with the file_change item type (basename of a saved file)
+    if (src.includes("require('path')")) {
+      assert.ok(/\bpath\.\w+\(/.test(src), 'path is imported, so it must be used');
+    }
+    if (src.includes("require('fs')")) {
+      assert.ok(/\bfs\.\w+\(/.test(src), 'fs is imported, so it must be used');
+    }
   });
   test('engmux-adapter does not hardcode python and caps captured stdout', () => {
     const src = read('adapters/engmux-adapter.js');
@@ -731,6 +737,215 @@ describe('platform -- setupClaude never clobbers settings.json', () => {
       assert.strictEqual(r.ok, false);
       assert.strictEqual(fs.readFileSync(settingsPath, 'utf8'), '{oops');
     } finally { cleanup(dir); }
+  });
+});
+
+// -- Codex native hooks --------------------------------------------------
+// Codex 0.146 has a stable hooks system with Claude-Code-shaped payloads, so
+// the integration is hooks-first: setup writes ~/.codex/hooks.json (never the
+// real one in tests) and the hook itself is told which editor it serves.
+
+describe('platform -- setupCodex installs codex native hooks', () => {
+  const quiet = { log: () => {} };
+  const REPO = '/repo';
+  function env() {
+    const dir = tmpDir('crumb-codex-');
+    return { dir, hooksPath: path.join(dir, '.codex', 'hooks.json') };
+  }
+
+  test('exports the codex installer pieces', () => {
+    for (const k of ['setupCodex', 'uninstallCodex', 'buildCodexHooks']) {
+      assert.strictEqual(typeof setup[k], 'function', k);
+    }
+    assert.ok(Array.isArray(setup.CODEX_HOOK_EVENTS));
+  });
+
+  test('CODEX_HOOK_EVENTS is exactly what codex 0.146 supports', () => {
+    assert.deepStrictEqual(setup.CODEX_HOOK_EVENTS, [
+      'PreToolUse', 'PostToolUse', 'PermissionRequest', 'PreCompact',
+      'SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop',
+      'UserPromptSubmit', 'Stop',
+    ]);
+    assert.ok(!setup.CODEX_HOOK_EVENTS.includes('Notification'),
+      'codex has no Notification hook');
+    assert.ok(!setup.CODEX_HOOK_EVENTS.includes('PostToolUseFailure'),
+      'codex has no PostToolUseFailure hook');
+  });
+
+  test('buildCodexHooks tags every command with --editor codex', () => {
+    const built = setup.buildCodexHooks(REPO);
+    assert.deepStrictEqual(Object.keys(built.hooks), setup.CODEX_HOOK_EVENTS);
+    for (const event of setup.CODEX_HOOK_EVENTS) {
+      const cmd = built.hooks[event][0].hooks[0].command;
+      assert.ok(cmd.includes('--editor codex'), `${event}: ${cmd}`);
+      assert.ok(cmd.endsWith(` ${event}`), `${event}: ${cmd}`);
+      assert.ok(cmd.includes('/repo/update-state.js'), `${event}: ${cmd}`);
+      assert.strictEqual(built.hooks[event][0].hooks[0].timeout, 5);
+    }
+  });
+
+  test('fresh install writes every codex hook event and nothing else', () => {
+    const { dir, hooksPath } = env();
+    try {
+      const r = setup.setupCodex({ hooksPath, repoRoot: REPO, ...quiet });
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(r.modified, true);
+      const f = readJSON(hooksPath);
+      assert.deepStrictEqual(Object.keys(f.hooks), setup.CODEX_HOOK_EVENTS);
+      assert.ok(f.hooks.PreToolUse[0].hooks[0].command.includes('--editor codex'));
+    } finally { cleanup(dir); }
+  });
+
+  test('re-running is idempotent and byte-identical', () => {
+    const { dir, hooksPath } = env();
+    try {
+      setup.setupCodex({ hooksPath, repoRoot: REPO, ...quiet });
+      const first = fs.readFileSync(hooksPath, 'utf8');
+      const r = setup.setupCodex({ hooksPath, repoRoot: REPO, ...quiet });
+      assert.strictEqual(r.modified, false);
+      assert.strictEqual(fs.readFileSync(hooksPath, 'utf8'), first);
+    } finally { cleanup(dir); }
+  });
+
+  test('an existing user hook survives the merge', () => {
+    const { dir, hooksPath } = env();
+    try {
+      fs.mkdirSync(path.dirname(hooksPath), { recursive: true });
+      fs.writeFileSync(hooksPath, JSON.stringify({
+        hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node other-tool.js' }] }] },
+      }), 'utf8');
+      setup.setupCodex({ hooksPath, repoRoot: REPO, ...quiet });
+      const f = readJSON(hooksPath);
+      assert.strictEqual(f.hooks.PreToolUse.length, 2);
+      assert.strictEqual(f.hooks.PreToolUse[0].hooks[0].command, 'node other-tool.js');
+    } finally { cleanup(dir); }
+  });
+
+  test('a stale hook path (the old hooks.json on this machine) is repaired', () => {
+    const { dir, hooksPath } = env();
+    try {
+      setup.setupCodex({ hooksPath, repoRoot: '/old/place', ...quiet });
+      const r = setup.setupCodex({ hooksPath, repoRoot: REPO, ...quiet });
+      assert.ok(r.replaced > 0);
+      const f = readJSON(hooksPath);
+      assert.strictEqual(f.hooks.PreToolUse.length, 1);
+      assert.ok(!JSON.stringify(f).includes('/old/place/'));
+    } finally { cleanup(dir); }
+  });
+
+  test('a corrupt hooks.json aborts without touching the file', () => {
+    const { dir, hooksPath } = env();
+    try {
+      fs.mkdirSync(path.dirname(hooksPath), { recursive: true });
+      fs.writeFileSync(hooksPath, '{ "hooks": { ] }', 'utf8');
+      const r = setup.setupCodex({ hooksPath, repoRoot: REPO, ...quiet });
+      assert.strictEqual(r.ok, false);
+      assert.strictEqual(fs.readFileSync(hooksPath, 'utf8'), '{ "hooks": { ] }');
+      assert.strictEqual(fs.existsSync(hooksPath + '.bak'), false);
+    } finally { cleanup(dir); }
+  });
+
+  test('uninstallCodex removes only Code Crumb entries', () => {
+    const { dir, hooksPath } = env();
+    try {
+      fs.mkdirSync(path.dirname(hooksPath), { recursive: true });
+      fs.writeFileSync(hooksPath, JSON.stringify({
+        hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node other-tool.js' }] }] },
+      }), 'utf8');
+      setup.setupCodex({ hooksPath, repoRoot: REPO, ...quiet });
+      const r = setup.uninstallCodex({ hooksPath, ...quiet });
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(r.removed, setup.CODEX_HOOK_EVENTS.length);
+      const f = readJSON(hooksPath);
+      assert.deepStrictEqual(Object.keys(f.hooks), ['PreToolUse']);
+      assert.strictEqual(f.hooks.PreToolUse[0].hooks[0].command, 'node other-tool.js');
+    } finally { cleanup(dir); }
+  });
+
+  test('uninstallCodex on a missing file is a no-op, not an error', () => {
+    const { dir, hooksPath } = env();
+    try {
+      const r = setup.uninstallCodex({ hooksPath, ...quiet });
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(r.removed, 0);
+      assert.strictEqual(fs.existsSync(hooksPath), false);
+    } finally { cleanup(dir); }
+  });
+});
+
+describe('platform -- update-state.js --editor flag', () => {
+  const UPDATE_STATE = path.join(ROOT, 'update-state.js');
+
+  function runHook(args, payload, extraEnv) {
+    const base = makeTempEnv('flag-test');
+    delete base.env.CLAUDE_SESSION_ID;
+    const env = { ...base.env, ...(extraEnv || {}) };
+    try {
+      execFileSync(process.execPath, [UPDATE_STATE, ...args], {
+        input: JSON.stringify(payload), env, timeout: 10000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+    return base;
+  }
+
+  test('--editor codex stamps the editor, the model name and the session prefix', () => {
+    const { tmp, stateFile } = runHook(['--editor', 'codex', 'PreToolUse'],
+      { tool_name: 'Read', tool_input: { file_path: 'a.js' } });
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.editor, 'codex');
+    assert.strictEqual(state.modelName, 'codex');
+    assert.ok(/^codex-/.test(state.sessionId), state.sessionId);
+    assert.strictEqual(state.state, 'reading');
+    cleanup(tmp);
+  });
+
+  test('--editor=codex works too', () => {
+    const { tmp, stateFile } = runHook(['--editor=codex', 'PreToolUse'],
+      { tool_name: 'Read', tool_input: { file_path: 'a.js' } });
+    assert.strictEqual(readJSON(stateFile).editor, 'codex');
+    cleanup(tmp);
+  });
+
+  test('CODE_CRUMB_EDITOR beats the flag', () => {
+    const { tmp, stateFile } = runHook(['--editor', 'codex', 'PreToolUse'],
+      { tool_name: 'Read', tool_input: { file_path: 'a.js' } },
+      { CODE_CRUMB_EDITOR: 'opencode' });
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.editor, 'opencode');
+    assert.strictEqual(state.modelName, 'opencode');
+    cleanup(tmp);
+  });
+
+  test('CODE_CRUMB_MODEL still beats the editor-derived model name', () => {
+    const { tmp, stateFile } = runHook(['--editor', 'codex', 'PreToolUse'],
+      { tool_name: 'Read', tool_input: { file_path: 'a.js' } },
+      { CODE_CRUMB_MODEL: 'gpt-5.6' });
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.editor, 'codex');
+    assert.strictEqual(state.modelName, 'gpt-5.6');
+    cleanup(tmp);
+  });
+
+  test('with no event positional the payload hook_event_name is honoured', () => {
+    const { tmp, stateFile } = runHook(['--editor', 'codex'],
+      { hook_event_name: 'Stop', session_id: 'codex-hen' });
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'responding');
+    assert.strictEqual(state.stopped, true);
+    cleanup(tmp);
+  });
+
+  test('the plain claude invocation is unchanged', () => {
+    const { tmp, stateFile } = runHook(['PreToolUse'],
+      { tool_name: 'Read', tool_input: { file_path: 'a.js' } });
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.editor, 'claude');
+    assert.strictEqual(state.modelName, 'claude');
+    assert.strictEqual(state.state, 'reading');
+    cleanup(tmp);
   });
 });
 

@@ -8,15 +8,17 @@
 // |  Usage:                                                        |
 // |    node setup.js              (Claude Code -- default)         |
 // |    node setup.js claude       (Claude Code -- explicit)        |
-// |    node setup.js uninstall    (remove Claude Code hooks)       |
-// |    node setup.js codex        (Codex CLI)                      |
+// |    node setup.js uninstall    (remove Claude + Codex hooks)    |
+// |    node setup.js codex        (Codex CLI native hooks)         |
+// |    node setup.js codex-notify (Codex legacy notify channel)    |
 // |    node setup.js opencode     (OpenCode)                       |
 // |    node setup.js openclaw     (OpenClaw / Pi)                  |
 // |    node setup.js --autolaunch (only flip the autolaunch pref)  |
 // |                                                                |
-// |  The Claude Code installer is also a module: setupClaude() /   |
-// |  uninstallClaude() take { settingsPath, hookPath, log } so     |
-// |  tests never touch a real ~/.claude/settings.json.             |
+// |  The Claude Code and Codex installers are also modules:        |
+// |  setupClaude() / uninstallClaude() / setupCodex() /            |
+// |  uninstallCodex() take { settingsPath | hooksPath, log } so    |
+// |  tests never touch a real settings.json or hooks.json.         |
 // +================================================================+
 
 const fs = require('fs');
@@ -30,6 +32,8 @@ const HOOK_SCRIPT = path.resolve(__dirname, 'update-state.js');
 const DEFAULT_HOOK_PATH = HOOK_SCRIPT.replace(/\\/g, '/');
 const DEFAULT_SETTINGS_PATH = path.join(HOME, '.claude', 'settings.json');
 
+const DEFAULT_CODEX_HOOKS_PATH = path.join(HOME, '.codex', 'hooks.json');
+
 const HOOK_EVENTS = [
   'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop',
   'Notification', 'SubagentStart', 'SubagentStop',
@@ -37,6 +41,15 @@ const HOOK_EVENTS = [
   'PreCompact', 'PostCompact', 'PermissionRequest', 'Setup',
   'Elicitation', 'ElicitationResult', 'ConfigChange',
   'InstructionsLoaded', 'StopFailure', 'UserPromptSubmit',
+];
+
+// Codex 0.146 fires a subset of the same event names (no Notification, no
+// PostToolUseFailure). Registering an event codex does not know about only
+// leaves dead config behind, so this list is exactly its supported set.
+const CODEX_HOOK_EVENTS = [
+  'PreToolUse', 'PostToolUse', 'PermissionRequest', 'PreCompact',
+  'SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop',
+  'UserPromptSubmit', 'Stop',
 ];
 
 // -- Claude Code Setup -----------------------------------------------
@@ -67,11 +80,19 @@ function hasExactPath(entry, hookPath) {
   return !!entry?.hooks?.some(hh => typeof hh?.command === 'string' && hh.command.includes(hookPath));
 }
 
+// Byte-exact command match. The Codex installer needs this rather than a path
+// match: a legacy entry can point at the right update-state.js and still be
+// missing the `--editor codex` tag that keeps sessions from being labelled
+// "claude", and that entry must be rewritten, not reported as installed.
+function hasExactCommand(entry, command) {
+  return !!entry?.hooks?.some(hh => typeof hh?.command === 'string' && hh.command === command);
+}
+
 // Read settings.json. A missing file means "start fresh"; anything else that
 // goes wrong (unreadable, invalid JSON, not an object) means "do not touch
 // it" -- the old behaviour silently replaced a broken settings.json with just
 // our hooks, wiping permissions, env, MCP servers and everything else.
-function readSettings(settingsPath, log) {
+function readSettings(settingsPath, log, label = 'Claude settings') {
   let raw;
   try {
     raw = fs.readFileSync(settingsPath, 'utf8');
@@ -96,7 +117,7 @@ function readSettings(settingsPath, log) {
     log(`  [!!] ${settingsPath} is not a JSON object. Leaving it untouched.`);
     return { error: new Error('settings.json is not an object') };
   }
-  log('  [ok] Found existing Claude settings');
+  log(`  [ok] Found existing ${label}`);
   return { settings, existed: true, raw };
 }
 
@@ -247,15 +268,189 @@ function uninstallClaude(opts = {}) {
   return { ok: true, removed };
 }
 
-// -- Codex CLI Setup -------------------------------------------------
+// -- Codex CLI Setup (native hooks) ----------------------------------
+// Codex 0.146 has a stable hooks system whose stdin payloads are shaped like
+// Claude Code's (hook_event_name, session_id, tool_name, tool_input,
+// tool_response, ...), so the same update-state.js serves both -- it only has
+// to be told which editor it is serving, via `--editor codex`.
 
-function setupCodex() {
+function codexHookPath(repoRoot) {
+  return path.resolve(repoRoot || __dirname).replace(/\\/g, '/') + '/update-state.js';
+}
+
+function buildCodexHooks(repoRoot) {
+  const hookPath = codexHookPath(repoRoot);
+  const hooks = {};
+  for (const event of CODEX_HOOK_EVENTS) {
+    hooks[event] = [
+      {
+        matcher: '',
+        hooks: [{
+          type: 'command',
+          command: `node "${hookPath}" --editor codex ${event}`,
+          timeout: 5,
+        }],
+      },
+    ];
+  }
+  return { hooks };
+}
+
+function printCodexUsage(hooksPath, log) {
+  const rendererPath = path.resolve(__dirname, 'renderer.js').replace(/\\/g, '/');
+  const wrapperPath = path.resolve(__dirname, 'adapters', 'codex-wrapper.js').replace(/\\/g, '/');
+  const rule = '\u2500'.repeat(42);
+  log(`
+  ${rule}
+
+  To use Code Crumb with Codex:
+
+  1. Open a terminal and run:
+     node "${rendererPath}"
+
+  2. Use Codex as normal in another terminal.
+
+  The first Codex run after this prompts you once to trust the
+  hooks in ${hooksPath} -- say yes, or start Codex with
+  --dangerously-bypass-hook-trust in automation.
+
+  Headless runs (codex exec) can also use the wrapper, which reads
+  the JSONL event stream directly and needs no hook trust:
+     node "${wrapperPath}" "your prompt"
+
+  Legacy turn-level notify channel (no tool-level events):
+     node setup.js codex-notify
+
+  To uninstall:
+     node setup.js uninstall
+
+  ${rule}
+`);
+}
+
+// Install (or repair) the Codex native hooks. Same contract as setupClaude:
+// opts { hooksPath, repoRoot, log, quiet } -> { ok, modified, added, replaced, pruned, error? }
+function setupCodex(opts = {}) {
+  const hooksPath = opts.hooksPath || DEFAULT_CODEX_HOOKS_PATH;
+  const log = opts.log || console.log;
+  const hookPath = codexHookPath(opts.repoRoot);
+  const faceHooks = buildCodexHooks(opts.repoRoot).hooks;
+
+  log('\n  Code Crumb Setup (Codex CLI)');
+  log('  ' + '='.repeat(40) + '\n');
+  log(`  Platform: ${process.platform}`);
+  log(`  Home:     ${HOME}`);
+  log(`  Hook:     ${hookPath}\n`);
+
+  const read = readSettings(hooksPath, log, 'Codex hooks');
+  if (read.error) return { ok: false, modified: false, added: 0, replaced: 0, pruned: 0, error: read.error };
+  const { settings, existed, raw } = read;
+
+  if (!settings.hooks || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks)) {
+    settings.hooks = {};
+  }
+
+  let added = 0;
+  let replaced = 0;
+  let pruned = 0;
+  for (const [event, hookConfigs] of Object.entries(faceHooks)) {
+    if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
+    const entries = settings.hooks[event];
+    const command = hookConfigs[0].hooks[0].command;
+
+    if (entries.some(e => hasExactCommand(e, command))) {
+      log(`  [ok] ${event} hook already installed`);
+      continue;
+    }
+    // A Code Crumb entry with a different path or a missing --editor tag:
+    // rewrite it rather than leave a hook that mislabels every session.
+    if (entries.some(isOurHook)) {
+      settings.hooks[event] = entries.filter(e => !isOurHook(e)).concat(hookConfigs);
+      replaced++;
+      log(`  ~ Updated ${event} hook`);
+      continue;
+    }
+    entries.push(...hookConfigs);
+    added++;
+    log(`  + Added ${event} hook`);
+  }
+
+  // Drop our entries from events codex cannot fire (an older install wrote
+  // the full Claude Code set here, including Notification).
+  for (const event of Object.keys(settings.hooks)) {
+    if (CODEX_HOOK_EVENTS.includes(event)) continue;
+    const entries = settings.hooks[event];
+    if (!Array.isArray(entries)) continue;
+    const kept = entries.filter(e => !isOurHook(e));
+    if (kept.length === entries.length) continue;
+    pruned += entries.length - kept.length;
+    if (kept.length) settings.hooks[event] = kept;
+    else delete settings.hooks[event];
+    log(`  - Removed ${event} hook (codex does not fire it)`);
+  }
+
+  const modified = added + replaced + pruned > 0;
+  if (modified) {
+    if (!writeSettings(hooksPath, settings, existed, raw, log)) {
+      return { ok: false, modified: false, added, replaced, pruned, error: new Error('write failed') };
+    }
+    log(`\n  Hooks written to ${hooksPath}`);
+  } else {
+    log('\n  All hooks already installed');
+  }
+
+  if (!opts.quiet) printCodexUsage(hooksPath, log);
+  return { ok: true, modified, added, replaced, pruned };
+}
+
+// Remove every Code Crumb entry from ~/.codex/hooks.json.
+// opts: { hooksPath, log }. Returns { ok, removed, error? }.
+function uninstallCodex(opts = {}) {
+  const hooksPath = opts.hooksPath || DEFAULT_CODEX_HOOKS_PATH;
+  const log = opts.log || console.log;
+
+  log('\n  Code Crumb Uninstall (Codex CLI)');
+  log('  ' + '='.repeat(40) + '\n');
+
+  const read = readSettings(hooksPath, log, 'Codex hooks');
+  if (read.error) return { ok: false, removed: 0, error: read.error };
+  const { settings, existed, raw } = read;
+
+  let removed = 0;
+  if (settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)) {
+    for (const event of Object.keys(settings.hooks)) {
+      const entries = settings.hooks[event];
+      if (!Array.isArray(entries)) continue;
+      const kept = entries.filter(e => !isOurHook(e));
+      removed += entries.length - kept.length;
+      if (kept.length) settings.hooks[event] = kept;
+      else delete settings.hooks[event];
+    }
+    if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+  }
+
+  if (removed === 0) {
+    log('  [ok] No Code Crumb hooks found -- nothing to do');
+    return { ok: true, removed: 0 };
+  }
+  if (!writeSettings(hooksPath, settings, existed, raw, log)) {
+    return { ok: false, removed: 0, error: new Error('write failed') };
+  }
+  log(`  - Removed ${removed} Code Crumb hook entries from ${hooksPath}\n`);
+  return { ok: true, removed };
+}
+
+// -- Codex CLI Setup (legacy notify channel) -------------------------
+// `notify` is Codex's pre-hooks callback (legacy_notify.rs upstream): one
+// turn-level event, no tool detail. Kept for older Codex builds.
+
+function setupCodexNotify() {
   const CODEX_CONFIG = path.join(HOME, '.codex', 'config.toml');
   const notifyPath = path.resolve(__dirname, 'adapters', 'codex-notify.js').replace(/\\/g, '/');
   const wrapperPath = path.resolve(__dirname, 'adapters', 'codex-wrapper.js').replace(/\\/g, '/');
   const rendererPath = path.resolve(__dirname, 'renderer.js').replace(/\\/g, '/');
 
-  console.log('\n  Code Crumb Setup (Codex CLI)');
+  console.log('\n  Code Crumb Setup (Codex CLI -- legacy notify)');
   console.log('  ' + '='.repeat(40) + '\n');
   console.log(`  Platform: ${process.platform}`);
   console.log(`  Home:     ${HOME}`);
@@ -296,22 +491,23 @@ function setupCodex() {
   console.log(`
   ${'─'.repeat(42)}
 
-  Codex CLI integration has two modes:
+  This is the LEGACY channel: \`notify\` fires once per turn,
+  so the face can only show turn completions.
 
-  1. NOTIFY MODE (basic -- turn-level events only):
-     Already configured above. The face will react when
-     Codex completes a turn. Start the renderer:
+  NOTIFY MODE (basic -- turn-level events only):
+     Configured above. Start the renderer:
        node "${rendererPath}"
      Then use Codex normally.
 
-  2. WRAPPER MODE (rich -- tool-level events):
-     Use the wrapper instead of \`codex exec\`:
+  Prefer one of these instead:
+
+  HOOKS MODE (rich, interactive sessions too):
+       node setup.js codex
+
+  WRAPPER MODE (rich, headless \`codex exec\` runs):
        node "${wrapperPath}" "your prompt"
      This intercepts the JSONL stream for real-time
      tool-level face reactions.
-
-  Note: Codex CLI lacks a hook system, so interactive
-  TUI sessions cannot be observed at the tool level.
 
   ${'─'.repeat(42)}
 `);
@@ -509,8 +705,8 @@ function enableAutolaunch(log = console.log) {
 // -- CLI -------------------------------------------------------------
 
 function printUsage() {
-  console.log('  Supported editors: claude, codex, opencode, openclaw');
-  console.log('  Usage: node setup.js [claude|codex|opencode|openclaw|uninstall] [--autolaunch]\n');
+  console.log('  Supported editors: claude, codex, codex-notify, opencode, openclaw');
+  console.log('  Usage: node setup.js [claude|codex|codex-notify|opencode|openclaw|uninstall] [--autolaunch]\n');
 }
 
 function main() {
@@ -536,12 +732,23 @@ function main() {
     }
     case 'uninstall': {
       const r = uninstallClaude();
-      process.exit(r.ok ? 0 : 1);
+      // Codex hooks live in their own file; clean them up too if present.
+      let codexOk = true;
+      if (fs.existsSync(DEFAULT_CODEX_HOOKS_PATH)) {
+        codexOk = uninstallCodex().ok;
+      }
+      process.exit(r.ok && codexOk ? 0 : 1);
       break;
     }
     case 'codex':
-    case 'openai':
-      setupCodex();
+    case 'openai': {
+      const r = setupCodex();
+      if (!r.ok) process.exit(1);
+      break;
+    }
+    case 'codex-notify':
+    case 'notify':
+      setupCodexNotify();
       break;
     case 'opencode':
       setupOpenCode();
@@ -582,8 +789,13 @@ module.exports = {
   setupClaude,
   uninstallClaude,
   buildFaceHooks,
+  setupCodex,
+  uninstallCodex,
+  buildCodexHooks,
   enableAutolaunch,
   HOOK_EVENTS,
+  CODEX_HOOK_EVENTS,
   DEFAULT_HOOK_PATH,
   DEFAULT_SETTINGS_PATH,
+  DEFAULT_CODEX_HOOKS_PATH,
 };
