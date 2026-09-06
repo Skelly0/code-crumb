@@ -236,9 +236,8 @@ describe('teams.js -- Orbital grouping with team data', () => {
       { col: 5, row: 2, face: f1 },
       { col: 60, row: 2, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 30, row: 15, w: 12, h: 8, centerX: 36, centerY: 19 };
-    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
+    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210]);
     // Tether should exist (team members grouped)
     assert.ok(result.length > 0, 'should render tethers for team group');
   });
@@ -251,9 +250,8 @@ describe('teams.js -- Orbital grouping with team data', () => {
       { col: 10, row: 5, face: f1 },
       { col: 30, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.ok(result.includes('frontend'), 'group label should contain team name');
   });
 

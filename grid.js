@@ -705,7 +705,6 @@ class OrbitalSystem {
     this._sortedCache = [];        // Cached sorted faces array
     this._sortedDirty = true;      // Rebuild cache on next getSortedFaces()
     this._loadingInProgress = false; // Re-entrancy guard for loadSessionsAsync
-    this._connDots = [];             // Reusable array for connection dot positions (avoids per-frame alloc)
     this._groupsCache = null;        // Cached _buildGroups result
     this._groupsDirty = true;        // Flag to invalidate groups cache
   }
@@ -1162,7 +1161,7 @@ class OrbitalSystem {
     return { a, b, maxSlots };
   }
 
-  _renderConnections(mainPos, positions, accentColor, outDots) {
+  _renderConnections(mainPos, positions, accentColor) {
     let out = '';
     const r = ansi.reset;
 
@@ -1221,13 +1220,12 @@ class OrbitalSystem {
           ? ansi.fg(...dimColor(lineColor, 0.7))
           : ansi.fg(...dimColor(lineColor, 0.2));
         out += `\x1b[${row};${col}H${color}\u00b7${r}`;
-        if (outDots) outDots.push(row, col);
       }
     }
     return out;
   }
 
-  _renderGroupTethers(positions, mainPos, accentColor, outDots) {
+  _renderGroupTethers(positions, mainPos, accentColor) {
     let out = '';
     const r = ansi.reset;
     const rows = process.stdout.rows || 24;
@@ -1296,7 +1294,6 @@ class OrbitalSystem {
               row >= mainTop - 8 && row <= mainBot + 7) continue;
 
           out += `\x1b[${row};${col}H${tetherColor}\u00b7${r}`;
-          if (outDots) outDots.push(row, col);
         }
       }
     }
@@ -1336,7 +1333,7 @@ class OrbitalSystem {
     return (stable[0].face.label || '').slice(0, 12);
   }
 
-  _renderGroupLabels(positions, rows, cols, outDots, mainPos) {
+  _renderGroupLabels(positions, rows, cols, mainPos) {
     let out = '';
     const r = ansi.reset;
 
@@ -1391,11 +1388,6 @@ class OrbitalSystem {
       const baseColor = members[0].face.teamColor || [140, 170, 200];
       const color = ansi.fg(...dimColor(baseColor, GROUP_LABEL_BRIGHTNESS));
       out += `\x1b[${labelRow};${labelCol}H${color}${label}${r}`;
-
-      // Track for clearing
-      for (let c = labelCol; c < labelCol + label.length; c++) {
-        if (outDots) outDots.push(labelRow, c);
-      }
     }
     return out;
   }
@@ -1555,12 +1547,10 @@ class OrbitalSystem {
     const accentColor = (themeMap.subagent || themeMap.idle).accent || [100, 160, 210];
 
     // Render group tethers (dimmest layer — background structure between siblings)
-    this._connDots.length = 0;
-    const connDots = this._connDots;
-    buf += this._renderGroupTethers(positions, mainPos, accentColor, connDots);
+    buf += this._renderGroupTethers(positions, mainPos, accentColor);
 
     // Render connection lines to main face (brighter pulsing — active data channels)
-    buf += this._renderConnections(mainPos, positions, accentColor, connDots);
+    buf += this._renderConnections(mainPos, positions, accentColor);
 
     // Render each mini-face at its orbital position
     for (let i = 0; i < n; i++) {
@@ -1571,7 +1561,7 @@ class OrbitalSystem {
     }
 
     // Render floating group labels beneath clustered groups
-    buf += this._renderGroupLabels(positions, rows, cols, connDots, mainPos);
+    buf += this._renderGroupLabels(positions, rows, cols, mainPos);
 
     // Overflow indicator
     if (overflow > 0) {

@@ -26,6 +26,22 @@ function seedOwningPid(pid = process.pid) {
   _pidStartCache.set(pid, { value: Date.now() - STALE_MS - 3600e3, resolvedAt: Date.now() });
 }
 
+// Extract the [row, col] of every cell a render actually painted. Each draw is
+// "\x1b[row;colH" + colour + text + reset, so one match yields text.length cells.
+// This replaces the old outDots out-param, which existed only to feed the
+// removed clear buffer.
+function drawnCells(out) {
+  const cells = [];
+  const re = /\x1b\[(\d+);(\d+)H((?:\x1b\[[^m]*m)*)([^\x1b]*)/g;
+  let m;
+  while ((m = re.exec(out)) !== null) {
+    const row = Number(m[1]);
+    const col = Number(m[2]);
+    for (let i = 0; i < m[4].length; i++) cells.push([row, col + i]);
+  }
+  return cells;
+}
+
 describe('grid.js -- MiniFace modelName', () => {
   test('default modelName is empty', () => {
     const face = new MiniFace('test-session');
@@ -2367,11 +2383,9 @@ describe('grid.js -- OrbitalSystem._renderGroupTethers', () => {
       { col: 10, row: 5, face: new MiniFace('s1') },
       { col: 40, row: 5, face: new MiniFace('s2') },
     ];
-    const dots = [];
     const mainPos = { col: 25, row: 10, w: 12, h: 8, centerX: 31, centerY: 14 };
-    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
+    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210]);
     assert.strictEqual(result, '');
-    assert.strictEqual(dots.length, 0);
   });
 
   test('produces ANSI output for multi-member groups', () => {
@@ -2383,11 +2397,10 @@ describe('grid.js -- OrbitalSystem._renderGroupTethers', () => {
       { col: 5, row: 2, face: f1 },
       { col: 60, row: 2, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 30, row: 15, w: 12, h: 8, centerX: 36, centerY: 19 };
-    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
+    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210]);
     assert.ok(result.length > 0, 'should produce ANSI output');
-    assert.ok(dots.length > 0, 'should track dot positions');
+    assert.ok(drawnCells(result).length > 0, 'should paint dots at real coordinates');
   });
 });
 
@@ -2496,11 +2509,9 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: new MiniFace('s1') },
       { col: 40, row: 5, face: new MiniFace('s2') },
     ];
-    const dots = [];
     const mainPos = { col: 30, row: 15, w: 12, h: 8, centerX: 36, centerY: 19 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.strictEqual(result, '');
-    assert.strictEqual(dots.length, 0);
   });
 
   test('produces label text for multi-member groups', () => {
@@ -2511,11 +2522,10 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 25, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.ok(result.length > 0, 'should produce ANSI output');
-    assert.ok(dots.length > 0, 'should track label positions');
+    assert.ok(drawnCells(result).length > 0, 'should paint the label at real coordinates');
   });
 
   test('team groups show teamName as label', () => {
@@ -2526,9 +2536,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 30, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.ok(result.includes('backend'), 'should contain team name label');
   });
 
@@ -2540,9 +2549,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 30, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.ok(result.includes('sub-1'), 'should contain first member label');
   });
 
@@ -2554,9 +2562,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 30, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.ok(result.includes('feat/auth'), 'should show branch instead of sub-1');
     assert.ok(!result.includes('sub-1'), 'should not contain fallback label');
   });
@@ -2569,9 +2576,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 30, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.ok(result.includes('myapp'), 'should show cwd basename');
   });
 
@@ -2583,9 +2589,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 25, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     // Only 1 non-spawning member, so no label (need 2+)
     assert.strictEqual(result, '', 'should skip label when only 1 non-spawning member');
   });
@@ -2598,9 +2603,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 25, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.strictEqual(result, '');
   });
 
@@ -2614,8 +2618,7 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 7, face: f1 },
       { col: 25, row: 7, face: f2 },
     ];
-    const dots = [];
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     // Label row = 7 + 7 = 14, which is inside mainPos.row-8=6 to mainPos.row+h+7=31
     assert.strictEqual(result, '', 'should skip label when overlapping main face');
   });
@@ -2629,9 +2632,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 70, row: 2, face: f1 },
       { col: 75, row: 2, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 30, row: 20, w: 12, h: 8, centerX: 36, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 15, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 15, 80, mainPos);
     // Label should still be within terminal cols
     if (result.length > 0) {
       const colMatch = result.match(/\x1b\[(\d+);(\d+)H/);
@@ -2726,12 +2728,10 @@ describe('grid.js -- _renderGroupTethers extended checks', () => {
       { col: 60, row: 2, face: f2 },
       { col: 30, row: 2, face: fMiddle }, // middle face that tether A→B could cross
     ];
-    const dots = [];
     const mainPos = { col: 30, row: 20, w: 12, h: 8, centerX: 36, centerY: 24 };
-    os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
+    const out = os._renderGroupTethers(positions, mainPos, [100, 160, 210]);
     // No dot should be inside fMiddle's bounding box (col 30-38, row 1-9)
-    for (let i = 0; i < dots.length; i += 2) {
-      const dRow = dots[i], dCol = dots[i + 1];
+    for (const [dRow, dCol] of drawnCells(out)) {
       const insideMiddle = dCol >= 29 && dCol <= 39 && dRow >= 1 && dRow <= 9;
       assert.ok(!insideMiddle,
         `tether dot at (${dRow},${dCol}) should not overlap middle face`);
@@ -2746,10 +2746,9 @@ describe('grid.js -- _renderGroupTethers extended checks', () => {
       { col: 5, row: 2, face: f1 },
       { col: 60, row: 2, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 30, row: 20, w: 12, h: 8, centerX: 36, centerY: 24 };
-    os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
-    assert.strictEqual(dots.length, 0, 'no tether dots when one endpoint is spawning');
+    const out = os._renderGroupTethers(positions, mainPos, [100, 160, 210]);
+    assert.strictEqual(drawnCells(out).length, 0, 'no tether dots when one endpoint is spawning');
   });
 });
 
