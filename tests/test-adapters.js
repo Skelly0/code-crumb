@@ -368,7 +368,9 @@ describe('adapters -- opencode-adapter', () => {
 
 describe('adapters -- opencode-plugin translate()', () => {
   const PLUGIN_FILE = path.join(ADAPTERS_DIR, 'opencode-plugin.mjs');
-  // The plugin resolves its node binary once, at import time.
+  // The plugin resolves its node binary per spawn, from this variable; pin
+  // it to the node running the suite so a test that really does spawn the
+  // adapter does not depend on what is on PATH.
   process.env.CODE_CRUMB_NODE = NODE;
   const loadModule = () => import(require('url').pathToFileURL(PLUGIN_FILE).href);
   // translate() rides on the factory rather than being its own export: see
@@ -378,9 +380,8 @@ describe('adapters -- opencode-plugin translate()', () => {
 
   // A fresh module instance -- the query string busts the ESM cache -- so a
   // test that exercises the delivery path gets its own throttle state and
-  // cannot colour another test's. (Do not swap CODE_CRUMB_NODE around this:
-  // module evaluation is async, and a sibling test's import would read the
-  // swapped value.)
+  // cannot colour another test's. (The node binary is not captured here; it
+  // is read per spawn, which is what withoutSpawning below relies on.)
   const loadIsolated = (tag) => import(`${require('url').pathToFileURL(PLUGIN_FILE).href}?t=${tag}`);
   const reasoning = (sessionID) => bus('message.part.updated', {
     part: { type: 'reasoning', sessionID, text: 'weighing options' },
