@@ -73,6 +73,27 @@ function seedSession(sessionsDir, sessionId, fields) {
   }), 'utf8');
 }
 
+// Stats blob for an owner session conducting one subagent.
+function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
+  return {
+    streak: 0, bestStreak: 0, brokenStreak: 0, brokenStreakAt: 0,
+    totalToolCalls: 5, totalErrors: 0,
+    records: { longestSession: 0, mostSubagents: 1, mostFilesEdited: 0 },
+    session: {
+      id: ownerId, start: Date.now() - 60000, toolCalls: 5, filesEdited: [],
+      subagentCount: 1, commitCount: 0,
+      activeSubagents: [{
+        id: subId, description: 'real task', taskDescription: 'real task',
+        model: 'haiku', editor: 'claude', startedAt: subStartedAt,
+      }],
+    },
+    recentMilestone: null,
+    daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
+    frequentFiles: {},
+    topLevelSessions,
+  };
+}
+
 // Run `fn` with the shared STATE_FILE (which test.js has already redirected
 // into the throwaway home) holding `data`, then put back whatever was there.
 // For in-process readers -- shared.js fixes its paths at first require, so a
@@ -2066,25 +2087,69 @@ describe('bug fix regressions', () => {
     cleanup(tmp);
   });
 
-  test('a PreToolUse for a subagent tool creates no extra orbital', () => {
-    // Bug: PreToolUse and SubagentStart both created orbital sessions, so a
-    // Task call produced two faces. Only SubagentStart may mint one now.
-    const { tmp, sessionsDir, env } = makeTempEnv('no-dup-orbital');
-    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
-    try {
-      execFileSync(NODE, [UPDATE_STATE, 'PreToolUse'], {
-        input: JSON.stringify({
-          session_id: 'no-dup-orbital', tool_name: 'Task',
-          tool_input: { description: 'go and look', subagent_type: 'Explore' },
-        }),
-        env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
-    const files = fs.readdirSync(sessionsDir);
-    assert.deepStrictEqual(files, ['no-dup-orbital.json'],
-      `only the caller's own orbital may exist, got ${files.join(', ')}`);
+  test('parent tool state reaches only the latest subagent orbital', () => {
+    // Guards what is left of two removed blocks. A file count cannot see
+    // either, because both wrote into files that already exist:
+    //   (a) PreToolUse used to mint its own synthetic orbital alongside the
+    //       one SubagentStart makes, so a Task call showed two faces;
+    //   (b) the old state-mirroring block copied the parent's state into a
+    //       subagent file unconditionally -- including on the Task call that
+    //       spawned it, and without the sticky-field merge.
+    // Propagation itself is deliberate and current (_writeSubagentToolState):
+    // the LATEST active subagent shows the parent's live tool state, earlier
+    // ones keep their own, subagent tools never propagate, and the sticky
+    // fields survive. That is the invariant asserted here.
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('conductor');
+    const stats = conductingStats('conductor', 'sub-old', Date.now() - 5000);
+    stats.session.activeSubagents.push({
+      id: 'sub-new', description: 'newer task', taskDescription: 'newer task',
+      model: 'sonnet', editor: 'claude', startedAt: Date.now() - 1000,
+    });
+    fs.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+    seedSession(sessionsDir, 'sub-old', {
+      state: 'coding', detail: 'editing old.js', stopped: false,
+      parentSession: 'conductor', taskDescription: 'real task', modelName: 'haiku',
+    });
+    seedSession(sessionsDir, 'sub-new', {
+      state: 'spawning', detail: 'newer task', stopped: false,
+      parentSession: 'conductor', taskDescription: 'newer task', modelName: 'sonnet',
+    });
+    const oldBefore = readJSON(path.join(sessionsDir, 'sub-old.json'));
+
+    // A subagent tool must not propagate -- it is the parent conducting.
+    runUpdateState('PreToolUse', {
+      session_id: 'conductor', tool_name: 'Task',
+      tool_input: { description: 'go and look', subagent_type: 'Explore' },
+    }, env);
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'sub-new.json')).state, 'spawning',
+      'a Task call is the parent conducting -- it must not overwrite an orbital');
+
+    // An ordinary tool call does propagate, to the latest subagent only.
+    runUpdateState('PreToolUse', {
+      session_id: 'conductor', tool_name: 'Read', tool_input: { file_path: '/src/app.js' },
+    }, env);
+
+    const files = fs.readdirSync(sessionsDir).sort();
+    assert.deepStrictEqual(files, ['conductor.json', 'sub-new.json', 'sub-old.json'],
+      `no synthetic extra orbital may be minted, got ${files.join(', ')}`);
+
+    const newer = readJSON(path.join(sessionsDir, 'sub-new.json'));
+    assert.strictEqual(newer.state, 'reading', 'the latest subagent shows the live tool state');
+    assert.strictEqual(newer.parentSession, 'conductor', 'sticky parentSession survives');
+    assert.strictEqual(newer.taskDescription, 'newer task', 'sticky taskDescription survives');
+    assert.strictEqual(newer.modelName, 'sonnet', 'sticky modelName survives');
+
+    const older = readJSON(path.join(sessionsDir, 'sub-old.json'));
+    assert.strictEqual(older.state, oldBefore.state,
+      `an earlier subagent keeps its own state, got '${older.state}'`);
+    assert.strictEqual(older.detail, oldBefore.detail,
+      `and its own detail, got '${older.detail}'`);
+
+    // The parent keeps the conducting face while its subagents work: the tool
+    // state went to the orbital, not to the conductor.
+    const parent = readJSON(path.join(sessionsDir, 'conductor.json'));
+    assert.strictEqual(parent.state, 'subagent');
+    assert.strictEqual(parent.detail, 'conducting 2');
     cleanup(tmp);
   });
 
@@ -3286,27 +3351,7 @@ describe('adapters -- editor provenance field', () => {
 // falsely retiring the real subagent's synthetic orbital.
 
 describe('update-state -- parallel sessions vs subagents (#134)', () => {
-  // Stats blob for an owner session conducting one subagent
-  function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
-    return {
-      streak: 0, bestStreak: 0, brokenStreak: 0, brokenStreakAt: 0,
-      totalToolCalls: 5, totalErrors: 0,
-      records: { longestSession: 0, mostSubagents: 1, mostFilesEdited: 0 },
-      session: {
-        id: ownerId, start: Date.now() - 60000, toolCalls: 5, filesEdited: [],
-        subagentCount: 1, commitCount: 0,
-        activeSubagents: [{
-          id: subId, description: 'real task', taskDescription: 'real task',
-          model: 'haiku', editor: 'claude', startedAt: subStartedAt,
-        }],
-      },
-      recentMilestone: null,
-      daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
-      frequentFiles: {},
-      topLevelSessions,
-    };
-  }
-
+  // conductingStats() is shared with the state-mirroring regression above.
   function seedSyntheticOrbital(sessionsDir, subId, ownerId) {
     fs.mkdirSync(sessionsDir, { recursive: true });
     fs.writeFileSync(path.join(sessionsDir, `${subId}.json`), JSON.stringify({
