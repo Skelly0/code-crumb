@@ -6,8 +6,10 @@
 // +================================================================+
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const { ParticleSystem } = require('../particles');
-const { ansi, dimColor } = require('../themes');
+const { ansi, dimColor, setNoColor, isNoColor } = require('../themes');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
@@ -483,6 +485,98 @@ describe('particles.js -- no incremental clear buffer', () => {
     const ps = new ParticleSystem();
     assert.strictEqual(typeof ps.clearPrevious, 'undefined',
       'ParticleSystem#clearPrevious should no longer exist');
+  });
+});
+
+describe('particles.js -- bigquestion style', () => {
+  const ALLOWED = ['?', '??', '?!', String.fromCharCode(0xbf) + '?'];
+
+  test('spawn adds bigquestion particles', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(3, 'bigquestion');
+    assert.strictEqual(ps.particles.length, 3);
+    assert.ok(ps.particles.every(p => p.style === 'bigquestion'));
+  });
+
+  test('bigquestion particles are marked bold', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(1, 'bigquestion');
+    assert.strictEqual(ps.particles[0].bold, true);
+  });
+
+  test('bigquestion chars come from the loud set', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(40, 'bigquestion');
+    for (const p of ps.particles) {
+      assert.ok(ALLOWED.includes(p.char), `unexpected bigquestion char ${JSON.stringify(p.char)}`);
+    }
+  });
+
+  test('bigquestion drifts up and lives longer than question', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(30, 'bigquestion');
+    for (const p of ps.particles) {
+      assert.ok(p.vy < 0, 'bigquestion should rise');
+      assert.ok(p.life >= 50 && p.life <= 90, `life out of range: ${p.life}`);
+      assert.strictEqual(p.maxLife, 90);
+    }
+  });
+
+  test('bigquestion spreads wider than question', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(200, 'bigquestion');
+    const xs = ps.particles.map(p => p.x);
+    assert.ok(Math.max(...xs) - Math.min(...xs) > 8,
+      'the wide spread should exceed the 8-column question spread');
+  });
+
+  test('render prefixes bold for a bold particle', () => {
+    const wasNoColor = isNoColor();
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    setNoColor(false);
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      const ps = new ParticleSystem();
+      ps.spawn(1, 'bigquestion');
+      ps.particles[0].x = 5;
+      ps.particles[0].y = 3;
+      const out = ps.render(0, 0, [255, 255, 255]);
+      assert.ok(out.includes('\x1b[1m'), 'a bold particle should emit the bold SGR');
+    } finally {
+      setNoColor(wasNoColor);
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+
+  test('render leaves non-bold particles alone', () => {
+    const wasNoColor = isNoColor();
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    setNoColor(false);
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      const ps = new ParticleSystem();
+      ps.spawn(1, 'question');
+      ps.particles[0].x = 5;
+      ps.particles[0].y = 3;
+      const out = ps.render(0, 0, [255, 255, 255]);
+      assert.ok(!out.includes('\x1b[1m'), 'a plain particle should not emit the bold SGR');
+    } finally {
+      setNoColor(wasNoColor);
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+
+  test('the header comment counts the style', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'particles.js'), 'utf8');
+    const header = src.slice(0, src.indexOf('const { ansi'));
+    assert.ok(header.includes('16 particle styles'), 'header should say 16 particle styles');
+    assert.ok(header.includes('bigquestion'), 'header should list bigquestion');
   });
 });
 

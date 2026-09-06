@@ -48,6 +48,11 @@ const COMPLETION_MIN_SHOW_MS = 1800;
 // start after LONG_TOOL_SWEAT_MS.
 const LONG_TOOL_ESCALATE_MS = 8000;
 const LONG_TOOL_SWEAT_MS = 20000;
+// Waiting on the user has no timeout -- the renderer holds the face for as long
+// as the state file says waiting. After this long unanswered the face gets
+// louder instead of politer: bigger question marks, a counting detail line, and
+// a pulsing status line (the renderer blinks the terminal title to match).
+const WAIT_ESCALATE_MS = 30000;
 // Minimum display per state before a *non-bypassing* state may replace it.
 const MIN_DISPLAY_MS = {
   // rewards + error: long
@@ -185,17 +190,28 @@ class ClaudeFace {
     return Date.now() - this.lastStateChange;
   }
 
-  // The escalation suffix for a work state that has outlived the hook cadence,
-  // or '' when the current state has not earned one.
+  // True once the face has been waiting on the user long enough to start
+  // asking louder. The renderer reads this for the flashing terminal title.
+  waitEscalated() {
+    return this.state === 'waiting' && this.heldMs() >= WAIT_ESCALATE_MS;
+  }
+
+  // The escalation suffix for a state that has outlived the hook cadence, or
+  // '' when the current state has not earned one. A long wait counts up bare
+  // ("45s") -- nothing is running, the user is just being asked.
   _escalationSuffix() {
-    if (!ACTIVE_WORK_STATES.has(this.state)) return '';
     const held = this.heldMs();
+    if (this.state === 'waiting') {
+      return held >= WAIT_ESCALATE_MS ? `${Math.floor(held / 1000)}s` : '';
+    }
+    if (!ACTIVE_WORK_STATES.has(this.state)) return '';
     if (held < LONG_TOOL_ESCALATE_MS) return '';
     return `still running \u2026 ${Math.floor(held / 1000)}s`;
   }
 
   // What the detail line shows: the raw detail, or the escalated form for a
-  // tool that has been running longer than the hook cadence would explain.
+  // tool that has been running longer than the hook cadence would explain --
+  // or for a question the user has left unanswered.
   // maxWidth (optional) truncates the *base* detail only -- the suffix must
   // stay visible, since it is the part that says the tool is not stuck.
   displayDetail(maxWidth) {
@@ -726,7 +742,14 @@ class ClaudeFace {
     if (this.state === 'satisfied' && this.frame % 50 === 0) this.particles.spawn(1, 'float');
     if (this.state === 'relieved' && this.frame % 45 === 0) this.particles.spawn(1, 'float');
     if (this.state === 'sleeping' && this.frame % 30 === 0) this.particles.spawn(1, 'zzz');
-    if (this.state === 'waiting' && this.frame % 45 === 0) this.particles.spawn(1, 'question');
+    // A wait the user has not answered gets louder rather than quieter.
+    if (this.state === 'waiting') {
+      if (this.waitEscalated()) {
+        if (this.frame % 20 === 0) this.particles.spawn(2, 'bigquestion');
+      } else if (this.frame % 45 === 0) {
+        this.particles.spawn(1, 'question');
+      }
+    }
     if (this.state === 'testing' && this.frame % 12 === 0) this.particles.spawn(1, 'sweat');
     if (this.state === 'installing' && this.frame % 8 === 0) this.particles.spawn(1, 'falling');
     if (this.state === 'caffeinated' && this.frame % 4 === 0) this.particles.spawn(1, 'speedline');
@@ -1065,8 +1088,13 @@ class ClaudeFace {
     }
     const statusText = `${emoji}  ${this.modelName} is ${theme.status}${statusSuffix}  ${emoji}`;
     const statusPad = Math.floor((faceW - statusText.length) / 2);
+    // A long unanswered wait pulses the status line (~0.5s each way at 15 FPS).
+    const statusPulse = this.waitEscalated() && Math.floor(this.frame / 8) % 2 === 0;
+    const statusColor = statusPulse
+      ? `${ansi.bold}${ansi.fg(...theme.accent)}`
+      : ansi.fg(...theme.label);
     buf += ansi.to(startRow + 9, startCol);
-    buf += `${ansi.fg(...theme.label)}${' '.repeat(Math.max(0, statusPad))}${statusText}${r}`;
+    buf += `${statusColor}${' '.repeat(Math.max(0, statusPad))}${statusText}${r}`;
 
     // Detail line (escalated for a tool that has been running a long time)
     const maxDetailWidth = Math.min(Math.max(10, cols - startCol - 8), 36);
@@ -1294,5 +1322,5 @@ module.exports = {
   ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   MIN_DISPLAY_MS, COMPLETION_MIN_SHOW_MS,
-  LONG_TOOL_ESCALATE_MS, LONG_TOOL_SWEAT_MS,
+  LONG_TOOL_ESCALATE_MS, LONG_TOOL_SWEAT_MS, WAIT_ESCALATE_MS,
 };

@@ -10,7 +10,7 @@ const fs = require('fs');
 const { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS, ACTIVE_WORK_STATES: FACE_ACTIVE_WORK_STATES, COMPLETION_STATES: FACE_COMPLETION_STATES } = require('../face');
 const { readState, ACTIVE_WORK_STATES: RENDERER_ACTIVE_WORK_STATES, COMPLETION_STATES: RENDERER_COMPLETION_STATES } = require('../renderer');
 const { ParticleSystem } = require('../particles');
-const { themes, PALETTES } = require('../themes');
+const { themes, PALETTES, ansi, setNoColor, isNoColor } = require('../themes');
 const { mouths, eyes } = require('../animations');
 const { STATE_FILE } = require('../shared');
 
@@ -2485,6 +2485,109 @@ describe('face.js -- long-running tool escalation', () => {
     const { LONG_TOOL_ESCALATE_MS, LONG_TOOL_SWEAT_MS } = require('../face');
     assert.strictEqual(LONG_TOOL_ESCALATE_MS, 8000);
     assert.strictEqual(LONG_TOOL_SWEAT_MS, 20000);
+  });
+});
+
+describe('face.js -- waiting escalation after 30s', () => {
+  const MIDDOT = String.fromCharCode(0xb7);
+
+  const waitingFor = (ms, detail = 'waiting for you') => {
+    const f = new ClaudeFace();
+    f.setState('waiting', detail);
+    f.lastStateChange = Date.now() - ms;
+    return f;
+  };
+
+  // ansi.bold is '' under no-color, which would make every includes() check
+  // vacuous -- these two tests need colour on whatever the ambient mode is.
+  const withColor = (fn) => {
+    const wasNoColor = isNoColor();
+    const origCols = process.stdout.columns;
+    const origRows = process.stdout.rows;
+    setNoColor(false);
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    try {
+      fn();
+    } finally {
+      setNoColor(wasNoColor);
+      process.stdout.columns = origCols;
+      process.stdout.rows = origRows;
+    }
+  };
+
+  test('a wait under 30s is not escalated', () => {
+    assert.strictEqual(waitingFor(29000).waitEscalated(), false);
+  });
+
+  test('a wait over 30s is escalated', () => {
+    assert.strictEqual(waitingFor(31000).waitEscalated(), true);
+  });
+
+  test('only waiting escalates -- a long tool does not', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', 'npm test');
+    f.lastStateChange = Date.now() - 60000;
+    assert.strictEqual(f.waitEscalated(), false);
+  });
+
+  test('the detail line counts the seconds once escalated', () => {
+    assert.strictEqual(waitingFor(45000).displayDetail(),
+      'waiting for you ' + MIDDOT + ' 45s');
+  });
+
+  test('an empty detail escalates to just the elapsed seconds', () => {
+    assert.strictEqual(waitingFor(33000, '').displayDetail(), '33s');
+  });
+
+  test('the detail line is untouched under 30s', () => {
+    assert.strictEqual(waitingFor(29000).displayDetail(), 'waiting for you');
+  });
+
+  test('bigquestion particles appear after 30s of waiting', () => {
+    const f = waitingFor(31000);
+    f.particles.particles = [];
+    for (let i = 0; i < 40; i++) f.update(66);
+    assert.ok(f.particles.particles.some(p => p.style === 'bigquestion'),
+      'an escalated wait should spawn bigquestion particles');
+  });
+
+  test('no bigquestion particles before 30s', () => {
+    const f = waitingFor(10000);
+    f.particles.particles = [];
+    // 50 frames: long enough to cross the slower `frame % 45` question cadence.
+    for (let i = 0; i < 50; i++) f.update(66);
+    assert.ok(!f.particles.particles.some(p => p.style === 'bigquestion'),
+      'a short wait should keep the small question marks');
+    assert.ok(f.particles.particles.some(p => p.style === 'question'),
+      'a short wait should still spawn the small question marks');
+  });
+
+  test('the status line pulses bold while escalated', () => {
+    withColor(() => {
+      const f = waitingFor(31000);
+      f.frame = 0;
+      const on = f.render();
+      f.frame = 8;
+      const off = f.render();
+      assert.ok(on.includes(ansi.bold), 'the bright half of the pulse should be bold');
+      assert.ok(!off.includes(ansi.bold), 'the dim half of the pulse should not be bold');
+    });
+  });
+
+  test('the status line never pulses before 30s', () => {
+    withColor(() => {
+      const f = waitingFor(29000);
+      for (let frame = 0; frame < 16; frame++) {
+        f.frame = frame;
+        assert.ok(!f.render().includes(ansi.bold), `frame ${frame} should not be bold`);
+      }
+    });
+  });
+
+  test('WAIT_ESCALATE_MS is exported', () => {
+    const { WAIT_ESCALATE_MS } = require('../face');
+    assert.strictEqual(WAIT_ESCALATE_MS, 30000);
   });
 });
 

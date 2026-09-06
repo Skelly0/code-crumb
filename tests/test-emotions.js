@@ -561,7 +561,7 @@ describe('emotions -- catch-path parity for team events', () => {
 // -- The renderer's timeout cascade -------------------------------------
 
 const {
-  idleCascade, LONG_TOOL_HOLD_MS, IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
+  idleCascade, buildTitle, LONG_TOOL_HOLD_MS, IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
 } = require('../renderer');
 
 describe('emotions -- a long-running tool keeps its face', () => {
@@ -626,7 +626,7 @@ describe('emotions -- the timeout cascade keeps its pre-existing branches', () =
   });
 
   test('waiting and error degrade like any other non-work state', () => {
-    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: IDLE_TIMEOUT + 1, sessionActive: true, lingerMs: 0, fileState: 'waiting' }), 'thinking');
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: IDLE_TIMEOUT + 1, sessionActive: true, lingerMs: 0, fileState: 'thinking' }), 'thinking');
     assert.strictEqual(idleCascade({ state: 'error', sinceChangeMs: IDLE_TIMEOUT + 1, sessionActive: false, lingerMs: 0, fileState: 'error' }), 'idle');
     assert.strictEqual(idleCascade({ state: 'error', sinceChangeMs: IDLE_TIMEOUT - 1, sessionActive: false, lingerMs: 0, fileState: 'error' }), null);
   });
@@ -651,6 +651,55 @@ describe('emotions -- the timeout cascade keeps its pre-existing branches', () =
     assert.strictEqual(THINKING_TIMEOUT, 45000);
     assert.strictEqual(SLEEP_TIMEOUT, 60000);
     assert.strictEqual(LONG_TOOL_HOLD_MS, 600000);
+  });
+});
+
+describe('emotions -- waiting on the user is held, not degraded', () => {
+  test('waiting is held forever while the file still says waiting', () => {
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: 600000, sessionActive: false, lingerMs: 0, fileState: 'waiting' }), null);
+  });
+
+  test('the hold ignores sessionActive -- idle_prompt arrives after Stop', () => {
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: IDLE_TIMEOUT + 1, sessionActive: true, lingerMs: 0, fileState: 'waiting' }), null);
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: IDLE_TIMEOUT + 1, sessionActive: false, lingerMs: 0, fileState: 'waiting' }), null);
+  });
+
+  test('the hold has no cap -- it outlives LONG_TOOL_HOLD_MS', () => {
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: LONG_TOOL_HOLD_MS * 2, sessionActive: true, lingerMs: 0, fileState: 'waiting' }), null);
+  });
+
+  test('waiting still degrades once the file names something else', () => {
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: 9000, sessionActive: true, lingerMs: 0, fileState: 'thinking' }), 'thinking');
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: 9000, sessionActive: false, lingerMs: 0, fileState: 'thinking' }), 'idle');
+  });
+
+  test('a completion linger still wins over the waiting hold', () => {
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: 5001, sessionActive: true, lingerMs: 5000, fileState: 'waiting' }), 'thinking');
+  });
+});
+
+describe('emotions -- the terminal title flashes for a long wait', () => {
+  test('the calm title names the model and its status', () => {
+    assert.strictEqual(buildTitle('claude', 'waiting', false),
+      '\x1b]0;Code Crumb \u00b7 claude is waiting\x07');
+  });
+
+  test('the flashing title shouts for the user', () => {
+    const flashed = buildTitle('claude', 'waiting', true);
+    assert.ok(flashed.includes('WAITING FOR YOU'), 'flashed title should shout');
+    assert.ok(flashed.startsWith('\x1b]0;') && flashed.endsWith('\x07'), 'flashed title should still be an OSC 0 sequence');
+  });
+
+  test('the two titles differ, so a title change alone is a new frame', () => {
+    assert.notStrictEqual(buildTitle('codex', 'thinking', false), buildTitle('codex', 'thinking', true));
+  });
+
+  test('the frame dedupe key includes the title', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8');
+    assert.ok(/const frameKey = _title \+ out;/.test(src),
+      'the frame loop should dedupe on title + output, not output alone');
+    assert.ok(!/if \(out === prevFrame\)/.test(src),
+      'the old output-only dedupe should be gone');
   });
 });
 

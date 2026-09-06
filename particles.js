@@ -2,9 +2,9 @@
 
 // +================================================================+
 // |  Particle system -- visual effects for the face renderer       |
-// |  15 particle styles: float, sparkle, glitch, orbit, zzz,       |
-// |  question, sweat, falling, speedline, echo, stream, heart,     |
-// |  push, rain, fire                                              |
+// |  16 particle styles: float, sparkle, glitch, orbit, zzz,       |
+// |  question, bigquestion, sweat, falling, speedline, echo,       |
+// |  stream, heart, push, rain, fire                               |
 // +================================================================+
 
 const { ansi, dimColor } = require('./themes');
@@ -91,6 +91,20 @@ class ParticleSystem {
           life: 40 + Math.random() * 40,
           maxLife: 80,
           char: ['?', '\u00b7', '?', '\u00b7'][Math.floor(Math.random() * 4)],
+          style,
+        });
+      } else if (style === 'bigquestion') {
+        // The escalated wait: same rise as 'question', but wider, slower,
+        // longer-lived and bold -- hard to miss out of the corner of an eye.
+        this.particles.push({
+          x: this.width / 2 + (Math.random() - 0.5) * 24,
+          y: this.height / 2 - 3 - Math.random() * 2,
+          vx: (Math.random() - 0.5) * 0.04,
+          vy: -0.05 - Math.random() * 0.03,
+          life: 50 + Math.random() * 40,
+          maxLife: 90,
+          char: ['?', '??', '?!', '\u00bf?'][Math.floor(Math.random() * 4)],
+          bold: true,
           style,
         });
       } else if (style === 'sweat') {
@@ -230,7 +244,9 @@ class ParticleSystem {
       if (row >= 1 && col >= 1 && row < (process.stdout.rows || 24) && col < (process.stdout.columns || 80)) {
         const fade = Math.min(1, p.life / (p.maxLife * 0.3));
         const color = dimColor(accentColor, fade);
-        out += ansi.to(row, col) + ansi.fg(...color) + p.char + ansi.reset;
+        // ansi.reset already terminates the bold, so nothing else to undo.
+        const weight = p.bold ? ansi.bold : '';
+        out += ansi.to(row, col) + weight + ansi.fg(...color) + p.char + ansi.reset;
       }
     }
     return out;

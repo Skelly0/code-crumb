@@ -60,11 +60,25 @@ function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState 
   }
   if (state === 'idle') return sinceChangeMs > SLEEP_TIMEOUT ? 'sleeping' : null;
   if (state === 'sleeping' || COMPLETION_STATES.has(state)) return null;
+  // Waiting on the user is real whether or not the turn has ended -- an
+  // idle_prompt notification arrives *after* Stop. So this hold ignores
+  // sessionActive and has no cap: the face waits as long as the user does.
+  if (state === 'waiting' && fileState === 'waiting') return null;
   // The state file still names this same unfinished tool: hold the work face.
   // ('responding' is in ACTIVE_WORK_STATES but is a post-turn state, never a tool.)
   if (ACTIVE_WORK_STATES.has(state) && state !== 'responding' && sessionActive
       && fileState === state && sinceChangeMs <= LONG_TOOL_HOLD_MS) return null;
   return sinceChangeMs > IDLE_TIMEOUT ? (sessionActive ? 'thinking' : 'idle') : null;
+}
+
+// -- Terminal title -------------------------------------------------
+// The tab/window title mirrors the face so a backgrounded terminal still
+// says what is going on. While the face has been waiting on the user for a
+// while, the caller alternates `flash` to make the title blink for attention.
+function buildTitle(modelName, status, flash) {
+  return flash
+    ? `\x1b]0;\u2753 WAITING FOR YOU \u00b7 Code Crumb\x07`
+    : `\x1b]0;Code Crumb \u00b7 ${modelName} is ${status}\x07`;
 }
 
 // -- Shared runtime -------------------------------------------------
@@ -656,16 +670,22 @@ function runUnifiedMode() {
       try { out += renderSessionList(cols, rows, subSorted, paletteThemes, mainInfo, face.sessionListIndex); } catch {}
     }
 
-    // Update terminal title bar to reflect current state
+    // Update terminal title bar to reflect current state. A wait the user has
+    // not answered for a while blinks the title (~0.5s each way at 15 FPS) so a
+    // backgrounded terminal still asks for attention.
     const _pal = PALETTES[face.paletteIndex] || PALETTES[0];
     const _status = (_pal.themes[face.state] || _pal.themes.idle).status;
-    const _title = `\x1b]0;Code Crumb \u00b7 ${face.modelName} is ${_status}\x07`;
+    const flash = face.waitEscalated() && Math.floor(face.frame / 8) % 2 === 0;
+    const _title = buildTitle(face.modelName, _status, flash);
 
-    if (out === prevFrame) {
+    // The title is part of the frame: a blink with identical body still needs
+    // writing, so dedupe on both.
+    const frameKey = _title + out;
+    if (frameKey === prevFrame) {
       setTimeout(loop, FRAME_MS);
       return;
     }
-    prevFrame = out;
+    prevFrame = frameKey;
     process.stdout.write(ansi.syncStart + _title + ansi.home + ansi.clearBelow + out + ansi.syncEnd);
     setTimeout(loop, FRAME_MS);
   }
@@ -772,6 +792,6 @@ if (require.main === module) {
     IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
     PALETTES, PALETTE_NAMES,
     readState, ACTIVE_WORK_STATES, COMPLETION_STATES, FRESH_READ_STATES,
-    idleCascade, IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT, LONG_TOOL_HOLD_MS,
+    idleCascade, buildTitle, IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT, LONG_TOOL_HOLD_MS,
   };
 }
