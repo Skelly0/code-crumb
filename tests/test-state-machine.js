@@ -3076,24 +3076,36 @@ describe('update-state.js -- subagent session detection (isKnownSubagent)', () =
     } finally { cleanup(tmp); }
   });
 
-  test('a subagent PermissionRequest routes to its orbital, not the main face', () => {
-    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-I');
-    try {
-      seedSyntheticOrbital(sessionsDir, 'ownerI-sub-1', 'ownerI');
-      fsMod.writeFileSync(statsFile, JSON.stringify(
-        conductingStats('ownerI', 'ownerI-sub-1', Date.now() - 1000)), 'utf8');
+  // The three per-session interactive events are deliberately kept OUT of
+  // LIFECYCLE_EVENTS so that in subagent context they land on the agent's
+  // orbital instead of the main face. Each one is asserted separately: they
+  // are three independent Set memberships, not one.
+  const interactiveCases = [
+    ['PermissionRequest', { tool_name: 'Bash' }, 'waiting', 'allow Bash?'],
+    ['Elicitation', { mcp_server_name: 'srv' }, 'waiting', 'srv: needs input'],
+    ['ElicitationResult', { action: 'decline' }, 'relieved', 'input declined'],
+  ];
+  for (const [event, payload, state, detail] of interactiveCases) {
+    test(`a subagent ${event} routes to its orbital, not the main face`, () => {
+      const id = 'sub-I-' + event;
+      const { tmp, sessionsDir, statsFile, env } = makeTempEnv(id);
+      try {
+        seedSyntheticOrbital(sessionsDir, 'ownerI-sub-1', 'ownerI');
+        fsMod.writeFileSync(statsFile, JSON.stringify(
+          conductingStats('ownerI', 'ownerI-sub-1', Date.now() - 1000)), 'utf8');
 
-      runUpdateState('PermissionRequest', { session_id: 'sub-I', tool_name: 'Bash' }, env);
+        runUpdateState(event, { session_id: id, ...payload }, env);
 
-      const mine = readJSON(pathMod.join(sessionsDir, 'sub-I.json'));
-      assert.strictEqual(mine.state, 'waiting');
-      assert.strictEqual(mine.detail, 'allow Bash?');
-      assert.strictEqual(mine.parentSession, 'ownerI',
-        'PermissionRequest stays OUT of LIFECYCLE_EVENTS so it lands on the orbital');
-      assert.strictEqual(readJSON(statsFile).session.id, 'ownerI',
-        'and it does not reset the conductor session');
-    } finally { cleanup(tmp); }
-  });
+        const mine = readJSON(pathMod.join(sessionsDir, id + '.json'));
+        assert.strictEqual(mine.state, state);
+        assert.strictEqual(mine.detail, detail);
+        assert.strictEqual(mine.parentSession, 'ownerI',
+          `${event} must stay OUT of LIFECYCLE_EVENTS so it lands on the orbital`);
+        assert.strictEqual(readJSON(statsFile).session.id, 'ownerI',
+          'and it does not reset the conductor session');
+      } finally { cleanup(tmp); }
+    });
+  }
 });
 
 // -- New Hook Events (PreCompact, PostCompact, PermissionRequest, etc.) ------
@@ -3156,6 +3168,7 @@ describe('update-state.js -- new hook event handlers', () => {
     ['ConfigChange', { file_path: '/a/b/settings.json' }, 'reading', 'config: settings.json'],
     ['InstructionsLoaded', { file_path: '/x/CLAUDE.md' }, 'reading', 'CLAUDE.md'],
     ['StopFailure', { error: 'rate_limit' }, 'error', 'rate limited!'],
+    ['StopFailure', { error: 'server_error' }, 'error', 'server error'],
   ];
 
   let caseNo = 0;
