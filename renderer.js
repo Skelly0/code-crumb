@@ -34,6 +34,13 @@ const IDLE_TIMEOUT = 8000;
 const THINKING_TIMEOUT = 45000; // 45s -- safety net if Stop event is missed
 const SLEEP_TIMEOUT = 60000;
 const LONG_TOOL_HOLD_MS = 600000; // 10 min: the longest a single tool call can run
+// The `waiting` hold below is uncapped in display time, so it needs a bound of
+// its own -- and it cannot borrow the crash machinery: on win32 update-state.js
+// writes no `pid`, so `editorDead` never arms, and a hard-closed terminal never
+// gets to write `stopped`. State-file staleness is the one signal available on
+// every platform. 30 min is 3x LONG_TOOL_HOLD_MS -- far past any plausible
+// "reading the permission prompt" pause, short of stranding the face for hours.
+const WAIT_HOLD_STALE_MS = 1800000;
 
 // -- Hoisted sets for checkState() hot path ---------------------------
 const { ACTIVE_WORK_STATES, COMPLETION_STATES } = require('./shared');
@@ -51,7 +58,8 @@ const FRESH_READ_STATES = new Set(['thinking', ...ACTIVE_WORK_STATES, ...COMPLET
 //   sessionActive Stop has not fired and the editor PID is not known dead
 //   lingerMs      COMPLETION_LINGER for the current state (0 when it has none)
 //   fileState     the state last applied from the state file
-function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState }) {
+//   fileAgeMs     how long since the main session last wrote (0 when unknown)
+function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState, fileAgeMs }) {
   if (state === 'starting') return sinceChangeMs > 2500 ? 'idle' : null;
   if (state === 'responding' && !sessionActive) return 'happy';
   if (lingerMs && sinceChangeMs > lingerMs) return sessionActive ? 'thinking' : 'idle';
@@ -62,8 +70,13 @@ function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState 
   if (state === 'sleeping' || COMPLETION_STATES.has(state)) return null;
   // Waiting on the user is real whether or not the turn has ended -- an
   // idle_prompt notification arrives *after* Stop. So this hold ignores
-  // sessionActive and has no cap: the face waits as long as the user does.
-  if (state === 'waiting' && fileState === 'waiting') return null;
+  // sessionActive and never expires on display time: the face waits as long as
+  // the user does. It ends only when the state file itself goes stale, which is
+  // the only crash signal that exists on every platform (see WAIT_HOLD_STALE_MS).
+  // Degrade to idle, not thinking -- nothing was ever running.
+  if (state === 'waiting' && fileState === 'waiting') {
+    return (fileAgeMs || 0) > WAIT_HOLD_STALE_MS ? 'idle' : null;
+  }
   // The state file still names this same unfinished tool: hold the work face.
   // ('responding' is in ACTIVE_WORK_STATES but is a post-turn state, never a tool.)
   if (ACTIVE_WORK_STATES.has(state) && state !== 'responding' && sessionActive
@@ -397,6 +410,7 @@ function runUnifiedMode() {
       sessionActive,
       lingerMs: COMPLETION_LINGER[face.state] || 0,
       fileState: lastAppliedState,
+      fileAgeMs: now - lastMainUpdate,
     });
     if (next) face.setState(next);
   }
@@ -792,6 +806,7 @@ if (require.main === module) {
     IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
     PALETTES, PALETTE_NAMES,
     readState, ACTIVE_WORK_STATES, COMPLETION_STATES, FRESH_READ_STATES,
-    idleCascade, buildTitle, IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT, LONG_TOOL_HOLD_MS,
+    idleCascade, buildTitle, IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
+    LONG_TOOL_HOLD_MS, WAIT_HOLD_STALE_MS,
   };
 }

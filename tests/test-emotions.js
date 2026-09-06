@@ -561,7 +561,8 @@ describe('emotions -- catch-path parity for team events', () => {
 // -- The renderer's timeout cascade -------------------------------------
 
 const {
-  idleCascade, buildTitle, LONG_TOOL_HOLD_MS, IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
+  idleCascade, buildTitle, LONG_TOOL_HOLD_MS, WAIT_HOLD_STALE_MS,
+  IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
 } = require('../renderer');
 
 describe('emotions -- a long-running tool keeps its face', () => {
@@ -664,8 +665,8 @@ describe('emotions -- waiting on the user is held, not degraded', () => {
     assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: IDLE_TIMEOUT + 1, sessionActive: false, lingerMs: 0, fileState: 'waiting' }), null);
   });
 
-  test('the hold has no cap -- it outlives LONG_TOOL_HOLD_MS', () => {
-    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: LONG_TOOL_HOLD_MS * 2, sessionActive: true, lingerMs: 0, fileState: 'waiting' }), null);
+  test('the hold has no cap on how long the face has shown', () => {
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: LONG_TOOL_HOLD_MS * 2, sessionActive: true, lingerMs: 0, fileState: 'waiting', fileAgeMs: 1000 }), null);
   });
 
   test('waiting still degrades once the file names something else', () => {
@@ -675,6 +676,63 @@ describe('emotions -- waiting on the user is held, not degraded', () => {
 
   test('a completion linger still wins over the waiting hold', () => {
     assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: 5001, sessionActive: true, lingerMs: 5000, fileState: 'waiting' }), 'thinking');
+  });
+});
+
+describe('emotions -- the waiting hold is bounded by state-file staleness', () => {
+  // The hold cannot lean on the crash machinery: on win32 no `pid` is written,
+  // so `editorDead` never arms and `lastStopped` can never flip if the user
+  // hard-closes a terminal sitting on a permission prompt. Staleness of the
+  // state file is the one signal available on every platform.
+  const fresh = 60000;
+  const stale = WAIT_HOLD_STALE_MS + 1;
+
+  test('a fresh state file keeps the wait held', () => {
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: 600000, sessionActive: true, lingerMs: 0, fileState: 'waiting', fileAgeMs: fresh }), null);
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: 600000, sessionActive: false, lingerMs: 0, fileState: 'waiting', fileAgeMs: fresh }), null);
+  });
+
+  test('a stale state file degrades the wait to idle', () => {
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: 600000, sessionActive: true, lingerMs: 0, fileState: 'waiting', fileAgeMs: stale }), 'idle');
+  });
+
+  test('it degrades to idle even while the session looks active -- nothing is running', () => {
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: 600000, sessionActive: false, lingerMs: 0, fileState: 'waiting', fileAgeMs: stale }), 'idle');
+  });
+
+  test('the boundary itself still holds', () => {
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: 600000, sessionActive: true, lingerMs: 0, fileState: 'waiting', fileAgeMs: WAIT_HOLD_STALE_MS }), null);
+  });
+
+  test('a fresh write resets the clock', () => {
+    const args = { state: 'waiting', sinceChangeMs: 600000, sessionActive: true, lingerMs: 0, fileState: 'waiting' };
+    // Gone stale: the hold ends.
+    assert.strictEqual(idleCascade({ ...args, fileAgeMs: stale }), 'idle');
+    // The editor writes again (the renderer refreshes lastMainUpdate on every
+    // own-session read, so the age collapses) -- the hold is back.
+    assert.strictEqual(idleCascade({ ...args, fileAgeMs: 0 }), null);
+  });
+
+  test('an omitted fileAgeMs is treated as fresh', () => {
+    assert.strictEqual(idleCascade({ state: 'waiting', sinceChangeMs: 600000, sessionActive: true, lingerMs: 0, fileState: 'waiting' }), null);
+  });
+
+  test('the long-tool hold is untouched -- it has its own cap', () => {
+    // A stale file does not shorten the work hold; only LONG_TOOL_HOLD_MS does.
+    assert.strictEqual(idleCascade({ state: 'executing', sinceChangeMs: 30000, sessionActive: true, lingerMs: 0, fileState: 'executing', fileAgeMs: stale }), null);
+    assert.strictEqual(idleCascade({ state: 'executing', sinceChangeMs: LONG_TOOL_HOLD_MS + 1, sessionActive: true, lingerMs: 0, fileState: 'executing', fileAgeMs: 0 }), 'thinking');
+  });
+
+  test('WAIT_HOLD_STALE_MS is exported and generous enough for a human pause', () => {
+    assert.strictEqual(WAIT_HOLD_STALE_MS, 1800000);
+    assert.ok(WAIT_HOLD_STALE_MS > LONG_TOOL_HOLD_MS,
+      'the wait bound must outlast the longest sanctioned work hold');
+  });
+
+  test('the renderer feeds it the age of the last main-session write', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8');
+    assert.ok(/fileAgeMs: now - lastMainUpdate,/.test(src),
+      'checkState should pass the age of the last own-session write to idleCascade');
   });
 });
 
