@@ -2483,27 +2483,9 @@ describe('update-state.js -- touch active subagent files (Bug #3)', () => {
     } finally { cleanup(tmp); }
   });
 
-  test('_touchSessionFile refreshes an mtime with fs.utimesSync', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
-    );
-    const helperStart = src.indexOf('function _touchSessionFile(');
-    const helperEnd = src.indexOf('\n}\n', helperStart);
-    const helperBody = src.slice(helperStart, helperEnd);
-    assert.ok(helperStart > 0, 'should define _touchSessionFile');
-    assert.ok(helperBody.includes('fs.utimesSync'), 'should use fs.utimesSync to refresh mtime');
-  });
-
-  test('an agent event heartbeats its parent session file', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
-    );
-    assert.ok(src.includes('if (isAgentEvent) _touchSessionFile(sessionId);'),
-      "an agent write must touch the parent's file so the renderer can tell a "
-      + 'waiting conductor from a crashed one');
-  });
+  // _touchSessionFile's own utimesSync behaviour and the agent-write family
+  // heartbeat are covered by the two tests above plus, behaviourally,
+  // tests/test-subagents.js "agent writes heartbeat the parent session file".
 });
 
 // -- stripAnsi tests ------------------------------------------------
