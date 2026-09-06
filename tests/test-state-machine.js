@@ -44,6 +44,65 @@ const {
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
 
+// -- update-state.js subprocess helpers -------------------------------
+// The hook's bookkeeping -- stats counters, orbital files, synthetic
+// retirement, the catch path -- has no in-process entry point, so the blocks
+// below run the real script against a throwaway home and read what it wrote.
+
+const fsMod = require('fs');
+const pathMod = require('path');
+const { execFileSync } = require('child_process');
+const { makeTempEnv, cleanup, readJSON } = require('./_harness');
+
+const UPDATE_STATE = pathMod.join(__dirname, '..', 'update-state.js');
+
+// Raw stdin. '' is not JSON, so the hook falls into its catch path -- that is
+// the only way to reach the fallback handlers.
+function runUpdateStateRaw(event, input, env) {
+  try {
+    execFileSync(process.execPath, [UPDATE_STATE, event], {
+      input, env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    if (e.status !== 0 && e.status !== null) throw e;
+  }
+}
+
+function runUpdateState(event, inputObj, env) {
+  runUpdateStateRaw(event, JSON.stringify(inputObj), env);
+}
+
+// Stats blob for an owner session conducting one subagent.
+function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
+  return {
+    streak: 0, bestStreak: 0, brokenStreak: 0, brokenStreakAt: 0,
+    totalToolCalls: 5, totalErrors: 0,
+    records: { longestSession: 0, mostSubagents: 1, mostFilesEdited: 0 },
+    session: {
+      id: ownerId, start: Date.now() - 60000, toolCalls: 5, filesEdited: [],
+      subagentCount: 1, commitCount: 0,
+      activeSubagents: [{
+        id: subId, description: 'real task', taskDescription: 'real task',
+        model: 'haiku', editor: 'claude', startedAt: subStartedAt,
+      }],
+    },
+    recentMilestone: null,
+    daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
+    frequentFiles: {},
+    topLevelSessions,
+  };
+}
+
+function seedSyntheticOrbital(sessionsDir, subId, ownerId, over = {}) {
+  fsMod.mkdirSync(sessionsDir, { recursive: true });
+  fsMod.writeFileSync(pathMod.join(sessionsDir, `${subId}.json`), JSON.stringify({
+    session_id: subId, state: 'spawning', detail: 'real task',
+    timestamp: Date.now(), stopped: false,
+    parentSession: ownerId, taskDescription: 'real task', modelName: 'haiku',
+    ...over,
+  }), 'utf8');
+}
+
 describe('state-machine.js -- toolToState', () => {
   test('Edit → coding with filename', () => {
     const r = toolToState('Edit', { file_path: '/src/App.tsx' });
@@ -2291,108 +2350,73 @@ describe('state-machine.js -- extractExitCode (ANSI-aware)', () => {
 // SubagentStop; per-agent liveness is the renderer's job.
 
 describe('update-state.js -- activeSubagents ageing net', () => {
-  test('cleanup uses SUBAGENT_MAX_AGE_MS (4 hours), not the old 10-minute cut', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
-    );
-    assert.ok(
-      src.includes('const SUBAGENT_MAX_AGE_MS = 4 * 3600000'),
-      'update-state.js should define SUBAGENT_MAX_AGE_MS as 4 hours'
-    );
-    assert.ok(
-      src.includes('sub => Date.now() - sub.startedAt < SUBAGENT_MAX_AGE_MS'),
-      'activeSubagents cleanup should filter on SUBAGENT_MAX_AGE_MS'
-    );
-    assert.ok(
-      !src.includes('sub => Date.now() - sub.startedAt < 600000'),
-      'the 10-minute cut must be gone -- it dropped long-running agents'
-    );
-    assert.ok(
-      !src.includes('sub => Date.now() - sub.startedAt < 180000'),
-      'activeSubagents cleanup should NOT use 180000ms (3 min) timeout'
-    );
+  test('a 3-hour-old agent survives the sweep; a 5-hour-old one does not', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('age-owner');
+    try {
+      fsMod.mkdirSync(sessionsDir, { recursive: true });
+      const stats = conductingStats('age-owner', 'age-owner-sub-young', Date.now() - 3 * 3600000);
+      stats.session.activeSubagents.unshift({
+        id: 'age-owner-sub-old', description: 'long gone', taskDescription: 'long gone',
+        model: 'haiku', editor: 'claude', startedAt: Date.now() - 5 * 3600000,
+      });
+      fsMod.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+
+      runUpdateState('PreToolUse', {
+        session_id: 'age-owner', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+      }, env);
+
+      const ids = readJSON(statsFile).session.activeSubagents.map(s => s.id);
+      // The old 10-minute cut would have taken the 3-hour agent too.
+      assert.deepStrictEqual(ids, ['age-owner-sub-young'],
+        'only agents past SUBAGENT_MAX_AGE_MS (4h) are swept');
+    } finally { cleanup(tmp); }
   });
 });
 
 // -- Bug #111: Fallback SubagentStart creates orbital session file (Bug E) --
 
 describe('update-state.js -- fallback SubagentStart creates orbital (Bug E)', () => {
-  test('fallback SubagentStart path writes a session file', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
-    );
-    // The fallback handler for SubagentStart should call writeSessionState
-    // to create the orbital session file even when stdin is malformed
-    assert.ok(
-      src.includes("} else if (hookEvent === 'SubagentStart')"),
-      'update-state.js should have a fallback handler for SubagentStart'
-    );
-    // Verify it calls writeSessionState in that block
-    const subagentStartBlock = src.split("} else if (hookEvent === 'SubagentStart')")[1];
-    assert.ok(subagentStartBlock,
-      'SubagentStart fallback block should exist');
-    // The writeSessionState call should come before the next else-if
-    const blockContent = subagentStartBlock.split('} else if')[0];
-    assert.ok(
-      blockContent.includes('writeSessionState(subId,'),
-      'fallback SubagentStart should call writeSessionState to create orbital file'
-    );
-  });
+  test('unparseable stdin still writes a spawning orbital under the parent', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('test-session');
+    try {
+      runUpdateStateRaw('SubagentStart', '', env);
 
-  test('fallback SubagentStart includes parentSession and taskDescription', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
-    );
-    const subagentStartBlock = src.split("} else if (hookEvent === 'SubagentStart')")[1];
-    const blockContent = subagentStartBlock.split('} else if')[0];
-    assert.ok(blockContent.includes('parentSession:'),
-      'fallback SubagentStart should include parentSession in session data');
-    assert.ok(blockContent.includes('taskDescription:'),
-      'fallback SubagentStart should include taskDescription in session data');
+      const files = fsMod.readdirSync(sessionsDir)
+        .filter(f => f.startsWith('test-session-sub-') && f.endsWith('.json'));
+      assert.strictEqual(files.length, 1, 'the fallback path must create exactly one orbital');
+      const sub = readJSON(pathMod.join(sessionsDir, files[0]));
+      assert.strictEqual(sub.state, 'spawning');
+      assert.strictEqual(sub.parentSession, 'test-session');
+      assert.strictEqual(sub.taskDescription, 'subagent');
+    } finally { cleanup(tmp); }
   });
 });
 
 // -- Bug fix: Stop no longer kills background subagents (Bug #1) --
 
 describe('update-state.js -- Stop handler does not kill active subagents (Bug #1)', () => {
-  test('Stop handler does not write stopped:true to subagent sessions', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
-    );
-    // Find the Stop handler block
-    const stopBlock = src.split("hookEvent === 'Stop'")[1];
-    const stopContent = stopBlock.split("else if (hookEvent ===")[0];
-    // Should NOT contain the bulk subagent cleanup loop
-    assert.ok(
-      !stopContent.includes("for (const sub of stats.session.activeSubagents)"),
-      'Stop handler must not iterate activeSubagents to write stopped sessions'
-    );
-    assert.ok(
-      !stopContent.includes("stats.session.activeSubagents = []"),
-      'Stop handler must not clear activeSubagents array'
-    );
-  });
+  test('Stop leaves a background subagent running; SessionEnd retires it', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('stop-owner');
+    const subFile = pathMod.join(sessionsDir, 'stop-owner-sub-1.json');
+    try {
+      seedSyntheticOrbital(sessionsDir, 'stop-owner-sub-1', 'stop-owner');
+      fsMod.writeFileSync(statsFile, JSON.stringify(conductingStats(
+        'stop-owner', 'stop-owner-sub-1', Date.now() - 1000)), 'utf8');
 
-  test('SessionEnd handler still cleans up active subagents', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
-    );
-    // Find the SessionEnd handler block
-    const sessionEndBlock = src.split("hookEvent === 'SessionEnd'")[1];
-    const sessionEndContent = sessionEndBlock.split("else {")[0];
-    assert.ok(
-      sessionEndContent.includes("for (const sub of stats.session.activeSubagents)"),
-      'SessionEnd handler must iterate activeSubagents to clean up'
-    );
-    assert.ok(
-      sessionEndContent.includes("stats.session.activeSubagents = []"),
-      'SessionEnd handler must clear activeSubagents array'
-    );
+      // End of turn -- the agent may still be working.
+      runUpdateState('Stop', { session_id: 'stop-owner' }, env);
+      assert.strictEqual(readJSON(subFile).stopped, false,
+        'end of turn must not stop a background subagent');
+      assert.strictEqual(readJSON(statsFile).session.activeSubagents.length, 1,
+        'Stop must not clear activeSubagents');
+
+      // End of session -- now everything goes.
+      runUpdateState('SessionEnd', { session_id: 'stop-owner' }, env);
+      assert.strictEqual(readJSON(subFile).stopped, true,
+        'SessionEnd retires every remaining subagent');
+      assert.deepStrictEqual(readJSON(statsFile).session.activeSubagents, [],
+        'SessionEnd clears activeSubagents');
+    } finally { cleanup(tmp); }
   });
 });
 
@@ -2403,65 +2427,60 @@ describe('update-state.js -- Stop handler does not kill active subagents (Bug #1
 // touched -- a subagent mid-model-turn writes nothing of its own.
 
 describe('update-state.js -- touch active subagent files (Bug #3)', () => {
-  test('_touchActiveSubagents helper exists and the "skip newest" version is gone', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
-    );
-    assert.ok(
-      src.includes('function _touchActiveSubagents('),
-      'should define _touchActiveSubagents helper'
-    );
-    assert.ok(
-      !src.includes('_touchEarlierSubagents'),
-      'the all-but-newest helper must be gone'
-    );
+  // Both entries carry an agentId, so the parent never rewrites either orbital
+  // file (_writeSubagentToolState is skipped for agent-owned entries). Only the
+  // mtime touch can save them from the staleness purge -- which makes a
+  // refreshed mtime unambiguous evidence that every entry was touched.
+  function seedTwoAgedOrbitals(sessionsDir, statsFile, ownerId) {
+    seedSyntheticOrbital(sessionsDir, ownerId + '-sub-1', ownerId);
+    seedSyntheticOrbital(sessionsDir, ownerId + '-sub-2', ownerId);
+    const stats = conductingStats(ownerId, ownerId + '-sub-2', Date.now() - 1000);
+    stats.session.activeSubagents[0].agentId = 'agent-2';
+    stats.session.activeSubagents.unshift({
+      id: ownerId + '-sub-1', agentId: 'agent-1',
+      description: 'earlier', taskDescription: 'earlier',
+      model: 'haiku', editor: 'claude', startedAt: Date.now() - 2000,
+    });
+    fsMod.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+    const old = new Date(Date.now() - 600000);
+    for (const n of [1, 2]) {
+      const fp = pathMod.join(sessionsDir, `${ownerId}-sub-${n}.json`);
+      fsMod.utimesSync(fp, old, old);
+    }
+  }
+
+  function assertBothRefreshed(sessionsDir, ownerId, since) {
+    for (const n of [1, 2]) {
+      const fp = pathMod.join(sessionsDir, `${ownerId}-sub-${n}.json`);
+      const m = fsMod.statSync(fp).mtimeMs;
+      assert.ok(m >= since,
+        `sub-${n} mtime ${m} was not refreshed (expected >= ${since})`);
+    }
+  }
+
+  test('a PreToolUse refreshes every active orbital, newest included', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('touch-pre');
+    try {
+      seedTwoAgedOrbitals(sessionsDir, statsFile, 'touch-pre');
+      const since = Date.now() - 2000;
+      runUpdateState('PreToolUse', {
+        session_id: 'touch-pre', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+      }, env);
+      assertBothRefreshed(sessionsDir, 'touch-pre', since);
+    } finally { cleanup(tmp); }
   });
 
-  test('PreToolUse calls _touchActiveSubagents after _writeSubagentToolState', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
-    );
-    // Find PreToolUse block
-    const preBlock = src.split("hookEvent === 'PreToolUse'")[1];
-    const preContent = preBlock.split("hookEvent === 'PostToolUse'")[0];
-    const writeIdx = preContent.indexOf('_writeSubagentToolState(latest');
-    const touchIdx = preContent.indexOf('_touchActiveSubagents(');
-    assert.ok(writeIdx >= 0, 'PreToolUse should call _writeSubagentToolState');
-    assert.ok(touchIdx >= 0, 'PreToolUse should call _touchActiveSubagents');
-    assert.ok(touchIdx > writeIdx, '_touchActiveSubagents should come after _writeSubagentToolState');
-  });
-
-  test('PostToolUse calls _touchActiveSubagents after _writeSubagentToolState', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
-    );
-    // Find PostToolUse block
-    const postBlock = src.split("hookEvent === 'PostToolUse'")[1];
-    const postContent = postBlock.split("hookEvent === 'Stop'")[0];
-    const writeIdx = postContent.indexOf('_writeSubagentToolState(latest');
-    const touchIdx = postContent.indexOf('_touchActiveSubagents(');
-    assert.ok(writeIdx >= 0, 'PostToolUse should call _writeSubagentToolState');
-    assert.ok(touchIdx >= 0, 'PostToolUse should call _touchActiveSubagents');
-    assert.ok(touchIdx > writeIdx, '_touchActiveSubagents should come after _writeSubagentToolState');
-  });
-
-  test('_touchActiveSubagents touches every entry via _touchSessionFile', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
-    );
-    const helperStart = src.indexOf('function _touchActiveSubagents(');
-    const helperEnd = src.indexOf('\n}\n', helperStart);
-    const helperBody = src.slice(helperStart, helperEnd);
-    assert.ok(helperBody.includes('_touchSessionFile('),
-      'should delegate to the shared _touchSessionFile helper');
-    assert.ok(helperBody.includes('i < activeSubagents.length;'),
-      'should iterate the whole list, not stop one short of the newest');
-    assert.ok(!helperBody.includes('length - 1'),
-      'the skip-the-newest bound must be gone');
+  test('a PostToolUse refreshes every active orbital too', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('touch-post');
+    try {
+      seedTwoAgedOrbitals(sessionsDir, statsFile, 'touch-post');
+      const since = Date.now() - 2000;
+      runUpdateState('PostToolUse', {
+        session_id: 'touch-post', tool_name: 'Read',
+        tool_input: { file_path: 'a.js' }, tool_response: {},
+      }, env);
+      assertBothRefreshed(sessionsDir, 'touch-post', since);
+    } finally { cleanup(tmp); }
   });
 
   test('_touchSessionFile refreshes an mtime with fs.utimesSync', () => {
