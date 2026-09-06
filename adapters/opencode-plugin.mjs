@@ -90,28 +90,30 @@ function translate(hook, input, output) {
         return null;
     }
   }
+  const i = input || {};
+  const o = output || {};
   if (hook === 'tool.execute.before') {
     return {
       type: 'tool.execute.before',
-      sessionId: input.sessionID,
-      callID: input.callID,
-      tool: input.tool,
-      toolInput: (output && output.args) || {},
+      sessionId: i.sessionID,
+      callID: i.callID,
+      tool: i.tool,
+      toolInput: o.args || {},
     };
   }
   if (hook === 'tool.execute.after') {
     return {
       type: 'tool.execute.after',
-      sessionId: input.sessionID,
-      callID: input.callID,
-      tool: input.tool,
-      toolInput: input.args || {},
-      title: output && output.title,
-      output: typeof (output && output.output) === 'string' ? output.output.slice(0, MAX_OUTPUT) : '',
+      sessionId: i.sessionID,
+      callID: i.callID,
+      tool: i.tool,
+      toolInput: i.args || {},
+      title: o.title,
+      output: typeof o.output === 'string' ? o.output.slice(0, MAX_OUTPUT) : '',
     };
   }
   if (hook === 'permission.ask') {
-    return { type: 'permission.asked', sessionId: input.sessionID, title: input.title || input.type };
+    return { type: 'permission.asked', sessionId: i.sessionID, title: i.title || i.type };
   }
   return null;
 }
@@ -143,21 +145,43 @@ const SYNC_TYPES = new Set(['session.idle', 'session.error']);
 // than a cold Node start on Windows, so its writes were killed mid-flight.
 const SYNC_CAP_MS = 5000;
 
+// A reasoning part is republished on every streaming delta -- dozens per
+// message. The face says the same thing for all of them, so collapse a burst
+// into one write instead of paying a cold Node start and a stats
+// read-modify-write per chunk. A long stream still refreshes itself often
+// enough to stay ahead of the renderer's 45s thinking timeout.
+const THROTTLE_MS = 5000;
+const THROTTLED_TYPES = new Set(['thinking']);
+// One entry per streaming session; cleared wholesale rather than pruned,
+// since a stale entry only costs one extra write.
+const MAX_THROTTLE_KEYS = 64;
+const lastSentAt = new Map();
+
+function throttled(payload, now) {
+  if (!THROTTLED_TYPES.has(payload.type)) return false;
+  const key = `${payload.type}:${payload.sessionId || ''}`;
+  if (now - (lastSentAt.get(key) || 0) < THROTTLE_MS) return true;
+  if (lastSentAt.size >= MAX_THROTTLE_KEYS) lastSentAt.clear();
+  lastSentAt.set(key, now);
+  return false;
+}
+
+// Returns whether the payload was handed to a child process. OpenCode
+// ignores what a hook resolves to; the tests use it to count sends.
 function send(payload) {
-  if (!payload) return;
-  const json = JSON.stringify(payload);
-  if (SYNC_TYPES.has(payload.type)) {
-    try {
+  if (!payload) return false;
+  try {
+    if (throttled(payload, Date.now())) return false;
+    const json = JSON.stringify(payload);
+    if (SYNC_TYPES.has(payload.type)) {
       spawnSync(NODE, [ADAPTER], {
         input: json,
         stdio: ['pipe', 'ignore', 'ignore'],
         windowsHide: true,
         timeout: SYNC_CAP_MS,
       });
-    } catch {}
-    return;
-  }
-  try {
+      return true;
+    }
     const child = spawn(NODE, [ADAPTER], {
       stdio: ['pipe', 'ignore', 'ignore'],
       windowsHide: true,
@@ -165,18 +189,32 @@ function send(payload) {
     child.on('error', () => {});
     child.stdin.on('error', () => {});
     child.stdin.end(json);
-  } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // -- Plugin -------------------------------------------------------------
 // Exactly one export, and it is a plugin factory: see the note on
 // translate() above.
 
+// Total by construction. OpenCode awaits the tool.execute.* hooks, so a
+// throw or a rejection here would surface inside the editor -- whatever the
+// payload looks like, a broken face stays the face's problem.
+async function dispatch(hook, input, output) {
+  try {
+    return send(translate(hook, input, output));
+  } catch {
+    return false;
+  }
+}
+
 export const CodeCrumbPlugin = async () => ({
-  event: async (input) => send(translate('event', input)),
-  'tool.execute.before': async (input, output) => send(translate('tool.execute.before', input, output)),
-  'tool.execute.after': async (input, output) => send(translate('tool.execute.after', input, output)),
-  'permission.ask': async (input, output) => send(translate('permission.ask', input, output)),
+  event: async (input) => dispatch('event', input),
+  'tool.execute.before': async (input, output) => dispatch('tool.execute.before', input, output),
+  'tool.execute.after': async (input, output) => dispatch('tool.execute.after', input, output),
+  'permission.ask': async (input, output) => dispatch('permission.ask', input, output),
 });
 
 // Test seam: a static property is invisible to the plugin loader.

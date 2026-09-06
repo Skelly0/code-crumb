@@ -376,6 +376,16 @@ describe('adapters -- opencode-plugin translate()', () => {
   const load = async () => ({ translate: (await loadModule()).CodeCrumbPlugin.translate });
   const bus = (type, properties) => ({ event: { type, properties } });
 
+  // A fresh module instance -- the query string busts the ESM cache -- so a
+  // test that exercises the delivery path gets its own throttle state and
+  // cannot colour another test's. (Do not swap CODE_CRUMB_NODE around this:
+  // module evaluation is async, and a sibling test's import would read the
+  // swapped value.)
+  const loadIsolated = (tag) => import(`${require('url').pathToFileURL(PLUGIN_FILE).href}?t=${tag}`);
+  const reasoning = (sessionID) => bus('message.part.updated', {
+    part: { type: 'reasoning', sessionID, text: 'weighing options' },
+  });
+
   test.async('session.created reads properties.info.id', async () => {
     const { translate } = await load();
     const out = translate('event', bus('session.created', { info: { id: 'ses_1' } }));
@@ -544,6 +554,65 @@ describe('adapters -- opencode-plugin translate()', () => {
     await hooks.event({ event: { type: 'lsp.updated', properties: {} } });
   });
 
+  // OpenCode awaits the tool.execute.* hooks, so anything that escapes a
+  // hook surfaces inside the editor. Every hook must be total, whatever it
+  // is handed: missing arguments, a null event, a getter that throws, or a
+  // payload JSON.stringify cannot serialise.
+  test.async('every hook is total: hostile input never throws or rejects', async () => {
+    const { CodeCrumbPlugin } = await loadIsolated('hostile');
+    const hooks = await CodeCrumbPlugin();
+    const names = ['event', 'tool.execute.before', 'tool.execute.after', 'permission.ask'];
+    const landmine = {
+      get event() { throw new Error('boom'); },
+      get sessionID() { throw new Error('boom'); },
+      get tool() { throw new Error('boom'); },
+      get args() { throw new Error('boom'); },
+      get title() { throw new Error('boom'); },
+      get output() { throw new Error('boom'); },
+    };
+    const cases = [
+      undefined, null, {}, { event: null }, { event: {} },
+      { event: { type: 'message.part.updated', properties: null } },
+      { event: { type: 'message.part.updated', properties: { part: null } } },
+      landmine,
+    ];
+    for (const c of cases) {
+      for (const name of names) {
+        const result = await hooks[name](c, c);
+        assert.strictEqual(typeof result, 'boolean', `${name} must resolve, not reject`);
+      }
+    }
+
+    // JSON.stringify throws on a cycle: that must be dropped, not raised.
+    const cyclic = { args: {} };
+    cyclic.args.self = cyclic;
+    assert.strictEqual(
+      await hooks['tool.execute.before']({ sessionID: 'ses_1', tool: 'edit', callID: 'c1' }, cyclic),
+      false, 'an unserialisable payload must be dropped');
+  });
+
+  // A reasoning part is republished on every streaming delta. One cold Node
+  // start (plus a stats read-modify-write) per chunk is load this project
+  // never had before the plugin existed.
+  test.async('a burst of reasoning deltas collapses into a single send', async () => {
+    const { CodeCrumbPlugin } = await loadIsolated('throttle');
+    const hooks = await CodeCrumbPlugin();
+
+    let sent = 0;
+    for (let i = 0; i < 20; i++) {
+      if (await hooks.event(reasoning('ses_burst'))) sent++;
+    }
+    assert.strictEqual(sent, 1, 'one send per burst, not one per delta');
+
+    // The throttle is per session, and only reasoning is throttled.
+    assert.strictEqual(await hooks.event(reasoning('ses_other')), true,
+      'another session must not inherit the first one\'s throttle');
+    const before = { sessionID: 'ses_burst', tool: 'read', callID: 'c1' };
+    assert.strictEqual(await hooks['tool.execute.before'](before, { args: {} }), true);
+    assert.strictEqual(await hooks['tool.execute.before'](before, { args: {} }), true,
+      'tool events are never collapsed');
+  });
+
   // Measured against opencode 1.18.21: `opencode run` exits the instant the
   // turn ends, and a child spawned microseconds earlier dies with it -- the
   // session.idle write never landed, so the face stayed on thinking and the
@@ -592,8 +661,7 @@ describe('adapters -- opencode-plugin structure', () => {
       'everything else must go through the async spawn');
   });
 
-  test('never throws out of a hook', () => {
-    assert.ok(/catch/.test(src), 'send() must swallow its own failures');
+  test('a failed spawn is handled rather than left to reject', () => {
     assert.ok(src.includes("child.on('error'"), 'a failed spawn must not reject');
   });
 });
