@@ -43,6 +43,32 @@ function runStdinAdapter(adapterFile, inputObj, env) {
   }
 }
 
+const UPDATE_STATE_JS = path.join(__dirname, '..', 'update-state.js');
+
+// Run one Claude Code hook against a temp home. `input` may be an object
+// (JSON encoded) or a raw string, so '' and 'not json' reach the catch path
+// that handles Stop/Notification/lifecycle events with no parsable stdin.
+function runUpdateState(event, input, env, extraArgs = []) {
+  try {
+    execFileSync(NODE, [UPDATE_STATE_JS, event, ...extraArgs], {
+      input: typeof input === 'string' ? input : JSON.stringify(input),
+      env,
+      timeout: 10000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    if (e.status !== 0 && e.status !== null) throw e;
+  }
+}
+
+// Seed a per-session orbital file inside a temp home.
+function seedSession(sessionsDir, sessionId, fields) {
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(path.join(sessionsDir, `${sessionId}.json`), JSON.stringify({
+    session_id: sessionId, timestamp: Date.now(), ...fields,
+  }), 'utf8');
+}
+
 // Run `fn` with the shared STATE_FILE (which test.js has already redirected
 // into the throwaway home) holding `data`, then put back whatever was there.
 // For in-process readers -- shared.js fixes its paths at first require, so a
@@ -2223,37 +2249,103 @@ describe('bug fix regressions', () => {
 // -- Stopped flag preservation (#98) ----------------------------------------
 
 describe('update-state.js stopped flag preservation (#98)', () => {
-  const updateStatePath = path.join(__dirname, '..', 'update-state.js');
-  const sharedMod = require(path.join(__dirname, '..', 'shared'));
-  const STATE_FILE = sharedMod.STATE_FILE;
-  const SESSIONS_DIR = sharedMod.SESSIONS_DIR;
-  const safeFilename = sharedMod.safeFilename;
+  test('a late PostToolUse keeps the stopped flag on the global state file', () => {
+    // Stop already released ownership; a tool result that lands afterwards
+    // must not resurrect the session and hold the main face hostage.
+    const { tmp, stateFile, env } = makeTempEnv('stop-global');
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'responding', detail: 'wrapping up',
+      timestamp: Date.now(), sessionId: 'stop-global', stopped: true,
+    }), 'utf8');
 
-  // Save and restore state file (integration tests write to the real file)
-  let savedStoppedState;
-  try { savedStoppedState = fs.readFileSync(STATE_FILE, 'utf8'); } catch { savedStoppedState = null; }
+    runUpdateState('PostToolUse', {
+      tool_name: 'Write', tool_input: { file_path: '/tmp/test.txt' },
+      tool_result: { stdout: 'ok' }, session_id: 'stop-global',
+    }, env);
 
-  test('source: global state file read preserves stopped flag for same session', () => {
-    const src = fs.readFileSync(updateStatePath, 'utf8');
-    assert.ok(
-      src.includes('existing.stopped && existing.sessionId === sessionId && !stopped'),
-      'update-state.js should check existing.stopped for same session and preserve it'
-    );
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.stopped, true,
+      'stopped must survive a late PostToolUse from the same session');
+    cleanup(tmp);
   });
 
-  test('source: session file read preserves stopped flag before writeSessionState', () => {
-    const src = fs.readFileSync(updateStatePath, 'utf8');
-    assert.ok(
-      src.includes('existingSession.stopped'),
-      'update-state.js should read existing session file and preserve stopped flag'
-    );
+  test('a late PostToolUse keeps the stopped flag on the session file', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('stop-session');
+    seedSession(sessionsDir, 'stop-session', {
+      state: 'responding', detail: 'wrapping up', stopped: true,
+    });
+
+    runUpdateState('PostToolUse', {
+      tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
+      tool_result: { stdout: 'ok' }, session_id: 'stop-session',
+    }, env);
+
+    const session = readJSON(path.join(sessionsDir, 'stop-session.json'));
+    assert.strictEqual(session.stopped, true,
+      'the orbital must not come back to life on a late tool result');
+    cleanup(tmp);
   });
 
-  test('source: renderer lastStopped resets when same session sends non-stopped state', () => {
+  test('a subagent carrying a parentSession never writes the global state file', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('sub-blocked');
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'thinking', detail: 'planning',
+      timestamp: Date.now(), sessionId: 'main-owner', stopped: true,
+    }), 'utf8');
+    // What SubagentStart leaves behind before the subagent's first own hook.
+    seedSession(sessionsDir, 'sub-blocked', {
+      state: 'spawning', detail: 'subagent', parentSession: 'main-owner',
+    });
+
+    runUpdateState('PreToolUse', {
+      tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
+      session_id: 'sub-blocked',
+    }, env);
+
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.sessionId, 'main-owner',
+      'a subagent must not take the main face even when the owner has stopped');
+    assert.strictEqual(state.state, 'thinking');
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'sub-blocked.json')).state, 'reading',
+      'it still updates its own orbital');
+    cleanup(tmp);
+  });
+
+  test('the empty-stdin fallback blocks a subagent from the global state file too', () => {
+    // The catch path (Stop with no parsable stdin) has its own copy of the
+    // parentSession guard. It once compared the adopted owner id against
+    // itself, so it always passed and a subagent Stop stole the main face.
+    // The state file is owned by the subagent's OWN id here, so only the
+    // parentSession guard can stop the write.
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('sub-fallback');
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'coding', detail: 'editing app.js',
+      timestamp: Date.now(), sessionId: 'sub-fallback', stopped: false,
+    }), 'utf8');
+    seedSession(sessionsDir, 'sub-fallback', {
+      state: 'spawning', detail: 'subagent', parentSession: 'main-owner',
+    });
+
+    runUpdateState('Stop', '', env);
+
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'coding',
+      'a subagent Stop must not write responding/wrapping-up over the main face');
+    assert.strictEqual(state.stopped, false,
+      'nor release ownership for the main session');
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'sub-fallback.json')).state, 'idle',
+      'the subagent orbital still goes idle between turns');
+    cleanup(tmp);
+  });
+
+  // Kept as source checks: both live inside the renderer's 15fps loop, which
+  // the suite has no harness for. They are one-way-latch regressions -- the
+  // shape of the comparison is the whole fix.
+  test('source: renderer lastStopped tracks the flag instead of latching on', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
     assert.ok(
       src.includes('lastStopped = !!stateData.stopped'),
-      'renderer.js should reset lastStopped when state file has no stopped flag'
+      'renderer.js should reset lastStopped when the state file has no stopped flag'
     );
     assert.ok(
       !src.includes('if (stateData.stopped) lastStopped = true'),
@@ -2272,336 +2364,88 @@ describe('update-state.js stopped flag preservation (#98)', () => {
       'renderer.js should not have the old bidirectional stoppedNow !== lastStopped check'
     );
   });
-
-  test('source: update-state.js blocks subagents with parentSession from global state writes', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
-    const pattern = 'mySession.parentSession) shouldWriteGlobal = false';
-    const matches = src.split(pattern).length - 1;
-    assert.ok(matches >= 2,
-      `update-state.js should have parentSession guard in both main and fallback paths (found ${matches})`);
-  });
-
-  test('integration: PostToolUse after Stop preserves stopped in global state file', () => {
-    // Write a stopped state file simulating a Stop event
-    const testSessionId = 'test-stopped-' + Date.now();
-    const stoppedState = JSON.stringify({
-      state: 'responding', detail: 'wrapping up',
-      timestamp: Date.now(), sessionId: testSessionId, stopped: true,
-    });
-    try { fs.writeFileSync(STATE_FILE, stoppedState, 'utf8'); } catch { return; }
-
-    // Simulate a late PostToolUse by spawning update-state.js
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'PostToolUse'], {
-        input: JSON.stringify({
-          tool_name: 'Write', tool_input: { file_path: '/tmp/test.txt' },
-          tool_result: { stdout: 'ok' }, session_id: testSessionId,
-        }),
-        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Read the state file back — stopped must still be true
-    try {
-      const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      assert.strictEqual(result.stopped, true,
-        'stopped flag must be preserved after late PostToolUse for same session');
-    } catch (e) {
-      // If the file can't be read (e.g. permissions), skip gracefully
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    }
-  });
-
-  test('integration: PostToolUse after Stop preserves stopped in session file', () => {
-    const testSessionId = 'test-session-stopped-' + Date.now();
-    const sessionFile = path.join(SESSIONS_DIR, safeFilename(testSessionId) + '.json');
-
-    // Write a stopped session file
-    try {
-      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-      fs.writeFileSync(sessionFile, JSON.stringify({
-        session_id: testSessionId, state: 'responding', detail: 'wrapping up',
-        timestamp: Date.now(), stopped: true,
-      }), 'utf8');
-    } catch { return; }
-
-    // Simulate late PostToolUse
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'PostToolUse'], {
-        input: JSON.stringify({
-          tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
-          tool_result: { stdout: 'ok' }, session_id: testSessionId,
-        }),
-        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Session file must still have stopped: true
-    try {
-      const result = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
-      assert.strictEqual(result.stopped, true,
-        'session file stopped flag must be preserved after late PostToolUse');
-    } catch (e) {
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    } finally {
-      try { fs.unlinkSync(sessionFile); } catch {}
-    }
-  });
-
-  test('integration: subagent with parentSession is blocked from global state writes', () => {
-    // Set up: main session owns the global state file
-    const mainId = 'test-main-' + Date.now();
-    const subId = 'test-sub-' + Date.now();
-    const mainState = JSON.stringify({
-      state: 'thinking', detail: 'planning',
-      timestamp: Date.now(), sessionId: mainId, stopped: true,
-    });
-    try { fs.writeFileSync(STATE_FILE, mainState, 'utf8'); } catch { return; }
-
-    // Create a session file for the subagent with parentSession set
-    // (simulates what SubagentStart does before the subagent's first hook)
-    const subSessionFile = path.join(SESSIONS_DIR, safeFilename(subId) + '.json');
-    try {
-      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-      fs.writeFileSync(subSessionFile, JSON.stringify({
-        session_id: subId, state: 'spawning', detail: 'subagent',
-        timestamp: Date.now(), parentSession: mainId,
-      }), 'utf8');
-    } catch { return; }
-
-    // Spawn update-state.js as the subagent sending a PreToolUse
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'PreToolUse'], {
-        input: JSON.stringify({
-          tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
-          session_id: subId,
-        }),
-        env: { ...process.env, CLAUDE_SESSION_ID: subId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Global state file must still belong to main session — subagent was blocked
-    try {
-      const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      assert.strictEqual(result.sessionId, mainId,
-        'subagent with parentSession must not overwrite global state file');
-    } catch (e) {
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    } finally {
-      try { fs.unlinkSync(subSessionFile); } catch {}
-    }
-  });
-
-  // Restore the state file as it was before this block ran.
-  if (savedStoppedState !== null) fs.writeFileSync(STATE_FILE, savedStoppedState, 'utf8');
-  else try { fs.unlinkSync(STATE_FILE); } catch {}
 });
 
 describe('update-state.js parallel sessions orbital visibility fix', () => {
-  const updateStatePath = path.join(__dirname, '..', 'update-state.js');
-  const sharedMod = require(path.join(__dirname, '..', 'shared'));
-  const STATE_FILE = sharedMod.STATE_FILE;
-  const SESSIONS_DIR = sharedMod.SESSIONS_DIR;
-  const safeFilename = sharedMod.safeFilename;
+  test('PreToolUse after a Stop clears stopped on both files (a new turn began)', () => {
+    // Preservation is deliberately limited to PostToolUse/PostToolUseFailure,
+    // the events that can legitimately arrive after a Stop. Anything else --
+    // PreToolUse first among them -- means a new turn, so the flag must go.
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('pre-clears');
+    seedSession(sessionsDir, 'pre-clears', {
+      state: 'responding', detail: 'wrapping up', stopped: true,
+    });
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'responding', detail: 'wrapping up',
+      timestamp: Date.now(), sessionId: 'pre-clears', stopped: true,
+    }), 'utf8');
 
-  // Save and restore state file
-  let savedOrbitalState;
-  try { savedOrbitalState = fs.readFileSync(STATE_FILE, 'utf8'); } catch { savedOrbitalState = null; }
+    runUpdateState('PreToolUse', {
+      tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
+      session_id: 'pre-clears',
+    }, env);
 
-  // -- Source tests: hookEvent guard on stopped preservation --
-
-  test('source: global stopped preservation is restricted to PostToolUse/PostToolUseFailure', () => {
-    const src = fs.readFileSync(updateStatePath, 'utf8');
-    // The stopped preservation block must check hookEvent
-    assert.ok(
-      src.includes("hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure'"),
-      'stopped preservation must be gated on PostToolUse/PostToolUseFailure hookEvent'
-    );
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'pre-clears.json')).stopped, false,
+      'PreToolUse must clear stopped on the per-session file');
+    assert.ok(!readJSON(stateFile).stopped,
+      'and on the global state file, so the renderer stops rescuing');
+    cleanup(tmp);
   });
 
-  test('source: per-session stopped preservation is restricted to PostToolUse/PostToolUseFailure', () => {
-    const src = fs.readFileSync(updateStatePath, 'utf8');
-    // Both global and session preservation blocks should have the hookEvent guard
-    const matches = src.match(/hookEvent === 'PostToolUse' \|\| hookEvent === 'PostToolUseFailure'/g);
-    assert.ok(matches && matches.length >= 2,
-      'both global and per-session stopped preservation must have hookEvent guard');
+  test('Stop leaves the orbital idle between turns, not stopped', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('stop-idle');
+    seedSession(sessionsDir, 'stop-idle', { state: 'coding', detail: 'editing', stopped: false });
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'coding', detail: 'editing', timestamp: Date.now(), sessionId: 'stop-idle',
+    }), 'utf8');
+
+    runUpdateState('Stop', { session_id: 'stop-idle' }, env);
+
+    const session = readJSON(path.join(sessionsDir, 'stop-idle.json'));
+    assert.strictEqual(session.state, 'idle', 'Stop is the end of a turn, not the session');
+    assert.strictEqual(session.detail, 'between turns');
+    assert.strictEqual(session.stopped, false, 'the orbital stays visible');
+    assert.strictEqual(readJSON(stateFile).stopped, true,
+      'the global state file still releases ownership');
+    cleanup(tmp);
   });
 
-  test('source: Stop writes idle to per-session file (not stopped)', () => {
-    const src = fs.readFileSync(updateStatePath, 'utf8');
-    assert.ok(
-      src.includes("hookEvent === 'Stop'") && src.includes("'idle', 'between turns', false"),
-      'Stop handler should write idle/between-turns/stopped=false to per-session file'
-    );
+  test('SessionEnd does retire the orbital', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('sess-end');
+    seedSession(sessionsDir, 'sess-end', { state: 'coding', detail: 'editing', stopped: false });
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'coding', detail: 'editing', timestamp: Date.now(), sessionId: 'sess-end',
+    }), 'utf8');
+
+    runUpdateState('SessionEnd', { session_id: 'sess-end' }, env);
+
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'sess-end.json')).stopped, true,
+      'SessionEnd must write stopped=true to the per-session file');
+    cleanup(tmp);
   });
 
-  test('source: fallback catch separates Stop from SessionEnd', () => {
-    const src = fs.readFileSync(updateStatePath, 'utf8');
-    // Should NOT have the combined condition anymore
-    assert.ok(
-      !src.includes("hookEvent === 'Stop' || hookEvent === 'SessionEnd'"),
-      'fallback catch must not combine Stop and SessionEnd in the same condition'
-    );
+  test('the empty-stdin fallback tells Stop and SessionEnd apart', () => {
+    // They used to share one condition, so a plain Stop retired the orbital
+    // and the parallel window vanished from the ellipse for the rest of the
+    // session. Same input, same code path, only the hook name differs.
+    const stop = makeTempEnv('fb-stop');
+    seedSession(stop.sessionsDir, 'fb-stop', { state: 'coding', detail: 'editing', stopped: false });
+    runUpdateState('Stop', '', stop.env);
+    const afterStop = readJSON(path.join(stop.sessionsDir, 'fb-stop.json'));
+    assert.strictEqual(afterStop.state, 'idle');
+    assert.strictEqual(afterStop.detail, 'between turns');
+    assert.strictEqual(afterStop.stopped, false, 'a turn ending must not retire the orbital');
+    cleanup(stop.tmp);
+
+    const end = makeTempEnv('fb-end');
+    seedSession(end.sessionsDir, 'fb-end', { state: 'coding', detail: 'editing', stopped: false });
+    runUpdateState('SessionEnd', '', end.env);
+    const afterEnd = readJSON(path.join(end.sessionsDir, 'fb-end.json'));
+    assert.strictEqual(afterEnd.state, 'responding');
+    assert.strictEqual(afterEnd.detail, 'session ending');
+    assert.strictEqual(afterEnd.stopped, true, 'only SessionEnd retires it');
+    cleanup(end.tmp);
   });
-
-  // -- Integration tests: PreToolUse clears stopped --
-
-  test('integration: PreToolUse after Stop clears stopped on per-session file', () => {
-    const testSessionId = 'test-pretool-clears-' + Date.now();
-    const sessionFile = path.join(SESSIONS_DIR, safeFilename(testSessionId) + '.json');
-
-    // Write a stopped session file (simulating a prior Stop)
-    try {
-      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-      fs.writeFileSync(sessionFile, JSON.stringify({
-        session_id: testSessionId, state: 'responding', detail: 'wrapping up',
-        timestamp: Date.now(), stopped: true,
-      }), 'utf8');
-      // Also write a stopped global state for same session
-      fs.writeFileSync(STATE_FILE, JSON.stringify({
-        state: 'responding', detail: 'wrapping up',
-        timestamp: Date.now(), sessionId: testSessionId, stopped: true,
-      }), 'utf8');
-    } catch { return; }
-
-    // Send PreToolUse (new turn starting) — should clear stopped
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'PreToolUse'], {
-        input: JSON.stringify({
-          tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
-          session_id: testSessionId,
-        }),
-        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Per-session file must NOT have stopped: true
-    try {
-      const result = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
-      assert.strictEqual(result.stopped, false,
-        'PreToolUse must clear stopped flag on per-session file (new turn)');
-    } catch (e) {
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    } finally {
-      try { fs.unlinkSync(sessionFile); } catch {}
-    }
-  });
-
-  test('integration: Stop writes idle with stopped=false to per-session file', () => {
-    const testSessionId = 'test-stop-idle-' + Date.now();
-    const sessionFile = path.join(SESSIONS_DIR, safeFilename(testSessionId) + '.json');
-
-    // Write an active session file first
-    try {
-      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-      fs.writeFileSync(sessionFile, JSON.stringify({
-        session_id: testSessionId, state: 'coding', detail: 'editing',
-        timestamp: Date.now(), stopped: false,
-      }), 'utf8');
-      fs.writeFileSync(STATE_FILE, JSON.stringify({
-        state: 'coding', detail: 'editing',
-        timestamp: Date.now(), sessionId: testSessionId,
-      }), 'utf8');
-    } catch { return; }
-
-    // Send Stop event
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'Stop'], {
-        input: JSON.stringify({ session_id: testSessionId }),
-        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Per-session file: state=idle, stopped=false (orbital stays visible)
-    try {
-      const result = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
-      assert.strictEqual(result.state, 'idle',
-        'Stop should write state=idle to per-session file');
-      assert.strictEqual(result.stopped, false,
-        'Stop should write stopped=false to per-session file (keep orbital visible)');
-      assert.strictEqual(result.detail, 'between turns',
-        'Stop should write detail="between turns" to per-session file');
-    } catch (e) {
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    } finally {
-      try { fs.unlinkSync(sessionFile); } catch {}
-    }
-  });
-
-  test('integration: SessionEnd still writes stopped=true to per-session file', () => {
-    const testSessionId = 'test-sessend-stopped-' + Date.now();
-    const sessionFile = path.join(SESSIONS_DIR, safeFilename(testSessionId) + '.json');
-
-    // Write an active session file
-    try {
-      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-      fs.writeFileSync(sessionFile, JSON.stringify({
-        session_id: testSessionId, state: 'coding', detail: 'editing',
-        timestamp: Date.now(), stopped: false,
-      }), 'utf8');
-      fs.writeFileSync(STATE_FILE, JSON.stringify({
-        state: 'coding', detail: 'editing',
-        timestamp: Date.now(), sessionId: testSessionId,
-      }), 'utf8');
-    } catch { return; }
-
-    // Send SessionEnd event
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'SessionEnd'], {
-        input: JSON.stringify({ session_id: testSessionId }),
-        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Per-session file: stopped=true (session truly over)
-    try {
-      const result = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
-      assert.strictEqual(result.stopped, true,
-        'SessionEnd must write stopped=true to per-session file');
-    } catch (e) {
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    } finally {
-      try { fs.unlinkSync(sessionFile); } catch {}
-    }
-  });
-
-  test('integration: Stop writes stopped=true to global state file (ownership release)', () => {
-    const testSessionId = 'test-stop-global-' + Date.now();
-
-    try {
-      fs.writeFileSync(STATE_FILE, JSON.stringify({
-        state: 'coding', detail: 'editing',
-        timestamp: Date.now(), sessionId: testSessionId,
-      }), 'utf8');
-    } catch { return; }
-
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'Stop'], {
-        input: JSON.stringify({ session_id: testSessionId }),
-        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Global state must still have stopped=true for ownership release
-    try {
-      const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      assert.strictEqual(result.stopped, true,
-        'Stop must write stopped=true to global state file for ownership release');
-    } catch (e) {
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    }
-  });
-
-  // Restore the state file as it was before this block ran.
-  if (savedOrbitalState !== null) fs.writeFileSync(STATE_FILE, savedOrbitalState, 'utf8');
-  else try { fs.unlinkSync(STATE_FILE); } catch {}
 });
 
 describe('base-adapter guardedWriteState modelName preservation (#78)', () => {
