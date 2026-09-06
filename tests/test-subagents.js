@@ -27,7 +27,9 @@ const { writeJsonAtomic } = require('../shared');
 const {
   MiniFace, OrbitalSystem, CHILD_ORPHAN_TIMEOUT, ORPHAN_TIMEOUT, STALE_MS,
 } = require('../grid');
-const { idleCascade, SLEEP_TIMEOUT, THINKING_TIMEOUT } = require('../renderer');
+const {
+  idleCascade, SLEEP_TIMEOUT, THINKING_TIMEOUT, WAIT_HOLD_STALE_MS,
+} = require('../renderer');
 
 // Horizontal ellipsis, built without a literal glyph so this file stays ASCII.
 const ELLIPSIS = String.fromCharCode(0x2026);
@@ -674,6 +676,31 @@ describe('renderer -- idleCascade conducting hold', () => {
     assert.strictEqual(idleCascade({
       ...base, state: 'coding', sinceChangeMs: 100, fileState: 'coding', liveChildren: 2,
     }), null);
+  });
+
+  // Ordering against Task 3's `waiting` bound. "The editor needs YOU" is
+  // actionable and outranks the ambient "your agents are busy", so the waiting
+  // hold wins while it lasts; conducting only fills the vacuum afterwards.
+  test('waiting on the user outranks conducting', () => {
+    assert.strictEqual(idleCascade({
+      ...base, state: 'waiting', sinceChangeMs: 999999, fileState: 'waiting',
+      fileAgeMs: 1000, liveChildren: 4,
+    }), null, 'a live waiting hold must not be replaced by conducting');
+  });
+
+  test('a stale waiting hold degrades to conducting, not idle, with live children', () => {
+    assert.strictEqual(idleCascade({
+      ...base, state: 'waiting', sinceChangeMs: 999999, fileState: 'waiting',
+      fileAgeMs: WAIT_HOLD_STALE_MS + 1, liveChildren: 4,
+    }), 'subagent',
+    'the global write clock has gone quiet but the agents demonstrably have not');
+  });
+
+  test('a stale waiting hold still degrades to idle with no children', () => {
+    assert.strictEqual(idleCascade({
+      ...base, state: 'waiting', sinceChangeMs: 999999, fileState: 'waiting',
+      fileAgeMs: WAIT_HOLD_STALE_MS + 1,
+    }), 'idle');
   });
 
   test('the hold releases when the last child retires', () => {
