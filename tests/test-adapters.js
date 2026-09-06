@@ -1016,10 +1016,11 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     '',
   ].join('\n');
 
-  function runFakeCodex(events) {
+  function runFakeCodex(events, seedStats) {
     const base = makeTempEnv('codex-thread');
     const binDir = path.join(base.tmp, 'bin');
     fs.mkdirSync(binDir, { recursive: true });
+    if (seedStats) fs.writeFileSync(base.statsFile, JSON.stringify(seedStats), 'utf8');
 
     const fixture = path.join(base.tmp, 'fixture.jsonl');
     fs.writeFileSync(fixture, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
@@ -1159,6 +1160,53 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     assert.strictEqual(state.state, 'error');
     assert.strictEqual(state.detail, 'boom');
     assert.strictEqual(state.stopped, true);
+    cleanup(tmp);
+  });
+
+  test('a failed turn breaks the streak once, not twice', () => {
+    // Codex reports one failure as BOTH a top-level error and a turn.failed.
+    // Breaking the streak on each would leave brokenStreak at 0 (face.js only
+    // reacts while brokenStreak > 0) and count the failure twice.
+    const blob = '{"type":"error","status":400,"error":{"message":"nope"}}';
+    const { tmp, stateFile, statsFile } = runFakeCodex([
+      { type: 'turn.started' },
+      { type: 'error', message: blob },
+      { type: 'turn.failed', error: { message: blob } },
+    ], { streak: 5, bestStreak: 7, totalErrors: 2 });
+
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.brokenStreak, 5, 'the lost streak must survive for the face reaction');
+    assert.strictEqual(stats.streak, 0);
+    assert.strictEqual(stats.totalErrors, 3, 'one failure counts once');
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'error');
+    assert.strictEqual(state.brokenStreak, 5);
+    cleanup(tmp);
+  });
+
+  test('a standalone error with no turn.failed still breaks the streak', () => {
+    const { tmp, statsFile } = runFakeCodex([
+      { type: 'turn.started' },
+      { type: 'error', message: 'stream died' },
+    ], { streak: 4, bestStreak: 9, totalErrors: 1 });
+
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.brokenStreak, 4);
+    assert.strictEqual(stats.streak, 0);
+    assert.strictEqual(stats.totalErrors, 2);
+    cleanup(tmp);
+  });
+
+  test('a second turn can break the streak again', () => {
+    const { tmp, statsFile } = runFakeCodex([
+      { type: 'turn.started' },
+      { type: 'turn.failed', error: { message: 'first' } },
+      { type: 'turn.started' },
+      { type: 'turn.failed', error: { message: 'second' } },
+    ], { streak: 3, bestStreak: 3, totalErrors: 0 });
+
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.totalErrors, 2, 'two failed turns count twice');
     cleanup(tmp);
   });
 

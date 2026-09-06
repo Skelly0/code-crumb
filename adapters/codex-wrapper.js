@@ -55,6 +55,19 @@ let lastState = null;
 let lastDetail = '';
 let turnOutcome = null; // 'completed' | 'failed' once the turn ends
 
+// A failed codex turn emits BOTH a top-level `error` and a `turn.failed`.
+// Breaking the streak on each would leave brokenStreak at 0 -- the face reads
+// that as "no streak was lost" and skips the reaction -- and would count the
+// same failure twice in totalErrors. So the streak breaks at most once per
+// turn; a standalone `error` with no turn.failed still breaks it.
+let streakBrokenThisTurn = false;
+
+function breakStreak(stats) {
+  if (streakBrokenThisTurn) return;
+  streakBrokenThisTurn = true;
+  updateStreak(stats, true);
+}
+
 // Error messages from codex can be a whole JSON blob; the status line is one row.
 function shortText(text, max = 60) {
   const s = String(text || '').replace(/[\r\n]+/g, ' ').trim();
@@ -281,6 +294,7 @@ function handleEvent(event) {
       commit(() => ({ state: 'starting', detail: 'codex is waking up' }));
     }
     else if (type === 'turn.started') {
+      streakBrokenThisTurn = false;
       commit(() => ({ state: 'thinking', detail: 'reading your message' }));
     }
     else if (type === 'turn.completed') {
@@ -293,14 +307,14 @@ function handleEvent(event) {
       const message = typeof err === 'string' ? err : (err && (err.message || err.type));
       const detail = shortText(message) || 'turn failed';
       commit((stats) => {
-        updateStreak(stats, true);
+        breakStreak(stats);
         return { state: 'error', detail, stopped: true };
       });
     }
     else if (type === 'error') {
       const detail = shortText(event.message) || 'something went wrong';
       commit((stats) => {
-        updateStreak(stats, true);
+        breakStreak(stats);
         return { state: 'error', detail };
       });
     }
@@ -353,7 +367,10 @@ function main() {
     process.exit(1);
   });
 
-  codex.on('exit', (code) => {
+  // 'close', not 'exit': exit fires while stdout may still hold buffered
+  // JSONL, so the last events of a turn (turn.completed included) could be
+  // lost to the process.exit below.
+  codex.on('close', (code) => {
     // The stream already said how the turn ended; exiting only stops the
     // session. A non-zero exit with no failure reported is the crash case.
     commit(() => {
