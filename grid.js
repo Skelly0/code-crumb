@@ -54,6 +54,9 @@ const IDLE_TIMEOUT = 8000;
 const SLEEP_TIMEOUT = 60000;
 const THINKING_TIMEOUT = 45000;
 const ORPHAN_TIMEOUT = 90000;  // 90s fallback for sessions without pid or whose process has exited
+// Subagent orbitals (parentSession set) go quiet for a whole model turn --
+// they emit no hooks between tool calls, so 90s/120s retired them mid-work.
+const CHILD_ORPHAN_TIMEOUT = 900000;  // 15 min for a live child orbital
 const BREATHE_STEP = 200;  // Quantize breathe/pulse time to reduce frame-unique output
 
 // -- Orbital Grouping Constants ------------------------------------
@@ -278,7 +281,8 @@ class MiniFace {
     this.blinkFrame = -1;
     this.lookDir = 0;
     this.lookTimer = 0;
-    this.parentSession = null; // set if this is a synthetic subagent
+    this.parentSession = null; // set if this is a subagent orbital
+    this.agentType = '';       // Claude Code agent_type (Explore, Plan, ...)
     this.teamName = '';        // agent teams: team name
     this.teammateName = '';    // agent teams: teammate role/name
     this.isTeammate = false;   // true if part of an agent team
@@ -365,6 +369,7 @@ class MiniFace {
       }
     }
     if (data.parentSession) this.parentSession = data.parentSession;
+    if (data.agentType) this.agentType = data.agentType;
     if (data.teamName) {
       this.teamName = data.teamName;
       this.teamColor = hashTeamColor(data.teamName);
@@ -395,8 +400,12 @@ class MiniFace {
     if (COMPLETION_STATES.has(this.state)) {
       return Date.now() - this.lastUpdate > STOPPED_LINGER_MS;
     }
-    // Everything else: orphan timeout
-    return Date.now() - this.lastUpdate > ORPHAN_TIMEOUT;
+    // Everything else: orphan timeout. A live child orbital gets the longer
+    // window -- a subagent in a long model turn writes nothing until its next
+    // tool call, and dropping it there is exactly the "subagents don't all
+    // show up" symptom.
+    const orphanMs = this.parentSession ? CHILD_ORPHAN_TIMEOUT : ORPHAN_TIMEOUT;
+    return Date.now() - this.lastUpdate > orphanMs;
   }
 
   tick(dt) {
@@ -756,6 +765,10 @@ class OrbitalSystem {
           // whose JSON lacks a timestamp field)
           try {
             const data = JSON.parse(fs.readFileSync(fp, 'utf8'));
+            // A live subagent orbital emits no hooks during a model turn —
+            // give child files the longer window before they are purged.
+            if (data.parentSession && !data.stopped &&
+                now - fileMtimeMs <= CHILD_ORPHAN_TIMEOUT) continue;
             if (data.pid && isOwnedByLiveProcess(data.pid, data.timestamp || fileMtimeMs)) continue;
           } catch {
             continue; // Parse failure = mid-write race — protect the file
@@ -918,6 +931,13 @@ class OrbitalSystem {
             survivingResults.push(r); // Protected — completion with owning PID
             continue;
           }
+        }
+        // A live subagent orbital emits no hooks during a model turn — give
+        // child files the longer window before they are purged.
+        if (r.data && r.data.parentSession && !r.data.stopped &&
+            now - r.mtimeMs <= CHILD_ORPHAN_TIMEOUT) {
+          survivingResults.push(r); // Protected — subagent in a long model turn
+          continue;
         }
         if (r.data && r.data.pid && isOwnedByLiveProcess(r.data.pid, r.data.timestamp || r.mtimeMs)) {
           survivingResults.push(r); // Protected — owning process alive
@@ -1790,7 +1810,7 @@ module.exports = {
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _sweepPidCache,
   _setPidResolver, KNOWN_EDITORS,
-  STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, SLACK_MS, PID_PROTECT_CAP_MS, PID_CACHE_TTL_MS,
+  STALE_MS, ORPHAN_TIMEOUT, CHILD_ORPHAN_TIMEOUT, REPOSITION_MS, SLACK_MS, PID_PROTECT_CAP_MS, PID_CACHE_TTL_MS,
   INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, GROUP_LABEL_BRIGHTNESS,
   CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS,
 };

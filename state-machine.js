@@ -744,6 +744,29 @@ function buildSubagentSessionState(existing, sub, parentSessionId, defaultCwd) {
   };
 }
 
+// -- Claude Code Subagent Attribution (pure logic) ------------------------
+
+// Claude Code fires every hook inside a subagent call with the PARENT's
+// session_id and adds agent_id / agent_type. The orbital's identity therefore
+// has to be synthesised from both, or all of a parent's agents collapse onto
+// one session id (and onto the main face).
+// Orbital session id for a Claude Code subagent: parent session + agent id.
+function subagentSessionId(sessionId, agentId) {
+  return `${sessionId}-agent-${agentId}`;
+}
+
+// Human label for a subagent orbital: first non-empty line of the prompt
+// (whitespace collapsed, <= 40 chars with a trailing ellipsis), else the
+// agent type, else 'subagent'. SubagentStart carries `invocation_prompt`;
+// `description` / `prompt` cover other hosts and older payloads.
+function subagentLabel(data) {
+  const d = data || {};
+  const src = toText(d.description || d.invocation_prompt || d.prompt);
+  const line = src.split(/\r?\n/).map(s => s.replace(/\s+/g, ' ').trim()).find(Boolean) || '';
+  if (line) return line.length > 40 ? line.slice(0, 39) + '\u2026' : line;
+  return toText(d.agent_type) || 'subagent';
+}
+
 // -- Parallel Session Classification (pure logic) -------------------------
 
 // Registry limits for stats.topLevelSessions ({ sessionId: lastSeenMs }).
@@ -791,6 +814,7 @@ function pruneTopLevelSessions(registry, now) {
 module.exports = {
   toolToState,
   humanizeToolName,
+  toText,
   EDIT_TOOLS,
   BASH_TOOLS,
   READ_TOOLS,
@@ -823,6 +847,8 @@ module.exports = {
   pruneFrequentFiles,
   topFrequentFiles,
   buildSubagentSessionState,
+  subagentSessionId,
+  subagentLabel,
   classifyForeignSession,
   pruneTopLevelSessions,
   TOP_LEVEL_REGISTRY_MAX,

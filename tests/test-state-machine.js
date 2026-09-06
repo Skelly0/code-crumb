@@ -2285,17 +2285,28 @@ describe('state-machine.js -- extractExitCode (ANSI-aware)', () => {
   });
 });
 
-// -- Bug #111: activeSubagents cleanup timeout (Bug D) --
+// -- Bug #111 / Task 12: activeSubagents ageing net --
+// Was a 10-minute cleanup (Bug D), which silently dropped every agent that
+// ran longer than that. It is now a 4-hour safety net for a missed
+// SubagentStop; per-agent liveness is the renderer's job.
 
-describe('update-state.js -- activeSubagents cleanup uses 10-minute timeout (Bug D)', () => {
-  test('cleanup timeout is 600000ms (10 minutes), not 180000ms (3 minutes)', () => {
+describe('update-state.js -- activeSubagents ageing net', () => {
+  test('cleanup uses SUBAGENT_MAX_AGE_MS (4 hours), not the old 10-minute cut', () => {
     const fs = require('fs');
     const src = fs.readFileSync(
       require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
     );
     assert.ok(
-      src.includes('sub => Date.now() - sub.startedAt < 600000'),
-      'activeSubagents cleanup should use 600000ms (10 min) timeout'
+      src.includes('const SUBAGENT_MAX_AGE_MS = 4 * 3600000'),
+      'update-state.js should define SUBAGENT_MAX_AGE_MS as 4 hours'
+    );
+    assert.ok(
+      src.includes('sub => Date.now() - sub.startedAt < SUBAGENT_MAX_AGE_MS'),
+      'activeSubagents cleanup should filter on SUBAGENT_MAX_AGE_MS'
+    );
+    assert.ok(
+      !src.includes('sub => Date.now() - sub.startedAt < 600000'),
+      'the 10-minute cut must be gone -- it dropped long-running agents'
     );
     assert.ok(
       !src.includes('sub => Date.now() - sub.startedAt < 180000'),
@@ -2385,21 +2396,29 @@ describe('update-state.js -- Stop handler does not kill active subagents (Bug #1
   });
 });
 
-// -- Bug fix: mtime touch for earlier subagents (Bug #3) --
+// -- Bug fix: mtime touch for active subagents (Bug #3 / Task 12) --
+// Originally "_touchEarlierSubagents" (all but the newest), because the newest
+// was assumed to be reporting under a foreign session id. With agent_id
+// routing every active entry owns a real orbital file, so every one is
+// touched -- a subagent mid-model-turn writes nothing of its own.
 
-describe('update-state.js -- touch earlier subagent files (Bug #3)', () => {
-  test('_touchEarlierSubagents helper exists', () => {
+describe('update-state.js -- touch active subagent files (Bug #3)', () => {
+  test('_touchActiveSubagents helper exists and the "skip newest" version is gone', () => {
     const fs = require('fs');
     const src = fs.readFileSync(
       require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
     );
     assert.ok(
-      src.includes('function _touchEarlierSubagents('),
-      'should define _touchEarlierSubagents helper'
+      src.includes('function _touchActiveSubagents('),
+      'should define _touchActiveSubagents helper'
+    );
+    assert.ok(
+      !src.includes('_touchEarlierSubagents'),
+      'the all-but-newest helper must be gone'
     );
   });
 
-  test('PreToolUse calls _touchEarlierSubagents after _writeSubagentToolState', () => {
+  test('PreToolUse calls _touchActiveSubagents after _writeSubagentToolState', () => {
     const fs = require('fs');
     const src = fs.readFileSync(
       require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
@@ -2408,13 +2427,13 @@ describe('update-state.js -- touch earlier subagent files (Bug #3)', () => {
     const preBlock = src.split("hookEvent === 'PreToolUse'")[1];
     const preContent = preBlock.split("hookEvent === 'PostToolUse'")[0];
     const writeIdx = preContent.indexOf('_writeSubagentToolState(latest');
-    const touchIdx = preContent.indexOf('_touchEarlierSubagents(');
+    const touchIdx = preContent.indexOf('_touchActiveSubagents(');
     assert.ok(writeIdx >= 0, 'PreToolUse should call _writeSubagentToolState');
-    assert.ok(touchIdx >= 0, 'PreToolUse should call _touchEarlierSubagents');
-    assert.ok(touchIdx > writeIdx, '_touchEarlierSubagents should come after _writeSubagentToolState');
+    assert.ok(touchIdx >= 0, 'PreToolUse should call _touchActiveSubagents');
+    assert.ok(touchIdx > writeIdx, '_touchActiveSubagents should come after _writeSubagentToolState');
   });
 
-  test('PostToolUse calls _touchEarlierSubagents after _writeSubagentToolState', () => {
+  test('PostToolUse calls _touchActiveSubagents after _writeSubagentToolState', () => {
     const fs = require('fs');
     const src = fs.readFileSync(
       require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
@@ -2423,22 +2442,25 @@ describe('update-state.js -- touch earlier subagent files (Bug #3)', () => {
     const postBlock = src.split("hookEvent === 'PostToolUse'")[1];
     const postContent = postBlock.split("hookEvent === 'Stop'")[0];
     const writeIdx = postContent.indexOf('_writeSubagentToolState(latest');
-    const touchIdx = postContent.indexOf('_touchEarlierSubagents(');
+    const touchIdx = postContent.indexOf('_touchActiveSubagents(');
     assert.ok(writeIdx >= 0, 'PostToolUse should call _writeSubagentToolState');
-    assert.ok(touchIdx >= 0, 'PostToolUse should call _touchEarlierSubagents');
-    assert.ok(touchIdx > writeIdx, '_touchEarlierSubagents should come after _writeSubagentToolState');
+    assert.ok(touchIdx >= 0, 'PostToolUse should call _touchActiveSubagents');
+    assert.ok(touchIdx > writeIdx, '_touchActiveSubagents should come after _writeSubagentToolState');
   });
 
-  test('_touchEarlierSubagents uses fs.utimesSync', () => {
+  test('_touchActiveSubagents uses fs.utimesSync over every entry', () => {
     const fs = require('fs');
     const src = fs.readFileSync(
       require('path').join(__dirname, '..', 'update-state.js'), 'utf8'
     );
-    const helperStart = src.indexOf('function _touchEarlierSubagents(');
-    const helperEnd = src.indexOf('\n\n', helperStart);
+    const helperStart = src.indexOf('function _touchActiveSubagents(');
+    const helperEnd = src.indexOf('\n}\n', helperStart);
     const helperBody = src.slice(helperStart, helperEnd);
     assert.ok(helperBody.includes('fs.utimesSync'), 'should use fs.utimesSync to refresh mtime');
-    assert.ok(helperBody.includes('length - 1'), 'should iterate up to length - 1 (skip latest)');
+    assert.ok(helperBody.includes('i < activeSubagents.length;'),
+      'should iterate the whole list, not stop one short of the newest');
+    assert.ok(!helperBody.includes('length - 1'),
+      'the skip-the-newest bound must be gone');
   });
 });
 
@@ -3342,11 +3364,12 @@ describe('update-state.js -- parallel session wiring (#134)', () => {
       'SessionStart should prune the registry');
   });
 
-  test('tool propagation blocks are guarded by !isParallelSession', () => {
+  test('tool propagation blocks are guarded by !isParallelSession and !isAgentEvent', () => {
     const src = readSrc();
-    const matches = src.match(/!SUBAGENT_TOOLS\.test\(toolName\) && !isKnownSubagent && !isParallelSession/g) || [];
+    const matches = src.match(
+      /!SUBAGENT_TOOLS\.test\(toolName\)\s*&&\s*!isKnownSubagent && !isParallelSession && !isAgentEvent/g) || [];
     assert.strictEqual(matches.length, 2,
-      'both PreToolUse and PostToolUse propagation must exclude parallel sessions');
+      'both PreToolUse and PostToolUse propagation must exclude parallel sessions and agent events');
   });
 
   test('healing strips stale parentSession/taskDescription for top-level sessions', () => {
