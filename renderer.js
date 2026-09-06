@@ -37,13 +37,19 @@ const LONG_TOOL_HOLD_MS = 600000; // 10 min: the longest a single tool call can 
 // The `waiting` hold below is uncapped in display time, so it needs a bound of
 // its own -- and it cannot borrow the crash machinery: on win32 update-state.js
 // writes no `pid`, so `editorDead` never arms, and a hard-closed terminal never
-// gets to write `stopped`. What is left is the editor's own write cadence: a
-// live editor keeps stamping new timestamps into the state file, a dead one
-// does not. The hold ends once no NEW write has arrived for this long (see
-// noteNewWrite -- the age must not be measured from a read, because checkState
-// re-reads the unchanged file every 2s). 30 min is 3x LONG_TOOL_HOLD_MS -- far
-// past any plausible "reading the permission prompt" pause, short of leaving
-// the face shouting at an empty desk all night.
+// gets to write `stopped`. What is left is the editor's own write cadence: the
+// hold ends once no NEW write has arrived for this long (see noteNewWrite --
+// the age must not be measured from a read, because checkState re-reads the
+// unchanged file every 2s).
+//
+// This is silence, not death. An editor blocked on a permission prompt emits no
+// further hooks either, so a live-but-unanswered session looks exactly like a
+// crashed one here and is dropped to idle identically -- a user who walks away
+// for longer than this loses the flashing title until the next write. That is
+// the accepted trade: the alternative is a face that shouts forever at a
+// terminal that is already closed. 30 min is 3x LONG_TOOL_HOLD_MS -- far past
+// any plausible "reading the permission prompt" pause, short of leaving the
+// face shouting at an empty desk all night.
 const WAIT_HOLD_STALE_MS = 1800000;
 
 // -- Hoisted sets for checkState() hot path ---------------------------

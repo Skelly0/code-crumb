@@ -811,8 +811,10 @@ describe('emotions -- the write clock behind the waiting bound', () => {
     assert.ok(/lastNewWriteAt = noteNewWrite\(/.test(src),
       'the write clock should be advanced through noteNewWrite');
     // Declaration + exactly one assignment. A second assignment site is how the
-    // read-path refresh would creep back in.
-    const assignments = src.match(/lastNewWriteAt =/g) || [];
+    // read-path refresh would creep back in. `\s*=[^=]` so that a whitespace-free
+    // `lastNewWriteAt= Date.now()` cannot sneak past, and so that a comparison
+    // (`==`/`===`) is not miscounted as an assignment.
+    const assignments = src.match(/lastNewWriteAt\s*=[^=]/g) || [];
     assert.strictEqual(assignments.length, 2,
       'lastNewWriteAt should have its declaration and exactly one assignment site');
   });
