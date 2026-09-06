@@ -1257,70 +1257,60 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
 });
 
 describe('grid.js -- loadSessions mtime purge protects active faces (Bug #0)', () => {
-  test('source code contains active-face protection logic in mtime purge', () => {
-    // Structural test: verify the fix is present in grid.js source
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'grid.js'), 'utf8'
-    );
-    // The fix skips deleting session files for active (non-stopped, non-completion) in-memory faces
-    assert.ok(
-      src.includes('if (knownFace && !knownFace.stopped)') &&
-      src.includes('COMPLETION_STATES.has(knownFace.state)'),
-      'loadSessions mtime purge should check for active in-memory face before deleting file'
-    );
-  });
+  const fs = require('fs');
+  const pathMod = require('path');
+  const { SESSIONS_DIR } = require('../shared');
 
-  test('source code contains PID liveness check in isStale', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'grid.js'), 'utf8'
-    );
-    assert.ok(
-      src.includes('isOwnedByLiveProcess(this.pid, this.lastUpdate)'),
-      'isStale should check PID ownership before falling back to timeout'
-    );
-  });
-
-  test('loadSessions does not delete file for active thinking face past STALE_MS', () => {
-    const fs = require('fs');
-    const pathMod = require('path');
-    const { SESSIONS_DIR } = require('../shared');
-    const orbital = new OrbitalSystem();
-
+  // Same file in all three tests, only the in-memory face differs: that is
+  // what makes "the file survived" attributable to the face and not to luck.
+  function seedStaleFile(sessionId) {
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const fp = pathMod.join(SESSIONS_DIR, sessionId + '.json');
+    fs.writeFileSync(fp, JSON.stringify({
+      session_id: sessionId, state: 'thinking', detail: '', timestamp: Date.now(),
+    }));
+    const old = new Date(Date.now() - STALE_MS - 5000);
+    fs.utimesSync(fp, old, old);
+    return fp;
+  }
 
-    // Write a session file and back-date its mtime past STALE_MS (30s)
-    const sessionId = 'active-thinking-test';
-    const filePath = pathMod.join(SESSIONS_DIR, sessionId + '.json');
-    const sessionData = {
-      session_id: sessionId,
-      state: 'thinking',
-      detail: '',
-      timestamp: Date.now(),
-    };
-    fs.writeFileSync(filePath, JSON.stringify(sessionData));
+  test('an active non-completion face protects its stale file from the purge', () => {
+    const id = 'purge-active-face';
+    const fp = seedStaleFile(id);
+    try {
+      const orbital = new OrbitalSystem();
+      const face = new MiniFace(id);
+      face.state = 'thinking';
+      face.stopped = false;
+      orbital.faces.set(id, face);
+      orbital.loadSessions('different-main-id');
+      assert.ok(fs.existsSync(fp),
+        'an active thinking face must keep its session file alive past STALE_MS');
+    } finally { try { fs.unlinkSync(fp); } catch {} }
+  });
 
-    // Pre-populate the face in memory as active (not stopped, not completion)
-    const face = new MiniFace(sessionId);
-    face.state = 'thinking';
-    face.stopped = false;
-    orbital.faces.set(sessionId, face);
+  test('the same stale file with no face and no pid is purged', () => {
+    const id = 'purge-no-face';
+    const fp = seedStaleFile(id);
+    try {
+      new OrbitalSystem().loadSessions('different-main-id');
+      assert.ok(!fs.existsSync(fp), 'an unprotected stale file must be deleted');
+    } finally { try { fs.unlinkSync(fp); } catch {} }
+  });
 
-    // Back-date the file mtime by writing then touching with an old time
-    // We simulate STALE_MS elapsed by directly manipulating the purge condition:
-    // the purge checks (now - mtime > STALE_MS) && face is active => skip delete
-    // Since we can't easily fake mtime, we verify the face survives loadSessions
-    // by confirming the protection branch exists (covered by source test above)
-    // and that a fresh file with an active face is retained
-    orbital.loadSessions('different-main-id');
-
-    const fileStillExists = fs.existsSync(filePath);
-    // Clean up regardless
-    try { fs.unlinkSync(filePath); } catch {}
-
-    assert.ok(fileStillExists || orbital.faces.has(sessionId),
-      'active thinking face should be protected from mtime purge deletion');
+  test('a stopped face does not protect its stale file', () => {
+    const id = 'purge-stopped-face';
+    const fp = seedStaleFile(id);
+    try {
+      const orbital = new OrbitalSystem();
+      const face = new MiniFace(id);
+      face.state = 'thinking';
+      face.stopped = true;
+      orbital.faces.set(id, face);
+      orbital.loadSessions('different-main-id');
+      assert.ok(!fs.existsSync(fp),
+        'only a live face protects -- a stopped one is finished with its file');
+    } finally { try { fs.unlinkSync(fp); } catch {} }
   });
 });
 
@@ -2140,18 +2130,6 @@ describe('grid.js -- file deletion protects on parse error (Bug B)', () => {
     // Cleanup
     try { fs.unlinkSync(filePath); } catch {}
   });
-
-  test('source code has catch-continue in purge loop parse', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'grid.js'), 'utf8'
-    );
-    // The purge loop's inner try/catch for JSON.parse should continue on error
-    assert.ok(
-      src.includes('catch {') && src.includes('continue; // Parse failure = mid-write race'),
-      'purge loop catch block should continue instead of falling through to unlink'
-    );
-  });
 });
 
 // -- Bug #111: Completion-state face with live PID protected in file deletion (Bug C) --
@@ -2174,23 +2152,28 @@ describe('grid.js -- completion-state face with live PID protected in file delet
       pid: process.pid, timestamp: Date.now(),
     }));
 
-    // First load: creates the face in happy state
-    orbital.loadSessions('main-id');
-    assert.ok(orbital.faces.has(sessionId), 'face should exist after first load');
-    assert.strictEqual(orbital.faces.get(sessionId).state, 'happy');
+    // Seed the start time so the ownership verdict is decided synchronously
+    // on every platform (execFile-based resolvers cannot answer in-tick).
+    seedOwningPid();
+    try {
+      // First load: creates the face in happy state
+      orbital.loadSessions('main-id');
+      assert.ok(orbital.faces.has(sessionId), 'face should exist after first load');
+      assert.strictEqual(orbital.faces.get(sessionId).state, 'happy');
 
-    // Backdate file past STALE_MS
-    const staleTime = new Date(Date.now() - STALE_MS - 5000);
-    fs.utimesSync(filePath, staleTime, staleTime);
+      // Backdate file past STALE_MS
+      const staleTime = new Date(Date.now() - STALE_MS - 5000);
+      fs.utimesSync(filePath, staleTime, staleTime);
 
-    // Second load: file is stale and face is in completion state,
-    // but PID is alive → file should be protected
-    orbital.loadSessions('main-id');
-    assert.ok(fs.existsSync(filePath),
-      'stale file for completion-state face with live PID should NOT be deleted');
-
-    // Cleanup
-    try { fs.unlinkSync(filePath); } catch {}
+      // Second load: file is stale and face is in completion state,
+      // but PID is alive and owns the write → file should be protected
+      orbital.loadSessions('main-id');
+      assert.ok(fs.existsSync(filePath),
+        'stale file for completion-state face with live PID should NOT be deleted');
+    } finally {
+      _pidStartCache.delete(process.pid);
+      try { fs.unlinkSync(filePath); } catch {}
+    }
   });
 
   test('completion-state face with dead PID is deleted during mtime purge', () => {
@@ -2222,18 +2205,6 @@ describe('grid.js -- completion-state face with live PID protected in file delet
     orbital.loadSessions('main-id');
     assert.ok(!fs.existsSync(filePath),
       'stale file for completion-state face with dead PID should be deleted');
-  });
-
-  test('source code checks PID liveness for completion-state faces in purge', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'grid.js'), 'utf8'
-    );
-    // The fix separates active non-completion (always protect) from completion with owning PID
-    assert.ok(
-      src.includes('if (knownFace.pid && isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)) continue;'),
-      'purge loop should check PID ownership for completion-state faces'
-    );
   });
 });
 
@@ -3020,31 +2991,58 @@ describe('grid.js -- async face removal PID guard (Bug #2)', () => {
     assert.ok(!os.faces.has('sub1'), 'face with no PID should be removed when file missing');
   });
 
-  test('_applySessionResults does not delete session files when removing stale faces', () => {
-    // Structural: the face removal loop should NOT contain fs.unlink
+  test('_applySessionResults drops the face but leaves the session file alone', () => {
+    // A scan that did not see the file (results: []) must not conclude the file
+    // is junk -- the dedicated stale purge owns deletion, this loop owns memory.
     const fs = require('fs');
-    const src = fs.readFileSync(require.resolve('../grid'), 'utf8');
-    // Find the _applySessionResults method and check the face removal section
-    const methodStart = src.indexOf('_applySessionResults(');
-    const methodBody = src.slice(methodStart, src.indexOf('\n  _assignLabels', methodStart));
-    const removalSection = methodBody.slice(methodBody.indexOf('Remove faces not seen'));
-    assert.ok(!removalSection.includes('fs.unlink'), 'face removal loop should not delete files');
-    assert.ok(!removalSection.includes('unlinkSync'), 'face removal loop should not delete files (sync)');
+    const pathMod = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const id = 'async-removal-keeps-file';
+    const fp = pathMod.join(SESSIONS_DIR, id + '.json');
+    fs.writeFileSync(fp, JSON.stringify({ session_id: id, state: 'coding', timestamp: Date.now() }));
+    try {
+      const os = new OrbitalSystem();
+      const mf = new MiniFace(id);
+      mf.state = 'coding';
+      mf.pid = 0;
+      mf.stopped = false;
+      os.faces.set(id, mf);
+
+      os._applySessionResults('main-id', []);
+
+      assert.ok(!os.faces.has(id), 'sanity: an unseen face with no pid is dropped from memory');
+      assert.ok(fs.existsSync(fp), 'face removal must not delete the session file');
+    } finally { try { fs.unlinkSync(fp); } catch {} }
   });
 });
 
 describe('grid.js -- sync face removal no file deletion (Bug #4)', () => {
-  test('loadSessions face removal does not contain unlinkSync', () => {
+  test('loadSessions retires a lingered stopped face without touching its file', () => {
+    // Fresh file (the mtime purge will not touch it) + a face whose stopped
+    // linger has expired: the removal loop must drop the face only.
     const fs = require('fs');
-    const src = fs.readFileSync(require.resolve('../grid'), 'utf8');
-    // Find the sync loadSessions method's face removal section
-    const loadStart = src.indexOf('loadSessions(');
-    const loadEnd = src.indexOf('\n  _assignLabels', loadStart);
-    const loadBody = src.slice(loadStart, loadEnd);
-    // The PID guard line should exist, but no unlinkSync after faces.delete
-    const deleteIdx = loadBody.lastIndexOf('this.faces.delete(id)');
-    const afterDelete = loadBody.slice(deleteIdx, deleteIdx + 200);
-    assert.ok(!afterDelete.includes('unlinkSync'), 'sync face removal should not delete files');
+    const pathMod = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const id = 'sync-removal-keeps-file';
+    const fp = pathMod.join(SESSIONS_DIR, id + '.json');
+    fs.writeFileSync(fp, JSON.stringify({
+      session_id: id, state: 'happy', stopped: true, timestamp: Date.now(),
+    }));
+    try {
+      const orbital = new OrbitalSystem();
+      const face = new MiniFace(id);
+      face.state = 'happy';
+      face.stopped = true;
+      face.stoppedAt = Date.now() - 60000;   // well past STOPPED_LINGER_MS
+      orbital.faces.set(id, face);
+
+      orbital.loadSessions('main-id');
+
+      assert.ok(!orbital.faces.has(id), 'sanity: the lingered stopped face is retired');
+      assert.ok(fs.existsSync(fp), 'sync face removal must not delete the session file');
+    } finally { try { fs.unlinkSync(fp); } catch {} }
   });
 });
 
@@ -3708,6 +3706,40 @@ describe('grid.js -- recycled-PID purge integration', () => {
     face.lastUpdate = Date.now() - 5 * 60 * 1000; // 5 min quiet
     _pidStartCache.set(process.pid, { value: face.lastUpdate - 3600 * 1000, resolvedAt: Date.now() });
     assert.strictEqual(face.isStale(), false);
+  });
+
+  test('loadSessions purges a stale file whose pid was recycled', () => {
+    const fs = require('fs');
+    const pathMod = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const id = 'recycled-pid-file';
+    const fp = pathMod.join(SESSIONS_DIR, id + '.json');
+    const wroteAt = Date.now() - 5 * 24 * 3600 * 1000; // 5-day-old ghost write
+    fs.writeFileSync(fp, JSON.stringify({
+      session_id: id, state: 'coding', pid: process.pid, timestamp: wroteAt,
+    }));
+    const old = new Date(Date.now() - STALE_MS - 5000);
+    fs.utimesSync(fp, old, old);
+    _pidStartCache.clear();
+    try {
+      // Start time AFTER the write: our live pid cannot be the writer.
+      _pidStartCache.set(process.pid, { value: Date.now() - 1000, resolvedAt: Date.now() });
+      new OrbitalSystem().loadSessions('main-id');
+      assert.ok(!fs.existsSync(fp), 'a recycled pid must not keep a ghost file alive');
+
+      // Same file, same live pid, but a start time that predates the write.
+      fs.writeFileSync(fp, JSON.stringify({
+        session_id: id, state: 'coding', pid: process.pid, timestamp: wroteAt,
+      }));
+      fs.utimesSync(fp, old, old);
+      _pidStartCache.set(process.pid, { value: wroteAt - 3600 * 1000, resolvedAt: Date.now() });
+      new OrbitalSystem().loadSessions('main-id');
+      assert.ok(fs.existsSync(fp), 'the real owner still protects its file');
+    } finally {
+      _pidStartCache.delete(process.pid);
+      try { fs.unlinkSync(fp); } catch {}
+    }
   });
 
   test('source: purge paths use isOwnedByLiveProcess, not bare isProcessAlive', () => {
