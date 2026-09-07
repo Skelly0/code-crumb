@@ -2,7 +2,7 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - face.js                                   |
+// |  Code Crumb Test Suite - face.js                               |
 // +================================================================+
 
 const assert = require('assert');
@@ -10,31 +10,12 @@ const fs = require('fs');
 const { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS, ACTIVE_WORK_STATES: FACE_ACTIVE_WORK_STATES, COMPLETION_STATES: FACE_COMPLETION_STATES } = require('../face');
 const { readState, ACTIVE_WORK_STATES: RENDERER_ACTIVE_WORK_STATES, COMPLETION_STATES: RENDERER_COMPLETION_STATES } = require('../renderer');
 const { ParticleSystem } = require('../particles');
-const { themes, PALETTES } = require('../themes');
+const { themes, PALETTES, ansi, setNoColor, isNoColor } = require('../themes');
 const { mouths, eyes } = require('../animations');
 const { STATE_FILE } = require('../shared');
 
-let passed = 0;
-let failed = 0;
-let currentDescribe = '';
-
-function describe(name, fn) {
-  currentDescribe = name;
-  console.log(`\n  ${name}`);
-  fn();
-}
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`    \x1b[32m\u2713\x1b[0m ${name}`);
-  } catch (e) {
-    failed++;
-    console.log(`    \x1b[31m\u2717\x1b[0m ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const suite = require('./_harness').createSuite();
+const { describe, test } = suite;
 
 describe('face.js -- ClaudeFace constructor', () => {
   test('initializes with idle state', () => {
@@ -67,24 +48,24 @@ describe('face.js -- ClaudeFace._getMinDisplayMs', () => {
     assert.strictEqual(face._getMinDisplayMs('error'), 4000);
   });
 
-  test('coding → 6000ms', () => {
-    assert.strictEqual(face._getMinDisplayMs('coding'), 6000);
+  test('coding → 1500ms', () => {
+    assert.strictEqual(face._getMinDisplayMs('coding'), 1500);
   });
 
-  test('reading → 4000ms', () => {
-    assert.strictEqual(face._getMinDisplayMs('reading'), 4000);
+  test('reading → 1200ms', () => {
+    assert.strictEqual(face._getMinDisplayMs('reading'), 1200);
   });
 
   test('sleeping → 1000ms', () => {
     assert.strictEqual(face._getMinDisplayMs('sleeping'), 1000);
   });
 
-  test('committing → 3500ms', () => {
-    assert.strictEqual(face._getMinDisplayMs('committing'), 3500);
+  test('committing → 1500ms', () => {
+    assert.strictEqual(face._getMinDisplayMs('committing'), 1500);
   });
 
-  test('training min display is 5000', () => {
-    assert.strictEqual(face._getMinDisplayMs('training'), 5000);
+  test('training min display is 2500', () => {
+    assert.strictEqual(face._getMinDisplayMs('training'), 2500);
   });
 
   test('unknown state → 1000ms default', () => {
@@ -246,6 +227,32 @@ describe('face.js -- ClaudeFace.setStats', () => {
     assert.strictEqual(face.modelName, 'o3');
     face.setStats({ modelName: 'gpt-4.1' });
     assert.strictEqual(face.modelName, 'gpt-4.1');
+  });
+});
+
+describe('face.js -- diff thought bubble', () => {
+  function proudWith(diffInfo) {
+    const face = new ClaudeFace();
+    face.forceState('proud', 'saved a.js');
+    face.setStats({ diffInfo });
+    face._updateThought();
+    return face.thoughtText;
+  }
+
+  test('additions and removals → "+N -M lines"', () => {
+    assert.strictEqual(proudWith({ added: 4, removed: 2 }), '+4 -2 lines');
+  });
+
+  test('additions only → "+N lines"', () => {
+    assert.strictEqual(proudWith({ added: 4, removed: 0 }), '+4 lines');
+  });
+
+  test('removals only → "-M lines"', () => {
+    assert.strictEqual(proudWith({ added: 0, removed: 3 }), '-3 lines');
+  });
+
+  test('a no-op diff falls back to a generic completion thought', () => {
+    assert.notStrictEqual(proudWith({ added: 0, removed: 0 }), '-0 lines');
   });
 });
 
@@ -1119,12 +1126,12 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     assert.strictEqual(face.stateDetail, 'git status');
   });
 
-  test('coding bypasses relieved min display after 500ms guaranteed window', () => {
+  test('coding bypasses relieved min display after the 1800ms guaranteed window', () => {
     const face = new ClaudeFace();
     face.setState('relieved');
     assert.strictEqual(face.state, 'relieved');
-    // Simulate relieved has been showing for 600ms (past the guaranteed window)
-    face.lastStateChange = Date.now() - 600;
+    // Simulate relieved has been showing for 1900ms (past the guaranteed window)
+    face.lastStateChange = Date.now() - 1900;
     face.setState('coding', 'editing app.ts');
     assert.strictEqual(face.state, 'coding');
   });
@@ -1178,10 +1185,10 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     assert.strictEqual(face.pendingState, 'reading'); // reading queued for early flush
   });
 
-  test('work state bypasses completion after 500ms guaranteed window (Fix #96)', () => {
+  test('work state bypasses completion after the 1800ms guaranteed window (Fix #96)', () => {
     const face = new ClaudeFace();
     face.setState('happy');
-    face.lastStateChange = Date.now() - 600; // simulate 600ms elapsed
+    face.lastStateChange = Date.now() - 1900; // past the guaranteed window
     face.setState('reading');
     assert.strictEqual(face.state, 'reading'); // bypasses now that window passed
     assert.strictEqual(face.pendingState, null);
@@ -1230,18 +1237,18 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     assert.strictEqual(face.pendingState, 'caffeinated');
   });
 
-  test('executing bypasses happy min display after 500ms guaranteed window', () => {
+  test('executing bypasses happy min display after the 1800ms guaranteed window', () => {
     const face = new ClaudeFace();
     face.setState('happy');
-    face.lastStateChange = Date.now() - 600;
+    face.lastStateChange = Date.now() - 1900;
     face.setState('executing', 'next command');
     assert.strictEqual(face.state, 'executing');
   });
 
-  test('testing bypasses satisfied min display after 500ms guaranteed window', () => {
+  test('testing bypasses satisfied min display after the 1800ms guaranteed window', () => {
     const face = new ClaudeFace();
     face.setState('satisfied');
-    face.lastStateChange = Date.now() - 600;
+    face.lastStateChange = Date.now() - 1900;
     face.setState('testing', 'npm test');
     assert.strictEqual(face.state, 'testing');
   });
@@ -2384,4 +2391,271 @@ describe('face.js -- ACTIVE_WORK_STATES / COMPLETION_STATES consistency', () => 
   });
 });
 
-module.exports = { passed: () => passed, failed: () => failed };
+describe('face.js -- long-running tool escalation', () => {
+  test('detail is untouched under 8s', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', 'npm test');
+    assert.strictEqual(f.displayDetail(), 'npm test');
+  });
+
+  test('detail gains "still running" with elapsed seconds after 8s', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', 'npm test');
+    f.lastStateChange = Date.now() - 9000;
+    assert.match(f.displayDetail(), /^npm test \u00b7 still running \u2026 9s$/);
+  });
+
+  test('an empty detail escalates to just the suffix', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', '');
+    f.lastStateChange = Date.now() - 12000;
+    assert.match(f.displayDetail(), /^still running \u2026 12s$/);
+  });
+
+  test('non-work states never escalate', () => {
+    const f = new ClaudeFace();
+    f.forceState('happy', 'all done');
+    f.lastStateChange = Date.now() - 60000;
+    assert.strictEqual(f.displayDetail(), 'all done');
+  });
+
+  test('heldMs measures the time since the current state started', () => {
+    const f = new ClaudeFace();
+    f.setState('coding', 'edit face.js');
+    f.lastStateChange = Date.now() - 5000;
+    assert.ok(f.heldMs() >= 5000 && f.heldMs() < 6000);
+  });
+
+  test('sweat particles appear after 20s of the same tool', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', 'npm test');
+    f.lastStateChange = Date.now() - 21000;
+    f.particles.particles = [];
+    for (let i = 0; i < 24; i++) f.update(66);
+    assert.ok(f.particles.particles.some(p => p.style === 'sweat'));
+  });
+
+  test('no sweat before 20s', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', 'npm test');
+    f.lastStateChange = Date.now() - 10000;
+    f.particles.particles = [];
+    for (let i = 0; i < 24; i++) f.update(66);
+    assert.ok(!f.particles.particles.some(p => p.style === 'sweat'));
+  });
+
+  test('a long-held non-work state grows no sweat', () => {
+    const f = new ClaudeFace();
+    f.forceState('idle', '');
+    f.lastStateChange = Date.now() - 60000;
+    f.particles.particles = [];
+    for (let i = 0; i < 24; i++) f.update(66);
+    assert.ok(!f.particles.particles.some(p => p.style === 'sweat'));
+  });
+
+  test('the rendered detail line keeps the suffix when the base detail is long', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', 'x'.repeat(60));
+    f.lastStateChange = Date.now() - 9000;
+    const origCols = process.stdout.columns;
+    const origRows = process.stdout.rows;
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    const out = f.render();
+    process.stdout.columns = origCols;
+    process.stdout.rows = origRows;
+    assert.ok(out.includes('still running'));
+  });
+
+  test('an escalated empty detail still draws a detail line', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', '');
+    f.lastStateChange = Date.now() - 9000;
+    const origCols = process.stdout.columns;
+    const origRows = process.stdout.rows;
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    const out = f.render();
+    process.stdout.columns = origCols;
+    process.stdout.rows = origRows;
+    assert.ok(out.includes('still running'));
+  });
+
+  test('the escalation constants are exported', () => {
+    const { LONG_TOOL_ESCALATE_MS, LONG_TOOL_SWEAT_MS } = require('../face');
+    assert.strictEqual(LONG_TOOL_ESCALATE_MS, 8000);
+    assert.strictEqual(LONG_TOOL_SWEAT_MS, 20000);
+  });
+});
+
+describe('face.js -- waiting escalation after 30s', () => {
+  const MIDDOT = String.fromCharCode(0xb7);
+
+  const waitingFor = (ms, detail = 'waiting for you') => {
+    const f = new ClaudeFace();
+    f.setState('waiting', detail);
+    f.lastStateChange = Date.now() - ms;
+    return f;
+  };
+
+  // ansi.bold is '' under no-color, which would make every includes() check
+  // vacuous -- these two tests need colour on whatever the ambient mode is.
+  const withColor = (fn) => {
+    const wasNoColor = isNoColor();
+    const origCols = process.stdout.columns;
+    const origRows = process.stdout.rows;
+    setNoColor(false);
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    try {
+      fn();
+    } finally {
+      setNoColor(wasNoColor);
+      process.stdout.columns = origCols;
+      process.stdout.rows = origRows;
+    }
+  };
+
+  test('a wait under 30s is not escalated', () => {
+    assert.strictEqual(waitingFor(29000).waitEscalated(), false);
+  });
+
+  test('a wait over 30s is escalated', () => {
+    assert.strictEqual(waitingFor(31000).waitEscalated(), true);
+  });
+
+  test('only waiting escalates -- a long tool does not', () => {
+    const f = new ClaudeFace();
+    f.setState('executing', 'npm test');
+    f.lastStateChange = Date.now() - 60000;
+    assert.strictEqual(f.waitEscalated(), false);
+  });
+
+  test('the detail line counts the seconds once escalated', () => {
+    assert.strictEqual(waitingFor(45000).displayDetail(),
+      'waiting for you ' + MIDDOT + ' 45s');
+  });
+
+  test('an empty detail escalates to just the elapsed seconds', () => {
+    assert.strictEqual(waitingFor(33000, '').displayDetail(), '33s');
+  });
+
+  test('the detail line is untouched under 30s', () => {
+    assert.strictEqual(waitingFor(29000).displayDetail(), 'waiting for you');
+  });
+
+  test('bigquestion particles appear after 30s of waiting', () => {
+    const f = waitingFor(31000);
+    f.particles.particles = [];
+    for (let i = 0; i < 40; i++) f.update(66);
+    assert.ok(f.particles.particles.some(p => p.style === 'bigquestion'),
+      'an escalated wait should spawn bigquestion particles');
+  });
+
+  test('no bigquestion particles before 30s', () => {
+    const f = waitingFor(10000);
+    f.particles.particles = [];
+    // 50 frames: long enough to cross the slower `frame % 45` question cadence.
+    for (let i = 0; i < 50; i++) f.update(66);
+    assert.ok(!f.particles.particles.some(p => p.style === 'bigquestion'),
+      'a short wait should keep the small question marks');
+    assert.ok(f.particles.particles.some(p => p.style === 'question'),
+      'a short wait should still spawn the small question marks');
+  });
+
+  test('the status line pulses bold while escalated', () => {
+    withColor(() => {
+      const f = waitingFor(31000);
+      f.frame = 0;
+      const on = f.render();
+      f.frame = 8;
+      const off = f.render();
+      assert.ok(on.includes(ansi.bold), 'the bright half of the pulse should be bold');
+      assert.ok(!off.includes(ansi.bold), 'the dim half of the pulse should not be bold');
+    });
+  });
+
+  test('the status line never pulses before 30s', () => {
+    withColor(() => {
+      const f = waitingFor(29000);
+      for (let frame = 0; frame < 16; frame++) {
+        f.frame = frame;
+        assert.ok(!f.render().includes(ansi.bold), `frame ${frame} should not be bold`);
+      }
+    });
+  });
+
+  test('WAIT_ESCALATE_MS is exported', () => {
+    const { WAIT_ESCALATE_MS } = require('../face');
+    assert.strictEqual(WAIT_ESCALATE_MS, 30000);
+  });
+});
+
+describe('face.js -- no incremental clear band', () => {
+  // The renderer clears the whole screen every frame (ansi.home + ansi.clearBelow
+  // inside a DEC 2026 synchronized block), so the face must not paint its own
+  // runs of blanks. A band row looks like "<cursor move><30+ spaces>".
+  const BAND = /\x1b\[\d+;\d+H {30,}/;
+
+  const withTerm = (fn) => {
+    const origCols = process.stdout.columns;
+    const origRows = process.stdout.rows;
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    try {
+      return fn();
+    } finally {
+      process.stdout.columns = origCols;
+      process.stdout.rows = origRows;
+    }
+  };
+
+  test('render emits no clear band with a thought bubble showing', () => {
+    const face = new ClaudeFace();
+    face.setState('coding', 'edit face.js');
+    face.thoughtText = 'hello';
+    const out = withTerm(() => {
+      face.render();
+      face.thoughtText = 'hello';
+      return face.render();
+    });
+    assert.ok(!BAND.test(out), 'face.render should not paint a band of blanks');
+  });
+
+  test('render emits no clear band after the help overlay is dismissed', () => {
+    const face = new ClaudeFace();
+    const out = withTerm(() => {
+      face.showHelp = true;
+      face.render();
+      face.showHelp = false;
+      return face.render();
+    });
+    assert.ok(!BAND.test(out), 'dismissing help should not paint a rectangle of blanks');
+  });
+
+  test('_prevHelpBounds is gone', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual('_prevHelpBounds' in face, false,
+      'ClaudeFace#_prevHelpBounds should no longer exist');
+  });
+
+  test('_prevBubbleRight is gone', () => {
+    const face = new ClaudeFace();
+    assert.strictEqual('_prevBubbleRight' in face, false,
+      'ClaudeFace#_prevBubbleRight should no longer exist');
+  });
+
+  test('lastPos.bubble is still published for the orbital layout', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking', 'pondering');
+    face.thoughtText = 'still here';
+    withTerm(() => {
+      face.thoughtText = 'still here';
+      face.render();
+    });
+    assert.ok(face.lastPos, 'render should publish lastPos');
+    assert.ok(face.lastPos.bubble, 'render should publish lastPos.bubble when a thought shows');
+  });
+});
+
+module.exports = suite;

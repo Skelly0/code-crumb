@@ -1,8 +1,8 @@
 'use strict';
 
 // +================================================================+
-// |  Themes, colors, ANSI codes, and thought bubble data            |
-// |  Pure data and small utility functions used by all renderers     |
+// |  Themes, colors, ANSI codes, and thought bubble data           |
+// |  Pure data and small utility functions used by all renderers   |
 // +================================================================+
 
 // -- ANSI ----------------------------------------------------------
@@ -280,10 +280,34 @@ const STATE_THOUGHTS = {
     'convergence?', 'metamorphosis...',
     'the forge burns...', 'transmuting data...',
   ],
+  reviewing: [
+    'hmm, is this right?', 'let me double-check', 'reading between the lines',
+    'looks... fine?', 'wait, what about...', 'nitpicking...', 'second opinion time',
+  ],
+  responding: [
+    'putting it into words', 'okay so...', 'summing up',
+    'here is what I found', 'wrapping this up', 'almost done talking',
+  ],
+  starting: [
+    'booting up...', 'stretching...', 'good morning', 'where were we?', 'loading context',
+  ],
+  spawning: [
+    'hello world', 'coming online', 'who am I?', 'warming up', 'reporting for duty',
+  ],
+  caffeinated: [
+    'SO FAST', 'cannot stop', 'everything at once', 'zoom zoom', 'wired!', 'too many tabs',
+  ],
 };
 
+// Bring a persisted palette index back into [0, n). A corrupt prefs file with
+// a negative index used to make every cycleTheme() land on PALETTES[0].
+function normalizePaletteIndex(index, n) {
+  if (!Number.isInteger(index) || !Number.isInteger(n) || n <= 0) return 0;
+  return ((index % n) + n) % n;
+}
+
 // -- Palettes --------------------------------------------------------
-// Each palette: { name, themes (17 states), timelineColors (17 states) }
+// Each palette: { name, themes (23 states), timelineColors (23 states) }
 // status/emoji are semantic (same across all palettes), only colors change.
 
 function _buildPaletteThemes(colorMap) {
@@ -541,6 +565,7 @@ module.exports = {
   TIMELINE_COLORS,
   SPARKLINE_BLOCKS,
   COMPLETION_LINGER,
+  normalizePaletteIndex,
   IDLE_THOUGHTS,
   THINKING_THOUGHTS,
   COMPLETION_THOUGHTS,

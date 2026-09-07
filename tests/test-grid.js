@@ -2,35 +2,44 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - grid.js (OrbitalSystem)                 |
+// |  Code Crumb Test Suite - grid.js (OrbitalSystem)               |
 // +================================================================+
 
 const assert = require('assert');
-const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS } = require('../grid');
+const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _setPidResolver, STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS } = require('../grid');
 const { gridMouths, eyes, mouths } = require('../animations');
 const { PALETTES } = require('../themes');
 const { ParticleSystem } = require('../particles');
 
-let passed = 0;
-let failed = 0;
-let currentDescribe = '';
+const suite = require('./_harness').createSuite();
+const { describe, test } = suite;
 
-function describe(name, fn) {
-  currentDescribe = name;
-  console.log(`\n  ${name}`);
-  fn();
+// The PID start-time cache is process-global and the platform resolver behind
+// it has platform-dependent timing: Linux answers in the same tick from /proc,
+// while win32/darwin go through execFile and cannot answer at all during a
+// synchronous test. A test that wants a definite ownership verdict must not
+// depend on that -- it seeds the cache itself with a start time comfortably
+// before the write (so the SLACK_MS comparison is decided), which also makes
+// requestPidStartTime return early and run no resolver anywhere. Entries are
+// deleted afterwards: process.pid is shared by every test in the run.
+function seedOwningPid(pid = process.pid) {
+  _pidStartCache.set(pid, { value: Date.now() - STALE_MS - 3600e3, resolvedAt: Date.now() });
 }
 
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`    \x1b[32m\u2713\x1b[0m ${name}`);
-  } catch (e) {
-    failed++;
-    console.log(`    \x1b[31m\u2717\x1b[0m ${name}`);
-    console.log(`      ${e.message}`);
+// Extract the [row, col] of every cell a render actually painted. Each draw is
+// "\x1b[row;colH" + colour + text + reset, so one match yields text.length cells.
+// This replaces the old outDots out-param, which existed only to feed the
+// removed clear buffer.
+function drawnCells(out) {
+  const cells = [];
+  const re = /\x1b\[(\d+);(\d+)H((?:\x1b\[[^m]*m)*)([^\x1b]*)/g;
+  let m;
+  while ((m = re.exec(out)) !== null) {
+    const row = Number(m[1]);
+    const col = Number(m[2]);
+    for (let i = 0; i < m[4].length; i++) cells.push([row, col + i]);
   }
+  return cells;
 }
 
 describe('grid.js -- MiniFace modelName', () => {
@@ -1099,8 +1108,11 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
     face.state = 'thinking';
     face.pid = process.pid; // current process — definitely alive
     face.lastUpdate = Date.now() - 200000; // 200s ago — way past any timeout
-    assert.ok(!face.isStale(),
-      'face with live owning process should never be stale');
+    seedOwningPid(); // started long before the write, so it owns the session
+    try {
+      assert.ok(!face.isStale(),
+        'face with live owning process should never be stale');
+    } finally { _pidStartCache.delete(process.pid); }
   });
 
   test('active face with dead pid and old lastUpdate is stale', () => {
@@ -1216,15 +1228,18 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
 
   test('completion state face with LIVE pid is NOT stale (Bug #108 fix)', () => {
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
-    for (const state of completionStates) {
-      const face = new MiniFace('test');
-      face.state = state;
-      face.stopped = false;
-      face.pid = process.pid; // live process — should protect from staleness
-      face.lastUpdate = Date.now() - 200000; // 200s ago — way past any timeout
-      assert.ok(!face.isStale(),
-        `completion state '${state}' with live pid should NEVER be stale`);
-    }
+    seedOwningPid();
+    try {
+      for (const state of completionStates) {
+        const face = new MiniFace('test');
+        face.state = state;
+        face.stopped = false;
+        face.pid = process.pid; // live process — should protect from staleness
+        face.lastUpdate = Date.now() - 200000; // 200s ago — way past any timeout
+        assert.ok(!face.isStale(),
+          `completion state '${state}' with live pid should NEVER be stale`);
+      }
+    } finally { _pidStartCache.delete(process.pid); }
   });
 
   test('completion state face with DEAD pid is stale after STOPPED_LINGER_MS', () => {
@@ -1242,70 +1257,60 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
 });
 
 describe('grid.js -- loadSessions mtime purge protects active faces (Bug #0)', () => {
-  test('source code contains active-face protection logic in mtime purge', () => {
-    // Structural test: verify the fix is present in grid.js source
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'grid.js'), 'utf8'
-    );
-    // The fix skips deleting session files for active (non-stopped, non-completion) in-memory faces
-    assert.ok(
-      src.includes('if (knownFace && !knownFace.stopped)') &&
-      src.includes('COMPLETION_STATES.has(knownFace.state)'),
-      'loadSessions mtime purge should check for active in-memory face before deleting file'
-    );
-  });
+  const fs = require('fs');
+  const pathMod = require('path');
+  const { SESSIONS_DIR } = require('../shared');
 
-  test('source code contains PID liveness check in isStale', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'grid.js'), 'utf8'
-    );
-    assert.ok(
-      src.includes('isOwnedByLiveProcess(this.pid, this.lastUpdate)'),
-      'isStale should check PID ownership before falling back to timeout'
-    );
-  });
-
-  test('loadSessions does not delete file for active thinking face past STALE_MS', () => {
-    const fs = require('fs');
-    const pathMod = require('path');
-    const { SESSIONS_DIR } = require('../shared');
-    const orbital = new OrbitalSystem();
-
+  // Same file in all three tests, only the in-memory face differs: that is
+  // what makes "the file survived" attributable to the face and not to luck.
+  function seedStaleFile(sessionId) {
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const fp = pathMod.join(SESSIONS_DIR, sessionId + '.json');
+    fs.writeFileSync(fp, JSON.stringify({
+      session_id: sessionId, state: 'thinking', detail: '', timestamp: Date.now(),
+    }));
+    const old = new Date(Date.now() - STALE_MS - 5000);
+    fs.utimesSync(fp, old, old);
+    return fp;
+  }
 
-    // Write a session file and back-date its mtime past STALE_MS (30s)
-    const sessionId = 'active-thinking-test';
-    const filePath = pathMod.join(SESSIONS_DIR, sessionId + '.json');
-    const sessionData = {
-      session_id: sessionId,
-      state: 'thinking',
-      detail: '',
-      timestamp: Date.now(),
-    };
-    fs.writeFileSync(filePath, JSON.stringify(sessionData));
+  test('an active non-completion face protects its stale file from the purge', () => {
+    const id = 'purge-active-face';
+    const fp = seedStaleFile(id);
+    try {
+      const orbital = new OrbitalSystem();
+      const face = new MiniFace(id);
+      face.state = 'thinking';
+      face.stopped = false;
+      orbital.faces.set(id, face);
+      orbital.loadSessions('different-main-id');
+      assert.ok(fs.existsSync(fp),
+        'an active thinking face must keep its session file alive past STALE_MS');
+    } finally { try { fs.unlinkSync(fp); } catch {} }
+  });
 
-    // Pre-populate the face in memory as active (not stopped, not completion)
-    const face = new MiniFace(sessionId);
-    face.state = 'thinking';
-    face.stopped = false;
-    orbital.faces.set(sessionId, face);
+  test('the same stale file with no face and no pid is purged', () => {
+    const id = 'purge-no-face';
+    const fp = seedStaleFile(id);
+    try {
+      new OrbitalSystem().loadSessions('different-main-id');
+      assert.ok(!fs.existsSync(fp), 'an unprotected stale file must be deleted');
+    } finally { try { fs.unlinkSync(fp); } catch {} }
+  });
 
-    // Back-date the file mtime by writing then touching with an old time
-    // We simulate STALE_MS elapsed by directly manipulating the purge condition:
-    // the purge checks (now - mtime > STALE_MS) && face is active => skip delete
-    // Since we can't easily fake mtime, we verify the face survives loadSessions
-    // by confirming the protection branch exists (covered by source test above)
-    // and that a fresh file with an active face is retained
-    orbital.loadSessions('different-main-id');
-
-    const fileStillExists = fs.existsSync(filePath);
-    // Clean up regardless
-    try { fs.unlinkSync(filePath); } catch {}
-
-    assert.ok(fileStillExists || orbital.faces.has(sessionId),
-      'active thinking face should be protected from mtime purge deletion');
+  test('a stopped face does not protect its stale file', () => {
+    const id = 'purge-stopped-face';
+    const fp = seedStaleFile(id);
+    try {
+      const orbital = new OrbitalSystem();
+      const face = new MiniFace(id);
+      face.state = 'thinking';
+      face.stopped = true;
+      orbital.faces.set(id, face);
+      orbital.loadSessions('different-main-id');
+      assert.ok(!fs.existsSync(fp),
+        'only a live face protects -- a stopped one is finished with its file');
+    } finally { try { fs.unlinkSync(fp); } catch {} }
   });
 });
 
@@ -2125,18 +2130,6 @@ describe('grid.js -- file deletion protects on parse error (Bug B)', () => {
     // Cleanup
     try { fs.unlinkSync(filePath); } catch {}
   });
-
-  test('source code has catch-continue in purge loop parse', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'grid.js'), 'utf8'
-    );
-    // The purge loop's inner try/catch for JSON.parse should continue on error
-    assert.ok(
-      src.includes('catch {') && src.includes('continue; // Parse failure = mid-write race'),
-      'purge loop catch block should continue instead of falling through to unlink'
-    );
-  });
 });
 
 // -- Bug #111: Completion-state face with live PID protected in file deletion (Bug C) --
@@ -2159,23 +2152,28 @@ describe('grid.js -- completion-state face with live PID protected in file delet
       pid: process.pid, timestamp: Date.now(),
     }));
 
-    // First load: creates the face in happy state
-    orbital.loadSessions('main-id');
-    assert.ok(orbital.faces.has(sessionId), 'face should exist after first load');
-    assert.strictEqual(orbital.faces.get(sessionId).state, 'happy');
+    // Seed the start time so the ownership verdict is decided synchronously
+    // on every platform (execFile-based resolvers cannot answer in-tick).
+    seedOwningPid();
+    try {
+      // First load: creates the face in happy state
+      orbital.loadSessions('main-id');
+      assert.ok(orbital.faces.has(sessionId), 'face should exist after first load');
+      assert.strictEqual(orbital.faces.get(sessionId).state, 'happy');
 
-    // Backdate file past STALE_MS
-    const staleTime = new Date(Date.now() - STALE_MS - 5000);
-    fs.utimesSync(filePath, staleTime, staleTime);
+      // Backdate file past STALE_MS
+      const staleTime = new Date(Date.now() - STALE_MS - 5000);
+      fs.utimesSync(filePath, staleTime, staleTime);
 
-    // Second load: file is stale and face is in completion state,
-    // but PID is alive → file should be protected
-    orbital.loadSessions('main-id');
-    assert.ok(fs.existsSync(filePath),
-      'stale file for completion-state face with live PID should NOT be deleted');
-
-    // Cleanup
-    try { fs.unlinkSync(filePath); } catch {}
+      // Second load: file is stale and face is in completion state,
+      // but PID is alive and owns the write → file should be protected
+      orbital.loadSessions('main-id');
+      assert.ok(fs.existsSync(filePath),
+        'stale file for completion-state face with live PID should NOT be deleted');
+    } finally {
+      _pidStartCache.delete(process.pid);
+      try { fs.unlinkSync(filePath); } catch {}
+    }
   });
 
   test('completion-state face with dead PID is deleted during mtime purge', () => {
@@ -2207,18 +2205,6 @@ describe('grid.js -- completion-state face with live PID protected in file delet
     orbital.loadSessions('main-id');
     assert.ok(!fs.existsSync(filePath),
       'stale file for completion-state face with dead PID should be deleted');
-  });
-
-  test('source code checks PID liveness for completion-state faces in purge', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(
-      require('path').join(__dirname, '..', 'grid.js'), 'utf8'
-    );
-    // The fix separates active non-completion (always protect) from completion with owning PID
-    assert.ok(
-      src.includes('if (knownFace.pid && isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)) continue;'),
-      'purge loop should check PID ownership for completion-state faces'
-    );
   });
 });
 
@@ -2368,11 +2354,9 @@ describe('grid.js -- OrbitalSystem._renderGroupTethers', () => {
       { col: 10, row: 5, face: new MiniFace('s1') },
       { col: 40, row: 5, face: new MiniFace('s2') },
     ];
-    const dots = [];
     const mainPos = { col: 25, row: 10, w: 12, h: 8, centerX: 31, centerY: 14 };
-    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
+    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210]);
     assert.strictEqual(result, '');
-    assert.strictEqual(dots.length, 0);
   });
 
   test('produces ANSI output for multi-member groups', () => {
@@ -2384,11 +2368,10 @@ describe('grid.js -- OrbitalSystem._renderGroupTethers', () => {
       { col: 5, row: 2, face: f1 },
       { col: 60, row: 2, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 30, row: 15, w: 12, h: 8, centerX: 36, centerY: 19 };
-    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
+    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210]);
     assert.ok(result.length > 0, 'should produce ANSI output');
-    assert.ok(dots.length > 0, 'should track dot positions');
+    assert.ok(drawnCells(result).length > 0, 'should paint dots at real coordinates');
   });
 });
 
@@ -2497,11 +2480,9 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: new MiniFace('s1') },
       { col: 40, row: 5, face: new MiniFace('s2') },
     ];
-    const dots = [];
     const mainPos = { col: 30, row: 15, w: 12, h: 8, centerX: 36, centerY: 19 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.strictEqual(result, '');
-    assert.strictEqual(dots.length, 0);
   });
 
   test('produces label text for multi-member groups', () => {
@@ -2512,11 +2493,10 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 25, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.ok(result.length > 0, 'should produce ANSI output');
-    assert.ok(dots.length > 0, 'should track label positions');
+    assert.ok(drawnCells(result).length > 0, 'should paint the label at real coordinates');
   });
 
   test('team groups show teamName as label', () => {
@@ -2527,9 +2507,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 30, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.ok(result.includes('backend'), 'should contain team name label');
   });
 
@@ -2541,9 +2520,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 30, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.ok(result.includes('sub-1'), 'should contain first member label');
   });
 
@@ -2555,9 +2533,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 30, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.ok(result.includes('feat/auth'), 'should show branch instead of sub-1');
     assert.ok(!result.includes('sub-1'), 'should not contain fallback label');
   });
@@ -2570,9 +2547,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 30, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.ok(result.includes('myapp'), 'should show cwd basename');
   });
 
@@ -2584,9 +2560,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 25, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     // Only 1 non-spawning member, so no label (need 2+)
     assert.strictEqual(result, '', 'should skip label when only 1 non-spawning member');
   });
@@ -2599,9 +2574,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 5, face: f1 },
       { col: 25, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.strictEqual(result, '');
   });
 
@@ -2615,8 +2589,7 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 10, row: 7, face: f1 },
       { col: 25, row: 7, face: f2 },
     ];
-    const dots = [];
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     // Label row = 7 + 7 = 14, which is inside mainPos.row-8=6 to mainPos.row+h+7=31
     assert.strictEqual(result, '', 'should skip label when overlapping main face');
   });
@@ -2630,9 +2603,8 @@ describe('grid.js -- OrbitalSystem._renderGroupLabels', () => {
       { col: 70, row: 2, face: f1 },
       { col: 75, row: 2, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 30, row: 20, w: 12, h: 8, centerX: 36, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 15, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 15, 80, mainPos);
     // Label should still be within terminal cols
     if (result.length > 0) {
       const colMatch = result.match(/\x1b\[(\d+);(\d+)H/);
@@ -2727,12 +2699,10 @@ describe('grid.js -- _renderGroupTethers extended checks', () => {
       { col: 60, row: 2, face: f2 },
       { col: 30, row: 2, face: fMiddle }, // middle face that tether A→B could cross
     ];
-    const dots = [];
     const mainPos = { col: 30, row: 20, w: 12, h: 8, centerX: 36, centerY: 24 };
-    os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
+    const out = os._renderGroupTethers(positions, mainPos, [100, 160, 210]);
     // No dot should be inside fMiddle's bounding box (col 30-38, row 1-9)
-    for (let i = 0; i < dots.length; i += 2) {
-      const dRow = dots[i], dCol = dots[i + 1];
+    for (const [dRow, dCol] of drawnCells(out)) {
       const insideMiddle = dCol >= 29 && dCol <= 39 && dRow >= 1 && dRow <= 9;
       assert.ok(!insideMiddle,
         `tether dot at (${dRow},${dCol}) should not overlap middle face`);
@@ -2747,10 +2717,9 @@ describe('grid.js -- _renderGroupTethers extended checks', () => {
       { col: 5, row: 2, face: f1 },
       { col: 60, row: 2, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 30, row: 20, w: 12, h: 8, centerX: 36, centerY: 24 };
-    os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
-    assert.strictEqual(dots.length, 0, 'no tether dots when one endpoint is spawning');
+    const out = os._renderGroupTethers(positions, mainPos, [100, 160, 210]);
+    assert.strictEqual(drawnCells(out).length, 0, 'no tether dots when one endpoint is spawning');
   });
 });
 
@@ -2900,8 +2869,11 @@ describe('grid.js -- _applySessionResults stale purge', () => {
     const results = [
       { file: 'sub1.json', data: { session_id: 'sub1', state: 'coding', pid: process.pid }, mtimeMs: Date.now() - STALE_MS - 1000 },
     ];
-    os._applySessionResults('main-id', results);
-    assert.ok(os.faces.has('sub1'), 'active non-completion face with live PID should survive stale purge');
+    seedOwningPid();
+    try {
+      os._applySessionResults('main-id', results);
+      assert.ok(os.faces.has('sub1'), 'active non-completion face with live PID should survive stale purge');
+    } finally { _pidStartCache.delete(process.pid); }
   });
 
   test('protects stale file when completion-state face has live PID', () => {
@@ -2914,8 +2886,11 @@ describe('grid.js -- _applySessionResults stale purge', () => {
     const results = [
       { file: 'sub1.json', data: { session_id: 'sub1', state: 'happy' }, mtimeMs: Date.now() - STALE_MS - 1000 },
     ];
-    os._applySessionResults('main-id', results);
-    assert.ok(os.faces.has('sub1'), 'completion face with live PID should survive stale purge');
+    seedOwningPid();
+    try {
+      os._applySessionResults('main-id', results);
+      assert.ok(os.faces.has('sub1'), 'completion face with live PID should survive stale purge');
+    } finally { _pidStartCache.delete(process.pid); }
   });
 
   test('purges stale file when completion-state face has no live PID', () => {
@@ -2947,8 +2922,11 @@ describe('grid.js -- _applySessionResults stale purge', () => {
     const results = [
       { file: 'new-sub.json', data: { session_id: 'new-sub', state: 'thinking', pid: process.pid }, mtimeMs: Date.now() - STALE_MS - 1000 },
     ];
-    os._applySessionResults('main-id', results);
-    assert.ok(os.faces.has('new-sub'), 'stale file with live PID should survive and create face');
+    seedOwningPid();
+    try {
+      os._applySessionResults('main-id', results);
+      assert.ok(os.faces.has('new-sub'), 'stale file with live PID should survive and create face');
+    } finally { _pidStartCache.delete(process.pid); }
   });
 
   test('non-stale file passes through without purge checks', () => {
@@ -3013,31 +2991,58 @@ describe('grid.js -- async face removal PID guard (Bug #2)', () => {
     assert.ok(!os.faces.has('sub1'), 'face with no PID should be removed when file missing');
   });
 
-  test('_applySessionResults does not delete session files when removing stale faces', () => {
-    // Structural: the face removal loop should NOT contain fs.unlink
+  test('_applySessionResults drops the face but leaves the session file alone', () => {
+    // A scan that did not see the file (results: []) must not conclude the file
+    // is junk -- the dedicated stale purge owns deletion, this loop owns memory.
     const fs = require('fs');
-    const src = fs.readFileSync(require.resolve('../grid'), 'utf8');
-    // Find the _applySessionResults method and check the face removal section
-    const methodStart = src.indexOf('_applySessionResults(');
-    const methodBody = src.slice(methodStart, src.indexOf('\n  _assignLabels', methodStart));
-    const removalSection = methodBody.slice(methodBody.indexOf('Remove faces not seen'));
-    assert.ok(!removalSection.includes('fs.unlink'), 'face removal loop should not delete files');
-    assert.ok(!removalSection.includes('unlinkSync'), 'face removal loop should not delete files (sync)');
+    const pathMod = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const id = 'async-removal-keeps-file';
+    const fp = pathMod.join(SESSIONS_DIR, id + '.json');
+    fs.writeFileSync(fp, JSON.stringify({ session_id: id, state: 'coding', timestamp: Date.now() }));
+    try {
+      const os = new OrbitalSystem();
+      const mf = new MiniFace(id);
+      mf.state = 'coding';
+      mf.pid = 0;
+      mf.stopped = false;
+      os.faces.set(id, mf);
+
+      os._applySessionResults('main-id', []);
+
+      assert.ok(!os.faces.has(id), 'sanity: an unseen face with no pid is dropped from memory');
+      assert.ok(fs.existsSync(fp), 'face removal must not delete the session file');
+    } finally { try { fs.unlinkSync(fp); } catch {} }
   });
 });
 
 describe('grid.js -- sync face removal no file deletion (Bug #4)', () => {
-  test('loadSessions face removal does not contain unlinkSync', () => {
+  test('loadSessions retires a lingered stopped face without touching its file', () => {
+    // Fresh file (the mtime purge will not touch it) + a face whose stopped
+    // linger has expired: the removal loop must drop the face only.
     const fs = require('fs');
-    const src = fs.readFileSync(require.resolve('../grid'), 'utf8');
-    // Find the sync loadSessions method's face removal section
-    const loadStart = src.indexOf('loadSessions(');
-    const loadEnd = src.indexOf('\n  _assignLabels', loadStart);
-    const loadBody = src.slice(loadStart, loadEnd);
-    // The PID guard line should exist, but no unlinkSync after faces.delete
-    const deleteIdx = loadBody.lastIndexOf('this.faces.delete(id)');
-    const afterDelete = loadBody.slice(deleteIdx, deleteIdx + 200);
-    assert.ok(!afterDelete.includes('unlinkSync'), 'sync face removal should not delete files');
+    const pathMod = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const id = 'sync-removal-keeps-file';
+    const fp = pathMod.join(SESSIONS_DIR, id + '.json');
+    fs.writeFileSync(fp, JSON.stringify({
+      session_id: id, state: 'happy', stopped: true, timestamp: Date.now(),
+    }));
+    try {
+      const orbital = new OrbitalSystem();
+      const face = new MiniFace(id);
+      face.state = 'happy';
+      face.stopped = true;
+      face.stoppedAt = Date.now() - 60000;   // well past STOPPED_LINGER_MS
+      orbital.faces.set(id, face);
+
+      orbital.loadSessions('main-id');
+
+      assert.ok(!orbital.faces.has(id), 'sanity: the lingered stopped face is retired');
+      assert.ok(fs.existsSync(fp), 'sync face removal must not delete the session file');
+    } finally { try { fs.unlinkSync(fp); } catch {} }
   });
 });
 
@@ -3610,20 +3615,44 @@ describe('grid.js -- isOwnedByLiveProcess (PID identity gate)', () => {
     assert.strictEqual(isOwnedByLiveProcess(7007, Date.now() - 2 * 3600 * 1000, alive), false); // 2 h — past cap
   });
 
+  // A resolver that never answers synchronously: the platform resolvers differ
+  // here (Linux /proc answers in the same tick, execFile cannot), so inject one
+  // with fixed timing to make the "still resolving" window observable anywhere.
+  const deferredResolver = (pids, done) => { setImmediate(() => done(new Map())); };
+
   test('uncached pid resolves as pending-protected and enqueues', () => {
     _pidStartCache.clear();
-    assert.strictEqual(isOwnedByLiveProcess(7008, Date.now(), alive), true);
-    assert.strictEqual(_pidStartStatus(7008), 'pending');
+    _setPidResolver(deferredResolver);
+    try {
+      assert.strictEqual(isOwnedByLiveProcess(7008, Date.now(), alive), true);
+      assert.strictEqual(_pidStartStatus(7008), 'pending');
+    } finally { _setPidResolver(null); _pidStartCache.delete(7008); }
   });
 
   test('TTL: stale cache entry keeps protecting with old value but re-enqueues', () => {
     _pidStartCache.clear();
-    const lastWrite = Date.now();
-    _pidStartCache.set(7009, { value: lastWrite - 1000, resolvedAt: Date.now() - 120000 }); // 2 min old entry
-    assert.strictEqual(isOwnedByLiveProcess(7009, lastWrite, alive), true); // old value still used
-    requestPidStartTime(7009, alive);
-    // entry survives (not downgraded to pending) while refresh is queued
-    assert.strictEqual(typeof _pidStartCache.get(7009).value, 'number');
+    _setPidResolver(deferredResolver);
+    try {
+      const lastWrite = Date.now();
+      _pidStartCache.set(7009, { value: lastWrite - 1000, resolvedAt: Date.now() - 120000 }); // 2 min old entry
+      assert.strictEqual(isOwnedByLiveProcess(7009, lastWrite, alive), true); // old value still used
+      requestPidStartTime(7009, alive);
+      // entry survives (not downgraded to pending) while refresh is queued
+      assert.strictEqual(typeof _pidStartCache.get(7009).value, 'number');
+    } finally { _setPidResolver(null); _pidStartCache.delete(7009); }
+  });
+
+  test('_setPidResolver: an answered start time decides ownership on every platform', () => {
+    _pidStartCache.clear();
+    const started = Date.now() - 5000;
+    _setPidResolver((pids, done) => { done(new Map([[4242, started]])); }); // synchronous
+    try {
+      // 4242 is not a real process, so the liveness probe is stubbed out with
+      // `alive`; the verdict then rests purely on the resolved start time
+      // against the last write (+ SLACK_MS) -- the same answer on every OS.
+      assert.strictEqual(isOwnedByLiveProcess(4242, Date.now(), alive), true);
+      assert.strictEqual(isOwnedByLiveProcess(4242, Date.now() - 10000, alive), false);
+    } finally { _setPidResolver(null); _pidStartCache.delete(4242); }
   });
 });
 
@@ -3677,6 +3706,40 @@ describe('grid.js -- recycled-PID purge integration', () => {
     face.lastUpdate = Date.now() - 5 * 60 * 1000; // 5 min quiet
     _pidStartCache.set(process.pid, { value: face.lastUpdate - 3600 * 1000, resolvedAt: Date.now() });
     assert.strictEqual(face.isStale(), false);
+  });
+
+  test('loadSessions purges a stale file whose pid was recycled', () => {
+    const fs = require('fs');
+    const pathMod = require('path');
+    const { SESSIONS_DIR } = require('../shared');
+    try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
+    const id = 'recycled-pid-file';
+    const fp = pathMod.join(SESSIONS_DIR, id + '.json');
+    const wroteAt = Date.now() - 5 * 24 * 3600 * 1000; // 5-day-old ghost write
+    fs.writeFileSync(fp, JSON.stringify({
+      session_id: id, state: 'coding', pid: process.pid, timestamp: wroteAt,
+    }));
+    const old = new Date(Date.now() - STALE_MS - 5000);
+    fs.utimesSync(fp, old, old);
+    _pidStartCache.clear();
+    try {
+      // Start time AFTER the write: our live pid cannot be the writer.
+      _pidStartCache.set(process.pid, { value: Date.now() - 1000, resolvedAt: Date.now() });
+      new OrbitalSystem().loadSessions('main-id');
+      assert.ok(!fs.existsSync(fp), 'a recycled pid must not keep a ghost file alive');
+
+      // Same file, same live pid, but a start time that predates the write.
+      fs.writeFileSync(fp, JSON.stringify({
+        session_id: id, state: 'coding', pid: process.pid, timestamp: wroteAt,
+      }));
+      fs.utimesSync(fp, old, old);
+      _pidStartCache.set(process.pid, { value: wroteAt - 3600 * 1000, resolvedAt: Date.now() });
+      new OrbitalSystem().loadSessions('main-id');
+      assert.ok(fs.existsSync(fp), 'the real owner still protects its file');
+    } finally {
+      _pidStartCache.delete(process.pid);
+      try { fs.unlinkSync(fp); } catch {}
+    }
   });
 
   test('source: purge paths use isOwnedByLiveProcess, not bare isProcessAlive', () => {
@@ -3736,4 +3799,25 @@ describe('grid.js -- session list editor tag', () => {
   });
 });
 
-module.exports = { passed: () => passed, failed: () => failed };
+describe('grid.js -- no incremental clear buffer', () => {
+  test('_buildClearBuf is gone', () => {
+    const os = new OrbitalSystem();
+    assert.strictEqual(typeof os._buildClearBuf, 'undefined',
+      'OrbitalSystem#_buildClearBuf should no longer exist');
+  });
+
+  test('render output does not start with a space-fill', () => {
+    const os = new OrbitalSystem();
+    const f = new MiniFace('sub-1');
+    f.label = 'sub-1';
+    f.state = 'reading';
+    os.faces.set('sub-1', f);
+    const mainPos = { row: 7, col: 26, w: 30, h: 10, centerX: 41, centerY: 12 };
+    os.render(80, 24, mainPos);          // first frame primes any clear buffer
+    const out = os.render(80, 24, mainPos);
+    assert.ok(!/^(\x1b\[\d+;\d+H +)+/.test(out),
+      'render should not prepend blanks for the previous frame');
+  });
+});
+
+module.exports = suite;

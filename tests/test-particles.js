@@ -2,33 +2,17 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - particles.js                             |
+// |  Code Crumb Test Suite - particles.js                          |
 // +================================================================+
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const { ParticleSystem } = require('../particles');
+const { ansi, dimColor, setNoColor, isNoColor } = require('../themes');
 
-let passed = 0;
-let failed = 0;
-let currentDescribe = '';
-
-function describe(name, fn) {
-  currentDescribe = name;
-  console.log(`\n  ${name}`);
-  fn();
-}
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`    \x1b[32m\u2713\x1b[0m ${name}`);
-  } catch (e) {
-    failed++;
-    console.log(`    \x1b[31m\u2717\x1b[0m ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const suite = require('./_harness').createSuite();
+const { describe, test } = suite;
 
 describe('particles.js -- ParticleSystem', () => {
   test('starts with no particles', () => {
@@ -244,48 +228,6 @@ describe('particles.js -- spawn edge cases', () => {
   });
 });
 
-describe('particles.js -- clearPrevious()', () => {
-  test('returns empty string on a fresh ParticleSystem', () => {
-    const ps = new ParticleSystem();
-    assert.strictEqual(ps.clearPrevious(), '');
-  });
-
-  test('returns non-empty string after render()', () => {
-    const ps = new ParticleSystem();
-    ps.spawn(5, 'float');
-    const savedRows = process.stdout.rows;
-    const savedCols = process.stdout.columns;
-    process.stdout.rows = 24;
-    process.stdout.columns = 80;
-    try {
-      ps.render(0, 0, [255, 255, 255]);
-      const clear = ps.clearPrevious();
-      assert.ok(clear.length > 0, 'clearPrevious should return non-empty after render');
-    } finally {
-      process.stdout.rows = savedRows;
-      process.stdout.columns = savedCols;
-    }
-  });
-
-  test('second consecutive call returns empty (buffer consumed)', () => {
-    const ps = new ParticleSystem();
-    ps.spawn(5, 'float');
-    const savedRows = process.stdout.rows;
-    const savedCols = process.stdout.columns;
-    process.stdout.rows = 24;
-    process.stdout.columns = 80;
-    try {
-      ps.render(0, 0, [255, 255, 255]);
-      ps.clearPrevious(); // first call consumes buffer
-      const second = ps.clearPrevious();
-      assert.strictEqual(second, '', 'second clearPrevious should return empty');
-    } finally {
-      process.stdout.rows = savedRows;
-      process.stdout.columns = savedCols;
-    }
-  });
-});
-
 describe('particles.js -- render()', () => {
   test('render returns a string', () => {
     const ps = new ParticleSystem();
@@ -318,22 +260,6 @@ describe('particles.js -- render()', () => {
       process.stdout.columns = savedCols;
     }
   });
-
-  test('_prevClearBuf is set after render', () => {
-    const ps = new ParticleSystem();
-    ps.spawn(5, 'float');
-    const savedRows = process.stdout.rows;
-    const savedCols = process.stdout.columns;
-    process.stdout.rows = 24;
-    process.stdout.columns = 80;
-    try {
-      ps.render(0, 0, [255, 255, 255]);
-      assert.ok(ps._prevClearBuf.length > 0, '_prevClearBuf should be set after render');
-    } finally {
-      process.stdout.rows = savedRows;
-      process.stdout.columns = savedCols;
-    }
-  });
 });
 
 describe('particles.js -- render boundary clipping', () => {
@@ -351,7 +277,6 @@ describe('particles.js -- render boundary clipping', () => {
       const output = ps.render(0, 0, [255, 255, 255]);
       // The particle is at col=-10, row=-10, which is < 1, so it should be clipped
       assert.strictEqual(output, '', 'out-of-bounds particle should produce empty output');
-      assert.strictEqual(ps._prevClearBuf, '', 'clearBuf should be empty for clipped particles');
     } finally {
       process.stdout.rows = savedRows;
       process.stdout.columns = savedCols;
@@ -530,4 +455,129 @@ describe('particles.js -- push style', () => {
   });
 });
 
-module.exports = { passed: () => passed, failed: () => failed };
+describe('particles.js -- no incremental clear buffer', () => {
+  test('render emits only the draw sequence for one particle', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(1, 'float');
+    const p = ps.particles[0];
+    p.x = 5;
+    p.y = 3;
+    p.char = '*';
+    p.life = 60;
+    p.maxLife = 180;
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      const output = ps.render(0, 0, [255, 255, 255]);
+      const fade = Math.min(1, p.life / (p.maxLife * 0.3));
+      const expected = ansi.to(3, 5) + ansi.fg(...dimColor([255, 255, 255], fade)) + '*' + ansi.reset;
+      assert.strictEqual(output, expected,
+        'render should emit the draw sequence only -- no trailing clear-buffer move/space');
+    } finally {
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+
+  test('clearPrevious() is gone', () => {
+    const ps = new ParticleSystem();
+    assert.strictEqual(typeof ps.clearPrevious, 'undefined',
+      'ParticleSystem#clearPrevious should no longer exist');
+  });
+});
+
+describe('particles.js -- bigquestion style', () => {
+  const ALLOWED = ['?', '??', '?!', String.fromCharCode(0xbf) + '?'];
+
+  test('spawn adds bigquestion particles', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(3, 'bigquestion');
+    assert.strictEqual(ps.particles.length, 3);
+    assert.ok(ps.particles.every(p => p.style === 'bigquestion'));
+  });
+
+  test('bigquestion particles are marked bold', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(1, 'bigquestion');
+    assert.strictEqual(ps.particles[0].bold, true);
+  });
+
+  test('bigquestion chars come from the loud set', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(40, 'bigquestion');
+    for (const p of ps.particles) {
+      assert.ok(ALLOWED.includes(p.char), `unexpected bigquestion char ${JSON.stringify(p.char)}`);
+    }
+  });
+
+  test('bigquestion drifts up and lives longer than question', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(30, 'bigquestion');
+    for (const p of ps.particles) {
+      assert.ok(p.vy < 0, 'bigquestion should rise');
+      assert.ok(p.life >= 50 && p.life <= 90, `life out of range: ${p.life}`);
+      assert.strictEqual(p.maxLife, 90);
+    }
+  });
+
+  test('bigquestion spreads wider than question', () => {
+    const ps = new ParticleSystem();
+    ps.spawn(200, 'bigquestion');
+    const xs = ps.particles.map(p => p.x);
+    assert.ok(Math.max(...xs) - Math.min(...xs) > 8,
+      'the wide spread should exceed the 8-column question spread');
+  });
+
+  test('render prefixes bold for a bold particle', () => {
+    const wasNoColor = isNoColor();
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    setNoColor(false);
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      const ps = new ParticleSystem();
+      ps.spawn(1, 'bigquestion');
+      ps.particles[0].x = 5;
+      ps.particles[0].y = 3;
+      const out = ps.render(0, 0, [255, 255, 255]);
+      assert.ok(out.includes('\x1b[1m'), 'a bold particle should emit the bold SGR');
+    } finally {
+      setNoColor(wasNoColor);
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+
+  test('render leaves non-bold particles alone', () => {
+    const wasNoColor = isNoColor();
+    const savedRows = process.stdout.rows;
+    const savedCols = process.stdout.columns;
+    setNoColor(false);
+    process.stdout.rows = 24;
+    process.stdout.columns = 80;
+    try {
+      const ps = new ParticleSystem();
+      ps.spawn(1, 'question');
+      ps.particles[0].x = 5;
+      ps.particles[0].y = 3;
+      const out = ps.render(0, 0, [255, 255, 255]);
+      assert.ok(!out.includes('\x1b[1m'), 'a plain particle should not emit the bold SGR');
+    } finally {
+      setNoColor(wasNoColor);
+      process.stdout.rows = savedRows;
+      process.stdout.columns = savedCols;
+    }
+  });
+
+  test('the header comment counts the style', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'particles.js'), 'utf8');
+    const header = src.slice(0, src.indexOf('const { ansi'));
+    assert.ok(header.includes('16 particle styles'), 'header should say 16 particle styles');
+    assert.ok(header.includes('bigquestion'), 'header should list bigquestion');
+  });
+});
+
+module.exports = suite;

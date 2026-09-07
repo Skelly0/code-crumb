@@ -2,14 +2,14 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb -- A terminal tamagotchi for AI coding assistants   |
-// |  Shows what your AI coding assistant is doing                   |
-// |  Subagent mini-faces orbit the main face as satellites          |
+// |  Code Crumb -- A terminal tamagotchi for AI coding assistants  |
+// |  Shows what your AI coding assistant is doing                  |
+// |  Subagent mini-faces orbit the main face as satellites         |
 // +================================================================+
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, STATE_FILE, SESSIONS_DIR, TEAMS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch, QUIT_FLAG_FILE, safeFilename } = require('./shared');
+const { HOME, STATE_FILE, SESSIONS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch, QUIT_FLAG_FILE, safeFilename } = require('./shared');
 
 // -- Modules -------------------------------------------------------
 const {
@@ -17,7 +17,7 @@ const {
   themes, TIMELINE_COLORS, SPARKLINE_BLOCKS,
   COMPLETION_LINGER,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
-  PALETTES, PALETTE_NAMES,
+  PALETTES, PALETTE_NAMES, normalizePaletteIndex,
   setNoColor, isNoColor,
 } = require('./themes');
 const { mouths, eyes, gridMouths } = require('./animations');
@@ -33,16 +33,128 @@ const FRAME_MS = Math.floor(1000 / FPS);
 const IDLE_TIMEOUT = 8000;
 const THINKING_TIMEOUT = 45000; // 45s -- safety net if Stop event is missed
 const SLEEP_TIMEOUT = 60000;
+const LONG_TOOL_HOLD_MS = 600000; // 10 min: the longest a single tool call can run
+// The `waiting` hold below is uncapped in display time, so it needs a bound of
+// its own -- and it cannot borrow the crash machinery: on win32 update-state.js
+// writes no `pid`, so `editorDead` never arms, and a hard-closed terminal never
+// gets to write `stopped`. What is left is the editor's own write cadence: the
+// hold ends once no NEW write has arrived for this long (see noteNewWrite --
+// the age must not be measured from a read, because checkState re-reads the
+// unchanged file every 2s).
+//
+// This is silence, not death. An editor blocked on a permission prompt emits no
+// further hooks either, so a live-but-unanswered session looks exactly like a
+// crashed one here and is dropped to idle identically -- a user who walks away
+// for longer than this loses the flashing title until the next write. That is
+// the accepted trade: the alternative is a face that shouts forever at a
+// terminal that is already closed. 30 min is 3x LONG_TOOL_HOLD_MS -- far past
+// any plausible "reading the permission prompt" pause, short of leaving the
+// face shouting at an empty desk all night.
+const WAIT_HOLD_STALE_MS = 1800000;
 
-// -- Hoisted sets for checkState() hot path (avoid per-call allocation) --
+// -- Hoisted sets for checkState() hot path ---------------------------
+const { ACTIVE_WORK_STATES, COMPLETION_STATES } = require('./shared');
 const RESCUE_EXCLUDE = new Set(['idle', 'sleeping', 'responding', 'starting', 'happy', 'satisfied', 'proud', 'relieved']);
-const FRESH_READ_STATES = new Set(['thinking', 'executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'responding', 'happy', 'satisfied', 'proud', 'relieved']);
-const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
-const ACTIVE_WORK_STATES = new Set(['executing', 'coding', 'reading', 'searching', 'testing', 'installing', 'committing', 'reviewing', 'subagent', 'responding', 'training']);
+// States in which a missed Stop/start event is worth a fresh file read: every
+// active work state, every completion, and thinking. Derived so a new work
+// state can never be forgotten here (committing/reviewing/subagent/training were).
+const FRESH_READ_STATES = new Set(['thinking', ...ACTIVE_WORK_STATES, ...COMPLETION_STATES]);
 
-// ===================================================================
-// SHARED RUNTIME
-// ===================================================================
+// -- Timeout cascade -------------------------------------------------
+// Pure: decide the timeout-driven transition for the main face.
+// Returns the next state, or null to hold the current one.
+//   state         current face state
+//   sinceChangeMs how long it has been showing (now - face.lastStateChange)
+//   sessionActive Stop has not fired and the editor PID is not known dead
+//   lingerMs      COMPLETION_LINGER for the current state (0 when it has none)
+//   fileState     the state last applied from the state file
+//   fileAgeMs     how long since the main session produced a NEW write
+//                 (0 when unknown -- treated as fresh)
+//   liveChildren  live subagent orbitals belonging to this session (0 = none)
+function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState, fileAgeMs, liveChildren = 0 }) {
+  // Conducting hold. A Claude Code subagent's hooks write only that agent's
+  // own orbital file, so between SubagentStart and SubagentStop nothing
+  // refreshes global state and the face would fall idle -> sleeping while its
+  // agents are visibly working around it. Hold it at 'subagent' (exactly what
+  // SubagentStart itself writes) instead of letting it rest.
+  //
+  // `conducting()` is null once the face is already there, so a held face
+  // never churns setState every frame. `hold()` substitutes it for a downward
+  // transition only -- a reward, a real work state and a plain null all pass
+  // through untouched, and so does the `waiting` hold below: "the editor needs
+  // YOU" is actionable and outranks the ambient "your agents are busy".
+  // Conducting only fills a vacuum the cascade would otherwise fill with idle.
+  //
+  // The bound is the caller's: liveChildren counts only non-stopped, non-stale
+  // children, so a crashed parent's stale orbitals stop holding the face up.
+  const conducting = () => (state === 'subagent' ? null : 'subagent');
+  const hold = (next) => (liveChildren > 0 &&
+    (next === 'idle' || next === 'sleeping' || next === 'thinking')) ? conducting() : next;
+
+  if (state === 'starting') return hold(sinceChangeMs > 2500 ? 'idle' : null);
+  if (state === 'responding' && !sessionActive) return 'happy';
+  if (lingerMs && sinceChangeMs > lingerMs) return hold(sessionActive ? 'thinking' : 'idle');
+  if (state === 'thinking') {
+    return hold(sinceChangeMs > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT) ? 'idle' : null);
+  }
+  // Resting: with agents still working, lift straight back to conducting
+  // rather than wait out the 60s sleep timer with orbitals busy on screen.
+  if (state === 'idle') {
+    if (liveChildren > 0) return conducting();
+    return sinceChangeMs > SLEEP_TIMEOUT ? 'sleeping' : null;
+  }
+  if (state === 'sleeping') return liveChildren > 0 ? conducting() : null;
+  if (COMPLETION_STATES.has(state)) return null;
+  // Waiting on the user is real whether or not the turn has ended -- an
+  // idle_prompt notification arrives *after* Stop. So this hold ignores
+  // sessionActive and never expires on display time: the face waits as long as
+  // the user does. It ends only once the editor has stopped producing new
+  // writes for WAIT_HOLD_STALE_MS -- the one crash signal that works on every
+  // platform. Degrade to idle, not thinking: nothing was ever running.
+  // This hold wins over the conducting hold while it lasts -- and once the
+  // silence bound does expire, hold() turns that 'idle' into conducting if
+  // agents are still writing, which is the honest reading: the global write
+  // clock has gone quiet but the family demonstrably has not.
+  if (state === 'waiting' && fileState === 'waiting') {
+    return (fileAgeMs || 0) > WAIT_HOLD_STALE_MS ? hold('idle') : null;
+  }
+  // The state file still names this same unfinished tool: hold the work face.
+  // ('responding' is in ACTIVE_WORK_STATES but is a post-turn state, never a tool.)
+  if (ACTIVE_WORK_STATES.has(state) && state !== 'responding' && sessionActive
+      && fileState === state && sinceChangeMs <= LONG_TOOL_HOLD_MS) return null;
+  return hold(sinceChangeMs > IDLE_TIMEOUT ? (sessionActive ? 'thinking' : 'idle') : null);
+}
+
+// -- Write clock -----------------------------------------------------
+// Pure: when did the main session last produce a genuinely NEW write?
+//
+// This exists because "when did we last read the file" is a trap. checkState()
+// re-reads the *unchanged* state file every 2s (the `forceRead` path, there to
+// beat NTFS's 1-second mtime granularity), so any clock stamped on a read sits
+// at ~2s forever, even for an editor that died an hour ago. Only the write's
+// own JSON timestamp advancing proves the editor is alive.
+//
+//   ts      timestamp of the write just read
+//   lastTs  the newest timestamp applied so far
+//   now     current time
+//   lastAt  the stamp to keep if this is not a new write
+// Returns the stamp to keep. 0 means "no write seen yet" -- callers treat that
+// as fresh rather than infinitely stale.
+function noteNewWrite(ts, lastTs, now, lastAt) {
+  return ts > lastTs ? now : lastAt;
+}
+
+// -- Terminal title -------------------------------------------------
+// The tab/window title mirrors the face so a backgrounded terminal still
+// says what is going on. While the face has been waiting on the user for a
+// while, the caller alternates `flash` to make the title blink for attention.
+function buildTitle(modelName, status, flash) {
+  return flash
+    ? `\x1b]0;\u2753 WAITING FOR YOU \u00b7 Code Crumb\x07`
+    : `\x1b]0;Code Crumb \u00b7 ${modelName} is ${status}\x07`;
+}
+
+// -- Shared runtime -------------------------------------------------
 
 function readState() {
   try {
@@ -114,32 +226,6 @@ function writeQuitFlag() {
   try { fs.writeFileSync(QUIT_FLAG_FILE, String(Date.now()), 'utf8'); } catch {}
 }
 
-// -- Team discovery ------------------------------------------------
-// Scans ~/.claude/teams/*/config.json and returns a map of
-// team name → { teammates: string[] } for display purposes.
-function scanTeams() {
-  const teams = {};
-  try {
-    const entries = fs.readdirSync(TEAMS_DIR, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      try {
-        const cfg = JSON.parse(
-          fs.readFileSync(path.join(TEAMS_DIR, entry.name, 'config.json'), 'utf8')
-        );
-        teams[entry.name] = {
-          teammates: Array.isArray(cfg.teammates) ? cfg.teammates : [],
-        };
-      } catch {
-        // Config missing or malformed — skip
-      }
-    }
-  } catch {
-    // Teams dir doesn't exist — agent teams not in use
-  }
-  return teams;
-}
-
 // -- Unified mode (main face + orbital subagents) ------------------
 function runUnifiedMode() {
   const minimal = (process.argv.includes('--minimal') || process.env.MINIMAL_BOOT === '1');
@@ -163,7 +249,7 @@ function runUnifiedMode() {
   // Load persisted preferences (skipped in minimal mode)
   if (!minimal) {
     const prefs = loadPrefs();
-    if (typeof prefs.paletteIndex === 'number') face.paletteIndex = prefs.paletteIndex % PALETTES.length;
+    face.paletteIndex = normalizePaletteIndex(prefs.paletteIndex, PALETTES.length);
     if (typeof prefs.accessoriesEnabled === 'boolean') face.accessoriesEnabled = prefs.accessoriesEnabled;
     if (typeof prefs.showStats === 'boolean') face.showStats = prefs.showStats;
     if (typeof prefs.showOrbitals === 'boolean') face.showOrbitals = prefs.showOrbitals;
@@ -175,7 +261,6 @@ function runUnifiedMode() {
   let lastMainUpdate = 0;
 
   let lastMtime = 0;
-  let lastFileState = 'idle'; // Track the last state written to the file by hooks
   let lastStopped = false;    // Track if Stop hook has fired (session ended)
   let lastForceReadTime = 0;  // Track periodic forced re-reads (bypasses mtime race)
   let lastEditorPid = 0;      // Validated (armed) PID of the editor process
@@ -184,6 +269,8 @@ function runUnifiedMode() {
   let candidateTs = 0;        // JSON timestamp of the write that reported the candidate
   let editorDead = false;     // Armed PID found dead — session presumed crashed
   let lastAppliedTimestamp = 0; // Dedup: skip re-applying state with same timestamp
+  let lastAppliedState = null;  // State named by that write -- "is this tool still running?"
+  let lastNewWriteAt = 0;       // When a NEW write last arrived (not a re-read) -- see noteNewWrite
   function checkState() {
     const now = Date.now();
     let cachedStateData = null; // Cache readState() to avoid duplicate fs.readFileSync
@@ -281,13 +368,14 @@ function runUnifiedMode() {
             lastEditorPid = 0;
             candidatePid = 0;
             editorDead = false;
+            // The old session's tool is no longer what the file names
+            lastAppliedState = null;
           } else {
             return; // Ignore — this is a subagent writing to the state file
           }
         }
 
         lastMainUpdate = Date.now();
-        lastFileState = stateData.state;
         lastStopped = !!stateData.stopped;
         // Track the writer's PID as a validation candidate (same PID repeated
         // keeps its original sighting time so it can pass the 2.5s window).
@@ -300,6 +388,11 @@ function runUnifiedMode() {
         // A write newer than anything we've applied proves the editor is
         // alive — overrides a false PID death (e.g. PID reuse).
         if (editorDead && ts > lastAppliedTimestamp) editorDead = false;
+        // Same proof, kept as a clock: this is the ONLY place the write clock
+        // moves. lastMainUpdate above cannot serve -- it is refreshed by every
+        // forced re-read of the unchanged file. Stamped before the swap guard
+        // so a write during a transition still counts as the editor breathing.
+        lastNewWriteAt = noteNewWrite(ts, lastAppliedTimestamp, now, lastNewWriteAt);
 
         // Don't apply incoming state while a swap transition is animating —
         // the face should dissolve with its current state until the swap frame.
@@ -307,6 +400,7 @@ function runUnifiedMode() {
 
         if (ts > lastAppliedTimestamp) {
           lastAppliedTimestamp = ts;
+          lastAppliedState = stateData.state;
           // Force-apply stopped state (session ended) — bypass minimum display time
           // so the face doesn't get stuck on "thinking" when Claude is interrupted
           if (stateData.stopped && Date.now() < face.minDisplayUntil) {
@@ -337,18 +431,7 @@ function runUnifiedMode() {
     // Completion states (happy/satisfied/proud/relieved) are excluded — they
     // already transition to idle via the linger path with sessionActive=false.
     if ((lastStopped || editorDead) && !RESCUE_EXCLUDE.has(face.state)) {
-      face.prevState = face.state;
-      face.state = 'responding';
-      face.transitionFrame = 0;
-      face.lastStateChange = now;
-      face.stateDetail = 'wrapping up';
-      face.minDisplayUntil = now + 3000; // respect responding's 3s min display time
-      face.pendingState = null;
-      face.pendingDetail = '';
-      face.particles.fadeAll();
-      face.timeline.push({ state: 'responding', at: now });
-      face._timelineDirty = true;
-      if (face.timeline.length > 200) face.timeline.shift();
+      face.forceState('responding', 'wrapping up', 3000); // respect responding's 3s min display time
     }
 
     // If we're past minDisplayUntil and in an active state,
@@ -360,27 +443,16 @@ function runUnifiedMode() {
       try {
         const freshData = cachedStateData || readState();
         const freshTs = freshData.timestamp || 0;
-        // Detect stopped transition: false->true only (primary reset at line 244 and session adoption)
+        // Detect stopped transition: false->true only (the primary reset is in the apply block above, plus session adoption)
         const stoppedNow = freshData.stopped || false;
         if (stoppedNow && !lastStopped && freshTs > lastAppliedTimestamp) {
           lastAppliedTimestamp = freshTs;
+          lastAppliedState = freshData.state;
           lastStopped = stoppedNow;
-          lastFileState = freshData.state;
           // If the file says responding, apply it; otherwise
           // we just set lastStopped so the rescue block above fires next frame.
           if (freshData.state === 'responding') {
-            face.prevState = face.state;
-            face.state = freshData.state;
-            face.transitionFrame = 0;
-            face.lastStateChange = now;
-            face.stateDetail = freshData.detail || 'wrapping up';
-            face.minDisplayUntil = now + 3000; // respect responding's 3s min display time
-            face.pendingState = null;
-            face.pendingDetail = '';
-            face.particles.fadeAll();
-            face.timeline.push({ state: freshData.state, at: now });
-            face._timelineDirty = true;
-            if (face.timeline.length > 200) face.timeline.shift();
+            face.forceState('responding', freshData.detail || 'wrapping up', 3000);
           }
         }
       } catch {}
@@ -389,33 +461,29 @@ function runUnifiedMode() {
     // Don't apply timeouts if minimum display time hasn't passed
     if (now < face.minDisplayUntil) return;
 
-    const completionLinger = COMPLETION_LINGER[face.state];
     // Session is active until Stop hook fires (writes stopped: true)
     // or the armed editor PID is found dead
     const sessionActive = !lastStopped && !editorDead;
 
-    // Auto-transition: starting → idle after min display
-    if (face.state === 'starting' && now - face.lastStateChange > 2500) {
-      face.setState('idle');
-    // Auto-transition: responding → happy after min display (Stop already fired)
-    } else if (face.state === 'responding' && (lastStopped || editorDead) && now >= face.minDisplayUntil) {
-      face.setState('happy');
-    } else if (completionLinger && now - face.lastStateChange > completionLinger) {
-      face.setState(sessionActive ? 'thinking' : 'idle');
-    } else if (face.state === 'thinking' &&
-               now - face.lastStateChange > (sessionActive ? THINKING_TIMEOUT : IDLE_TIMEOUT)) {
-      face.setState('idle');
-    } else if (!COMPLETION_STATES.has(face.state) &&
-               face.state !== 'idle' && face.state !== 'sleeping' &&
-               face.state !== 'thinking' &&
-               face.state !== 'starting' &&
-               now - face.lastStateChange > IDLE_TIMEOUT) {
-      // Active tool states degrade to thinking (not idle) if session is still running
-      face.setState(sessionActive ? 'thinking' : 'idle');
-    }
-    if (face.state === 'idle' && now - face.lastStateChange > SLEEP_TIMEOUT) {
-      face.setState('sleeping');
-    }
+    // Timeout-driven transitions: starting → idle, responding → happy once the
+    // session ended, a completion's linger, thinking/idle timeouts, and the
+    // degrade-to-thinking fallback — except while the state file still names
+    // the same unfinished tool, which holds the work face (face.js escalates
+    // its detail line instead).
+    // Live subagent orbitals hold the main face at "conducting N" instead of
+    // letting it fall idle while agent hooks write only their own files.
+    const liveChildren = minimal ? 0 : orbital.liveChildCount();
+    const next = idleCascade({
+      state: face.state,
+      sinceChangeMs: now - face.lastStateChange,
+      sessionActive,
+      lingerMs: COMPLETION_LINGER[face.state] || 0,
+      fileState: lastAppliedState,
+      fileAgeMs: lastNewWriteAt ? now - lastNewWriteAt : 0,
+      liveChildren,
+    });
+    if (next === 'subagent' && liveChildren > 0) face.setState(next, `conducting ${liveChildren}`);
+    else if (next) face.setState(next);
   }
 
   checkState();
@@ -424,10 +492,13 @@ function runUnifiedMode() {
   // immediately, duplicates within 50ms are suppressed — Windows fs.watch
   // fires multiple events per write)
   let stateWatchThrottled = false;
+  let stateWatcher = null;
+  let sessionWatcher = null;
+  let sessionWatchTimer = null;
   try {
     const dir = path.dirname(STATE_FILE);
     const basename = path.basename(STATE_FILE);
-    const stateWatcher = fs.watch(dir, (eventType, filename) => {
+    stateWatcher = fs.watch(dir, (eventType, filename) => {
       if (!filename || filename === basename) {
         if (!stateWatchThrottled) {
           stateWatchThrottled = true;
@@ -443,9 +514,8 @@ function runUnifiedMode() {
 
   // Watch sessions directory for subagent changes (skipped in minimal mode)
   if (!minimal) {
-    let sessionWatchTimer = null;
     try {
-      const sessionWatcher = fs.watch(SESSIONS_DIR, () => {
+      sessionWatcher = fs.watch(SESSIONS_DIR, () => {
         if (sessionWatchTimer) clearTimeout(sessionWatchTimer);
         sessionWatchTimer = setTimeout(() => {
           if (mainSessionId) orbital.loadSessionsAsync(mainSessionId);
@@ -463,13 +533,13 @@ function runUnifiedMode() {
   // Initial session load (skipped in minimal mode)
   if (!minimal) orbital.loadSessions(mainSessionId);
 
-  // Initial team discovery (skipped in minimal mode)
-  let activeTeams = minimal ? {} : scanTeams();
-
   // -- Cleanup (accessible to keypress handler + signal handlers) ----
   function cleanup() {
     writeQuitFlag();
     removePid();
+    try { if (stateWatcher) stateWatcher.close(); } catch {}
+    try { if (sessionWatcher) sessionWatcher.close(); } catch {}
+    if (sessionWatchTimer) clearTimeout(sessionWatchTimer);
     try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch {}
     process.stdout.write(ansi.syncEnd + ansi.show + ansi.clear + ansi.reset);
     process.exit(0);
@@ -523,7 +593,7 @@ function runUnifiedMode() {
         return;
       }
       if (key === ' ') face.pet();
-      else if (key === 't' && !isNoColor()) { face.cycleTheme(); orbital.paletteIndex = face.paletteIndex; persistPrefs(); }
+      else if (key === 't' && !isNoColor()) { face.cycleTheme(); persistPrefs(); }
       else if (key === 's') { face.toggleStats(); persistPrefs(); }
       else if (key === 'a') { face.toggleAccessories(); persistPrefs(); }
       else if (key === 'o') { face.toggleOrbitals(); persistPrefs(); }
@@ -532,6 +602,7 @@ function runUnifiedMode() {
     });
   }
 
+  let prevFrame = null;  // last frame written; loop() skips identical frames
   process.stdout.on('resize', () => {
     // Force-complete swap on resize to avoid ghost artifacts
     if (swapTransition.active) {
@@ -539,8 +610,7 @@ function runUnifiedMode() {
       swapTransition.cancel();
     }
     face.particles.fadeAll(5);
-    orbital._prevClearBuf = '';  // Full clear handles it
-    prevSessionListClear = '';
+    prevFrame = null;  // the screen is about to be cleared -- force the next frame out even if identical
     process.stdout.write(ansi.syncEnd + ansi.clear);
   });
 
@@ -570,8 +640,12 @@ function runUnifiedMode() {
       );
     } catch {}
 
-    // Adopt the new session as main
+    // Adopt the new session as main. Every path that changes which session is
+    // main must also forget the file state the hold is keyed on -- a manual
+    // promotion pins the session, so a stale work state would otherwise hold
+    // the promoted face for the full LONG_TOOL_HOLD_MS.
     mainSessionId = newId;
+    lastAppliedState = null;
 
     // Read the new main's session file and apply state
     try {
@@ -598,8 +672,6 @@ function runUnifiedMode() {
   }
 
   let lastTime = Date.now();
-  let prevFrame = null;
-  let prevSessionListClear = '';
   function loop() {
     const now = Date.now();
     const dt = now - lastTime;
@@ -638,22 +710,16 @@ function runUnifiedMode() {
     if (orbital.frame % (FPS * 2) === 0) orbital.loadSessionsAsync(mainSessionId);
 
     // Periodically rescan team configs (~every 10s)
-    if (orbital.frame % (FPS * 10) === 0) activeTeams = scanTeams();
 
     if (face.frame % Math.floor(FPS / 2) === 0) checkState();
 
     // Tell face how many subagents are active (for status line)
     face.subagentCount = orbital.faces.size;
 
-    // Sync palette
-    orbital.paletteIndex = face.paletteIndex;
-
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
 
     let out = '';
-    // Pre-clear previous session list footprint so face/orbital redraws overwrite it
-    if (prevSessionListClear) out += prevSessionListClear;
     try {
       out += face.render();
     } catch {}
@@ -662,9 +728,6 @@ function runUnifiedMode() {
       try {
         out += orbital.render(cols, rows, face.lastPos, paletteThemes);
       } catch {}
-    } else if (orbital._prevClearBuf) {
-      out += orbital._prevClearBuf;
-      orbital._prevClearBuf = '';
     }
 
     // Apply transition dim to face output
@@ -689,32 +752,25 @@ function runUnifiedMode() {
         isMain: true,
         isPinned: !!pinnedSessionId,
       };
-      const slBounds = {};
-      try { out += renderSessionList(cols, rows, subSorted, paletteThemes, mainInfo, face.sessionListIndex, slBounds); } catch {}
-      // Store current bounds so next frame's pre-clear wipes this footprint
-      if (slBounds.bx != null) {
-        let clr = '';
-        const clearRow = ' '.repeat(slBounds.w);
-        for (let r = slBounds.by; r < slBounds.by + slBounds.h; r++) {
-          clr += `\x1b[${r};${slBounds.bx}H${clearRow}`;
-        }
-        prevSessionListClear = clr;
-      }
-    } else if (prevSessionListClear) {
-      // Pre-clear already ran above; just reset state
-      prevSessionListClear = '';
+      try { out += renderSessionList(cols, rows, subSorted, paletteThemes, mainInfo, face.sessionListIndex); } catch {}
     }
 
-    // Update terminal title bar to reflect current state
+    // Update terminal title bar to reflect current state. A wait the user has
+    // not answered for a while blinks the title (~0.5s each way at 15 FPS) so a
+    // backgrounded terminal still asks for attention.
     const _pal = PALETTES[face.paletteIndex] || PALETTES[0];
     const _status = (_pal.themes[face.state] || _pal.themes.idle).status;
-    const _title = `\x1b]0;Code Crumb \u00b7 ${face.modelName} is ${_status}\x07`;
+    const flash = face.waitEscalated() && Math.floor(face.frame / 8) % 2 === 0;
+    const _title = buildTitle(face.modelName, _status, flash);
 
-    if (out === prevFrame) {
+    // The title is part of the frame: a blink with identical body still needs
+    // writing, so dedupe on both.
+    const frameKey = _title + out;
+    if (frameKey === prevFrame) {
       setTimeout(loop, FRAME_MS);
       return;
     }
-    prevFrame = out;
+    prevFrame = frameKey;
     process.stdout.write(ansi.syncStart + _title + ansi.home + ansi.clearBelow + out + ansi.syncEnd);
     setTimeout(loop, FRAME_MS);
   }
@@ -820,6 +876,9 @@ if (require.main === module) {
     COMPLETION_LINGER, TIMELINE_COLORS, SPARKLINE_BLOCKS,
     IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
     PALETTES, PALETTE_NAMES,
-    readState, ACTIVE_WORK_STATES, COMPLETION_STATES,
+    readState, ACTIVE_WORK_STATES, COMPLETION_STATES, FRESH_READ_STATES,
+    idleCascade, buildTitle, noteNewWrite,
+    IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
+    LONG_TOOL_HOLD_MS, WAIT_HOLD_STALE_MS,
   };
 }

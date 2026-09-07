@@ -1,0 +1,29 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: node ${{ matrix.node }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Syntax check every script
+        shell: bash
+        run: git ls-files '*.js' '*.mjs' | xargs -n1 node --check
+      - name: No trailing whitespace
+        shell: bash
+        run: "! git grep -n -E '[[:space:]]+$' -- '*.js' '*.mjs' '*.md' '*.json' '*.yml'"
+      - name: Run test suite
+        run: node test.js --quiet

@@ -1,29 +1,24 @@
 'use strict';
 
 // +================================================================+
-// |  Orbital mode -- MiniFace and OrbitalSystem classes              |
-// |  MiniFace renders compact subagent faces                        |
-// |  OrbitalSystem orbits them around the main ClaudeFace           |
+// |  Orbital mode -- MiniFace and OrbitalSystem classes            |
+// |  MiniFace renders compact subagent faces                       |
+// |  OrbitalSystem orbits them around the main ClaudeFace          |
 // +================================================================+
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, SESSIONS_DIR, safeFilename } = require('./shared');
-const { ansi, breathe, dimColor, themes, COMPLETION_LINGER, PALETTES, PALETTE_NAMES } = require('./themes');
+const {
+  HOME, SESSIONS_DIR, safeFilename,
+  ACTIVE_WORK_STATES, INTERRUPTIBLE_STATES, COMPLETION_STATES,
+} = require('./shared');
+const { ansi, breathe, dimColor, themes, COMPLETION_LINGER } = require('./themes');
 const { gridMouths } = require('./animations');
 
 // -- Config --------------------------------------------------------
 
-const ACTIVE_WORK_STATES = new Set([
-  'executing', 'coding', 'reading', 'searching', 'testing',
-  'installing', 'committing', 'reviewing', 'subagent', 'responding',
-  'training',
-]);
-const INTERRUPTIBLE_STATES = new Set([
-  'thinking', 'happy', 'satisfied', 'proud', 'relieved',
-  'idle', 'sleeping', 'waiting',
-]);
-const COMPLETION_STATES = new Set(['happy', 'satisfied', 'proud', 'relieved']);
+// ACTIVE_WORK_STATES / INTERRUPTIBLE_STATES / COMPLETION_STATES are shared
+// with face.js and renderer.js via shared.js.
 const HOME_FWD = HOME.replace(/\\/g, '/');  // Forward-slash-normalized HOME for path display
 
 // Editors whose names may appear in legacy modelName fields / ID prefixes
@@ -50,18 +45,18 @@ function hashTeamColor(teamName) {
   return TEAM_COLORS[h % TEAM_COLORS.length];
 }
 
-const CELL_W = 12;
 const CELL_H = 7;
 const BOX_W = 8;
 const BOX_INNER = 6;
 const STALE_MS = 120000;
 const STOPPED_LINGER_MS = 10000;
-const MIN_COLS_GRID = 14;
-const MIN_ROWS_GRID = 9;
 const IDLE_TIMEOUT = 8000;
 const SLEEP_TIMEOUT = 60000;
 const THINKING_TIMEOUT = 45000;
 const ORPHAN_TIMEOUT = 90000;  // 90s fallback for sessions without pid or whose process has exited
+// Subagent orbitals (parentSession set) go quiet for a whole model turn --
+// they emit no hooks between tool calls, so 90s/120s retired them mid-work.
+const CHILD_ORPHAN_TIMEOUT = 900000;  // 15 min for a live child orbital
 const BREATHE_STEP = 200;  // Quantize breathe/pulse time to reduce frame-unique output
 
 // -- Orbital Grouping Constants ------------------------------------
@@ -115,18 +110,44 @@ function _winPsExe() {
   return _psExeCached;
 }
 
+// Evict resolved entries nobody has asked about for 3x the TTL, so PIDs from
+// sessions that vanished do not accumulate over a long renderer lifetime.
+// Pending entries are left alone: a resolver may still be about to fill them.
+function _sweepPidCache(now = Date.now()) {
+  for (const [pid, e] of _pidStartCache) {
+    if (e.value !== 'pending' && now - e.resolvedAt > 3 * PID_CACHE_TTL_MS) _pidStartCache.delete(pid);
+  }
+}
+
 // Enqueue a PID for background start-time resolution. Fresh entries are
 // left alone; TTL-expired entries keep their old value (still used by the
 // gate) while a refresh rides the next batch.
 function requestPidStartTime(pid, aliveFn = isProcessAlive) {
   if (!pid || pid <= 1) return;
   const now = Date.now();
+  _sweepPidCache(now);
   const e = _pidStartCache.get(pid);
   if (e && (e.value === 'pending' || now - e.resolvedAt < PID_CACHE_TTL_MS)) return;
   if (!aliveFn(pid)) { _pidStartCache.delete(pid); return; }
   if (!e) _pidStartCache.set(pid, { value: 'pending', resolvedAt: now });
   _pidResolveQueue.add(pid);
   _kickPidResolve();
+}
+
+// Test seam: swap the platform start-time resolver. The Linux resolver reads
+// /proc synchronously and calls back in the same tick, while win32/darwin go
+// through execFile and cannot call back until the caller yields -- so the same
+// test observes 'known' on Linux and 'pending' everywhere else. Tests inject a
+// resolver with deterministic timing instead. Resetting also clears the
+// in-flight latch and the queue, because _pidExecInFlight is only lowered
+// inside `done` and test.js runs every test file in one process: a fake
+// resolver that never calls back would otherwise freeze every later PID at
+// 'pending' for the rest of the run.
+let _pidResolver = _resolvePidStartTimes;
+function _setPidResolver(fn) {
+  _pidResolver = fn || _resolvePidStartTimes;
+  _pidExecInFlight = false;
+  _pidResolveQueue.clear();
 }
 
 // One outstanding exec at a time; queued PIDs ride the next batch.
@@ -151,7 +172,7 @@ function _kickPidResolve() {
   };
   // A synchronous throw in a resolver must never latch _pidExecInFlight —
   // that would freeze every PID at 'pending' (protected) forever.
-  try { _resolvePidStartTimes(pids, done); } catch { done(null); }
+  try { _pidResolver(pids, done); } catch { done(null); }
 }
 
 // Platform resolvers. callback(Map<pid, epochMs|'unknown-alive'> | null on exec failure).
@@ -260,7 +281,13 @@ class MiniFace {
     this.blinkFrame = -1;
     this.lookDir = 0;
     this.lookTimer = 0;
-    this.parentSession = null; // set if this is a synthetic subagent
+    this.parentSession = null; // set if this is a subagent orbital
+    this.agentType = '';       // Claude Code agent_type (Explore, Plan, ...)
+    // Whether the conducting parent still shows a sign of life. Only the long
+    // CHILD_ORPHAN_TIMEOUT depends on it, and it starts true so a face nobody
+    // has classified yet is protected -- the same "unresolved means protect"
+    // convention isOwnedByLiveProcess uses for a pending PID.
+    this.parentAlive = true;
     this.teamName = '';        // agent teams: team name
     this.teammateName = '';    // agent teams: teammate role/name
     this.isTeammate = false;   // true if part of an agent team
@@ -300,7 +327,15 @@ class MiniFace {
     // Skip if data hasn't changed since last read (prevents tick() oscillation).
     // Uses JSON timestamp (ms precision) instead of file mtime — immune to NTFS 1s granularity.
     const dataTs = data.timestamp || 0;
-    if (dataTs && dataTs === this._lastDataTimestamp) return;
+    if (dataTs && dataTs === this._lastDataTimestamp) {
+      // Same content, newer mtime: the file was touched, not rewritten (the
+      // parent heartbeat and _touchActiveSubagents both do this). Take the
+      // mtime so the face doesn't go stale under a demonstrably fresh file.
+      // Only the file's own mtime is used, never Date.now() -- polling must
+      // not be able to keep a dead session alive.
+      if (fileMtimeMs && fileMtimeMs > this.lastUpdate) this.lastUpdate = fileMtimeMs;
+      return;
+    }
     this._lastDataTimestamp = dataTs;
 
     const newState = data.state || 'idle';
@@ -347,6 +382,7 @@ class MiniFace {
       }
     }
     if (data.parentSession) this.parentSession = data.parentSession;
+    if (data.agentType) this.agentType = data.agentType;
     if (data.teamName) {
       this.teamName = data.teamName;
       this.teamColor = hashTeamColor(data.teamName);
@@ -377,8 +413,15 @@ class MiniFace {
     if (COMPLETION_STATES.has(this.state)) {
       return Date.now() - this.lastUpdate > STOPPED_LINGER_MS;
     }
-    // Everything else: orphan timeout
-    return Date.now() - this.lastUpdate > ORPHAN_TIMEOUT;
+    // Everything else: orphan timeout. A child orbital gets the longer window
+    // -- a subagent in a long model turn writes nothing until its next tool
+    // call, and dropping it there is exactly the "subagents don't all show up"
+    // symptom. The extension is conditional on the parent still showing a sign
+    // of life, so a crashed parent's ghosts degrade on the normal schedule
+    // instead of animating fake work for a quarter of an hour.
+    const orphanMs = (this.parentSession && this.parentAlive)
+      ? CHILD_ORPHAN_TIMEOUT : ORPHAN_TIMEOUT;
+    return Date.now() - this.lastUpdate > orphanMs;
   }
 
   tick(dt) {
@@ -583,6 +626,22 @@ class MiniFace {
         const cp = Math.floor(this.frame / 8) % 2;
         return cp ? ' \u2580\u2580 \u2580\u2580' : ' \u2588\u2588 \u2588\u2588';
       }
+      case 'reviewing': {
+        // Scanning along a line -- reading with intent
+        const rv = Math.floor(this.frame / 6) % 3;
+        return [' \u2500\u2588 \u2500\u2588', ' \u2588\u2500 \u2588\u2500', ' \u2500\u2500 \u2500\u2500'][rv];
+      }
+      case 'training': {
+        // Furnace eyes -- embers flicker
+        const tf = Math.floor(this.frame / 5) % 2;
+        return tf ? ' \u2593\u2593 \u2593\u2593' : ' \u2592\u2592 \u2592\u2592';
+      }
+      case 'starting':
+      case 'spawning': {
+        // Booting up -- dots resolve into open eyes
+        const sp = Math.floor(this.frame / 4) % 3;
+        return [' \u00b7\u00b7 \u00b7\u00b7', ' \u2584\u2584 \u2584\u2584', ' \u2588\u2588 \u2588\u2588'][sp];
+      }
       default:            return ' \u2588\u2588 \u2588\u2588';
     }
   }
@@ -614,7 +673,7 @@ class MiniFace {
 
     const eyeStr = this.getEyes();
     const mouthStr = this.getMouth();
-    const mPad = Math.floor((BOX_INNER - mouthStr.length) / 2);
+    const mPad = Math.max(0, Math.floor((BOX_INNER - mouthStr.length) / 2));
     const mRight = BOX_INNER - mPad - mouthStr.length;
 
     let buf = '';
@@ -660,8 +719,6 @@ class MiniFace {
 const MINI_W = BOX_W;       // 8 cols visible width of mini face
 const MINI_H = CELL_H;      // 7 rows (box + label + status)
 const MAX_ORBITALS = 8;      // Beyond this, labels become unreadable
-const MIN_ORBITAL_COLS = 80;
-const MIN_ORBITAL_ROWS = 30;
 
 class OrbitalSystem {
   constructor() {
@@ -670,12 +727,9 @@ class OrbitalSystem {
     this.rotationSpeed = 0.007;    // ~1 full rotation per 60s at 15fps
     this.frame = 0;
     this.time = 0;
-    this.paletteIndex = 0;         // Synced from main face
     this._sortedCache = [];        // Cached sorted faces array
     this._sortedDirty = true;      // Rebuild cache on next getSortedFaces()
-    this._prevClearBuf = '';        // Pre-built buffer to clear previous frame's orbital content
     this._loadingInProgress = false; // Re-entrancy guard for loadSessionsAsync
-    this._connDots = [];             // Reusable array for connection dot positions (avoids per-frame alloc)
     this._groupsCache = null;        // Cached _buildGroups result
     this._groupsDirty = true;        // Flag to invalidate groups cache
   }
@@ -710,10 +764,23 @@ class OrbitalSystem {
 
     // Purge orphaned/finished session files — but protect active thinking faces
     const now = Date.now();
+    // One stat per file, reused by the purge below and by the parent-freshness
+    // rule: a child orbital only earns CHILD_ORPHAN_TIMEOUT while its parent's
+    // file is fresh. Every agent write heartbeats that file, so a silent parent
+    // really is a gone parent and its ghosts degrade on the normal schedule.
+    const mtimes = new Map();
+    for (const f of files) {
+      try { mtimes.set(f, fs.statSync(path.join(SESSIONS_DIR, f)).mtimeMs); } catch {}
+    }
+    const parentIsFresh = (parentSession) => {
+      const m = mtimes.get(safeFilename(parentSession) + '.json');
+      return m !== undefined && now - m <= STALE_MS;
+    };
     for (const f of files) {
       try {
         const fp = path.join(SESSIONS_DIR, f);
-        const fileMtimeMs = fs.statSync(fp).mtimeMs;
+        const fileMtimeMs = mtimes.get(f);
+        if (fileMtimeMs === undefined) continue;
         if (now - fileMtimeMs > STALE_MS) {
           // Use reverse map for correct face lookup (safeFilename may transform the ID)
           const faceId = fileToFaceId.get(f) || path.basename(f, '.json');
@@ -727,6 +794,12 @@ class OrbitalSystem {
           // whose JSON lacks a timestamp field)
           try {
             const data = JSON.parse(fs.readFileSync(fp, 'utf8'));
+            // A live subagent orbital emits no hooks during a model turn —
+            // give child files the longer window before they are purged, but
+            // only while the conducting parent still shows a sign of life.
+            if (data.parentSession && !data.stopped &&
+                parentIsFresh(data.parentSession) &&
+                now - fileMtimeMs <= CHILD_ORPHAN_TIMEOUT) continue;
             if (data.pid && isOwnedByLiveProcess(data.pid, data.timestamp || fileMtimeMs)) continue;
           } catch {
             continue; // Parse failure = mid-write race — protect the file
@@ -773,7 +846,10 @@ class OrbitalSystem {
           mf.spawnProgress = 0;
           this.faces.set(id, mf);
         }
-        this.faces.get(id).updateFromFile(data, mtimeMs);
+        const mf = this.faces.get(id);
+        mf.updateFromFile(data, mtimeMs);
+        // Only children gate on this; a top-level session is always "alive".
+        mf.parentAlive = !data.parentSession || parentIsFresh(data.parentSession);
       } catch {
         // Parse failure (partial write) — protect existing face from deletion
         const existingId = fileToFaceId.get(file);
@@ -860,6 +936,22 @@ class OrbitalSystem {
     });
   }
 
+  // How many of the main session's subagent orbitals are still live.
+  // The renderer feeds this to idleCascade so the main face reads as
+  // "conducting N" instead of cascading to idle/sleeping while its agents
+  // work -- agent hooks write only their own orbital files, so nothing
+  // refreshes global state between SubagentStart and SubagentStop.
+  // Staleness is whatever isStale() already says, so a crashed parent whose
+  // child files have gone stale stops holding the face up.
+  liveChildCount() {
+    if (!this.mainSessionId) return 0;
+    let n = 0;
+    for (const face of this.faces.values()) {
+      if (face.parentSession === this.mainSessionId && !face.stopped && !face.isStale()) n++;
+    }
+    return n;
+  }
+
   _applySessionResults(excludeId, results) {
     const prevSize = this.faces.size;
     const prevKeys = new Set(this.faces.keys());
@@ -873,6 +965,18 @@ class OrbitalSystem {
     // Purge stale session files (async unlink — fire and forget)
     const now = Date.now();
     const survivingResults = [];
+
+    // Sessions that still show a sign of life. A child orbital only earns the
+    // long CHILD_ORPHAN_TIMEOUT while its parent is in here: every agent write
+    // heartbeats the parent's file, so a parent silent for STALE_MS has really
+    // gone and its ghost children must not keep animating fake work.
+    const freshIds = new Set();
+    for (const r of results) {
+      if (r.error || r.empty || !r.data) continue;
+      if (now - r.mtimeMs <= STALE_MS) {
+        freshIds.add(r.data.session_id || path.basename(r.file, '.json'));
+      }
+    }
 
     for (const r of results) {
       if (r.error || r.empty) { survivingResults.push(r); continue; }
@@ -889,6 +993,15 @@ class OrbitalSystem {
             survivingResults.push(r); // Protected — completion with owning PID
             continue;
           }
+        }
+        // A live subagent orbital emits no hooks during a model turn — give
+        // child files the longer window before they are purged, but only while
+        // the conducting parent still shows a sign of life.
+        if (r.data && r.data.parentSession && !r.data.stopped &&
+            freshIds.has(r.data.parentSession) &&
+            now - r.mtimeMs <= CHILD_ORPHAN_TIMEOUT) {
+          survivingResults.push(r); // Protected — subagent in a long model turn
+          continue;
         }
         if (r.data && r.data.pid && isOwnedByLiveProcess(r.data.pid, r.data.timestamp || r.mtimeMs)) {
           survivingResults.push(r); // Protected — owning process alive
@@ -923,7 +1036,10 @@ class OrbitalSystem {
         mf.spawnProgress = 0;
         this.faces.set(id, mf);
       }
-      this.faces.get(id).updateFromFile(r.data, r.mtimeMs);
+      const mf = this.faces.get(id);
+      mf.updateFromFile(r.data, r.mtimeMs);
+      // Only children gate on this; a top-level session is always "alive".
+      mf.parentAlive = !r.data.parentSession || freshIds.has(r.data.parentSession);
     }
 
     // Remove faces not seen in files or stale in memory
@@ -991,7 +1107,12 @@ class OrbitalSystem {
   // Groups visible orbitals by team/parent for clustered positioning
 
   _buildGroups(visible) {
-    if (!this._groupsDirty && this._groupsCache) return this._groupsCache;
+    // The cache is keyed on the visible set as well as on session reloads:
+    // maxSlots changes with the terminal size, so after a resize the visible
+    // subset can differ without any session file having changed.
+    const sig = visible.map(f => f.sessionId).join('\u0000');
+    if (!this._groupsDirty && this._groupsCache && this._groupsSig === sig) return this._groupsCache;
+    this._groupsSig = sig;
     const map = new Map();
     for (const face of visible) {
       const key = face.teamName || face.parentSession || face.sessionId;
@@ -1088,31 +1209,6 @@ class OrbitalSystem {
     }
   }
 
-  _buildClearBuf(facePositions, connDots, overflowInfo, rows, cols) {
-    let clearBuf = '';
-    // Clear mini-face rectangular regions
-    for (const pos of facePositions) {
-      for (let dy = 0; dy < MINI_H; dy++) {
-        const row = pos.row + dy;
-        if (row < 1 || row > rows) continue;
-        const col = Math.max(1, pos.col);
-        const w = Math.min(MINI_W, cols - col + 1);
-        if (w > 0) {
-          clearBuf += `\x1b[${row};${col}H${' '.repeat(w)}`;
-        }
-      }
-    }
-    // Clear connection dots (flat array: [row1, col1, row2, col2, ...])
-    for (let i = 0; i < connDots.length; i += 2) {
-      clearBuf += `\x1b[${connDots[i]};${connDots[i + 1]}H `;
-    }
-    // Clear overflow text
-    if (overflowInfo) {
-      clearBuf += `\x1b[${overflowInfo.row};${overflowInfo.col}H${' '.repeat(overflowInfo.len)}`;
-    }
-    this._prevClearBuf = clearBuf;
-  }
-
   calculateOrbit(cols, rows, mainPos) {
     // Minimum ellipse semi-axes: must clear the main face box + decorations
     // Vertical padding above: accessories/thought bubble need more clearance than bare face
@@ -1152,7 +1248,7 @@ class OrbitalSystem {
     return { a, b, maxSlots };
   }
 
-  _renderConnections(mainPos, positions, accentColor, outDots) {
+  _renderConnections(mainPos, positions, accentColor) {
     let out = '';
     const r = ansi.reset;
 
@@ -1211,13 +1307,12 @@ class OrbitalSystem {
           ? ansi.fg(...dimColor(lineColor, 0.7))
           : ansi.fg(...dimColor(lineColor, 0.2));
         out += `\x1b[${row};${col}H${color}\u00b7${r}`;
-        if (outDots) outDots.push(row, col);
       }
     }
     return out;
   }
 
-  _renderGroupTethers(positions, mainPos, accentColor, outDots) {
+  _renderGroupTethers(positions, mainPos, accentColor) {
     let out = '';
     const r = ansi.reset;
     const rows = process.stdout.rows || 24;
@@ -1286,7 +1381,6 @@ class OrbitalSystem {
               row >= mainTop - 8 && row <= mainBot + 7) continue;
 
           out += `\x1b[${row};${col}H${tetherColor}\u00b7${r}`;
-          if (outDots) outDots.push(row, col);
         }
       }
     }
@@ -1326,7 +1420,7 @@ class OrbitalSystem {
     return (stable[0].face.label || '').slice(0, 12);
   }
 
-  _renderGroupLabels(positions, rows, cols, outDots, mainPos) {
+  _renderGroupLabels(positions, rows, cols, mainPos) {
     let out = '';
     const r = ansi.reset;
 
@@ -1381,11 +1475,6 @@ class OrbitalSystem {
       const baseColor = members[0].face.teamColor || [140, 170, 200];
       const color = ansi.fg(...dimColor(baseColor, GROUP_LABEL_BRIGHTNESS));
       out += `\x1b[${labelRow};${labelCol}H${color}${label}${r}`;
-
-      // Track for clearing
-      for (let c = labelCol; c < labelCol + label.length; c++) {
-        if (outDots) outDots.push(labelRow, c);
-      }
     }
     return out;
   }
@@ -1419,7 +1508,6 @@ class OrbitalSystem {
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
       const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 7);
       const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
-      this._buildClearBuf([], [], { row: textRow, col: textCol, len: text.length }, rows, cols);
       return `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
     }
 
@@ -1446,9 +1534,6 @@ class OrbitalSystem {
     const overflow = sorted.length - visibleCount;
     let buf = '';
 
-    // Track positions for clearing next frame
-    const sidePositions = [];
-
     // Render a vertical stack of faces centered on the main face
     const renderStack = (faces, col) => {
       if (faces.length === 0) return;
@@ -1457,7 +1542,6 @@ class OrbitalSystem {
       startRow = Math.min(startRow, Math.max(1, rows - totalH));
       for (let i = 0; i < faces.length; i++) {
         const faceRow = startRow + i * MINI_H;
-        sidePositions.push({ row: faceRow, col });
         buf += faces[i].render(faceRow, col, this.time, paletteThemes);
       }
     };
@@ -1465,25 +1549,20 @@ class OrbitalSystem {
     renderStack(leftFaces, leftCol);
     renderStack(rightFaces, rightCol);
 
-    let overflowInfo = null;
     if (overflow > 0) {
       const text = `+${overflow} more`;
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
       const textRow = Math.min(rows - 1, mainPos.row + mainPos.h + 7);
       const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
       buf += `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
-      overflowInfo = { row: textRow, col: textCol, len: text.length };
     }
-
-    this._buildClearBuf(sidePositions, [], overflowInfo, rows, cols);
 
     return buf;
   }
 
   render(cols, rows, mainPos, paletteThemes) {
-    // Clear previous frame's orbital content before drawing new
-    let buf = this._prevClearBuf;
-    this._prevClearBuf = '';
+    // No pre-clear: the renderer erases the whole screen every frame.
+    let buf = '';
 
     if (this.faces.size === 0) return buf;
 
@@ -1555,12 +1634,10 @@ class OrbitalSystem {
     const accentColor = (themeMap.subagent || themeMap.idle).accent || [100, 160, 210];
 
     // Render group tethers (dimmest layer — background structure between siblings)
-    this._connDots.length = 0;
-    const connDots = this._connDots;
-    buf += this._renderGroupTethers(positions, mainPos, accentColor, connDots);
+    buf += this._renderGroupTethers(positions, mainPos, accentColor);
 
     // Render connection lines to main face (brighter pulsing — active data channels)
-    buf += this._renderConnections(mainPos, positions, accentColor, connDots);
+    buf += this._renderConnections(mainPos, positions, accentColor);
 
     // Render each mini-face at its orbital position
     for (let i = 0; i < n; i++) {
@@ -1571,21 +1648,16 @@ class OrbitalSystem {
     }
 
     // Render floating group labels beneath clustered groups
-    buf += this._renderGroupLabels(positions, rows, cols, connDots, mainPos);
+    buf += this._renderGroupLabels(positions, rows, cols, mainPos);
 
     // Overflow indicator
-    let overflowInfo = null;
     if (overflow > 0) {
       const text = `+${overflow} more`;
       const textCol = Math.max(1, mainPos.centerX - Math.floor(text.length / 2));
       const textRow = Math.min(rows - 2, mainPos.row + mainPos.h + 7);
       const dc = ansi.fg(...dimColor([140, 170, 200], 0.65));
       buf += `${ansi.to(textRow, textCol)}${dc}${text}${ansi.reset}`;
-      overflowInfo = { row: textRow, col: textCol, len: text.length };
     }
-
-    // Build clear buffer for next frame (erase these positions before drawing new ones)
-    this._buildClearBuf(positions, connDots, overflowInfo, rows, cols);
 
     return buf;
   }
@@ -1802,8 +1874,10 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
 
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
-  isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, KNOWN_EDITORS,
-  STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, SLACK_MS, PID_PROTECT_CAP_MS, PID_CACHE_TTL_MS,
+  ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
+  isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _sweepPidCache,
+  _setPidResolver, KNOWN_EDITORS,
+  STALE_MS, ORPHAN_TIMEOUT, CHILD_ORPHAN_TIMEOUT, REPOSITION_MS, SLACK_MS, PID_PROTECT_CAP_MS, PID_CACHE_TTL_MS,
   INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, GROUP_LABEL_BRIGHTNESS,
   CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS,
 };

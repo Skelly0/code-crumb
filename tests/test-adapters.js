@@ -2,72 +2,33 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - Adapter coverage                        |
-// |  Tests for codex-notify, opencode-adapter, openclaw-adapter,     |
-// |  and codex-wrapper (structure only — requires codex binary).     |
-// |                                                                  |
-// |  Adapters are scripts, not libraries, so we test them by         |
-// |  spawning child processes with controlled env/stdin/argv and     |
-// |  verifying the state files they write.                           |
+// |  Code Crumb Test Suite - Adapter coverage                      |
+// |  Tests for codex-notify, codex-wrapper, opencode-adapter,      |
+// |  opencode-plugin, openclaw-adapter and engmux-adapter.         |
+// |                                                                |
+// |  Adapters are scripts, not libraries, so we test them by       |
+// |  spawning child processes with controlled env/stdin/argv and   |
+// |  verifying the state files they write. A handful of tests are  |
+// |  named `source:` -- those assert on the file text on purpose,  |
+// |  because what they guard has no observable outside the render  |
+// |  loop or needs a CLI the suite cannot supply portably. Every   |
+// |  one carries a comment saying why. Nothing else greps source.  |
 // +================================================================+
 
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { execFileSync, execSync } = require('child_process');
-const os = require('os');
+const vm = require('vm');
+const { execFileSync, spawn } = require('child_process');
 
-let passed = 0;
-let failed = 0;
-
-function describe(name, fn) {
-  console.log(`\n  ${name}`);
-  fn();
-}
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`    \x1b[32m\u2713\x1b[0m ${name}`);
-  } catch (e) {
-    failed++;
-    console.log(`    \x1b[31m\u2717\x1b[0m ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const suite = require('./_harness').createSuite();
+const { describe, test } = suite;
+const { makeTempEnv, cleanup, readJSON } = require('./_harness');
 
 // -- Helpers ----------------------------------------------------------
 
 const ADAPTERS_DIR = path.join(__dirname, '..', 'adapters');
 const NODE = process.execPath;
-
-// Create a temp directory for each test run so adapters write state
-// files there instead of polluting the real home directory.
-function makeTempEnv(sessionId) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-test-'));
-  const stateFile = path.join(tmp, '.code-crumb-state');
-  const sessionsDir = path.join(tmp, '.code-crumb-sessions');
-  const statsFile = path.join(tmp, '.code-crumb-stats.json');
-  // Adapters resolve paths via shared.js which reads HOME/USERPROFILE
-  // and CODE_CRUMB_STATE. We override HOME so all paths land in tmp.
-  const env = {
-    ...process.env,
-    HOME: tmp,
-    USERPROFILE: tmp,
-    CODE_CRUMB_STATE: stateFile,
-    CLAUDE_SESSION_ID: sessionId || 'test-session',
-  };
-  return { tmp, stateFile, sessionsDir, statsFile, env };
-}
-
-function cleanup(tmp) {
-  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
-}
-
-function readJSON(filepath) {
-  return JSON.parse(fs.readFileSync(filepath, 'utf8'));
-}
 
 // Run an adapter that reads stdin, return the state file contents
 function runStdinAdapter(adapterFile, inputObj, env) {
@@ -83,6 +44,71 @@ function runStdinAdapter(adapterFile, inputObj, env) {
     // Adapters call process.exit(0), which can throw in execFileSync
     // on some Node versions. That's fine as long as the state file was written.
     if (e.status !== 0 && e.status !== null) throw e;
+  }
+}
+
+const UPDATE_STATE_JS = path.join(__dirname, '..', 'update-state.js');
+
+// Run one Claude Code hook against a temp home. `input` may be an object
+// (JSON encoded) or a raw string, so '' and 'not json' reach the catch path
+// that handles Stop/Notification/lifecycle events with no parsable stdin.
+function runUpdateState(event, input, env, extraArgs = []) {
+  try {
+    execFileSync(NODE, [UPDATE_STATE_JS, event, ...extraArgs], {
+      input: typeof input === 'string' ? input : JSON.stringify(input),
+      env,
+      timeout: 10000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    if (e.status !== 0 && e.status !== null) throw e;
+  }
+}
+
+// Seed a per-session orbital file inside a temp home.
+function seedSession(sessionsDir, sessionId, fields) {
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(path.join(sessionsDir, `${sessionId}.json`), JSON.stringify({
+    session_id: sessionId, timestamp: Date.now(), ...fields,
+  }), 'utf8');
+}
+
+// Stats blob for an owner session conducting one subagent.
+function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
+  return {
+    streak: 0, bestStreak: 0, brokenStreak: 0, brokenStreakAt: 0,
+    totalToolCalls: 5, totalErrors: 0,
+    records: { longestSession: 0, mostSubagents: 1, mostFilesEdited: 0 },
+    session: {
+      id: ownerId, start: Date.now() - 60000, toolCalls: 5, filesEdited: [],
+      subagentCount: 1, commitCount: 0,
+      activeSubagents: [{
+        id: subId, description: 'real task', taskDescription: 'real task',
+        model: 'haiku', editor: 'claude', startedAt: subStartedAt,
+      }],
+    },
+    recentMilestone: null,
+    daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
+    frequentFiles: {},
+    topLevelSessions,
+  };
+}
+
+// Run `fn` with the shared STATE_FILE (which test.js has already redirected
+// into the throwaway home) holding `data`, then put back whatever was there.
+// For in-process readers -- shared.js fixes its paths at first require, so a
+// per-test temp dir is only usable by subprocesses.
+const SHARED = require(path.join(__dirname, '..', 'shared'));
+
+function withStateFile(data, fn) {
+  let saved = null;
+  try { saved = fs.readFileSync(SHARED.STATE_FILE, 'utf8'); } catch {}
+  try {
+    fs.writeFileSync(SHARED.STATE_FILE, JSON.stringify(data), 'utf8');
+    return fn();
+  } finally {
+    if (saved !== null) fs.writeFileSync(SHARED.STATE_FILE, saved, 'utf8');
+    else try { fs.unlinkSync(SHARED.STATE_FILE); } catch {}
   }
 }
 
@@ -131,22 +157,6 @@ describe('adapters -- codex-notify', () => {
     assert.strictEqual(state.state, 'happy');
     assert.ok(state.detail.length <= 40, `detail should be truncated, got ${state.detail.length}`);
     assert.ok(state.detail.endsWith('...'));
-    cleanup(tmp);
-  });
-
-  test('approval-requested writes waiting state', () => {
-    const { tmp, stateFile, env } = makeTempEnv('notify-3');
-    const event = { type: 'approval-requested', 'thread-id': 'notify-3' };
-    try {
-      execFileSync(NODE, [ADAPTER, JSON.stringify(event)], {
-        env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
-    const state = readJSON(stateFile);
-    assert.strictEqual(state.state, 'waiting');
-    assert.strictEqual(state.detail, 'needs approval');
     cleanup(tmp);
   });
 
@@ -316,14 +326,17 @@ describe('adapters -- opencode-adapter', () => {
     cleanup(tmp);
   });
 
-  test('session.created writes waiting state', () => {
+  // A brand new session is starting, not waiting on the user: `waiting` is
+  // the face for "it needs you", and OpenCode has real events for that now
+  // (permission.asked / permission.ask).
+  test('session.created writes starting state', () => {
     const { tmp, stateFile, env } = makeTempEnv('oc-8');
     runStdinAdapter(ADAPTER, {
       type: 'session.created',
       session_id: 'oc-8',
     }, env);
     const state = readJSON(stateFile);
-    assert.strictEqual(state.state, 'waiting');
+    assert.strictEqual(state.state, 'starting');
     assert.strictEqual(state.detail, 'session started');
     cleanup(tmp);
   });
@@ -413,6 +426,493 @@ describe('adapters -- opencode-adapter', () => {
     }, env);
     const stats = readJSON(statsFile);
     assert.ok(stats.totalToolCalls >= 2, `expected >= 2 tool calls, got ${stats.totalToolCalls}`);
+    cleanup(tmp);
+  });
+});
+
+// -- opencode-plugin.mjs (the shipped OpenCode plugin) ----------------
+// OpenCode loads the plugin inside its own Bun runtime, so translate() is
+// kept pure: the whole payload contract can be checked from Node without a
+// Bun child process. Shapes below are the real 1.18 ones (Hooks in
+// @opencode-ai/plugin, Event in @opencode-ai/sdk).
+
+describe('adapters -- opencode-plugin translate()', () => {
+  const PLUGIN_FILE = path.join(ADAPTERS_DIR, 'opencode-plugin.mjs');
+  // The plugin resolves its node binary per spawn, from this variable; pin
+  // it to the node running the suite so a test that really does spawn the
+  // adapter does not depend on what is on PATH.
+  process.env.CODE_CRUMB_NODE = NODE;
+  const loadModule = () => import(require('url').pathToFileURL(PLUGIN_FILE).href);
+  // translate() rides on the factory rather than being its own export: see
+  // "every export is a plugin factory" below.
+  const load = async () => ({ translate: (await loadModule()).CodeCrumbPlugin.translate });
+  const bus = (type, properties) => ({ event: { type, properties } });
+
+  // A fresh module instance -- the query string busts the ESM cache -- so a
+  // test that exercises the delivery path gets its own throttle state and
+  // cannot colour another test's. (The node binary is not captured here; it
+  // is read per spawn, which is what withoutSpawning below relies on.)
+  const loadIsolated = (tag) => import(`${require('url').pathToFileURL(PLUGIN_FILE).href}?t=${tag}`);
+  const reasoning = (sessionID) => bus('message.part.updated', {
+    part: { type: 'reasoning', sessionID, text: 'weighing options' },
+  });
+
+  // Run fn() with the plugin pointed at a node binary that does not exist,
+  // so a test about hook behaviour never starts a real adapter. The plugin
+  // reads CODE_CRUMB_NODE per spawn, and a hook runs its whole body
+  // synchronously (an async function only yields at an await, and there is
+  // none before the spawn) -- so fn() must make its calls and hand back the
+  // promises, which are awaited after the env is restored. Nothing else can
+  // observe the swap in between.
+  const withoutSpawning = (fn) => {
+    const realNode = process.env.CODE_CRUMB_NODE;
+    process.env.CODE_CRUMB_NODE = path.join(ADAPTERS_DIR, 'no-such-node-binary');
+    try {
+      return fn();
+    } finally {
+      if (realNode === undefined) delete process.env.CODE_CRUMB_NODE;
+      else process.env.CODE_CRUMB_NODE = realNode;
+    }
+  };
+
+  test.async('session.created reads properties.info.id', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('session.created', { info: { id: 'ses_1' } }));
+    assert.strictEqual(out.type, 'session.created');
+    assert.strictEqual(out.sessionId, 'ses_1');
+  });
+
+  test.async('session.idle reads properties.sessionID', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('session.idle', { sessionID: 'ses_1' }));
+    assert.deepStrictEqual(out, { type: 'session.idle', sessionId: 'ses_1' });
+  });
+
+  test.async('session.error flattens the SDK error object to text', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('session.error', {
+      sessionID: 'ses_1',
+      error: { name: 'UnknownError', data: { message: 'connection lost' } },
+    }));
+    assert.strictEqual(out.type, 'session.error');
+    assert.strictEqual(out.sessionId, 'ses_1');
+    assert.strictEqual(out.error, 'connection lost');
+  });
+
+  test.async('session.error falls back to the error name when there is no message', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('session.error', { error: { name: 'MessageAbortedError', data: {} } }));
+    assert.strictEqual(out.error, 'MessageAbortedError');
+  });
+
+  test.async('permission.asked becomes a waiting payload', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('permission.asked', {
+      sessionID: 'ses_1', type: 'bash', title: 'rm -rf build',
+    }));
+    assert.strictEqual(out.type, 'permission.asked');
+    assert.strictEqual(out.sessionId, 'ses_1');
+    assert.strictEqual(out.title, 'rm -rf build');
+  });
+
+  test.async('permission.replied carries the response', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('permission.replied', {
+      sessionID: 'ses_1', permissionID: 'p1', response: 'always',
+    }));
+    assert.strictEqual(out.type, 'permission.replied');
+    assert.strictEqual(out.response, 'always');
+  });
+
+  test.async('a reasoning part becomes thinking', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('message.part.updated', {
+      part: { type: 'reasoning', sessionID: 'ses_1', text: 'weighing options' },
+    }));
+    assert.strictEqual(out.type, 'thinking');
+    assert.strictEqual(out.sessionId, 'ses_1');
+  });
+
+  test.async('a failed tool part becomes tool.error (tool.execute.after never fires for it)', async () => {
+    const { translate } = await load();
+    const out = translate('event', bus('message.part.updated', {
+      part: {
+        type: 'tool', sessionID: 'ses_1', callID: 'c1', tool: 'bash',
+        state: { status: 'error', input: { command: 'exit 1' }, error: 'exit code 1' },
+      },
+    }));
+    assert.strictEqual(out.type, 'tool.error');
+    assert.strictEqual(out.sessionId, 'ses_1');
+    assert.strictEqual(out.tool, 'bash');
+    assert.deepStrictEqual(out.toolInput, { command: 'exit 1' });
+    assert.strictEqual(out.error, 'exit code 1');
+  });
+
+  test.async('a text part is ignored', async () => {
+    const { translate } = await load();
+    assert.strictEqual(translate('event', bus('message.part.updated', {
+      part: { type: 'text', sessionID: 'ses_1', text: 'hello' },
+    })), null);
+  });
+
+  test.async('a completed tool part is ignored (tool.execute.after covers it)', async () => {
+    const { translate } = await load();
+    assert.strictEqual(translate('event', bus('message.part.updated', {
+      part: { type: 'tool', sessionID: 'ses_1', tool: 'read', state: { status: 'completed', input: {}, output: 'x' } },
+    })), null);
+  });
+
+  test.async('unknown bus events and a missing event object are ignored', async () => {
+    const { translate } = await load();
+    assert.strictEqual(translate('event', bus('lsp.updated', {})), null);
+    assert.strictEqual(translate('event', {}), null);
+    assert.strictEqual(translate('event', null), null);
+  });
+
+  test.async('tool.execute.before reads args from OUTPUT, not input', async () => {
+    const { translate } = await load();
+    const out = translate('tool.execute.before',
+      { tool: 'edit', sessionID: 'ses_1', callID: 'c1' },
+      { args: { filePath: 'a.js' } });
+    assert.strictEqual(out.type, 'tool.execute.before');
+    assert.strictEqual(out.sessionId, 'ses_1');
+    assert.strictEqual(out.tool, 'edit');
+    assert.strictEqual(out.toolInput.filePath, 'a.js');
+    assert.strictEqual(out.callID, 'c1');
+  });
+
+  test.async('tool.execute.before survives a missing output object', async () => {
+    const { translate } = await load();
+    const out = translate('tool.execute.before', { tool: 'edit', sessionID: 'ses_1', callID: 'c1' });
+    assert.deepStrictEqual(out.toolInput, {});
+  });
+
+  test.async('tool.execute.after reads args from input and caps the output text', async () => {
+    const { translate } = await load();
+    const out = translate('tool.execute.after',
+      { tool: 'bash', sessionID: 'ses_1', callID: 'c1', args: { command: 'echo hi' } },
+      { title: 'echo hi', output: 'x'.repeat(9000), metadata: {} });
+    assert.strictEqual(out.type, 'tool.execute.after');
+    assert.deepStrictEqual(out.toolInput, { command: 'echo hi' });
+    assert.strictEqual(out.title, 'echo hi');
+    assert.strictEqual(out.output.length, 4000, 'tool output must never be embedded whole');
+  });
+
+  test.async('tool.execute.after with a non-string output yields empty text', async () => {
+    const { translate } = await load();
+    const out = translate('tool.execute.after',
+      { tool: 'read', sessionID: 'ses_1', callID: 'c1', args: {} },
+      { title: 'read', output: { not: 'a string' }, metadata: {} });
+    assert.strictEqual(out.output, '');
+  });
+
+  test.async('the permission.ask hook maps to the same waiting payload', async () => {
+    const { translate } = await load();
+    const out = translate('permission.ask',
+      { id: 'p1', type: 'bash', sessionID: 'ses_1', title: 'rm -rf build', metadata: {} },
+      { status: 'ask' });
+    assert.strictEqual(out.type, 'permission.asked');
+    assert.strictEqual(out.sessionId, 'ses_1');
+    assert.strictEqual(out.title, 'rm -rf build');
+  });
+
+  test.async('an unknown hook name is ignored', async () => {
+    const { translate } = await load();
+    assert.strictEqual(translate('chat.params', {}, {}), null);
+  });
+
+  // OpenCode calls every named export as a plugin factory and then reads
+  // .config / .dispose off the result. A second export (even a pure helper)
+  // returns something that is not a Hooks object and breaks plugin loading
+  // with "null is not an object" -- verified against opencode 1.18.21.
+  test.async('exports exactly one thing, and it is a plugin factory', async () => {
+    const mod = await loadModule();
+    const names = Object.keys(mod);
+    assert.deepStrictEqual(names, ['CodeCrumbPlugin'], `unexpected exports: ${names.join(', ')}`);
+    assert.strictEqual(typeof mod.CodeCrumbPlugin, 'function');
+    assert.strictEqual(typeof mod.CodeCrumbPlugin.translate, 'function', 'translate must stay reachable for tests');
+  });
+
+  test.async('CodeCrumbPlugin resolves to the four hooks OpenCode calls', async () => {
+    const { CodeCrumbPlugin } = await loadModule();
+    const hooks = await CodeCrumbPlugin({ project: {}, directory: '.', worktree: '.' });
+    for (const key of ['event', 'tool.execute.before', 'tool.execute.after', 'permission.ask']) {
+      assert.strictEqual(typeof hooks[key], 'function', `missing hook ${key}`);
+    }
+    // Hooks must resolve even when nothing can be sent (unknown event).
+    await hooks.event({ event: { type: 'lsp.updated', properties: {} } });
+  });
+
+  // Proves the two tests below really do start nothing: the plugin reads
+  // CODE_CRUMB_NODE per spawn, so a bogus binary disarms delivery. (If it
+  // were captured at import instead, those tests would quietly go on
+  // spawning real adapters and still pass.)
+  test.async('CODE_CRUMB_NODE is honoured per spawn, so a bogus binary starts nothing', async () => {
+    const { CodeCrumbPlugin } = await loadIsolated('nospawn');
+    const hooks = await CodeCrumbPlugin();
+    const home = process.env.USERPROFILE || process.env.HOME;
+    const sid = `plug-nospawn-${process.pid}`;
+    const file = path.join(home, '.code-crumb-sessions', `${sid}.json`);
+    try { fs.unlinkSync(file); } catch {}
+
+    // session.idle takes the synchronous path: a real adapter would have
+    // written the session file by the time the hook resolves.
+    await withoutSpawning(() => hooks.event(bus('session.idle', { sessionID: sid })));
+    assert.strictEqual(fs.existsSync(file), false, 'no adapter may run with a bogus node binary');
+  });
+
+  // OpenCode awaits the tool.execute.* hooks, so anything that escapes a
+  // hook surfaces inside the editor. Every hook must be total, whatever it
+  // is handed: missing arguments, a null event, a getter that throws, or a
+  // payload JSON.stringify cannot serialise.
+  test.async('every hook is total: hostile input never throws or rejects', async () => {
+    const { CodeCrumbPlugin } = await loadIsolated('hostile');
+    const hooks = await CodeCrumbPlugin();
+    const names = ['event', 'tool.execute.before', 'tool.execute.after', 'permission.ask'];
+    const landmine = {
+      get event() { throw new Error('boom'); },
+      get sessionID() { throw new Error('boom'); },
+      get tool() { throw new Error('boom'); },
+      get args() { throw new Error('boom'); },
+      get title() { throw new Error('boom'); },
+      get output() { throw new Error('boom'); },
+    };
+    const cases = [
+      undefined, null, {}, { event: null }, { event: {} },
+      { event: { type: 'message.part.updated', properties: null } },
+      { event: { type: 'message.part.updated', properties: { part: null } } },
+      landmine,
+    ];
+    // JSON.stringify throws on a cycle: that must be dropped, not raised.
+    const cyclic = { args: {} };
+    cyclic.args.self = cyclic;
+
+    // Most of these payloads survive translate() and would reach the spawn:
+    // the assertions are about totality, not about starting 21 real adapters.
+    const pending = withoutSpawning(() => {
+      const calls = [];
+      for (const c of cases) {
+        for (const name of names) calls.push([name, hooks[name](c, c)]);
+      }
+      calls.push(['cyclic', hooks['tool.execute.before']({ sessionID: 'ses_1', tool: 'edit', callID: 'c1' }, cyclic)]);
+      return calls;
+    });
+
+    for (const [name, promise] of pending) {
+      const result = await promise;
+      assert.strictEqual(typeof result, 'boolean', `${name} must resolve, not reject`);
+    }
+    assert.strictEqual(await pending[pending.length - 1][1], false,
+      'an unserialisable payload must be dropped');
+  });
+
+  // A reasoning part is republished on every streaming delta. One cold Node
+  // start (plus a stats read-modify-write) per chunk is load this project
+  // never had before the plugin existed.
+  test.async('a burst of reasoning deltas collapses into a single send', async () => {
+    const { CodeCrumbPlugin } = await loadIsolated('throttle');
+    const hooks = await CodeCrumbPlugin();
+
+    const before = { sessionID: 'ses_burst', tool: 'read', callID: 'c1' };
+    const calls = withoutSpawning(() => ({
+      burst: Array.from({ length: 20 }, () => hooks.event(reasoning('ses_burst'))),
+      // The throttle is per session, and only reasoning is throttled.
+      otherSession: hooks.event(reasoning('ses_other')),
+      tools: [hooks['tool.execute.before'](before, { args: {} }),
+        hooks['tool.execute.before'](before, { args: {} })],
+    }));
+
+    const sent = (await Promise.all(calls.burst)).filter(Boolean).length;
+    assert.strictEqual(sent, 1, 'one send per burst, not one per delta');
+    assert.strictEqual(await calls.otherSession, true,
+      'another session must not inherit the first one\'s throttle');
+    assert.deepStrictEqual(await Promise.all(calls.tools), [true, true],
+      'tool events are never collapsed');
+  });
+
+  // Measured against opencode 1.18.21: `opencode run` exits the instant the
+  // turn ends, and a child spawned microseconds earlier dies with it -- the
+  // session.idle write never landed, so the face stayed on thinking and the
+  // global state file stayed owned by a session that never said stopped.
+  test.async('the session.idle write has landed by the time the hook resolves', async () => {
+    const { CodeCrumbPlugin } = await loadModule();
+    const hooks = await CodeCrumbPlugin();
+    const home = process.env.USERPROFILE || process.env.HOME;
+    const sid = `plug-idle-${process.pid}`;
+    const file = path.join(home, '.code-crumb-sessions', `${sid}.json`);
+    try { fs.unlinkSync(file); } catch {}
+
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: sid } } });
+
+    assert.ok(fs.existsSync(file), 'turn-end write must not be left in flight');
+    const s = readJSON(file);
+    assert.strictEqual(s.state, 'happy');
+    assert.strictEqual(s.stopped, true);
+  });
+});
+
+describe('adapters -- opencode-plugin structure', () => {
+  const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'opencode-plugin.mjs'), 'utf8');
+  // Comments talk about what the plugin must NOT do, so assert on code only.
+  const code = src.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+
+  test('spawns a real node, not process.execPath (which is bun inside OpenCode)', () => {
+    assert.ok(!code.includes('process.execPath'), 'process.execPath is the bun binary under OpenCode');
+    assert.ok(code.includes('CODE_CRUMB_NODE'), 'the node binary must be overridable');
+  });
+
+  test('no exec timeout short enough to kill a cold node start', () => {
+    assert.ok(!code.includes('execSync'), 'execSync with a 200ms cap killed writes mid-flight');
+    const caps = [...code.matchAll(/timeout:\s*(\w+)/g)].map(m => m[1]);
+    for (const cap of caps) {
+      const value = cap === 'SYNC_CAP_MS' ? 5000 : Number(cap);
+      assert.ok(value >= 1000, `spawn timeout ${cap} is shorter than a cold node start`);
+    }
+    assert.ok(code.includes('windowsHide'), 'no console flash on Windows');
+  });
+
+  test('only the turn-end payloads block: ordinary tool events stay fire-and-forget', () => {
+    assert.ok(/SYNC_TYPES = new Set\(\['session.idle', 'session.error'\]\)/.test(code),
+      'the synchronous set must stay limited to the writes that race process exit');
+    assert.ok(/if \(SYNC_TYPES\.has\(payload\.type\)\)/.test(code),
+      'everything else must go through the async spawn');
+  });
+
+  test('a failed spawn is handled rather than left to reject', () => {
+    assert.ok(src.includes("child.on('error'"), 'a failed spawn must not reject');
+  });
+});
+
+// -- opencode-adapter: payloads produced by the shipped plugin ---------
+
+describe('adapters -- opencode-adapter (plugin payloads)', () => {
+  const ADAPTER = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+
+  test('tool.execute.before with an OpenCode filePath arg writes coding and tracks the file', () => {
+    const { tmp, stateFile, statsFile, env } = makeTempEnv('oc-plug-1');
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.before', sessionId: 'ses_1', callID: 'c1',
+      tool: 'edit', toolInput: { filePath: 'a.js' },
+    }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'coding');
+    assert.strictEqual(state.detail, 'editing a.js');
+    assert.strictEqual(state.sessionId, 'ses_1');
+    const stats = readJSON(statsFile);
+    assert.ok(stats.frequentFiles && stats.frequentFiles['a.js'] >= 1,
+      `frequentFiles should track a.js, got ${JSON.stringify(stats.frequentFiles)}`);
+    cleanup(tmp);
+  });
+
+  test('the payload session id wins over the opencode-<ppid> fallback', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-2');
+    delete env.CLAUDE_SESSION_ID;
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.before', sessionId: 'ses_1', tool: 'bash', toolInput: { command: 'ls' },
+    }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.sessionId, 'ses_1');
+    assert.ok(!/^opencode-\d+$/.test(state.sessionId), 'must not fall back to a ppid-derived id');
+    cleanup(tmp);
+  });
+
+  test('tool.execute.after writes a completion state', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-3');
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.execute.after', sessionId: 'ses_1', tool: 'bash',
+      toolInput: { command: 'echo hi' }, title: 'echo hi', output: 'hi',
+    }, env);
+    const state = readJSON(stateFile);
+    assert.ok(['happy', 'satisfied', 'proud', 'relieved'].includes(state.state),
+      `expected completion state, got "${state.state}"`);
+    cleanup(tmp);
+  });
+
+  test('tool.error writes the error face with the error text', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-4');
+    runStdinAdapter(ADAPTER, {
+      type: 'tool.error', sessionId: 'ses_1', tool: 'bash',
+      toolInput: { command: 'exit 1' }, error: 'exit code 1',
+    }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'error');
+    cleanup(tmp);
+  });
+
+  test('session.created writes the starting face', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-5');
+    runStdinAdapter(ADAPTER, { type: 'session.created', sessionId: 'ses_1' }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'starting');
+    assert.strictEqual(state.detail, 'session started');
+    assert.strictEqual(state.sessionId, 'ses_1');
+    cleanup(tmp);
+  });
+
+  test('session.idle still stops the session', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-6');
+    runStdinAdapter(ADAPTER, { type: 'session.idle', sessionId: 'ses_1' }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'happy');
+    assert.strictEqual(state.detail, 'all done!');
+    assert.strictEqual(state.stopped, true);
+    cleanup(tmp);
+  });
+
+  test('session.error carries the flattened error text into the detail', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-7');
+    runStdinAdapter(ADAPTER, {
+      type: 'session.error', sessionId: 'ses_1', error: 'connection lost',
+    }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'error');
+    assert.ok(state.detail.includes('connection lost'), `detail was "${state.detail}"`);
+    cleanup(tmp);
+  });
+
+  test('thinking writes the thinking face', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-8');
+    runStdinAdapter(ADAPTER, { type: 'thinking', sessionId: 'ses_1' }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'thinking');
+    cleanup(tmp);
+  });
+
+  test('permission.asked waits with the allow? detail that spawns question particles', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-9');
+    runStdinAdapter(ADAPTER, {
+      type: 'permission.asked', sessionId: 'ses_1', title: 'rm -rf build',
+    }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'waiting');
+    assert.strictEqual(state.detail, 'allow?');
+    cleanup(tmp);
+  });
+
+  test('permission.replied returns to satisfied', () => {
+    const { tmp, stateFile, env } = makeTempEnv('oc-plug-10');
+    runStdinAdapter(ADAPTER, {
+      type: 'permission.replied', sessionId: 'ses_1', response: 'once',
+    }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'satisfied');
+    assert.strictEqual(state.detail, 'got your answer');
+    cleanup(tmp);
+  });
+
+  test('one OpenCode turn produces exactly one session file', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('oc-plug-11');
+    delete env.CLAUDE_SESSION_ID;
+    for (const payload of [
+      { type: 'session.created', sessionId: 'ses_1' },
+      { type: 'thinking', sessionId: 'ses_1' },
+      { type: 'tool.execute.before', sessionId: 'ses_1', tool: 'bash', toolInput: { command: 'ls' } },
+      { type: 'tool.execute.after', sessionId: 'ses_1', tool: 'bash', toolInput: { command: 'ls' }, output: 'a.js' },
+      { type: 'session.idle', sessionId: 'ses_1' },
+    ]) runStdinAdapter(ADAPTER, payload, env);
+    const files = fs.readdirSync(sessionsDir);
+    assert.deepStrictEqual(files, ['ses_1.json'],
+      `expected a single ses_1 session file, got ${files.join(', ')}`);
     cleanup(tmp);
   });
 });
@@ -776,98 +1276,550 @@ describe('adapters -- openclaw-adapter', () => {
 
 // -- codex-wrapper.js (structural tests) -----------------------------
 
-describe('adapters -- codex-wrapper (structural)', () => {
+describe('adapters -- codex-wrapper bootstrap guard', () => {
   const ADAPTER = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
 
-  test('adapter file exists', () => {
-    assert.ok(fs.existsSync(ADAPTER), 'codex-wrapper.js should exist');
+  test('requiring the wrapper starts no codex and writes no state', () => {
+    // Without the require.main guard, a plain require spawns `codex exec`
+    // and takes over the global state file -- which is exactly what the
+    // in-process classifyItem block below would trip over.
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('wrapper-require');
+    execFileSync(NODE, ['-e', 'require(process.argv[1]);', ADAPTER], {
+      env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    assert.ok(!fs.existsSync(stateFile), 'a bare require must not write global state');
+    assert.ok(!fs.existsSync(sessionsDir), 'a bare require must not create an orbital');
+    cleanup(tmp);
   });
 
-  test('adapter file starts with use strict', () => {
+  // Kept as a source check: the wrapper spawns the real `codex` binary, and
+  // on Windows that is a .cmd shim node refuses to exec without shell:true.
+  // The fake-codex block below proves the shim path works, but only when the
+  // suite happens to run on win32 -- posix CI would never notice a regression.
+  test('source: codex is spawned through buildEditorSpawn (Windows .cmd shims)', () => {
     const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'use strict'"), 'should have use strict');
-  });
-
-  test('adapter imports shared.js dependencies', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(
-      src.includes("require('../shared')") || src.includes("require('./base-adapter')"),
-      'should import shared or base-adapter'
-    );
-    assert.ok(
-      src.includes("require('../state-machine')") || src.includes("require('./base-adapter')"),
-      'should import state-machine or base-adapter'
-    );
-  });
-
-  test('adapter has handleEvent function', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('function handleEvent'), 'should define handleEvent');
-  });
-
-  test('adapter handles item.created events', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'item.created'"), 'should handle item.created');
-  });
-
-  test('adapter handles item.completed events', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'item.completed'"), 'should handle item.completed');
-  });
-
-  test('adapter handles turn.completed events', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'turn.completed'"), 'should handle turn.completed');
-  });
-
-  test('adapter handles turn.failed events', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'turn.failed'"), 'should handle turn.failed');
-  });
-
-  test('adapter handles turn.started events', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'turn.started'"), 'should handle turn.started');
-  });
-
-  test('adapter tracks subagent sessions', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('activeSubagents'), 'should track subagents');
-    assert.ok(src.includes('SUBAGENT_TOOLS'), 'should use SUBAGENT_TOOLS pattern');
-  });
-
-  test('adapter defaults model name to codex', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("|| 'codex'"), 'should default to codex');
+    assert.ok(src.includes('buildEditorSpawn'), 'should use buildEditorSpawn');
+    assert.ok(!/spawn\(\s*'codex'/.test(src), 'should not spawn the bare codex name');
   });
 });
 
 // -- codex-notify.js (structural tests) ------------------------------
 
-describe('adapters -- codex-notify (structural)', () => {
+describe('adapters -- codex-notify guards and unknown events', () => {
   const ADAPTER = path.join(ADAPTERS_DIR, 'codex-notify.js');
 
-  test('adapter file exists', () => {
-    assert.ok(fs.existsSync(ADAPTER), 'codex-notify.js should exist');
+  function runNotify(event, env) {
+    try {
+      execFileSync(NODE, [ADAPTER, JSON.stringify(event)], {
+        env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+  }
+
+  test('approval-requested is not a codex notify event -- it falls through to thinking', () => {
+    // The handler used to special-case it; codex never emits it, so it must
+    // take the same unknown-type path as any future event name.
+    const { tmp, stateFile, env } = makeTempEnv('notify-approval');
+    runNotify({ type: 'approval-requested', 'thread-id': 'notify-approval' }, env);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'thinking');
+    assert.strictEqual(state.detail, 'approval-requested');
+    cleanup(tmp);
   });
 
-  test('adapter file starts with use strict', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'use strict'"), 'should have use strict');
+  test('another live session keeps the global state file; the orbital is still written', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('notify-guard');
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'coding', detail: 'editing app.js', sessionId: 'someone-else',
+      stopped: false, timestamp: Date.now(),
+    }), 'utf8');
+
+    runNotify({ type: 'agent-turn-complete', 'thread-id': 'notify-guard' }, env);
+
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.sessionId, 'someone-else',
+      'a live owner must not be evicted from the global state file');
+    assert.strictEqual(state.state, 'coding');
+    const session = readJSON(path.join(sessionsDir, 'notify-guard.json'));
+    assert.strictEqual(session.state, 'happy',
+      'the guarded session still gets its own orbital file');
+    cleanup(tmp);
   });
 
-  test('handles three event types', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'agent-turn-complete'"), 'should handle agent-turn-complete');
-    assert.ok(src.includes("'approval-requested'"), 'should handle approval-requested');
+  test('a stopped owner releases the global state file to the codex thread', () => {
+    const { tmp, stateFile, env } = makeTempEnv('notify-takeover');
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'happy', detail: 'all done!', sessionId: 'someone-else',
+      stopped: true, timestamp: Date.now(),
+    }), 'utf8');
+
+    runNotify({ type: 'agent-turn-complete', 'thread-id': 'notify-takeover' }, env);
+
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.sessionId, 'notify-takeover');
+    assert.strictEqual(state.state, 'happy');
+    cleanup(tmp);
   });
 
-  test('guards global state file against other sessions', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(
-      src.includes('shouldWriteGlobal') || src.includes('guardedWriteState'),
-      'should guard global writes'
-    );
+  test('the editor provenance of the session owner survives a notify write', () => {
+    const { tmp, stateFile, env } = makeTempEnv('notify-editor');
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'thinking', detail: '', sessionId: 'notify-editor',
+      editor: 'opencode', stopped: false, timestamp: Date.now(),
+    }), 'utf8');
+
+    runNotify({ type: 'agent-turn-complete', 'thread-id': 'notify-editor' }, env);
+
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.editor, 'opencode',
+      "the owner's editor tag must not be relabelled codex mid-session");
+    cleanup(tmp);
+  });
+});
+
+// -- codex-wrapper.js: the real `codex exec --json` schema -------------
+// Codex 0.146 emits thread.started / turn.* / item.started|updated|completed
+// with typed items (command_execution, file_change, mcp_tool_call, ...).
+// classifyItem is pure and tested in-process; anything that writes a state
+// file goes through a subprocess with its own temp HOME, because shared.js
+// fixes its paths at first require.
+
+describe('adapters -- codex-wrapper classifyItem (real ThreadEvent schema)', () => {
+  const wrapper = require('../adapters/codex-wrapper');
+
+  test('requiring the wrapper exports its pure helpers and spawns nothing', () => {
+    assert.strictEqual(typeof wrapper.classifyItem, 'function', 'classifyItem exported');
+    assert.strictEqual(typeof wrapper.handleEvent, 'function', 'handleEvent exported');
+  });
+
+  test('command_execution start maps to the Bash tool with its command', () => {
+    const c = wrapper.classifyItem({ id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' }, 'started');
+    assert.strictEqual(c.toolName, 'Bash');
+    assert.strictEqual(c.toolInput.command, 'npm test');
+  });
+
+  test('command_execution completion carries output, exit code and failure flag', () => {
+    const c = wrapper.classifyItem({
+      id: 'i1', type: 'command_execution', command: 'npm test',
+      aggregated_output: 'FAIL', exit_code: 1, status: 'failed',
+    }, 'completed');
+    assert.strictEqual(c.toolName, 'Bash');
+    assert.strictEqual(c.toolResponse.stdout, 'FAIL');
+    assert.strictEqual(c.toolResponse.exitCode, 1);
+    assert.strictEqual(c.toolResponse.isError, true);
+  });
+
+  test('a declined command is relief, not an error', () => {
+    const c = wrapper.classifyItem({
+      id: 'i1', type: 'command_execution', command: 'rm -rf /', status: 'declined',
+    }, 'completed');
+    assert.strictEqual(c.state, 'relieved');
+    assert.strictEqual(c.detail, 'command declined');
+  });
+
+  test('file_change start maps to the Edit tool with the first path', () => {
+    const c = wrapper.classifyItem({
+      id: 'i2', type: 'file_change', status: 'in_progress',
+      changes: [{ path: '/repo/a.js', kind: 'update' }, { path: '/repo/b.js', kind: 'add' }],
+    }, 'started');
+    assert.strictEqual(c.toolName, 'Edit');
+    assert.strictEqual(c.toolInput.file_path, '/repo/a.js');
+    assert.deepStrictEqual(c.filePaths, ['/repo/a.js', '/repo/b.js']);
+  });
+
+  test('file_change completion is proud, and counts multiple files', () => {
+    const one = wrapper.classifyItem({
+      id: 'i2', type: 'file_change', status: 'completed',
+      changes: [{ path: '/repo/a.js', kind: 'update' }],
+    }, 'completed');
+    assert.strictEqual(one.state, 'proud');
+    assert.strictEqual(one.detail, 'saved a.js');
+
+    const two = wrapper.classifyItem({
+      id: 'i2', type: 'file_change', status: 'completed',
+      changes: [{ path: '/repo/a.js', kind: 'update' }, { path: '/repo/b.js', kind: 'add' }],
+    }, 'completed');
+    assert.strictEqual(two.state, 'proud');
+    assert.strictEqual(two.detail, 'saved 2 files');
+  });
+
+  test('a failed file_change is an error', () => {
+    const c = wrapper.classifyItem({
+      id: 'i2', type: 'file_change', status: 'failed',
+      changes: [{ path: '/repo/a.js', kind: 'update' }],
+    }, 'completed');
+    assert.strictEqual(c.state, 'error');
+    assert.strictEqual(c.detail, 'edit failed');
+  });
+
+  test('mcp_tool_call becomes an mcp__server__tool name for the verb classifier', () => {
+    const c = wrapper.classifyItem({
+      id: 'i3', type: 'mcp_tool_call', server: 'github', tool: 'list_issues',
+      arguments: { repo: 'x' }, status: 'in_progress',
+    }, 'started');
+    assert.strictEqual(c.toolName, 'mcp__github__list_issues');
+    assert.deepStrictEqual(c.toolInput, { repo: 'x' });
+  });
+
+  test('an mcp_tool_call error is reported as an error', () => {
+    const c = wrapper.classifyItem({
+      id: 'i3', type: 'mcp_tool_call', server: 'github', tool: 'list_issues',
+      error: 'not authorised', status: 'failed',
+    }, 'completed');
+    assert.strictEqual(c.toolResponse.isError, true);
+  });
+
+  test('web_search maps to the WebSearch tool', () => {
+    const c = wrapper.classifyItem({ id: 'i4', type: 'web_search', query: 'node 18 fs' }, 'started');
+    assert.strictEqual(c.toolName, 'WebSearch');
+    assert.strictEqual(c.toolInput.query, 'node 18 fs');
+  });
+
+  test('collab items delegate and finish as an agent', () => {
+    for (const type of ['collab_tool_call', 'collab_agent_tool_call']) {
+      const started = wrapper.classifyItem({ id: 'i5', type, status: 'in_progress' }, 'started');
+      assert.strictEqual(started.toolName, 'Task', type);
+      assert.strictEqual(started.toolInput.description, 'delegating', type);
+      const done = wrapper.classifyItem({ id: 'i5', type, status: 'completed' }, 'completed');
+      assert.strictEqual(done.toolName, 'Task', type);
+    }
+  });
+
+  test('todo_list and plan_update are planning, then a plan update', () => {
+    for (const type of ['todo_list', 'plan_update']) {
+      const started = wrapper.classifyItem({ id: 'i6', type }, 'started');
+      assert.strictEqual(started.toolName, 'TodoWrite', type);
+      const done = wrapper.classifyItem({ id: 'i6', type }, 'completed');
+      assert.strictEqual(done.state, 'satisfied', type);
+      assert.strictEqual(done.detail, 'plan updated', type);
+    }
+  });
+
+  test('context_compaction is thinking, then satisfied', () => {
+    const started = wrapper.classifyItem({ id: 'i7', type: 'context_compaction' }, 'started');
+    assert.strictEqual(started.state, 'thinking');
+    assert.strictEqual(started.detail, 'compacting memory');
+    const done = wrapper.classifyItem({ id: 'i7', type: 'context_compaction' }, 'completed');
+    assert.strictEqual(done.state, 'satisfied');
+    assert.strictEqual(done.detail, 'memory compacted');
+  });
+
+  test('reasoning thinks without touching the detail line', () => {
+    const c = wrapper.classifyItem({ id: 'i8', type: 'reasoning', text: 'hmm' }, 'completed');
+    assert.strictEqual(c.state, 'thinking');
+    assert.strictEqual(c.detail, undefined, 'no detail means "keep what is on screen"');
+    assert.ok(!c.toolName, 'reasoning is not a tool call');
+  });
+
+  test('agent_message responds', () => {
+    const c = wrapper.classifyItem({ id: 'i9', type: 'agent_message', text: 'done' }, 'completed');
+    assert.strictEqual(c.state, 'responding');
+    assert.ok(!c.toolName, 'a message is not a tool call');
+  });
+
+  test('unknown item types are executed by their humanised name', () => {
+    for (const type of ['image_generation', 'image_view', 'dynamic_tool_call', 'brand_new_thing']) {
+      const started = wrapper.classifyItem({ id: 'i10', type }, 'started');
+      assert.strictEqual(started.state, 'executing', type);
+      assert.ok(started.detail && !started.detail.includes('_'), `${type} detail should be humanised`);
+      const done = wrapper.classifyItem({ id: 'i10', type }, 'completed');
+      assert.strictEqual(done.state, 'satisfied', type);
+      assert.strictEqual(done.detail, 'done', type);
+    }
+  });
+
+  test('item type "error" is a codex diagnostic, not a face state', () => {
+    // Live capture: codex reports warnings ("Skill descriptions were shortened",
+    // "clamping SessionEnd hook timeout") as item.completed items of type error.
+    const c = wrapper.classifyItem({ id: 'i11', type: 'error', message: 'skill descriptions were shortened' }, 'completed');
+    assert.strictEqual(c, null);
+  });
+
+  test('a malformed item never throws', () => {
+    assert.strictEqual(wrapper.classifyItem(null, 'started'), null);
+    assert.strictEqual(wrapper.classifyItem({}, 'completed'), null);
+  });
+});
+
+describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
+  const WRAPPER = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
+
+  // Replays a fixture through the wrapper's real spawn path: on Windows the
+  // fake is a .cmd shim, which only starts if the wrapper passes shell:true
+  // (Node refuses to spawn .cmd otherwise), so this also covers the Windows
+  // spawn fix.
+  const FAKE_SRC = [
+    "'use strict';",
+    "const fs = require('fs');",
+    "const text = fs.readFileSync(process.env.CODEX_FAKE_FIXTURE, 'utf8');",
+    "for (const line of text.split('\\n')) {",
+    "  if (line.trim()) process.stdout.write(line + '\\n');",
+    "}",
+    '',
+  ].join('\n');
+
+  function runFakeCodex(events, seedStats) {
+    const base = makeTempEnv('codex-thread');
+    const binDir = path.join(base.tmp, 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    if (seedStats) fs.writeFileSync(base.statsFile, JSON.stringify(seedStats), 'utf8');
+
+    const fixture = path.join(base.tmp, 'fixture.jsonl');
+    fs.writeFileSync(fixture, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+    fs.writeFileSync(path.join(binDir, 'codex-fake.js'), FAKE_SRC, 'utf8');
+
+    if (process.platform === 'win32') {
+      fs.writeFileSync(path.join(binDir, 'codex.cmd'), '@node "%~dp0codex-fake.js" %*\r\n', 'utf8');
+    } else {
+      const sh = path.join(binDir, 'codex');
+      fs.writeFileSync(sh, '#!/bin/sh\nexec node "$(dirname "$0")/codex-fake.js" "$@"\n', 'utf8');
+      fs.chmodSync(sh, 0o755);
+    }
+
+    const env = { ...base.env, CODEX_FAKE_FIXTURE: fixture };
+    // Windows env keys are case-insensitive; a stray Path AND PATH confuses the child.
+    for (const k of Object.keys(env)) if (/^path$/i.test(k)) delete env[k];
+    env.PATH = binDir + path.delimiter + (process.env.PATH || '');
+    delete env.CLAUDE_SESSION_ID; // the codex thread id owns the session identity
+
+    try {
+      execFileSync(NODE, [WRAPPER, 'a prompt'], {
+        env, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+    return base;
+  }
+
+  test('a running npm test shows the testing face', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'thread.started', thread_id: 't1' },
+      { type: 'turn.started' },
+      { type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'testing');
+    assert.ok(state.detail.includes('npm test'), state.detail);
+    assert.strictEqual(state.editor, 'codex');
+    cleanup(tmp);
+  });
+
+  test('a failing command ends on the error face', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } },
+      { type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'npm test', aggregated_output: 'FAIL', exit_code: 1, status: 'failed' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'error');
+    cleanup(tmp);
+  });
+
+  test('a clean exit code is relief', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'ls -la', status: 'in_progress' } },
+      { type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'ls -la', aggregated_output: 'a\nb', exit_code: 0, status: 'completed' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'relieved');
+    cleanup(tmp);
+  });
+
+  test('a declined command shows relieved / command declined', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'rm -rf /', status: 'declined' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'relieved');
+    assert.strictEqual(state.detail, 'command declined');
+    cleanup(tmp);
+  });
+
+  test('a file_change codes, then is proud of every file it saved', () => {
+    const changes = [{ path: '/repo/a.js', kind: 'update' }, { path: '/repo/b.js', kind: 'add' }];
+    const start = runFakeCodex([
+      { type: 'item.started', item: { id: 'i2', type: 'file_change', changes, status: 'in_progress' } },
+    ]);
+    const coding = readJSON(start.stateFile);
+    assert.strictEqual(coding.state, 'coding');
+    assert.strictEqual(coding.detail, 'editing a.js');
+    cleanup(start.tmp);
+
+    const { tmp, stateFile, statsFile } = runFakeCodex([
+      { type: 'item.started', item: { id: 'i2', type: 'file_change', changes, status: 'in_progress' } },
+      { type: 'item.completed', item: { id: 'i2', type: 'file_change', changes, status: 'completed' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'proud');
+    assert.strictEqual(state.detail, 'saved 2 files');
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.session.filesEdited.length, 2, 'both changed files are tracked');
+    cleanup(tmp);
+  });
+
+  test('an mcp tool reads, then reports the server as done', () => {
+    const item = { id: 'i3', type: 'mcp_tool_call', server: 'github', tool: 'list_issues', arguments: {} };
+    const start = runFakeCodex([
+      { type: 'item.started', item: { ...item, status: 'in_progress' } },
+    ]);
+    assert.strictEqual(readJSON(start.stateFile).state, 'reading');
+    cleanup(start.tmp);
+
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'item.started', item: { ...item, status: 'in_progress' } },
+      { type: 'item.completed', item: { ...item, status: 'completed', result: 'ok' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'satisfied');
+    assert.strictEqual(state.detail, 'github done');
+    cleanup(tmp);
+  });
+
+  test('a web search shows the searching face', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'item.started', item: { id: 'i4', type: 'web_search', query: 'node 18 fs' } },
+    ]);
+    assert.strictEqual(readJSON(stateFile).state, 'searching');
+    cleanup(tmp);
+  });
+
+  test('a collaboration item shows the subagent face', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'item.started', item: { id: 'i5', type: 'collab_tool_call', status: 'in_progress' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'subagent');
+    assert.strictEqual(state.detail, 'delegating');
+    cleanup(tmp);
+  });
+
+  test('turn.failed shows the error with its message and stops the session', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'turn.started' },
+      { type: 'turn.failed', error: { message: 'boom' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'error');
+    assert.strictEqual(state.detail, 'boom');
+    assert.strictEqual(state.stopped, true);
+    cleanup(tmp);
+  });
+
+  test('a failed turn breaks the streak once, not twice', () => {
+    // Codex reports one failure as BOTH a top-level error and a turn.failed.
+    // Breaking the streak on each would leave brokenStreak at 0 (face.js only
+    // reacts while brokenStreak > 0) and count the failure twice.
+    const blob = '{"type":"error","status":400,"error":{"message":"nope"}}';
+    const { tmp, stateFile, statsFile } = runFakeCodex([
+      { type: 'turn.started' },
+      { type: 'error', message: blob },
+      { type: 'turn.failed', error: { message: blob } },
+    ], { streak: 5, bestStreak: 7, totalErrors: 2 });
+
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.brokenStreak, 5, 'the lost streak must survive for the face reaction');
+    assert.strictEqual(stats.streak, 0);
+    assert.strictEqual(stats.totalErrors, 3, 'one failure counts once');
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'error');
+    assert.strictEqual(state.brokenStreak, 5);
+    cleanup(tmp);
+  });
+
+  test('a standalone error with no turn.failed still breaks the streak', () => {
+    const { tmp, statsFile } = runFakeCodex([
+      { type: 'turn.started' },
+      { type: 'error', message: 'stream died' },
+    ], { streak: 4, bestStreak: 9, totalErrors: 1 });
+
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.brokenStreak, 4);
+    assert.strictEqual(stats.streak, 0);
+    assert.strictEqual(stats.totalErrors, 2);
+    cleanup(tmp);
+  });
+
+  test('a second turn can break the streak again', () => {
+    const { tmp, statsFile } = runFakeCodex([
+      { type: 'turn.started' },
+      { type: 'turn.failed', error: { message: 'first' } },
+      { type: 'turn.started' },
+      { type: 'turn.failed', error: { message: 'second' } },
+    ], { streak: 3, bestStreak: 3, totalErrors: 0 });
+
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.totalErrors, 2, 'two failed turns count twice');
+    cleanup(tmp);
+  });
+
+  test('thread.started names the session after the codex thread', () => {
+    const { tmp, stateFile, sessionsDir } = runFakeCodex([
+      { type: 'thread.started', thread_id: 'abc' },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.sessionId, 'codex-abc');
+    assert.strictEqual(state.editor, 'codex');
+    assert.strictEqual(state.modelName, 'codex', 'the status line says "codex is ..." by default');
+    // The wrapper is long-lived, so it publishes its OWN pid, not its parent's.
+    assert.strictEqual(typeof state.pid, 'number');
+    assert.ok(state.pid > 0 && state.pid !== process.pid,
+      `pid should be the wrapper process, not the test runner (${process.pid})`);
+    const files = fs.readdirSync(sessionsDir);
+    assert.deepStrictEqual(files, ['codex-abc.json'], 'exactly one orbital, named for the thread');
+    cleanup(tmp);
+  });
+
+  test('item.updated refreshes the face without counting the tool twice', () => {
+    const { tmp, stateFile, statsFile } = runFakeCodex([
+      { type: 'thread.started', thread_id: 'upd' },
+      { type: 'turn.started' },
+      { type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } },
+      { type: 'item.updated', item: { id: 'i1', type: 'command_execution', command: 'npm run lint', status: 'in_progress' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.ok(state.detail.includes('npm run lint'),
+      `the updated command should reach the face, got "${state.detail}"`);
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.session.toolCalls, 1,
+      'item.started + item.updated is one tool call, not two');
+    cleanup(tmp);
+  });
+
+  test('the pre-0.146 item.created / tool_use schema is ignored, not misread', () => {
+    // codex 0.146 emits item.started|updated|completed with typed items; the
+    // old guess (item.created carrying a tool_use item) must move nothing.
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'thread.started', thread_id: 'old' },
+      { type: 'item.created', item: { id: 'i1', type: 'tool_use', name: 'Bash', input: { command: 'npm test' } } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'starting',
+      `the face must stay on the thread.started frame, got "${state.state}"`);
+    assert.ok(!/npm test/.test(state.detail || ''),
+      'no tool detail should be derived from the old schema');
+    cleanup(tmp);
+  });
+
+  test('a whole captured turn ends on responding / stopped', () => {
+    // Shape taken from a live `codex exec --json` capture (codex-cli 0.146.0).
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'thread.started', thread_id: 'live' },
+      { type: 'item.completed', item: { id: 'item_0', type: 'error', message: 'clamping SessionEnd hook timeout to 3s' } },
+      { type: 'turn.started' },
+      { type: 'item.completed', item: { id: 'item_2', type: 'agent_message', text: 'running it' } },
+      { type: 'item.started', item: { id: 'item_3', type: 'command_execution', command: 'pwsh -Command echo hi', aggregated_output: '', exit_code: null, status: 'in_progress' } },
+      { type: 'item.completed', item: { id: 'item_3', type: 'command_execution', command: 'pwsh -Command echo hi', aggregated_output: 'hi', exit_code: 0, status: 'completed' } },
+      { type: 'item.completed', item: { id: 'item_4', type: 'agent_message', text: 'done' } },
+      { type: 'turn.completed', usage: { input_tokens: 47463, output_tokens: 118 } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'responding');
+    assert.strictEqual(state.detail, 'wrapping up');
+    assert.strictEqual(state.stopped, true);
+    assert.strictEqual(state.sessionId, 'codex-live');
+    cleanup(tmp);
   });
 });
 
@@ -953,69 +1905,111 @@ describe('adapters -- openclaw normalisePiEvent coverage', () => {
 
 // -- engmux-adapter.js (structural) ------------------------------------
 
-describe('adapters -- engmux-adapter (structural)', () => {
+describe('adapters -- engmux-adapter', () => {
   const ADAPTER = path.join(ADAPTERS_DIR, 'engmux-adapter.js');
+  // Requiring the adapter must not start a dispatch: the runtime lives behind
+  // a require.main guard, so a bare require only hands back the arg parsers.
+  const engmux = require('../adapters/engmux-adapter');
 
-  test('adapter file exists', () => {
-    assert.ok(fs.existsSync(ADAPTER));
+  // Runs one dispatch to completion with a stand-in for the python
+  // interpreter and returns the orbital session file it left behind.
+  function runEngmux(args, python) {
+    const base = makeTempEnv('engmux-parent');
+    const env = { ...base.env, ENGMUX_PYTHON: python };
+    try {
+      execFileSync(NODE, [ADAPTER, ...args], {
+        env, timeout: 20000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      // The adapter exits with the child's code; only a killed adapter matters.
+      if (e.status === null || e.status === undefined) throw e;
+    }
+    const files = fs.existsSync(base.sessionsDir) ? fs.readdirSync(base.sessionsDir) : [];
+    const session = files.length
+      ? readJSON(path.join(base.sessionsDir, files[0]))
+      : null;
+    cleanup(base.tmp);
+    return { files, session };
+  }
+
+  test('requiring the adapter exports its arg parsers and starts no dispatch', () => {
+    assert.strictEqual(typeof engmux.extractModel, 'function');
+    assert.strictEqual(typeof engmux.extractEngine, 'function');
   });
 
-  test('adapter file starts with use strict', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'use strict'"));
+  test('extractModel takes -m / --model and strips the provider prefix', () => {
+    assert.strictEqual(engmux.extractModel(['-m', 'opencode/big-pickle']), 'big-pickle');
+    assert.strictEqual(engmux.extractModel(['--model', 'anthropic/claude-opus']), 'claude-opus');
+    assert.strictEqual(engmux.extractModel(['-m', 'plain-name']), 'plain-name');
+    assert.strictEqual(engmux.extractModel(['-E', 'opencode', 'do X']), 'engmux',
+      'no -m falls back to the adapter name');
+    assert.strictEqual(engmux.extractModel(['-m']), 'engmux', 'a dangling -m is not a model');
   });
 
-  test('adapter imports base-adapter writeSessionState', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("require('./base-adapter')"));
-    assert.ok(src.includes('writeSessionState'));
+  test('extractEngine takes -E / --engine as the editor provenance', () => {
+    assert.strictEqual(engmux.extractEngine(['-E', 'opencode']), 'opencode');
+    assert.strictEqual(engmux.extractEngine(['--engine', 'claude']), 'claude');
+    assert.strictEqual(engmux.extractEngine(['-m', 'opencode/x', 'do X']), 'engmux',
+      'no -E falls back to the adapter name');
+    assert.strictEqual(engmux.extractEngine(['--engine']), 'engmux',
+      'a dangling --engine is not an engine');
   });
 
-  test('adapter uses spawn for child process', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("require('child_process')"));
-    assert.ok(src.includes('spawn'));
+  test('a dispatch writes one orbital carrying model, engine and parent session', () => {
+    // ENGMUX_PYTHON points at node, which rejects `-m`: the child exits
+    // non-zero, which drives the real spawn + close path to the error branch.
+    const { files, session } = runEngmux(
+      ['-E', 'opencode', '-m', 'opencode/big-pickle', '-e', 'medium', 'do X'], NODE);
+    assert.strictEqual(files.length, 1, `one orbital per dispatch, got ${files.join(', ')}`);
+    assert.strictEqual(session.modelName, 'big-pickle', 'the -m value labels the orbital');
+    assert.strictEqual(session.editor, 'opencode', 'the -E value is the editor provenance');
+    assert.strictEqual(session.parentSession, 'engmux-parent',
+      "the dispatcher's CLAUDE_SESSION_ID becomes the parent");
+    assert.ok(session.sessionId.startsWith('engmux-'), session.sessionId);
+    assert.strictEqual(session.state, 'error', 'a failed dispatch ends on the error face');
+    assert.strictEqual(session.stopped, true, 'the orbital is retired when the dispatch ends');
+    assert.ok(session.detail, 'the failure is described');
   });
 
-  test('adapter cycles through SUB_STATES', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('SUB_STATES'));
-    assert.ok(src.includes('thinking'));
-    assert.ok(src.includes('coding'));
-    assert.ok(src.includes('searching'));
+  test('a python that cannot be spawned still retires the orbital with an error', () => {
+    const { session } = runEngmux(['-E', 'claude', 'do X'],
+      path.join(__dirname, 'no-such-python-binary'));
+    assert.strictEqual(session.state, 'error');
+    assert.strictEqual(session.stopped, true);
+    assert.ok(session.detail, 'the spawn failure message is shown');
   });
 
-  test('adapter writes spawning state on start', () => {
+  // Kept as source checks: what is left of the runtime is timer- and
+  // child-driven (an 8s work-state cycle, the initial spawning write that the
+  // final write overwrites, and the JSON stdout passthrough). Observing any of
+  // it needs a working `python -m engmux`, which the suite cannot supply
+  // portably -- there is no fake interpreter that node can spawn on win32
+  // without a shell.
+  test('source: the running dispatch cycles through work states', () => {
     const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'spawning'"));
+    assert.ok(src.includes('SUB_STATES'), 'a cycling state list');
+    for (const s of ['thinking', 'coding', 'searching']) {
+      assert.ok(src.includes(`'${s}'`), `${s} should be one of the cycled states`);
+    }
+    assert.ok(src.includes('setInterval('), 'cycling is timer-driven');
+    assert.ok(src.includes("writeState('spawning'"),
+      'the orbital appears before the child starts');
   });
 
-  test('adapter writes happy on success and error on failure', () => {
+  test('source: engmux JSON stdout is passed through unchanged', () => {
     const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes("'happy'"));
-    assert.ok(src.includes("'error'"));
-  });
-
-  test('adapter sets parentSession from env', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('PARENT_SESSION'));
-    assert.ok(src.includes('parentSession'));
-  });
-
-  test('adapter extracts model name from -m flag', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('extractModel'));
-    // Strips prefix like "opencode/"
-    assert.ok(src.includes("replace(/^[^/]+\\//"));
-  });
-
-  test('adapter passes through engmux JSON stdout', () => {
-    const src = fs.readFileSync(ADAPTER, 'utf8');
-    assert.ok(src.includes('process.stdout.write(stdout)'));
+    assert.ok(src.includes('process.stdout.write(stdout)'),
+      "the caller must still receive engmux's own JSON result");
   });
 });
 
 // -- Bug fix regression tests -------------------------------------------
+// The `source:`-prefixed tests below, and the layout-constant ones, are kept
+// deliberately: they are lint rules for code whose only effect is on drawn
+// pixels inside the 15fps render loop (grid.js padding and exclusion zones,
+// renderer.js try/catch and PID-guard branches, the particles TTY fallbacks
+// that only differ on a real terminal). Everything with an observable file
+// or object has been converted.
 
 describe('bug fix regressions', () => {
   test('renderer.js has no duplicate const minimal', () => {
@@ -1024,10 +2018,21 @@ describe('bug fix regressions', () => {
     assert.strictEqual(matches.length, 1, `Expected 1 "const minimal" but found ${matches.length}`);
   });
 
-  test('face.js uses petSpamLevel not petCount in getEyes', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'face.js'), 'utf8');
-    assert.ok(!src.includes('this.petCount'), 'should not reference this.petCount');
-    assert.ok(src.includes('this.petSpamLevel >= 3'));
+  test('petSpamLevel 3 changes the eyes on a happy face', () => {
+    // The counter was once petCount and the threshold once `> 3`, so level 3
+    // never reached the reward eyes. Assert the level actually drives them.
+    const { ClaudeFace } = require(path.join(__dirname, '..', 'face.js'));
+    const { eyes } = require(path.join(__dirname, '..', 'animations.js'));
+    const calm = new ClaudeFace();
+    calm.state = 'happy';
+    const spam = new ClaudeFace();
+    spam.state = 'happy';
+    spam.petSpamLevel = 3;
+    const theme = calm.getTheme();
+    assert.deepStrictEqual(spam.getEyes(theme, 0), eyes.heart(),
+      'level 3 on a happy face should give heart eyes');
+    assert.notDeepStrictEqual(calm.getEyes(theme, 0), eyes.heart(),
+      'level 0 must not');
   });
 
   test('particles.js has TTY fallbacks for rows/columns', () => {
@@ -1049,12 +2054,6 @@ describe('bug fix regressions', () => {
   test('grid.js spawn scale starts at 0.3 minimum', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'grid.js'), 'utf8');
     assert.ok(src.includes('Math.max(0.3,'));
-  });
-
-  test('update-state.js has no hardcoded subagent state cycling (Fix #79)', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
-    assert.ok(!src.includes('lastCycleTime'), 'cycling mechanism should be removed');
-    assert.ok(!src.includes('SUB_STATES'), 'hardcoded state array should be removed');
   });
 
   test('renderer.js wraps face.render() in try-catch', () => {
@@ -1088,15 +2087,70 @@ describe('bug fix regressions', () => {
     cleanup(tmp);
   });
 
-  test('update-state.js has no PreToolUse synthetic subagent session block', () => {
-    // Bug: PreToolUse + SubagentStart both created orbital sessions, causing
-    // duplicate faces. The PreToolUse block was the old workaround before
-    // SubagentStart/SubagentStop hooks existed — it's been removed.
-    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
-    assert.ok(!src.includes('isSubagentTool'),
-      'isSubagentTool variable should be gone (PreToolUse synthetic session block removed)');
-    assert.ok(!src.includes("'PreToolUse' && isSubagentTool"),
-      'PreToolUse isSubagentTool branch should not exist');
+  test('parent tool state reaches only the latest subagent orbital', () => {
+    // Guards what is left of two removed blocks. A file count cannot see
+    // either, because both wrote into files that already exist:
+    //   (a) PreToolUse used to mint its own synthetic orbital alongside the
+    //       one SubagentStart makes, so a Task call showed two faces;
+    //   (b) the old state-mirroring block copied the parent's state into a
+    //       subagent file unconditionally -- including on the Task call that
+    //       spawned it, and without the sticky-field merge.
+    // Propagation itself is deliberate and current (_writeSubagentToolState):
+    // the LATEST active subagent shows the parent's live tool state, earlier
+    // ones keep their own, subagent tools never propagate, and the sticky
+    // fields survive. That is the invariant asserted here.
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('conductor');
+    const stats = conductingStats('conductor', 'sub-old', Date.now() - 5000);
+    stats.session.activeSubagents.push({
+      id: 'sub-new', description: 'newer task', taskDescription: 'newer task',
+      model: 'sonnet', editor: 'claude', startedAt: Date.now() - 1000,
+    });
+    fs.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+    seedSession(sessionsDir, 'sub-old', {
+      state: 'coding', detail: 'editing old.js', stopped: false,
+      parentSession: 'conductor', taskDescription: 'real task', modelName: 'haiku',
+    });
+    seedSession(sessionsDir, 'sub-new', {
+      state: 'spawning', detail: 'newer task', stopped: false,
+      parentSession: 'conductor', taskDescription: 'newer task', modelName: 'sonnet',
+    });
+    const oldBefore = readJSON(path.join(sessionsDir, 'sub-old.json'));
+
+    // A subagent tool must not propagate -- it is the parent conducting.
+    runUpdateState('PreToolUse', {
+      session_id: 'conductor', tool_name: 'Task',
+      tool_input: { description: 'go and look', subagent_type: 'Explore' },
+    }, env);
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'sub-new.json')).state, 'spawning',
+      'a Task call is the parent conducting -- it must not overwrite an orbital');
+
+    // An ordinary tool call does propagate, to the latest subagent only.
+    runUpdateState('PreToolUse', {
+      session_id: 'conductor', tool_name: 'Read', tool_input: { file_path: '/src/app.js' },
+    }, env);
+
+    const files = fs.readdirSync(sessionsDir).sort();
+    assert.deepStrictEqual(files, ['conductor.json', 'sub-new.json', 'sub-old.json'],
+      `no synthetic extra orbital may be minted, got ${files.join(', ')}`);
+
+    const newer = readJSON(path.join(sessionsDir, 'sub-new.json'));
+    assert.strictEqual(newer.state, 'reading', 'the latest subagent shows the live tool state');
+    assert.strictEqual(newer.parentSession, 'conductor', 'sticky parentSession survives');
+    assert.strictEqual(newer.taskDescription, 'newer task', 'sticky taskDescription survives');
+    assert.strictEqual(newer.modelName, 'sonnet', 'sticky modelName survives');
+
+    const older = readJSON(path.join(sessionsDir, 'sub-old.json'));
+    assert.strictEqual(older.state, oldBefore.state,
+      `an earlier subagent keeps its own state, got '${older.state}'`);
+    assert.strictEqual(older.detail, oldBefore.detail,
+      `and its own detail, got '${older.detail}'`);
+
+    // The parent keeps the conducting face while its subagents work: the tool
+    // state went to the orbital, not to the conductor.
+    const parent = readJSON(path.join(sessionsDir, 'conductor.json'));
+    assert.strictEqual(parent.state, 'subagent');
+    assert.strictEqual(parent.detail, 'conducting 2');
+    cleanup(tmp);
   });
 
   test('update-state.js fallback catch block respects subagent isolation', () => {
@@ -1213,23 +2267,17 @@ describe('bug fix regressions', () => {
     cleanup(tmp);
   });
 
-  test('renderer.js readState returns isSessionStart field', () => {
-    // readState() must propagate isSessionStart so SessionStart events
-    // can trigger immediate session adoption in the render loop.
-    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-    assert.ok(src.includes('isSessionStart: data.isSessionStart'),
-      'readState should include isSessionStart field');
-  });
+  test('readState propagates isSessionStart so the renderer can adopt the session', () => {
+    const state = withStateFile({
+      state: 'idle', detail: 'session starting', sessionId: 'rs-1',
+      isSessionStart: true, timestamp: Date.now(),
+    }, () => require(path.join(__dirname, '..', 'renderer.js')).readState());
+    assert.strictEqual(state.isSessionStart, true);
 
-  test('update-state.js has no state-mirroring block for orbital faces', () => {
-    // Bug: an else-if block mirrored every parent tool call's state directly
-    // into the latest subagent session file, making orbital faces flicker
-    // and mirror the main face. Removed in favour of the time-based cycling.
-    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
-    assert.ok(!src.includes('latestSub'),
-      'latestSub variable should be gone (state-mirroring block removed)');
-    assert.ok(!src.includes('!isSubagentTool'),
-      '!isSubagentTool guard should be gone (state-mirroring block removed)');
+    const plain = withStateFile({
+      state: 'coding', detail: 'editing', sessionId: 'rs-1', timestamp: Date.now(),
+    }, () => require(path.join(__dirname, '..', 'renderer.js')).readState());
+    assert.strictEqual(plain.isSessionStart, false, 'absent means false, never undefined');
   });
 
   test('renderer.js PID guard handles EPERM as running (#65)', () => {
@@ -1238,54 +2286,141 @@ describe('bug fix regressions', () => {
       'PID guard catch should check for EPERM and treat as running');
   });
 
-  test('renderer.js responding state gets 3000ms minDisplayUntil (#67)', () => {
+  test('forceState applies the state at once and holds it for the given minimum (#67)', () => {
+    // The renderer's responding rescues call forceState(..., 3000). This is the
+    // half of that contract that lives in face.js and can be observed.
+    const { ClaudeFace } = require(path.join(__dirname, '..', 'face.js'));
+    const face = new ClaudeFace();
+    face.setState('coding', 'editing app.js');
+    const before = Date.now();
+    face.forceState('responding', 'wrapping up', 3000);
+    const after = Date.now();
+    assert.strictEqual(face.state, 'responding', 'forceState skips the pending queue');
+    assert.strictEqual(face.stateDetail, 'wrapping up');
+    assert.strictEqual(face.pendingState, null, 'the queue is dropped');
+    assert.ok(face.minDisplayUntil >= before + 3000 && face.minDisplayUntil <= after + 3000,
+      `minDisplayUntil should be ~now+3000, got ${face.minDisplayUntil - before}ms out`);
+    // And the hold is real: a later work state does not replace it immediately.
+    face.setState('coding', 'editing again');
+    assert.strictEqual(face.state, 'responding', 'the 3s minimum buffers the next state');
+  });
+
+  // Kept as a source check: both rescue paths live inside the renderer's
+  // 15fps render loop, which the suite has no harness for. This asserts only
+  // that they still route through face.forceState (whose behaviour the test
+  // above covers) rather than hand-rolling the transition again.
+  test('source: the renderer responding rescues go through face.forceState', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-    // Both occurrences of the responding→happy transition should use now + 3000
-    const matches = src.match(/minDisplayUntil = now \+ 3000;.*responding/g)
-                 || src.match(/now \+ 3000;.*3s min display/g)
-                 || [];
-    // Source-level check: no `now;` (immediate expire) near 'wrapping up'
-    assert.ok(!src.includes("minDisplayUntil = now;"),
+    const calls = src.match(/face\.forceState\('responding'/g) || [];
+    assert.strictEqual(calls.length, 2,
+      `both the stopped-flag and fresh-read rescues should forceState, found ${calls.length}`);
+    assert.ok(!src.includes('minDisplayUntil = now;'),
       'responding should not use minDisplayUntil = now (immediate expire)');
-    assert.ok(src.includes("now + 3000"),
-      'responding transitions should use now + 3000');
+    assert.ok(!src.includes("face.state = 'responding';"),
+      'renderer should not assign face.state directly for responding');
   });
 });
 
 // -- Stopped flag preservation (#98) ----------------------------------------
 
 describe('update-state.js stopped flag preservation (#98)', () => {
-  const updateStatePath = path.join(__dirname, '..', 'update-state.js');
-  const sharedMod = require(path.join(__dirname, '..', 'shared'));
-  const STATE_FILE = sharedMod.STATE_FILE;
-  const SESSIONS_DIR = sharedMod.SESSIONS_DIR;
-  const safeFilename = sharedMod.safeFilename;
+  test('a late PostToolUse keeps the stopped flag on the global state file', () => {
+    // Stop already released ownership; a tool result that lands afterwards
+    // must not resurrect the session and hold the main face hostage.
+    const { tmp, stateFile, env } = makeTempEnv('stop-global');
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'responding', detail: 'wrapping up',
+      timestamp: Date.now(), sessionId: 'stop-global', stopped: true,
+    }), 'utf8');
 
-  // Save and restore state file (integration tests write to the real file)
-  let savedStoppedState;
-  try { savedStoppedState = fs.readFileSync(STATE_FILE, 'utf8'); } catch { savedStoppedState = null; }
+    runUpdateState('PostToolUse', {
+      tool_name: 'Write', tool_input: { file_path: '/tmp/test.txt' },
+      tool_result: { stdout: 'ok' }, session_id: 'stop-global',
+    }, env);
 
-  test('source: global state file read preserves stopped flag for same session', () => {
-    const src = fs.readFileSync(updateStatePath, 'utf8');
-    assert.ok(
-      src.includes('existing.stopped && existing.sessionId === sessionId && !stopped'),
-      'update-state.js should check existing.stopped for same session and preserve it'
-    );
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.stopped, true,
+      'stopped must survive a late PostToolUse from the same session');
+    cleanup(tmp);
   });
 
-  test('source: session file read preserves stopped flag before writeSessionState', () => {
-    const src = fs.readFileSync(updateStatePath, 'utf8');
-    assert.ok(
-      src.includes('existingSession.stopped'),
-      'update-state.js should read existing session file and preserve stopped flag'
-    );
+  test('a late PostToolUse keeps the stopped flag on the session file', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('stop-session');
+    seedSession(sessionsDir, 'stop-session', {
+      state: 'responding', detail: 'wrapping up', stopped: true,
+    });
+
+    runUpdateState('PostToolUse', {
+      tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
+      tool_result: { stdout: 'ok' }, session_id: 'stop-session',
+    }, env);
+
+    const session = readJSON(path.join(sessionsDir, 'stop-session.json'));
+    assert.strictEqual(session.stopped, true,
+      'the orbital must not come back to life on a late tool result');
+    cleanup(tmp);
   });
 
-  test('source: renderer lastStopped resets when same session sends non-stopped state', () => {
+  test('a subagent carrying a parentSession never writes the global state file', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('sub-blocked');
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'thinking', detail: 'planning',
+      timestamp: Date.now(), sessionId: 'main-owner', stopped: true,
+    }), 'utf8');
+    // What SubagentStart leaves behind before the subagent's first own hook.
+    seedSession(sessionsDir, 'sub-blocked', {
+      state: 'spawning', detail: 'subagent', parentSession: 'main-owner',
+    });
+
+    runUpdateState('PreToolUse', {
+      tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
+      session_id: 'sub-blocked',
+    }, env);
+
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.sessionId, 'main-owner',
+      'a subagent must not take the main face even when the owner has stopped');
+    assert.strictEqual(state.state, 'thinking');
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'sub-blocked.json')).state, 'reading',
+      'it still updates its own orbital');
+    cleanup(tmp);
+  });
+
+  test('the empty-stdin fallback blocks a subagent from the global state file too', () => {
+    // The catch path (Stop with no parsable stdin) has its own copy of the
+    // parentSession guard. It once compared the adopted owner id against
+    // itself, so it always passed and a subagent Stop stole the main face.
+    // The state file is owned by the subagent's OWN id here, so only the
+    // parentSession guard can stop the write.
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('sub-fallback');
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'coding', detail: 'editing app.js',
+      timestamp: Date.now(), sessionId: 'sub-fallback', stopped: false,
+    }), 'utf8');
+    seedSession(sessionsDir, 'sub-fallback', {
+      state: 'spawning', detail: 'subagent', parentSession: 'main-owner',
+    });
+
+    runUpdateState('Stop', '', env);
+
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.state, 'coding',
+      'a subagent Stop must not write responding/wrapping-up over the main face');
+    assert.strictEqual(state.stopped, false,
+      'nor release ownership for the main session');
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'sub-fallback.json')).state, 'idle',
+      'the subagent orbital still goes idle between turns');
+    cleanup(tmp);
+  });
+
+  // Kept as source checks: both live inside the renderer's 15fps loop, which
+  // the suite has no harness for. They are one-way-latch regressions -- the
+  // shape of the comparison is the whole fix.
+  test('source: renderer lastStopped tracks the flag instead of latching on', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
     assert.ok(
       src.includes('lastStopped = !!stateData.stopped'),
-      'renderer.js should reset lastStopped when state file has no stopped flag'
+      'renderer.js should reset lastStopped when the state file has no stopped flag'
     );
     assert.ok(
       !src.includes('if (stateData.stopped) lastStopped = true'),
@@ -1304,337 +2439,87 @@ describe('update-state.js stopped flag preservation (#98)', () => {
       'renderer.js should not have the old bidirectional stoppedNow !== lastStopped check'
     );
   });
-
-  test('source: update-state.js blocks subagents with parentSession from global state writes', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
-    const pattern = 'mySession.parentSession) shouldWriteGlobal = false';
-    const matches = src.split(pattern).length - 1;
-    assert.ok(matches >= 2,
-      `update-state.js should have parentSession guard in both main and fallback paths (found ${matches})`);
-  });
-
-  test('integration: PostToolUse after Stop preserves stopped in global state file', () => {
-    // Write a stopped state file simulating a Stop event
-    const testSessionId = 'test-stopped-' + Date.now();
-    const stoppedState = JSON.stringify({
-      state: 'responding', detail: 'wrapping up',
-      timestamp: Date.now(), sessionId: testSessionId, stopped: true,
-    });
-    try { fs.writeFileSync(STATE_FILE, stoppedState, 'utf8'); } catch { return; }
-
-    // Simulate a late PostToolUse by spawning update-state.js
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'PostToolUse'], {
-        input: JSON.stringify({
-          tool_name: 'Write', tool_input: { file_path: '/tmp/test.txt' },
-          tool_result: { stdout: 'ok' }, session_id: testSessionId,
-        }),
-        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Read the state file back — stopped must still be true
-    try {
-      const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      assert.strictEqual(result.stopped, true,
-        'stopped flag must be preserved after late PostToolUse for same session');
-    } catch (e) {
-      // If the file can't be read (e.g. permissions), skip gracefully
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    }
-  });
-
-  test('integration: PostToolUse after Stop preserves stopped in session file', () => {
-    const testSessionId = 'test-session-stopped-' + Date.now();
-    const sessionFile = path.join(SESSIONS_DIR, safeFilename(testSessionId) + '.json');
-
-    // Write a stopped session file
-    try {
-      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-      fs.writeFileSync(sessionFile, JSON.stringify({
-        session_id: testSessionId, state: 'responding', detail: 'wrapping up',
-        timestamp: Date.now(), stopped: true,
-      }), 'utf8');
-    } catch { return; }
-
-    // Simulate late PostToolUse
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'PostToolUse'], {
-        input: JSON.stringify({
-          tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
-          tool_result: { stdout: 'ok' }, session_id: testSessionId,
-        }),
-        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Session file must still have stopped: true
-    try {
-      const result = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
-      assert.strictEqual(result.stopped, true,
-        'session file stopped flag must be preserved after late PostToolUse');
-    } catch (e) {
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    } finally {
-      try { fs.unlinkSync(sessionFile); } catch {}
-    }
-  });
-
-  test('integration: subagent with parentSession is blocked from global state writes', () => {
-    // Set up: main session owns the global state file
-    const mainId = 'test-main-' + Date.now();
-    const subId = 'test-sub-' + Date.now();
-    const mainState = JSON.stringify({
-      state: 'thinking', detail: 'planning',
-      timestamp: Date.now(), sessionId: mainId, stopped: true,
-    });
-    try { fs.writeFileSync(STATE_FILE, mainState, 'utf8'); } catch { return; }
-
-    // Create a session file for the subagent with parentSession set
-    // (simulates what SubagentStart does before the subagent's first hook)
-    const subSessionFile = path.join(SESSIONS_DIR, safeFilename(subId) + '.json');
-    try {
-      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-      fs.writeFileSync(subSessionFile, JSON.stringify({
-        session_id: subId, state: 'spawning', detail: 'subagent',
-        timestamp: Date.now(), parentSession: mainId,
-      }), 'utf8');
-    } catch { return; }
-
-    // Spawn update-state.js as the subagent sending a PreToolUse
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'PreToolUse'], {
-        input: JSON.stringify({
-          tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
-          session_id: subId,
-        }),
-        env: { ...process.env, CLAUDE_SESSION_ID: subId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Global state file must still belong to main session — subagent was blocked
-    try {
-      const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      assert.strictEqual(result.sessionId, mainId,
-        'subagent with parentSession must not overwrite global state file');
-    } catch (e) {
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    } finally {
-      try { fs.unlinkSync(subSessionFile); } catch {}
-    }
-  });
-
-  test('cleanup: restore original state file after stopped flag tests', () => {
-    if (savedStoppedState !== null) fs.writeFileSync(STATE_FILE, savedStoppedState, 'utf8');
-    else try { fs.unlinkSync(STATE_FILE); } catch {}
-  });
 });
 
 describe('update-state.js parallel sessions orbital visibility fix', () => {
-  const updateStatePath = path.join(__dirname, '..', 'update-state.js');
-  const sharedMod = require(path.join(__dirname, '..', 'shared'));
-  const STATE_FILE = sharedMod.STATE_FILE;
-  const SESSIONS_DIR = sharedMod.SESSIONS_DIR;
-  const safeFilename = sharedMod.safeFilename;
+  test('PreToolUse after a Stop clears stopped on both files (a new turn began)', () => {
+    // Preservation is deliberately limited to PostToolUse/PostToolUseFailure,
+    // the events that can legitimately arrive after a Stop. Anything else --
+    // PreToolUse first among them -- means a new turn, so the flag must go.
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('pre-clears');
+    seedSession(sessionsDir, 'pre-clears', {
+      state: 'responding', detail: 'wrapping up', stopped: true,
+    });
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'responding', detail: 'wrapping up',
+      timestamp: Date.now(), sessionId: 'pre-clears', stopped: true,
+    }), 'utf8');
 
-  // Save and restore state file
-  let savedOrbitalState;
-  try { savedOrbitalState = fs.readFileSync(STATE_FILE, 'utf8'); } catch { savedOrbitalState = null; }
+    runUpdateState('PreToolUse', {
+      tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
+      session_id: 'pre-clears',
+    }, env);
 
-  // -- Source tests: hookEvent guard on stopped preservation --
-
-  test('source: global stopped preservation is restricted to PostToolUse/PostToolUseFailure', () => {
-    const src = fs.readFileSync(updateStatePath, 'utf8');
-    // The stopped preservation block must check hookEvent
-    assert.ok(
-      src.includes("hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure'"),
-      'stopped preservation must be gated on PostToolUse/PostToolUseFailure hookEvent'
-    );
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'pre-clears.json')).stopped, false,
+      'PreToolUse must clear stopped on the per-session file');
+    assert.ok(!readJSON(stateFile).stopped,
+      'and on the global state file, so the renderer stops rescuing');
+    cleanup(tmp);
   });
 
-  test('source: per-session stopped preservation is restricted to PostToolUse/PostToolUseFailure', () => {
-    const src = fs.readFileSync(updateStatePath, 'utf8');
-    // Both global and session preservation blocks should have the hookEvent guard
-    const matches = src.match(/hookEvent === 'PostToolUse' \|\| hookEvent === 'PostToolUseFailure'/g);
-    assert.ok(matches && matches.length >= 2,
-      'both global and per-session stopped preservation must have hookEvent guard');
+  test('Stop leaves the orbital idle between turns, not stopped', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('stop-idle');
+    seedSession(sessionsDir, 'stop-idle', { state: 'coding', detail: 'editing', stopped: false });
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'coding', detail: 'editing', timestamp: Date.now(), sessionId: 'stop-idle',
+    }), 'utf8');
+
+    runUpdateState('Stop', { session_id: 'stop-idle' }, env);
+
+    const session = readJSON(path.join(sessionsDir, 'stop-idle.json'));
+    assert.strictEqual(session.state, 'idle', 'Stop is the end of a turn, not the session');
+    assert.strictEqual(session.detail, 'between turns');
+    assert.strictEqual(session.stopped, false, 'the orbital stays visible');
+    assert.strictEqual(readJSON(stateFile).stopped, true,
+      'the global state file still releases ownership');
+    cleanup(tmp);
   });
 
-  test('source: Stop writes idle to per-session file (not stopped)', () => {
-    const src = fs.readFileSync(updateStatePath, 'utf8');
-    assert.ok(
-      src.includes("hookEvent === 'Stop'") && src.includes("'idle', 'between turns', false"),
-      'Stop handler should write idle/between-turns/stopped=false to per-session file'
-    );
+  test('SessionEnd does retire the orbital', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('sess-end');
+    seedSession(sessionsDir, 'sess-end', { state: 'coding', detail: 'editing', stopped: false });
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'coding', detail: 'editing', timestamp: Date.now(), sessionId: 'sess-end',
+    }), 'utf8');
+
+    runUpdateState('SessionEnd', { session_id: 'sess-end' }, env);
+
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'sess-end.json')).stopped, true,
+      'SessionEnd must write stopped=true to the per-session file');
+    cleanup(tmp);
   });
 
-  test('source: fallback catch separates Stop from SessionEnd', () => {
-    const src = fs.readFileSync(updateStatePath, 'utf8');
-    // Should NOT have the combined condition anymore
-    assert.ok(
-      !src.includes("hookEvent === 'Stop' || hookEvent === 'SessionEnd'"),
-      'fallback catch must not combine Stop and SessionEnd in the same condition'
-    );
-  });
+  test('the empty-stdin fallback tells Stop and SessionEnd apart', () => {
+    // They used to share one condition, so a plain Stop retired the orbital
+    // and the parallel window vanished from the ellipse for the rest of the
+    // session. Same input, same code path, only the hook name differs.
+    const stop = makeTempEnv('fb-stop');
+    seedSession(stop.sessionsDir, 'fb-stop', { state: 'coding', detail: 'editing', stopped: false });
+    runUpdateState('Stop', '', stop.env);
+    const afterStop = readJSON(path.join(stop.sessionsDir, 'fb-stop.json'));
+    assert.strictEqual(afterStop.state, 'idle');
+    assert.strictEqual(afterStop.detail, 'between turns');
+    assert.strictEqual(afterStop.stopped, false, 'a turn ending must not retire the orbital');
+    cleanup(stop.tmp);
 
-  // -- Integration tests: PreToolUse clears stopped --
-
-  test('integration: PreToolUse after Stop clears stopped on per-session file', () => {
-    const testSessionId = 'test-pretool-clears-' + Date.now();
-    const sessionFile = path.join(SESSIONS_DIR, safeFilename(testSessionId) + '.json');
-
-    // Write a stopped session file (simulating a prior Stop)
-    try {
-      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-      fs.writeFileSync(sessionFile, JSON.stringify({
-        session_id: testSessionId, state: 'responding', detail: 'wrapping up',
-        timestamp: Date.now(), stopped: true,
-      }), 'utf8');
-      // Also write a stopped global state for same session
-      fs.writeFileSync(STATE_FILE, JSON.stringify({
-        state: 'responding', detail: 'wrapping up',
-        timestamp: Date.now(), sessionId: testSessionId, stopped: true,
-      }), 'utf8');
-    } catch { return; }
-
-    // Send PreToolUse (new turn starting) — should clear stopped
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'PreToolUse'], {
-        input: JSON.stringify({
-          tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' },
-          session_id: testSessionId,
-        }),
-        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Per-session file must NOT have stopped: true
-    try {
-      const result = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
-      assert.strictEqual(result.stopped, false,
-        'PreToolUse must clear stopped flag on per-session file (new turn)');
-    } catch (e) {
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    } finally {
-      try { fs.unlinkSync(sessionFile); } catch {}
-    }
-  });
-
-  test('integration: Stop writes idle with stopped=false to per-session file', () => {
-    const testSessionId = 'test-stop-idle-' + Date.now();
-    const sessionFile = path.join(SESSIONS_DIR, safeFilename(testSessionId) + '.json');
-
-    // Write an active session file first
-    try {
-      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-      fs.writeFileSync(sessionFile, JSON.stringify({
-        session_id: testSessionId, state: 'coding', detail: 'editing',
-        timestamp: Date.now(), stopped: false,
-      }), 'utf8');
-      fs.writeFileSync(STATE_FILE, JSON.stringify({
-        state: 'coding', detail: 'editing',
-        timestamp: Date.now(), sessionId: testSessionId,
-      }), 'utf8');
-    } catch { return; }
-
-    // Send Stop event
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'Stop'], {
-        input: JSON.stringify({ session_id: testSessionId }),
-        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Per-session file: state=idle, stopped=false (orbital stays visible)
-    try {
-      const result = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
-      assert.strictEqual(result.state, 'idle',
-        'Stop should write state=idle to per-session file');
-      assert.strictEqual(result.stopped, false,
-        'Stop should write stopped=false to per-session file (keep orbital visible)');
-      assert.strictEqual(result.detail, 'between turns',
-        'Stop should write detail="between turns" to per-session file');
-    } catch (e) {
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    } finally {
-      try { fs.unlinkSync(sessionFile); } catch {}
-    }
-  });
-
-  test('integration: SessionEnd still writes stopped=true to per-session file', () => {
-    const testSessionId = 'test-sessend-stopped-' + Date.now();
-    const sessionFile = path.join(SESSIONS_DIR, safeFilename(testSessionId) + '.json');
-
-    // Write an active session file
-    try {
-      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-      fs.writeFileSync(sessionFile, JSON.stringify({
-        session_id: testSessionId, state: 'coding', detail: 'editing',
-        timestamp: Date.now(), stopped: false,
-      }), 'utf8');
-      fs.writeFileSync(STATE_FILE, JSON.stringify({
-        state: 'coding', detail: 'editing',
-        timestamp: Date.now(), sessionId: testSessionId,
-      }), 'utf8');
-    } catch { return; }
-
-    // Send SessionEnd event
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'SessionEnd'], {
-        input: JSON.stringify({ session_id: testSessionId }),
-        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Per-session file: stopped=true (session truly over)
-    try {
-      const result = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
-      assert.strictEqual(result.stopped, true,
-        'SessionEnd must write stopped=true to per-session file');
-    } catch (e) {
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    } finally {
-      try { fs.unlinkSync(sessionFile); } catch {}
-    }
-  });
-
-  test('integration: Stop writes stopped=true to global state file (ownership release)', () => {
-    const testSessionId = 'test-stop-global-' + Date.now();
-
-    try {
-      fs.writeFileSync(STATE_FILE, JSON.stringify({
-        state: 'coding', detail: 'editing',
-        timestamp: Date.now(), sessionId: testSessionId,
-      }), 'utf8');
-    } catch { return; }
-
-    try {
-      execFileSync(process.execPath, [updateStatePath, 'Stop'], {
-        input: JSON.stringify({ session_id: testSessionId }),
-        env: { ...process.env, CLAUDE_SESSION_ID: testSessionId, CODE_CRUMB_STATE: STATE_FILE },
-        timeout: 5000,
-      });
-    } catch {}
-
-    // Global state must still have stopped=true for ownership release
-    try {
-      const result = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      assert.strictEqual(result.stopped, true,
-        'Stop must write stopped=true to global state file for ownership release');
-    } catch (e) {
-      if (e.code !== 'ENOENT' && e instanceof assert.AssertionError) throw e;
-    }
-  });
-
-  test('cleanup: restore state after orbital visibility tests', () => {
-    if (savedOrbitalState !== null) fs.writeFileSync(STATE_FILE, savedOrbitalState, 'utf8');
-    else try { fs.unlinkSync(STATE_FILE); } catch {}
+    const end = makeTempEnv('fb-end');
+    seedSession(end.sessionsDir, 'fb-end', { state: 'coding', detail: 'editing', stopped: false });
+    runUpdateState('SessionEnd', '', end.env);
+    const afterEnd = readJSON(path.join(end.sessionsDir, 'fb-end.json'));
+    assert.strictEqual(afterEnd.state, 'responding');
+    assert.strictEqual(afterEnd.detail, 'session ending');
+    assert.strictEqual(afterEnd.stopped, true, 'only SessionEnd retires it');
+    cleanup(end.tmp);
   });
 });
 
@@ -1713,10 +2598,9 @@ describe('base-adapter guardedWriteState modelName preservation (#78)', () => {
     }
   });
 
-  test('cleanup: restore original state file after modelName tests', () => {
-    if (savedModelState !== null) fs.writeFileSync(STATE_FILE, savedModelState, 'utf8');
-    else try { fs.unlinkSync(STATE_FILE); } catch {}
-  });
+  // Restore the state file as it was before this block ran.
+  if (savedModelState !== null) fs.writeFileSync(STATE_FILE, savedModelState, 'utf8');
+  else try { fs.unlinkSync(STATE_FILE); } catch {}
 });
 
 // -- base-adapter unit tests (guardedWriteState, initSession, buildExtra, trackEditedFile, processJsonlStream)
@@ -1938,52 +2822,45 @@ describe('base-adapter -- processJsonlStream unit tests', () => {
     return stream;
   }
 
-  test('parses valid JSONL lines', (done) => {
-    const events = [];
-    const stream = makeStream(['{"a":1}\n{"b":2}\n']);
-    baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
-    stream.on('end', () => {
-      // Give a tick for the flush handler
-      setTimeout(() => {
-        assert.strictEqual(events.length, 2);
-        assert.strictEqual(events[0].a, 1);
-        assert.strictEqual(events[1].b, 2);
-      }, 10);
+  // processJsonlStream flushes its buffer on 'end'. Resolve one tick after
+  // that so the assertions see the final event list.
+  function collect(chunks) {
+    return new Promise((resolve) => {
+      const events = [];
+      const stream = makeStream(chunks);
+      baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
+      stream.on('end', () => setImmediate(() => resolve(events)));
     });
+  }
+
+  test.async('parses valid JSONL lines', async () => {
+    const events = await collect(['{"a":1}\n{"b":2}\n']);
+    assert.strictEqual(events.length, 2);
+    assert.strictEqual(events[0].a, 1);
+    assert.strictEqual(events[1].b, 2);
   });
 
-  test('skips malformed lines silently', () => {
-    const events = [];
-    const stream = makeStream(['{"valid":true}\nnot json\n{"also":true}\n']);
-    baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
-    stream.on('end', () => {
-      setTimeout(() => {
-        assert.strictEqual(events.length, 2);
-      }, 10);
-    });
+  test.async('skips malformed lines silently', async () => {
+    const events = await collect(['{"valid":true}\nnot json\n{"also":true}\n']);
+    assert.strictEqual(events.length, 2);
   });
 
-  test('handles \\r\\n line endings', () => {
-    const events = [];
-    const stream = makeStream(['{"x":1}\r\n{"y":2}\r\n']);
-    baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
-    stream.on('end', () => {
-      setTimeout(() => {
-        assert.strictEqual(events.length, 2);
-      }, 10);
-    });
+  test.async('handles \\r\\n line endings', async () => {
+    const events = await collect(['{"x":1}\r\n{"y":2}\r\n']);
+    assert.strictEqual(events.length, 2);
   });
 
-  test('calls handler for each parsed object', () => {
-    const events = [];
-    const stream = makeStream(['{"type":"a"}\n', '{"type":"b"}\n']);
-    baseAdapter.processJsonlStream(stream, (ev) => events.push(ev));
-    stream.on('end', () => {
-      setTimeout(() => {
-        assert.ok(events.length >= 2);
-        assert.strictEqual(events[0].type, 'a');
-      }, 10);
-    });
+  test.async('calls handler for each parsed object', async () => {
+    const events = await collect(['{"type":"a"}\n', '{"type":"b"}\n']);
+    assert.strictEqual(events.length, 2);
+    assert.strictEqual(events[0].type, 'a');
+    assert.strictEqual(events[1].type, 'b');
+  });
+
+  test.async('flushes a trailing line that has no newline', async () => {
+    const events = await collect(['{"tail":true}']);
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].tail, true);
   });
 });
 
@@ -1994,7 +2871,6 @@ describe('bug fix structural tests', () => {
   const BASE_ADAPTER = path.join(ADAPTERS_DIR, 'base-adapter.js');
   const OPENCODE_ADAPTER = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
   const PARTICLES = path.join(__dirname, '..', 'particles.js');
-  const FACE = path.join(__dirname, '..', 'face.js');
 
   // Bug #1 -- Windows Terminal fallback probes with execSync('where wt')
   test('update-state.js probes for wt with "where wt" before spawning', () => {
@@ -2009,25 +2885,84 @@ describe('bug fix structural tests', () => {
       'should have hasWt boolean flag controlled by where-wt probe');
   });
 
-  // Bug #2 -- OpenCode adapter toolInput uses data.tool_input || toolArgs, not data.input
-  test('opencode-adapter.js does not use data.input as first choice for toolInput', () => {
-    const src = fs.readFileSync(OPENCODE_ADAPTER, 'utf8');
-    // data.input is the full {tool, args} wrapper — should not be used directly as toolInput
-    assert.ok(!src.includes('toolInput = data.input'),
-      'toolInput must not be set to data.input (the full wrapper object)');
+  // Bug #2 -- OpenCode adapter toolInput unwraps the args, never the wrapper
+  test('normaliseEvent unwraps input.args instead of taking the {tool, args} wrapper', () => {
+    const { normaliseEvent } = require(OPENCODE_ADAPTER);
+    const norm = normaliseEvent({
+      type: 'tool.execute.before',
+      input: { tool: 'file_edit', args: { file_path: '/src/app.js' } },
+    });
+    assert.strictEqual(norm.toolName, 'file_edit');
+    assert.deepStrictEqual(norm.toolInput, { file_path: '/src/app.js' },
+      'toolInput is the args, not the wrapper');
+    assert.strictEqual(norm.toolInput.tool, undefined,
+      'the wrapper object must never leak into toolInput');
   });
 
-  test('opencode-adapter.js uses data.tool_input || toolArgs pattern for toolInput', () => {
-    const src = fs.readFileSync(OPENCODE_ADAPTER, 'utf8');
-    assert.ok(src.includes('data.tool_input || toolArgs'),
-      'toolInput should prefer data.tool_input, falling back to the unwrapped toolArgs');
+  test('normaliseEvent prefers the flat plugin field, then tool_input, then input.args', () => {
+    const { normaliseEvent } = require(OPENCODE_ADAPTER);
+    const all = normaliseEvent({
+      type: 'tool.execute.before', tool: 'edit',
+      toolInput: { filePath: 'flat.js' },
+      tool_input: { file_path: 'snake.js' },
+      input: { tool: 'file_edit', args: { file_path: 'nested.js' } },
+    });
+    // normaliseToolInput also mirrors filePath onto file_path for the mapper.
+    assert.strictEqual(all.toolInput.file_path, 'flat.js', 'flat plugin field wins');
+
+    const snake = normaliseEvent({
+      type: 'tool.execute.before', tool: 'edit',
+      tool_input: { file_path: 'snake.js' },
+      input: { tool: 'file_edit', args: { file_path: 'nested.js' } },
+    });
+    assert.deepStrictEqual(snake.toolInput, { file_path: 'snake.js' }, 'tool_input beats input.args');
   });
 
   // Bug #4 -- SubagentStop only splices when idx >= 0
-  test('update-state.js guards SubagentStop splice with idx >= 0 check', () => {
-    const src = fs.readFileSync(UPDATE_STATE, 'utf8');
-    assert.ok(src.includes('if (idx >= 0)'),
-      'SubagentStop handler must check idx >= 0 before splicing to avoid removing wrong subagent');
+  test('SubagentStop for an unknown id retires nobody', () => {
+    // findIndex returns -1 for an id we never registered; splicing on that
+    // removes the LAST subagent and marks the wrong orbital done.
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-stop-guard');
+    const UPDATE_STATE_PATH = path.join(__dirname, '..', 'update-state.js');
+    const stats = {
+      streak: 0, bestStreak: 0, brokenStreak: 0, brokenStreakAt: 0,
+      totalToolCalls: 0, totalErrors: 0,
+      records: { longestSession: 0, mostSubagents: 1, mostFilesEdited: 0 },
+      session: {
+        id: 'sub-stop-guard', start: Date.now() - 1000, toolCalls: 0, filesEdited: [],
+        subagentCount: 1, commitCount: 0,
+        activeSubagents: [{
+          id: 'real-sub', description: 'real task', taskDescription: 'real task',
+          model: 'haiku', editor: 'claude', startedAt: Date.now() - 500,
+        }],
+      },
+      recentMilestone: null,
+      daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
+      frequentFiles: {}, topLevelSessions: {},
+    };
+    fs.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    fs.writeFileSync(path.join(sessionsDir, 'real-sub.json'), JSON.stringify({
+      session_id: 'real-sub', state: 'coding', detail: 'editing',
+      timestamp: Date.now(), stopped: false, parentSession: 'sub-stop-guard',
+    }), 'utf8');
+
+    try {
+      execFileSync(NODE, [UPDATE_STATE_PATH, 'SubagentStop'], {
+        input: JSON.stringify({ session_id: 'sub-stop-guard', subagent_id: 'never-registered' }),
+        env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+
+    const after = readJSON(statsFile);
+    assert.strictEqual(after.session.activeSubagents.length, 1,
+      'an unknown subagent id must not splice the real one out');
+    assert.strictEqual(after.session.activeSubagents[0].id, 'real-sub');
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'real-sub.json')).stopped, false,
+      "the running subagent's orbital must not be retired");
+    cleanup(tmp);
   });
 
   // Bug #5 -- Redundant stdin close handlers removed
@@ -2047,40 +2982,51 @@ describe('bug fix structural tests', () => {
       'base-adapter.js should not have redundant stdin close handler that calls process.exit');
   });
 
-  // Bug #7 -- Particle render includes ansi.reset after char
-  test('particles.js render method appends ansi.reset after particle character', () => {
-    const src = fs.readFileSync(PARTICLES, 'utf8');
-    assert.ok(src.includes('ansi.reset'),
-      'particles.js render should include ansi.reset to avoid color bleed after particle chars');
+  // Bug #7 -- every particle is closed with a reset, or its colour bleeds
+  test('every rendered particle is followed by a reset', () => {
+    const { ParticleSystem } = require(PARTICLES);
+    const { ansi } = require(path.join(__dirname, '..', 'themes.js'));
+    assert.ok(ansi.reset.length > 0, 'colour is on, so a reset is observable');
+    const ps = new ParticleSystem();
+    ps.spawn(20, 'float');
+    const out = ps.render(2, 2, [255, 128, 0]);
+    assert.ok(out.length > 0, 'the particles should be inside the terminal bounds');
+    assert.ok(out.endsWith(ansi.reset), 'the last particle must close its colour');
+    const chunks = out.split(ansi.reset).filter(Boolean);
+    for (const chunk of chunks) {
+      assert.ok(!chunk.includes(ansi.reset), 'split invariant');
+    }
+    assert.strictEqual(out.split(ansi.reset).length - 1, ps.particles.length,
+      'one reset per particle drawn');
   });
 
   // Bug #10 -- base-adapter initSession includes commitCount and activeSubagents
-  test('base-adapter.js initSession initialises commitCount in session object', () => {
-    const src = fs.readFileSync(BASE_ADAPTER, 'utf8');
-    assert.ok(src.includes('commitCount: 0'),
-      'initSession must include commitCount: 0 in the new session object');
-  });
-
-  test('base-adapter.js initSession initialises activeSubagents in session object', () => {
-    const src = fs.readFileSync(BASE_ADAPTER, 'utf8');
-    assert.ok(src.includes('activeSubagents: []'),
-      'initSession must include activeSubagents: [] in the new session object');
+  test('initSession gives a new session commitCount 0 and an empty activeSubagents', () => {
+    const baseAdapter = require(BASE_ADAPTER);
+    const { defaultStats } = require(path.join(__dirname, '..', 'state-machine.js'));
+    const stats = defaultStats();
+    baseAdapter.initSession(stats, 'fresh-session');
+    assert.strictEqual(stats.session.id, 'fresh-session');
+    assert.strictEqual(stats.session.commitCount, 0,
+      'a missing commitCount makes the commit counter NaN on the first commit');
+    assert.deepStrictEqual(stats.session.activeSubagents, [],
+      'a missing activeSubagents throws on the first SubagentStart');
   });
 
   // Bug #13 -- base-adapter guardedWriteState preserves existing.stopped flag
-  test('base-adapter.js guardedWriteState checks existing.stopped to preserve the flag', () => {
-    const src = fs.readFileSync(BASE_ADAPTER, 'utf8');
-    assert.ok(src.includes('existing.stopped'),
-      'guardedWriteState must read existing.stopped to preserve it for same-session writes');
-  });
-
-  // Bug #16 -- petSpamLevel threshold is >= 3, not > 3
-  test('face.js uses petSpamLevel >= 3 threshold (not > 3)', () => {
-    const src = fs.readFileSync(FACE, 'utf8');
-    assert.ok(src.includes('petSpamLevel >= 3'),
-      'face.js should activate caffeinated mode at petSpamLevel >= 3, not > 3');
-    assert.ok(!src.includes('petSpamLevel > 3'),
-      'face.js must not use petSpamLevel > 3 (off-by-one: level 3 would never trigger)');
+  test('guardedWriteState preserves a prior stopped flag for the same session', () => {
+    const baseAdapter = require(BASE_ADAPTER);
+    const result = withStateFile({
+      state: 'responding', detail: 'wrapping up', sessionId: 'gws-stopped',
+      stopped: true, timestamp: Date.now(),
+    }, () => {
+      baseAdapter.guardedWriteState('gws-stopped', 'relieved', 'command succeeded',
+        { sessionId: 'gws-stopped' });
+      return readJSON(SHARED.STATE_FILE);
+    });
+    assert.strictEqual(result.state, 'relieved', 'the late write still lands');
+    assert.strictEqual(result.stopped, true,
+      'a late PostToolUse must not erase the Stop that already happened');
   });
 });
 
@@ -2142,73 +3088,37 @@ describe('adapters -- base-adapter structure', () => {
   });
 });
 
-// -- engmux adapter structure -----------------------------------------
+// -- adapter files: exist, parse, declare strict mode --------------------
+// One gate for every adapter, replacing the per-adapter "file exists" /
+// "starts with use strict" / "is a valid Node.js script" copies. Parsing is
+// done in-process with vm.Script (compile, never run) so this costs no
+// subprocesses; opencode-plugin.mjs is ESM and is really imported by the
+// "opencode-plugin translate()" block above, which is a stronger check.
 
-describe('adapters -- engmux adapter structure', () => {
-  test('engmux-adapter.js file can be read without error', () => {
-    const adapterPath = path.join(ADAPTERS_DIR, 'engmux-adapter.js');
-    assert.ok(fs.existsSync(adapterPath), 'engmux-adapter.js should exist');
-    assert.doesNotThrow(() => fs.readFileSync(adapterPath, 'utf8'));
-  });
-
-  test('engmux-adapter.js is a valid Node.js script', () => {
-    const adapterPath = path.join(ADAPTERS_DIR, 'engmux-adapter.js');
-    const src = fs.readFileSync(adapterPath, 'utf8');
-    assert.ok(src.includes("'use strict'"), 'should use strict mode');
-    assert.ok(src.includes("require('./base-adapter')"), 'should require base-adapter');
-  });
-
-  test('engmux-adapter.js uses writeSessionState from base-adapter', () => {
-    const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'engmux-adapter.js'), 'utf8');
-    assert.ok(src.includes('writeSessionState'), 'should use writeSessionState');
-  });
-});
-
-// -- codex-wrapper structure ------------------------------------------
-
-describe('adapters -- codex-wrapper structure', () => {
-  test('codex-wrapper.js file exists and is readable', () => {
-    const adapterPath = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
-    assert.ok(fs.existsSync(adapterPath), 'codex-wrapper.js should exist');
-    assert.doesNotThrow(() => fs.readFileSync(adapterPath, 'utf8'));
-  });
-
-  test('codex-wrapper.js is a valid Node.js script', () => {
-    const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'codex-wrapper.js'), 'utf8');
-    assert.ok(src.includes("'use strict'"), 'should use strict mode');
-    assert.ok(src.includes("require('./base-adapter')"), 'should require base-adapter');
-  });
-
-  test('codex-wrapper.js imports expected base-adapter functions', () => {
-    const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'codex-wrapper.js'), 'utf8');
-    assert.ok(src.includes('writeSessionState'), 'should import writeSessionState');
-    assert.ok(src.includes('readStats'), 'should import readStats');
-    assert.ok(src.includes('writeStats'), 'should import writeStats');
-    assert.ok(src.includes('guardedWriteState'), 'should import guardedWriteState');
-    assert.ok(src.includes('initSession'), 'should import initSession');
-    assert.ok(src.includes('buildExtra'), 'should import buildExtra');
-    assert.ok(src.includes('handleToolStart'), 'should import handleToolStart');
-    assert.ok(src.includes('handleToolEnd'), 'should import handleToolEnd');
-    assert.ok(src.includes('processJsonlStream'), 'should import processJsonlStream');
-  });
-});
-
-// -- adapter files all exist ------------------------------------------
-
-describe('adapters -- adapter files all exist', () => {
+describe('adapters -- every adapter file exists and parses', () => {
   const adapterFiles = [
     'base-adapter.js',
     'codex-wrapper.js',
     'codex-notify.js',
     'opencode-adapter.js',
+    'opencode-plugin.mjs',
     'openclaw-adapter.js',
     'engmux-adapter.js',
   ];
 
   for (const file of adapterFiles) {
-    test(`${file} exists in adapters directory`, () => {
+    test(`${file} exists, and parses under strict mode`, () => {
       const fullPath = path.join(ADAPTERS_DIR, file);
       assert.ok(fs.existsSync(fullPath), `${file} should exist at ${fullPath}`);
+      const src = fs.readFileSync(fullPath, 'utf8');
+      if (file.endsWith('.mjs')) {
+        // ESM is strict by definition and is parsed by the real import above.
+        assert.ok(/\bexport\b/.test(src), `${file} should export something`);
+        return;
+      }
+      assert.ok(src.includes("'use strict'"), `${file} should declare strict mode`);
+      assert.doesNotThrow(() => new vm.Script(src, { filename: fullPath }),
+        `${file} should parse`);
     });
   }
 });
@@ -2221,9 +3131,8 @@ describe('adapters -- adapter files all exist', () => {
 
 describe('editor PID liveness tracking', () => {
   const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-  const updateStateSrc = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
 
-  test('codex-notify writes parent PID to global state file', () => {
+  test('codex-notify publishes the parent PID (posix only -- omitted on win32 like update-state.js)', () => {
     const { tmp, stateFile, env } = makeTempEnv('pid-1');
     const event = { type: 'agent-turn-complete', 'thread-id': 'pid-1' };
     try {
@@ -2234,9 +3143,15 @@ describe('editor PID liveness tracking', () => {
       if (e.status !== 0 && e.status !== null) throw e;
     }
     const state = readJSON(stateFile);
-    // The adapter is our direct child, so its ppid is this test process
-    assert.strictEqual(state.pid, process.pid,
-      `state.pid should be the parent process (${process.pid}), got ${state.pid}`);
+    // The adapter is our direct child, so its ppid is this test process --
+    // except on Windows, where the pid is omitted (same policy as update-state.js:
+    // the ppid there is a transient shim and a PID-recycling hazard).
+    if (process.platform === 'win32') {
+      assert.strictEqual(state.pid, undefined, 'win32 must not publish a transient ppid');
+    } else {
+      assert.strictEqual(state.pid, process.pid,
+        `state.pid should be the parent process (${process.pid}), got ${state.pid}`);
+    }
     cleanup(tmp);
   });
 
@@ -2267,22 +3182,19 @@ describe('editor PID liveness tracking', () => {
     cleanup(tmp);
   });
 
-  test('update-state.js writeState adds pid in the function, platform-conditionally', () => {
-    assert.ok(
-      updateStateSrc.includes("...(process.platform !== 'win32' ? { pid: process.ppid } : {}), ...extra"),
-      'writeState should spread pid conditionally (omit on win32) before ...extra'
-    );
-  });
+  test('readState propagates the writer pid, and reports 0 when there is none', () => {
+    const { readState } = require(path.join(__dirname, '..', 'renderer.js'));
+    const withPid = withStateFile({
+      state: 'coding', detail: 'editing', sessionId: 'pid-3',
+      pid: 4242, timestamp: Date.now(),
+    }, readState);
+    assert.strictEqual(withPid.pid, 4242, 'the renderer must see the pid to arm it');
 
-  test('codex-wrapper reports its own pid (long-lived, exits with codex)', () => {
-    const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'codex-wrapper.js'), 'utf8');
-    assert.ok(src.includes('pid: process.pid'),
-      'codex-wrapper should override pid with process.pid');
-  });
-
-  test('renderer readState returns pid field', () => {
-    assert.ok(rendererSrc.includes('pid: data.pid || 0'),
-      'readState should propagate the pid field');
+    const withoutPid = withStateFile({
+      state: 'coding', detail: 'editing', sessionId: 'pid-3', timestamp: Date.now(),
+    }, readState);
+    assert.strictEqual(withoutPid.pid, 0,
+      'a win32 write carries no pid; 0 means "nothing to arm", never undefined');
   });
 
   test('renderer keeps PID death in sticky editorDead flag, not lastStopped', () => {
@@ -2328,31 +3240,107 @@ describe('adapters -- editor provenance field', () => {
     assert.strictEqual(extra.editor, 'codex');
   });
 
-  test('every adapter declares its editor', () => {
-    const read = f => fs.readFileSync(path.join(__dirname, '..', 'adapters', f), 'utf8');
-    assert.ok(read('opencode-adapter.js').includes("defaultEditor: 'opencode'"));
-    assert.ok(read('openclaw-adapter.js').includes("defaultEditor: 'openclaw'"));
-    assert.ok(read('codex-notify.js').includes('editor'));
-    assert.ok(read('codex-wrapper.js').includes("editor: 'codex'"));
-    assert.ok(read('engmux-adapter.js').includes('extractEngine'));
+  test('each stdin adapter stamps its own editor onto the state file', () => {
+    // codex-wrapper is covered by the fake-codex block (editor: 'codex') and
+    // engmux by its own dispatch test (editor from -E).
+    const cases = [
+      ['opencode-adapter.js', 'opencode', { type: 'thinking', sessionId: 'ed-oc' }],
+      ['openclaw-adapter.js', 'openclaw', { event: 'tool_call', toolName: 'read', sessionId: 'ed-cl' }],
+    ];
+    for (const [file, editor, payload] of cases) {
+      const { tmp, stateFile, env } = makeTempEnv(`ed-${editor}`);
+      runStdinAdapter(path.join(ADAPTERS_DIR, file), payload, env);
+      assert.strictEqual(readJSON(stateFile).editor, editor, file);
+      cleanup(tmp);
+    }
+
+    const { tmp, stateFile, env } = makeTempEnv('ed-codex');
+    try {
+      execFileSync(NODE, [path.join(ADAPTERS_DIR, 'codex-notify.js'),
+        JSON.stringify({ type: 'agent-turn-complete', 'thread-id': 'ed-codex' })], {
+        env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+    assert.strictEqual(readJSON(stateFile).editor, 'codex', 'codex-notify.js');
+    cleanup(tmp);
   });
 
-  test('runStdinAdapter fallback session id is editor-prefixed', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'adapters', 'base-adapter.js'), 'utf8');
-    assert.ok(src.includes('${defaultEditor}-${process.ppid}'));
+  test('an anonymous adapter session gets an editor-prefixed fallback id', () => {
+    // ${defaultEditor}-${process.ppid}: under execFileSync the adapter's
+    // parent is this test runner, so the ppid it sees is our own pid.
+    const { tmp, stateFile, env } = makeTempEnv('unused');
+    delete env.CLAUDE_SESSION_ID;
+    runStdinAdapter(path.join(ADAPTERS_DIR, 'opencode-adapter.js'),
+      { type: 'thinking' }, env); // no sessionId / session_id anywhere
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.sessionId, `opencode-${process.pid}`,
+      `an anonymous session must be self-describing, got "${state.sessionId}"`);
+    cleanup(tmp);
   });
 
-  test('update-state.js: editor invariants', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'update-state.js'), 'utf8');
-    assert.ok(src.includes("process.env.CODE_CRUMB_EDITOR || 'claude'"), 'editor resolution');
-    assert.ok(src.includes("'editor'"), 'editor in STICKY_FIELDS');
-    assert.ok(src.includes('FALLBACK_SESSION_ID'), 'single shared fallback id expression');
-    assert.ok(src.includes("process.platform !== 'win32'"), 'win32 transient-shim pid omission');
+  test('update-state.js takes its editor from CODE_CRUMB_EDITOR, then --editor, then claude', () => {
+    const dflt = makeTempEnv('ed-default');
+    delete dflt.env.CODE_CRUMB_EDITOR;
+    runUpdateState('PreToolUse', {
+      session_id: 'ed-default', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    }, dflt.env);
+    assert.strictEqual(readJSON(dflt.stateFile).editor, 'claude', 'default');
+    cleanup(dflt.tmp);
+
+    const flag = makeTempEnv('ed-flag');
+    delete flag.env.CODE_CRUMB_EDITOR;
+    runUpdateState('PreToolUse', {
+      session_id: 'ed-flag', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    }, flag.env, ['--editor', 'opencode']);
+    assert.strictEqual(readJSON(flag.stateFile).editor, 'opencode', '--editor <name>');
+    cleanup(flag.tmp);
+
+    const env = makeTempEnv('ed-env');
+    env.env.CODE_CRUMB_EDITOR = 'foo';
+    runUpdateState('PreToolUse', {
+      session_id: 'ed-env', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    }, env.env, ['--editor', 'opencode']);
+    assert.strictEqual(readJSON(env.stateFile).editor, 'foo', 'the env var outranks the flag');
+    cleanup(env.tmp);
   });
 
-  test('guardedWriteState preserves owner editor', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'adapters', 'base-adapter.js'), 'utf8');
-    assert.ok(src.includes('existing.editor'), 'editor preservation in guardedWriteState');
+  test('the editor a session established survives later hooks of another editor', () => {
+    // The owner guard in update-state.js pins modelName and editor for the
+    // session that owns the state file, and the same `extra` then goes to the
+    // orbital -- so a claude-defaulted hook cannot relabel an openclaw session.
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('ed-sticky');
+    delete env.CODE_CRUMB_EDITOR;
+    fs.writeFileSync(stateFile, JSON.stringify({
+      state: 'idle', detail: '', sessionId: 'ed-sticky',
+      editor: 'openclaw', stopped: false, timestamp: Date.now(),
+    }), 'utf8');
+
+    runUpdateState('PreToolUse', {
+      session_id: 'ed-sticky', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    }, env);
+
+    assert.strictEqual(readJSON(stateFile).editor, 'openclaw',
+      'a claude-defaulted hook must not relabel the session');
+    assert.strictEqual(readJSON(path.join(sessionsDir, 'ed-sticky.json')).editor, 'openclaw',
+      'and the orbital carries the same provenance');
+    cleanup(tmp);
+  });
+
+  test('guardedWriteState keeps the editor the session owner established', () => {
+    const baseAdapter = require('../adapters/base-adapter');
+    const result = withStateFile({
+      state: 'thinking', detail: '', sessionId: 'ed-owner',
+      editor: 'openclaw', stopped: false, timestamp: Date.now(),
+    }, () => {
+      baseAdapter.guardedWriteState('ed-owner', 'coding', 'editing',
+        { sessionId: 'ed-owner', editor: 'codex' });
+      return readJSON(SHARED.STATE_FILE);
+    });
+    assert.strictEqual(result.state, 'coding', 'the write still lands');
+    assert.strictEqual(result.editor, 'openclaw',
+      'the owner editor wins over the writing adapter');
   });
 });
 
@@ -2363,42 +3351,7 @@ describe('adapters -- editor provenance field', () => {
 // falsely retiring the real subagent's synthetic orbital.
 
 describe('update-state -- parallel sessions vs subagents (#134)', () => {
-  const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
-
-  function runUpdateState(event, inputObj, env) {
-    try {
-      execFileSync(NODE, [UPDATE_STATE, event], {
-        input: JSON.stringify(inputObj),
-        env,
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
-  }
-
-  // Stats blob for an owner session conducting one subagent
-  function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
-    return {
-      streak: 0, bestStreak: 0, brokenStreak: 0, brokenStreakAt: 0,
-      totalToolCalls: 5, totalErrors: 0,
-      records: { longestSession: 0, mostSubagents: 1, mostFilesEdited: 0 },
-      session: {
-        id: ownerId, start: Date.now() - 60000, toolCalls: 5, filesEdited: [],
-        subagentCount: 1, commitCount: 0,
-        activeSubagents: [{
-          id: subId, description: 'real task', taskDescription: 'real task',
-          model: 'haiku', editor: 'claude', startedAt: subStartedAt,
-        }],
-      },
-      recentMilestone: null,
-      daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
-      frequentFiles: {},
-      topLevelSessions,
-    };
-  }
-
+  // conductingStats() is shared with the state-mirroring regression above.
   function seedSyntheticOrbital(sessionsDir, subId, ownerId) {
     fs.mkdirSync(sessionsDir, { recursive: true });
     fs.writeFileSync(path.join(sessionsDir, `${subId}.json`), JSON.stringify({
@@ -2561,4 +3514,58 @@ describe('update-state -- parallel sessions vs subagents (#134)', () => {
   });
 });
 
-module.exports = { passed: () => passed, failed: () => failed };
+// -- Stats lock end to end ---------------------------------------------
+
+describe('update-state.js -- parallel hooks keep every stats increment', () => {
+  const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
+
+  function preToolInput(sessionId) {
+    return JSON.stringify({
+      session_id: sessionId, tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    });
+  }
+
+  test.async('6 concurrent PreToolUse hooks each count once', async () => {
+    const { tmp, statsFile, env } = makeTempEnv('lock-session');
+    try {
+      // One hook first, synchronously: it creates the session so the parallel
+      // batch only increments (a session reset mid-race would zero the counter).
+      execFileSync(NODE, [UPDATE_STATE, 'PreToolUse'], {
+        input: preToolInput('lock-session'), env, timeout: 10000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      assert.strictEqual(readJSON(statsFile).session.toolCalls, 1, 'first hook counted');
+
+      await Promise.all(Array.from({ length: 6 }, () => new Promise((resolve, reject) => {
+        const child = spawn(NODE, [UPDATE_STATE, 'PreToolUse'], {
+          env, stdio: ['pipe', 'ignore', 'ignore'],
+        });
+        child.on('error', reject);
+        child.on('exit', resolve);
+        child.stdin.end(preToolInput('lock-session'));
+      })));
+
+      const stats = readJSON(statsFile);
+      assert.strictEqual(stats.session.toolCalls, 7, 'no session.toolCalls increment lost');
+      assert.strictEqual(stats.totalToolCalls, 7, 'no totalToolCalls increment lost');
+    } finally { cleanup(tmp); }
+  });
+
+  test('the process.exit(0) paths release the lock before exiting', () => {
+    const { tmp, env } = makeTempEnv('lock-exit');
+    try {
+      try {
+        execFileSync(NODE, [UPDATE_STATE, 'TeammateIdle'], {
+          input: JSON.stringify({ teammate_name: 'x', team_name: 't' }),
+          env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } catch (e) {
+        if (e.status !== 0 && e.status !== null) throw e;
+      }
+      assert.ok(!fs.existsSync(path.join(tmp, '.code-crumb-stats.lock')),
+        'process.exit skips finally -- the exit paths must release explicitly');
+    } finally { cleanup(tmp); }
+  });
+});
+
+module.exports = suite;

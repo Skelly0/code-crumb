@@ -1,10 +1,10 @@
 'use strict';
 
 // +================================================================+
-// |  Accessories -- hats, glasses, and other face adornments        |
-// |  Small ASCII art layered above the face, one per state          |
-// |  Toggle with 'a' key. State-specific: hard hat for installing,  |
-// |  reading glasses for reading, party hat for happy, etc.         |
+// |  Accessories -- hats, glasses, and other face adornments       |
+// |  Small ASCII art layered above the face, one per state         |
+// |  Toggle with 'a' key. State-specific: hard hat for installing, |
+// |  reading glasses for reading, party hat for happy, etc.        |
 // +================================================================+
 
 // Each accessory: { lines: string[] }

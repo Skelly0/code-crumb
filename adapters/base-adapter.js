@@ -1,64 +1,75 @@
 'use strict';
 
 // +================================================================+
-// |  Base Adapter -- shared logic for all Code Crumb adapters           |
-// |                                                                  |
-// |  Provides:                                                       |
-// |    - writeState / writeSessionState   (state file IPC)           |
-// |    - readStats / writeStats           (persistent stats)         |
-// |    - guardedWriteState                (session-aware global)     |
-// |    - initSession                      (stats bootstrapping)      |
-// |    - buildExtra                       (extra fields for state)   |
-// |    - handleToolStart / handleToolEnd  (common tool event logic)  |
-// |    - processStdinEvent                (stdin JSON reader loop)   |
-// |    - trackEditedFile                  (file tracking helper)     |
-// |                                                                  |
-// |  Each adapter imports these helpers and supplies its own         |
-// |  event normalisation + mapping logic.                            |
+// |  Base Adapter -- shared logic for all Code Crumb adapters      |
+// |                                                                |
+// |  Provides:                                                     |
+// |    - writeState / writeSessionState   (state file IPC)         |
+// |    - readStats / writeStats           (persistent stats)       |
+// |    - guardedWriteState                (session-aware global)   |
+// |    - initSession                      (stats bootstrapping)    |
+// |    - buildExtra                       (extra fields for state) |
+// |    - handleToolStart / handleToolEnd  (common tool event logic)|
+// |    - processStdinEvent                (stdin JSON reader loop) |
+// |    - trackEditedFile                  (file tracking helper)   |
+// |                                                                |
+// |  Each adapter imports these helpers and supplies its own       |
+// |  event normalisation + mapping logic.                          |
 // +================================================================+
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, STATS_FILE, safeFilename } = require('../shared');
 const {
-  toolToState, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats,
+  STATE_FILE, SESSIONS_DIR, STATS_FILE, STATS_LOCK_FILE,
+  safeFilename, writeJsonAtomic, acquireFileLock,
+} = require('../shared');
+const {
+  toolToState, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
   EDIT_TOOLS,
   pruneFrequentFiles, topFrequentFiles,
 } = require('../state-machine');
 
 // -- State file writing ------------------------------------------------
 
-// pid defaults to ppid (right for per-event processes like codex-notify,
-// whose parent is the editor); long-lived adapters override via extra.pid.
-// The renderer validates the PID before trusting it for liveness checks.
+// Same PID policy as update-state.js: ppid is the editor on Unix (per-event
+// processes like codex-notify run as its children) and enables liveness
+// rescue; on Windows ppid is a transient cmd.exe shim -- useless and a
+// PID-recycling hazard -- so it is omitted and staleness timeouts apply.
+// Long-lived adapters (codex-wrapper) override via extra.pid.
+function pidField() {
+  return process.platform !== 'win32' ? { pid: process.ppid } : {};
+}
+
 function writeState(state, detail = '', extra = {}) {
-  const data = JSON.stringify({ state, detail, timestamp: Date.now(), pid: process.ppid, ...extra });
-  try { fs.writeFileSync(STATE_FILE, data, { encoding: 'utf8', mode: 0o600 }); } catch {}
+  const data = { state, detail, timestamp: Date.now(), ...pidField(), ...extra };
+  try { writeJsonAtomic(STATE_FILE, data, 0o600); } catch {}
 }
 
 function writeSessionState(sessionId, state, detail = '', stopped = false, extra = {}) {
   try {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
     const filename = safeFilename(sessionId) + '.json';
-    const data = JSON.stringify({
+    const data = {
       session_id: sessionId, state, detail,
       timestamp: Date.now(), cwd: process.cwd(), stopped,
-      pid: process.ppid, // editor PID — hook runs as child, so ppid is the long-lived process
+      ...pidField(),
       ...extra,
-    });
-    fs.writeFileSync(path.join(SESSIONS_DIR, filename), data, { encoding: 'utf8', mode: 0o600 });
+    };
+    writeJsonAtomic(path.join(SESSIONS_DIR, filename), data, 0o600);
   } catch {}
 }
 
 // -- Stats persistence -------------------------------------------------
 
+// Always returns a fully-shaped stats object: a {} or old-schema file must
+// not make stats.session.id throw inside an adapter.
 function readStats() {
-  try { return JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); }
+  try { return normalizeStats(JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'))); }
   catch { return defaultStats(); }
 }
 
 function writeStats(stats) {
-  try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats), { encoding: 'utf8', mode: 0o600 }); } catch {}
+  try { writeJsonAtomic(STATS_FILE, stats, 0o600); } catch {}
 }
 
 // -- Session-guarded global state write --------------------------------
@@ -138,7 +149,8 @@ function buildExtra(stats, sessionId, modelName, editor) {
 
 function trackEditedFile(stats, toolName, toolInput) {
   if (EDIT_TOOLS.test(toolName)) {
-    const fp = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
+    const raw = toolInput?.file_path || toolInput?.notebook_path || toolInput?.path || toolInput?.target_file || '';
+    const fp = typeof raw === 'string' ? raw : '';
     const base = fp ? path.basename(fp) : '';
     if (base && !stats.session.filesEdited.includes(base)) {
       stats.session.filesEdited.push(base);
@@ -169,34 +181,45 @@ function handleToolEnd(stats, toolName, toolInput, toolResponse, isError) {
 // openclaw-adapter, and similar stdin-based adapters.
 //
 // handler(data) should process the parsed event object.
-// On parse failure, fallbackFn(err) is called if provided.
+// On parse failure, fallbackFn(err) is called if provided. A throw inside
+// handler() is swallowed on its own -- it must NOT be reported as
+// "unparseable stdin", or every mapping bug would hide behind the fallback's
+// thinking face.
+//
+// opts.stream / opts.exit exist for tests (default: process.stdin / process.exit).
 
-function processStdinEvent(handler, fallbackFn) {
+function processStdinEvent(handler, fallbackFn, opts = {}) {
+  const stream = opts.stream || process.stdin;
+  const exit = opts.exit || ((code) => process.exit(code));
   let input = '';
   const MAX_INPUT = 1048576;
   let inputTruncated = false;
-  process.stdin.setEncoding('utf8');
-  process.stdin.on('data', chunk => {
+  stream.setEncoding('utf8');
+  stream.on('data', chunk => {
     if (input.length < MAX_INPUT) input += chunk;
     else inputTruncated = true;
   });
-  process.stdin.on('end', () => {
+  stream.on('end', () => {
     if (inputTruncated) {
       const truncResult = classifyTruncatedInput('', input);
       writeState(truncResult.state, truncResult.detail);
-      process.exit(0);
+      exit(0);
+      return;
     }
+    let data;
     try {
-      const data = JSON.parse(input);
-      handler(data);
+      data = JSON.parse(input);
     } catch (err) {
       if (fallbackFn) {
         try { fallbackFn(err); } catch {}
       }
+      exit(0);
+      return;
     }
-    process.exit(0);
+    try { handler(data); } catch {}
+    exit(0);
   });
-  // 'end' handler above already calls process.exit(0); no 'close' handler needed
+  // 'end' handler above already calls exit(0); no 'close' handler needed
 }
 
 // -- Stdin JSONL (streaming) reader ------------------------------------
@@ -273,61 +296,70 @@ function runStdinAdapter(options) {
       || process.env.CODE_CRUMB_EDITOR
       || defaultEditor;
 
-    const stats = readStats();
-    initSession(stats, sessionId);
+    // Read -> mutate -> write of the shared stats file, serialized: several
+    // adapter processes can run at once and the last writer would otherwise
+    // drop the others' counter increments. A failed acquire proceeds
+    // unlocked -- the lock must never cost the adapter its event.
+    const releaseStats = acquireFileLock(STATS_LOCK_FILE);
+    try {
+      const stats = readStats();
+      initSession(stats, sessionId);
 
-    const extra = buildExtra(stats, sessionId, modelName, editor);
+      const extra = buildExtra(stats, sessionId, modelName, editor);
 
-    let state = 'thinking';
-    let detail = '';
-    let stopped = false;
+      let state = 'thinking';
+      let detail = '';
+      let stopped = false;
 
-    // Let the adapter handle custom event types first
-    const custom = mapEvent
-      ? mapEvent(event, toolName, toolInput, toolOutput, isError, data)
-      : null;
+      // Let the adapter handle custom event types first
+      const custom = mapEvent
+        ? mapEvent(event, toolName, toolInput, toolOutput, isError, data)
+        : null;
 
-    if (custom) {
-      state = custom.state || state;
-      detail = custom.detail || detail;
-      stopped = custom.stopped || false;
-      if (custom.extra) Object.assign(extra, custom.extra);
-    }
-    // Common event handling
-    else if (event === 'tool_start' || event === 'PreToolUse') {
-      ({ state, detail } = handleToolStart(stats, toolName, toolInput));
-    }
-    else if (event === 'tool_end' || event === 'PostToolUse') {
-      const toolResponse = { stdout: toolOutput, stderr: norm.stderr || '', isError };
-      const result = handleToolEnd(stats, toolName, toolInput, toolResponse, isError);
-      state = result.state;
-      detail = result.detail;
-      extra.diffInfo = result.diffInfo;
-    }
-    else if (event === 'turn_end' || event === 'Stop' || event === 'session_end') {
-      state = 'happy';
-      detail = 'all done!';
-      stopped = true;
-    }
-    else if (event === 'error') {
-      state = 'error';
-      detail = data.message || data.reason || data.output?.error || 'something went wrong';
-      updateStreak(stats, true);
-    }
-    else if (event === 'waiting' || event === 'Notification') {
-      state = 'waiting';
-      detail = 'needs attention';
-    }
+      if (custom) {
+        state = custom.state || state;
+        detail = custom.detail || detail;
+        stopped = custom.stopped || false;
+        if (custom.extra) Object.assign(extra, custom.extra);
+      }
+      // Common event handling
+      else if (event === 'tool_start' || event === 'PreToolUse') {
+        ({ state, detail } = handleToolStart(stats, toolName, toolInput));
+      }
+      else if (event === 'tool_end' || event === 'PostToolUse') {
+        const toolResponse = { stdout: toolOutput, stderr: norm.stderr || '', isError };
+        const result = handleToolEnd(stats, toolName, toolInput, toolResponse, isError);
+        state = result.state;
+        detail = result.detail;
+        extra.diffInfo = result.diffInfo;
+      }
+      else if (event === 'turn_end' || event === 'Stop' || event === 'session_end') {
+        state = 'happy';
+        detail = 'all done!';
+        stopped = true;
+      }
+      else if (event === 'error') {
+        state = 'error';
+        detail = data.message || data.reason || data.output?.error || 'something went wrong';
+        updateStreak(stats, true);
+      }
+      else if (event === 'waiting' || event === 'Notification') {
+        state = 'waiting';
+        detail = 'needs attention';
+      }
 
-    // Update extra with latest counters
-    extra.toolCalls = stats.session.toolCalls;
-    extra.filesEdited = stats.session.filesEdited.length;
-    if (stopped) extra.stopped = true;
+      // Update extra with latest counters
+      extra.toolCalls = stats.session.toolCalls;
+      extra.filesEdited = stats.session.filesEdited.length;
+      if (stopped) extra.stopped = true;
 
-    guardedWriteState(sessionId, state, detail, extra);
-    writeSessionState(sessionId, state, detail, stopped, extra);
-    pruneFrequentFiles(stats.frequentFiles);
-    writeStats(stats);
+      guardedWriteState(sessionId, state, detail, extra);
+      writeSessionState(sessionId, state, detail, stopped, extra);
+      pruneFrequentFiles(stats.frequentFiles);
+      writeStats(stats);
+    } finally {
+      if (releaseStats) releaseStats();
+    }
   }, () => {
     // Fallback on parse error -- write thinking state with guard.
     // Same editor-prefixed ID as the main path so the session never splits.
@@ -337,6 +369,7 @@ function runStdinAdapter(options) {
 }
 
 module.exports = {
+  pidField,
   writeState,
   writeSessionState,
   readStats,

@@ -1,8 +1,8 @@
 'use strict';
 
 // +================================================================+
-// |  Face animations -- eyes, mouths, and grid mouths               |
-// |  Pure visual data used by ClaudeFace and MiniFace               |
+// |  Face animations -- eyes, mouths, and grid mouths              |
+// |  Pure visual data used by ClaudeFace and MiniFace              |
 // +================================================================+
 
 // -- Mouths (full-size face) ---------------------------------------
@@ -153,12 +153,12 @@ const eyes = {
     return { left: ['\u2584\u2584', '\u2588 '], right: ['\u2584\u2584', ' \u2588'] };
   },
 
-  wink() { return { left: ['██', '██'], right: ['──', '▄▄'] }; },
+  wink() { return { left: ['\u2588\u2588', '\u2588\u2588'], right: ['\u2500\u2500', '\u2584\u2584'] }; },
 
-  heart() { return { left: ['♥ ', ' ♥'], right: [' ♥', '♥ '] }; },
+  heart() { return { left: ['\u2665 ', ' \u2665'], right: [' \u2665', '\u2665 '] }; },
 
   star(theme, frame) {
-    const chars = ['★ ', ' ★', '✦ ', ' ✦'];
+    const chars = ['\u2605 ', ' \u2605', '\u2726 ', ' \u2726'];
     const i = frame % chars.length;
     return {
       left:  [chars[i], chars[(i + 2) % chars.length]],
@@ -166,7 +166,7 @@ const eyes = {
     };
   },
 
-  tired() { return { left: ['▀▀', '  '], right: ['  ', '▄▄'] }; },
+  tired() { return { left: ['\u2580\u2580', '  '], right: ['  ', '\u2584\u2584'] }; },
 
   furnace(theme, frame) {
     // Flickering embers — slow hypnotic pulse between glyph pairs

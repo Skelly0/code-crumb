@@ -2,36 +2,17 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - launch.js                                  |
-// |  Tests for CLI argument parsing, editor resolution, and         |
-// |  platform-specific renderer command construction.               |
+// |  Code Crumb Test Suite - launch.js                             |
+// |  Tests for CLI argument parsing, editor resolution, and        |
+// |  platform-specific renderer command construction.              |
 // +================================================================+
 
 const assert = require('assert');
 const path = require('path');
 const { parseArgs, resolveEditor, buildRendererCommands, WINDOW_TITLE } = require('../launch');
 
-let passed = 0;
-let failed = 0;
-let currentDescribe = '';
-
-function describe(name, fn) {
-  currentDescribe = name;
-  console.log(`\n  ${name}`);
-  fn();
-}
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`    \x1b[32m\u2713\x1b[0m ${name}`);
-  } catch (e) {
-    failed++;
-    console.log(`    \x1b[31m\u2717\x1b[0m ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const suite = require('./_harness').createSuite();
+const { describe, test } = suite;
 
 // -- parseArgs ------------------------------------------------------------
 
@@ -182,21 +163,21 @@ describe('launch.js -- buildRendererCommands win32', () => {
     assert.ok(cmds.cmd, 'should have cmd entry');
   });
 
-  test('wt command includes window title and node', () => {
+  test('wt command includes window title (quoted for the shell) and node', () => {
     const cmds = buildRendererCommands('win32', rendererArgs, title);
     assert.strictEqual(cmds.wt.cmd, 'wt');
     assert.ok(cmds.wt.args.includes('--title'));
-    assert.ok(cmds.wt.args.includes(title));
+    assert.ok(cmds.wt.args.includes(`"${title}"`), 'shell:true joins args verbatim, so the title must carry its own quotes');
     assert.ok(cmds.wt.args.includes('node'));
-    assert.ok(cmds.wt.args.includes(rendererArgs[0]));
+    assert.ok(cmds.wt.args.includes(rendererArgs[0]), 'a path without spaces stays unquoted');
   });
 
   test('cmd fallback uses start command', () => {
     const cmds = buildRendererCommands('win32', rendererArgs, title);
     assert.strictEqual(cmds.cmd.cmd, 'cmd');
     assert.ok(cmds.cmd.args.includes('/c'));
-    assert.ok(cmds.cmd.args.includes('start'));
-    assert.ok(cmds.cmd.args.includes('node'));
+    assert.ok(cmds.cmd.args.some(a => a.includes('start')));
+    assert.ok(cmds.cmd.args.some(a => a.includes('node')));
   });
 
   test('wt opts include shell: true and detached: true', () => {
@@ -390,4 +371,4 @@ describe('launch.js -- buildRendererCommands returns array', () => {
   });
 });
 
-module.exports = { passed: () => passed, failed: () => failed };
+module.exports = suite;

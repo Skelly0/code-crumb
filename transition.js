@@ -1,7 +1,7 @@
 'use strict';
 
 // +================================================================+
-// |  SwapTransition -- dissolve/swap/materialize animation state    |
+// |  SwapTransition -- dissolve/swap/materialize animation state   |
 // |  Pure state machine: frame counting + interpolation, no I/O    |
 // +================================================================+
 

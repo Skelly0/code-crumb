@@ -1,20 +1,20 @@
 'use strict';
 
 // +================================================================+
-// |  State Machine -- pure logic for Code Crumb state management         |
-// |  Extracted for testability. No I/O, no side effects.            |
-// |                                                                  |
-// |  Handles:                                                        |
-// |    - Tool name → face state mapping (multi-editor)              |
-// |    - Forensic error detection (50+ regex patterns)               |
-// |    - Post-tool result classification                             |
-// |    - Streak tracking and milestone detection                     |
-// |                                                                  |
-// |  Supported editors:                                              |
-// |    - Claude Code (edit, bash, grep, glob, read, task, etc.)     |
-// |    - OpenAI Codex CLI (shell, apply_diff, apply_patch, etc.)    |
-// |    - OpenCode (file_edit, terminal, search_files, etc.)         |
-// |    - OpenClaw/Pi (read, write, edit, bash, exec, process, etc.) |
+// |  State Machine -- pure logic for Code Crumb state management   |
+// |  Extracted for testability. No I/O, no side effects.           |
+// |                                                                |
+// |  Handles:                                                      |
+// |    - Tool name → face state mapping (multi-editor)             |
+// |    - Forensic error detection (50+ regex patterns)             |
+// |    - Post-tool result classification                           |
+// |    - Streak tracking and milestone detection                   |
+// |                                                                |
+// |  Supported editors:                                            |
+// |    - Claude Code (edit, bash, grep, glob, read, task, etc.)    |
+// |    - OpenAI Codex CLI (shell, apply_diff, apply_patch, etc.)   |
+// |    - OpenCode (file_edit, terminal, search_files, etc.)        |
+// |    - OpenClaw/Pi (read, write, edit, bash, exec, process, etc.)|
 // +================================================================+
 
 const path = require('path');
@@ -22,27 +22,89 @@ const path = require('path');
 // -- Tool-to-State Mapping -------------------------------------------
 
 // Tool name patterns per category — covers Claude Code, Codex CLI, OpenCode, and OpenClaw/Pi
-const EDIT_TOOLS = /^(edit|multiedit|write|str_replace|create_file|file_edit|write_file|create_file_with_contents|apply_diff|apply_patch|code_edit|insert_text|replace_text|patch)$/i;
-const BASH_TOOLS = /^(bash|shell|terminal|execute|run_command|run|exec|process|sh|cmd|powershell|command|cli)$/i;
-const READ_TOOLS = /^(read|view|cat|file_read|read_file|get_file_contents|open_file)$/i;
-const SEARCH_TOOLS = /^(grep|glob|search|ripgrep|find|list|search_files|list_files|list_dir|find_files|file_search|codebase_search)$/i;
+const EDIT_TOOLS = /^(edit|multiedit|write|notebookedit|notebook_edit|str_replace|create_file|file_edit|write_file|create_file_with_contents|apply_diff|apply_patch|code_edit|insert_text|replace_text|patch)$/i;
+const BASH_TOOLS = /^(bash|shell|terminal|execute|run_command|run|exec|process|sh|cmd|powershell|command|cli|killshell|bashoutput|enterworktree|exitworktree)$/i;
+// Shell-management tools: no command text of their own, so details fall back to the humanized name
+const SHELL_MGMT_TOOLS = /^(killshell|bashoutput|enterworktree|exitworktree)$/i;
+const READ_TOOLS = /^(read|view|cat|file_read|read_file|get_file_contents|open_file|notebookread|readmcpresourcetool|readmcpresourcedirtool|listmcpresourcestool)$/i;
+const SEARCH_TOOLS = /^(grep|glob|search|ripgrep|find|list|ls|toolsearch|search_files|list_files|list_dir|find_files|file_search|codebase_search)$/i;
+const LIST_TOOLS = /^(ls|list|list_dir|list_files)$/i;
 const WEB_TOOLS = /^(web_search|websearch|web_fetch|fetch|webfetch|browser|browse|http_request|curl|canvas)$/i;
-const SUBAGENT_TOOLS = /^(task|agent|subagent|spawn_agent|delegate|codex_agent|sessions)$/i;
-const REVIEW_TOOLS = /^(diff|review|compare|patch)$/i;
+const SUBAGENT_TOOLS = /^(task|agent|subagent|spawn_agent|delegate|codex_agent|sessions|workflow|sendmessage|listagents|taskoutput|taskstop|monitor)$/i;
+// Subsets of SUBAGENT_TOOLS: ones whose completion means an agent finished, vs. ones that just check in
+const AGENT_DONE_TOOLS = /^(task|agent|subagent|spawn_agent|delegate|codex_agent|workflow|taskoutput)$/i;
+const AGENT_MONITOR_TOOLS = /^(taskoutput|taskstop|listagents|monitor)$/i;
+const REVIEW_TOOLS = /^(diff|review|compare|reportfindings|code_review)$/i;
+const ASK_TOOLS = /^(askuserquestion|ask_user|ask_user_question|request_user_input)$/i;
+const SKILL_TOOLS = /^(skill|loadskill|load_skill)$/i;
+const PLAN_TOOLS = /^(todowrite|todoread|enterplanmode|exitplanmode|croncreate|cronlist|crondelete|schedulewakeup)$/i;
+const SCHEDULE_TOOLS = /^(croncreate|cronlist|crondelete|schedulewakeup)$/i;
+const PUBLISH_TOOLS = /^(artifact|senduserfile)$/i;
+
+// MCP tool verbs (mcp__<server>__<verb>_<rest>) — read-ish, search-ish, and write-ish prefixes
+const MCP_READ_VERBS = /^(read|get|list|fetch|describe|inspect|check|show|view|download|export|whoami|debug)(_|$)/i;
+const MCP_SEARCH_VERBS = /^(search|find|query|lookup)(_|$)/i;
+const MCP_WRITE_VERBS = /^(create|update|write|modify|edit|insert|delete|remove|append|set|move|replace|format|batch|push|merge|upload|import|add|manage|resize|copy|draft)(_|$)/i;
+
+// Coerce a tool_input field to text. Strings pass through, numbers and
+// booleans stringify, and objects/arrays/null become '' — MCP inputs are
+// often structured, and a non-string here used to throw inside stripAnsi.
+function toText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  return '';
+}
+
+// "AskUserQuestion" -> "ask user question", "mcp__foo__bar_baz" -> "foo bar baz".
+// Used wherever a tool has no better detail than its own name.
+function humanizeToolName(name) {
+  return toText(name)
+    .replace(/^mcp__/, '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_\-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+// mcp__<server>__<tool>. Plugin-installed servers arrive as plugin_<x>_<x>;
+// collapse that to <x> so the status line reads "github: create pull request".
+function splitMcpToolName(toolName) {
+  const parts = toText(toolName).split('__');
+  let server = (parts[1] || 'external').replace(/^plugin_/, '');
+  const segs = server.split('_');
+  if (segs.length === 2 && segs[0] === segs[1]) server = segs[0];
+  const rawTool = parts.slice(2).join('__');
+  return {
+    server: server.replace(/_/g, ' '),
+    tool: rawTool.replace(/_/g, ' '),
+    rawTool,
+  };
+}
+
+function mcpVerbState(rawTool) {
+  if (MCP_SEARCH_VERBS.test(rawTool)) return 'searching';
+  if (MCP_READ_VERBS.test(rawTool)) return 'reading';
+  if (MCP_WRITE_VERBS.test(rawTool)) return 'coding';
+  return 'executing';
+}
 
 function toolToState(toolName, toolInput) {
   let result;
+  const name = toText(toolName);
+  const input = (toolInput && typeof toolInput === 'object') ? toolInput : {};
+  const filePath = toText(input.file_path || input.notebook_path || input.path || input.target_file);
+  const shortPath = filePath ? path.basename(filePath) : '';
 
   // Writing/editing code
-  if (EDIT_TOOLS.test(toolName)) {
-    const filePath = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
-    const shortPath = filePath ? path.basename(filePath) : '';
+  if (EDIT_TOOLS.test(name)) {
     result = { state: 'coding', detail: shortPath ? `editing ${shortPath}` : 'writing code' };
   }
 
   // Running commands
-  else if (BASH_TOOLS.test(toolName)) {
-    const cmd = toolInput?.command || toolInput?.cmd || toolInput?.input || '';
+  else if (BASH_TOOLS.test(name)) {
+    const cmd = toText(input.command || input.cmd || input.input);
     const shortCmd = cmd.length > 40 ? cmd.slice(0, 37) + '...' : cmd;
 
     // Detect test commands
@@ -85,53 +147,80 @@ function toolToState(toolName, toolInput) {
     }
 
     else {
-      result = { state: 'executing', detail: shortCmd || 'running command' };
+      const fallback = SHELL_MGMT_TOOLS.test(name) ? humanizeToolName(name) : 'running command';
+      result = { state: 'executing', detail: shortCmd || fallback };
     }
   }
 
   // Reviewing / diffing code
-  else if (REVIEW_TOOLS.test(toolName)) {
-    result = { state: 'reviewing', detail: toolName || 'reviewing' };
+  else if (REVIEW_TOOLS.test(name)) {
+    result = { state: 'reviewing', detail: humanizeToolName(name) || 'reviewing' };
   }
 
   // Reading files
-  else if (READ_TOOLS.test(toolName)) {
-    const filePath = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
-    const shortPath = filePath ? path.basename(filePath) : '';
+  else if (READ_TOOLS.test(name)) {
     result = { state: 'reading', detail: shortPath ? `reading ${shortPath}` : 'reading' };
   }
 
   // Searching
-  else if (SEARCH_TOOLS.test(toolName)) {
-    const pattern = toolInput?.pattern || toolInput?.query || toolInput?.search_term || '';
-    result = { state: 'searching', detail: pattern ? `looking for "${pattern}"` : 'searching' };
+  else if (SEARCH_TOOLS.test(name)) {
+    const pattern = toText(input.pattern || input.query || input.search_term);
+    if (!pattern && LIST_TOOLS.test(name) && shortPath) {
+      result = { state: 'searching', detail: `listing ${shortPath}` };
+    } else {
+      result = { state: 'searching', detail: pattern ? `looking for "${pattern}"` : 'searching' };
+    }
   }
 
   // Web/fetch
-  else if (WEB_TOOLS.test(toolName)) {
-    const query = toolInput?.query || toolInput?.url || '';
+  else if (WEB_TOOLS.test(name)) {
+    const query = toText(input.query || input.url);
     const shortQuery = query.length > 30 ? query.slice(0, 27) + '...' : query;
     result = { state: 'searching', detail: shortQuery ? `searching "${shortQuery}"` : 'searching the web' };
   }
 
+  // Asking the user something — the face waits on them
+  else if (ASK_TOOLS.test(name)) {
+    result = { state: 'waiting', detail: 'asking you' };
+  }
+
+  // Loading a skill = reading instructions
+  else if (SKILL_TOOLS.test(name)) {
+    const skill = toText(input.skill || input.name);
+    result = { state: 'reading', detail: skill ? `skill: ${skill}` : 'loading a skill' };
+  }
+
+  // Planning / scheduling tools are thinking, not doing
+  else if (PLAN_TOOLS.test(name)) {
+    result = { state: 'thinking', detail: SCHEDULE_TOOLS.test(name) ? 'scheduling' : 'planning' };
+  }
+
+  // Publishing an artifact or sending a file is producing output
+  else if (PUBLISH_TOOLS.test(name)) {
+    result = { state: 'coding', detail: /^senduserfile$/i.test(name) ? 'sending a file' : 'publishing' };
+  }
+
   // Task/subagent
-  else if (SUBAGENT_TOOLS.test(toolName)) {
-    const desc = toolInput?.description || toolInput?.prompt || '';
+  else if (SUBAGENT_TOOLS.test(name)) {
+    const desc = toText(input.description || input.prompt);
     const shortDesc = desc.length > 30 ? desc.slice(0, 27) + '...' : desc;
-    result = { state: 'subagent', detail: shortDesc || 'spawning subagent' };
+    let fallback = 'spawning subagent';
+    if (/^workflow$/i.test(name)) fallback = 'orchestrating';
+    else if (/^sendmessage$/i.test(name)) fallback = 'messaging an agent';
+    else if (AGENT_MONITOR_TOOLS.test(name)) fallback = 'checking on agents';
+    result = { state: 'subagent', detail: shortDesc || fallback };
   }
 
-  // MCP tools
-  else if (/^mcp__/.test(toolName)) {
-    const parts = toolName.split('__');
-    const server = parts[1] || 'external';
-    const tool = parts[2] || '';
-    result = { state: 'executing', detail: `${server}: ${tool}` };
+  // MCP tools — classify by verb so "read_sheet_values" reads and
+  // "create_pull_request" codes instead of everything being "executing"
+  else if (/^mcp__/.test(name)) {
+    const { server, tool, rawTool } = splitMcpToolName(name);
+    result = { state: mcpVerbState(rawTool), detail: `${server}: ${tool}` };
   }
 
-  // Default
+  // Default: unknown tool, best we can do is say its name in plain words
   else {
-    result = { state: 'thinking', detail: toolName || '' };
+    result = { state: 'thinking', detail: humanizeToolName(name) };
   }
 
   // Strip ANSI escape sequences from detail before returning
@@ -270,9 +359,13 @@ function errorDetail(stdout, stderr) {
 
 // Claude Code sends tool output as `tool_result` (string or object).
 // Other editors may use `tool_response` with {stdout, stderr}.
-// This normalizes both into a consistent {stdout, stderr} object.
+// This normalizes both into a consistent {stdout, stderr} object and keeps
+// the signals that mean trouble — `interrupted` (user hit Esc), `isError` /
+// `is_error` (MCP), and a numeric `exitCode` / `exit_code` — so
+// classifyToolResult can react to them. Without this an interrupted
+// command used to render as relieved / "command succeeded".
 function normalizeToolResponse(data) {
-  const rawResult = data.tool_result || data.tool_response || {};
+  const rawResult = data.tool_result ?? data.tool_response ?? {};
   if (typeof rawResult === 'string') return { stdout: rawResult, stderr: '' };
   if (Array.isArray(rawResult)) {
     // Content block array: [{type:"text", text:"..."}]
@@ -282,7 +375,19 @@ function normalizeToolResponse(data) {
       .join('\n');
     return { stdout: text, stderr: '' };
   }
-  return { stdout: rawResult.stdout || '', stderr: rawResult.stderr || '' };
+  if (typeof rawResult !== 'object' || rawResult === null) {
+    return { stdout: toText(rawResult), stderr: '' };
+  }
+  const out = { stdout: toText(rawResult.stdout), stderr: toText(rawResult.stderr) };
+  const isError = rawResult.isError ?? rawResult.is_error;
+  if (isError !== undefined) out.isError = !!isError;
+  if (rawResult.interrupted !== undefined) out.interrupted = !!rawResult.interrupted;
+  const exit = rawResult.exitCode ?? rawResult.exit_code;
+  if (typeof exit === 'number') out.exitCode = exit;
+  // Claude Code's edit diff, carried through only when it is the array we expect.
+  // It is read for line counts and never persisted -- see diffFromPatch.
+  if (Array.isArray(rawResult.structuredPatch)) out.structuredPatch = rawResult.structuredPatch;
+  return out;
 }
 
 // -- Post-Tool Classification ----------------------------------------
@@ -295,13 +400,60 @@ function isMergeConflict(stdout, stderr) {
          /\bfix conflicts and then commit\b/i.test(combined);
 }
 
+// -- Edit Diff Counting ----------------------------------------------
+
+// Claude Code attaches a `structuredPatch` to PostToolUse for Edit/MultiEdit/
+// Write-over-existing: hunks of { oldStart, oldLines, newStart, newLines,
+// lines } where each line keeps its '+', '-' or ' ' prefix. Counting those is
+// exact -- a same-length replacement is +1 -1, where counting the raw inputs
+// claims +2 -2. Returns null when the patch is absent or malformed so the
+// caller can fall back. Only the two totals are kept; the patch is never
+// written to the state file.
+function diffFromPatch(structuredPatch) {
+  if (!Array.isArray(structuredPatch) || structuredPatch.length === 0) return null;
+  let added = 0, removed = 0, sawHunk = false;
+  for (const hunk of structuredPatch) {
+    if (!hunk || !Array.isArray(hunk.lines)) continue;
+    sawHunk = true;
+    for (const line of hunk.lines) {
+      if (typeof line !== 'string') continue;
+      if (line[0] === '+') added++;
+      else if (line[0] === '-') removed++;
+    }
+  }
+  return sawHunk ? { added, removed } : null;
+}
+
+// Fallback when no patch is available (other editors, Write to a new file):
+// line counts of the edit's own inputs. Approximate -- a replacement counts
+// both sides in full -- but it is all these tools give us.
+function diffFromInput(input) {
+  if (Array.isArray(input.edits)) {              // MultiEdit
+    let added = 0, removed = 0;
+    for (const e of input.edits) {
+      const o = toText(e && e.old_string), n = toText(e && e.new_string);
+      if (o) removed += o.split('\n').length;
+      if (n) added += n.split('\n').length;
+    }
+    return added || removed ? { added, removed } : null;
+  }
+  const oldStr = toText(input.old_string || input.old_str);
+  const newStr = toText(input.new_string || input.new_str || input.content || input.new_source);
+  if (!oldStr && !newStr) return null;
+  return { added: newStr ? newStr.split('\n').length : 0, removed: oldStr ? oldStr.split('\n').length : 0 };
+}
+
 // Encapsulates the full PostToolUse decision tree.
 // Returns { state, detail, diffInfo }
 function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
-  const stdout = toolResponse?.stdout || '';
-  const stderr = toolResponse?.stderr || '';
+  const name = toText(toolName);
+  const input = (toolInput && typeof toolInput === 'object') ? toolInput : {};
+  const stdout = toText(toolResponse?.stdout);
+  const stderr = toText(toolResponse?.stderr);
   const isError = isErrorFlag || toolResponse?.isError || false;
   const inferredExit = extractExitCode(stdout);
+  const exitCode = typeof toolResponse?.exitCode === 'number' ? toolResponse.exitCode : null;
+  const fp = toText(input.file_path || input.notebook_path || input.path || input.target_file);
 
   let state, detail;
   let diffInfo = null;
@@ -312,39 +464,34 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
   } else if (toolResponse?.interrupted) {
     state = 'error';
     detail = 'interrupted';
+  } else if (exitCode !== null && exitCode !== 0) {
+    state = 'error'; detail = exitDetail(stdout, stderr, exitCode);
   } else if (inferredExit !== null && inferredExit !== 0) {
-    state = 'error'; detail = errorDetail(stdout, stderr) || `exit ${inferredExit}`;
-  } else if (!READ_TOOLS.test(toolName) && !SEARCH_TOOLS.test(toolName) && !WEB_TOOLS.test(toolName) && looksLikeError(stderr, stderrErrorPatterns)) {
+    state = 'error'; detail = exitDetail(stdout, stderr, inferredExit);
+  } else if (!READ_TOOLS.test(name) && !SEARCH_TOOLS.test(name) && !WEB_TOOLS.test(name) && looksLikeError(stderr, stderrErrorPatterns)) {
     state = 'error'; detail = errorDetail(stdout, stderr);
-  } else if (BASH_TOOLS.test(toolName) && looksLikeError(stdout, stdoutErrorPatterns)) {
+  } else if (BASH_TOOLS.test(name) && looksLikeError(stdout, stdoutErrorPatterns)) {
     // Only check stdout patterns for shell commands -- other tools have structured output
     state = 'error'; detail = errorDetail(stdout, stderr);
-  } else if (EDIT_TOOLS.test(toolName)) {
+  } else if (EDIT_TOOLS.test(name)) {
     state = 'proud';
-    const fp = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
     detail = fp ? `saved ${path.basename(fp)}` : 'code written';
-    // Calculate diff info for thought bubbles
-    const oldStr = toolInput?.old_string || toolInput?.old_str || '';
-    const newStr = toolInput?.new_string || toolInput?.new_str || toolInput?.content || '';
-    if (oldStr || newStr) {
-      const removed = oldStr ? oldStr.split('\n').length : 0;
-      const added = newStr ? newStr.split('\n').length : 0;
-      diffInfo = { added, removed };
-    }
-  } else if (READ_TOOLS.test(toolName)) {
+    // Diff info for thought bubbles: exact from the patch when we got one,
+    // otherwise estimated from the edit's inputs
+    diffInfo = diffFromPatch(toolResponse && toolResponse.structuredPatch) || diffFromInput(input);
+  } else if (READ_TOOLS.test(name)) {
     state = 'satisfied';
-    const fp = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
     detail = fp ? `read ${path.basename(fp)}` : 'got it';
-  } else if (SEARCH_TOOLS.test(toolName)) {
+  } else if (SEARCH_TOOLS.test(name)) {
     state = 'satisfied';
-    const pattern = toolInput?.pattern || toolInput?.query || toolInput?.search_term || '';
+    const pattern = toText(input.pattern || input.query || input.search_term);
     detail = pattern ? `found "${pattern.length > 20 ? pattern.slice(0, 17) + '...' : pattern}"` : 'got it';
-  } else if (WEB_TOOLS.test(toolName)) {
+  } else if (WEB_TOOLS.test(name)) {
     state = 'satisfied';
     detail = 'search complete';
-  } else if (BASH_TOOLS.test(toolName)) {
+  } else if (BASH_TOOLS.test(name)) {
     state = 'relieved';
-    const cmd = toolInput?.command || toolInput?.cmd || toolInput?.input || '';
+    const cmd = toText(input.command || input.cmd || input.input);
     const isTest = /\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|spec)\b/i.test(cmd) ||
                    /\bnpm\s+(run\s+)?test\b/i.test(cmd) ||
                    /\bnode\s+(--test|test)\b/i.test(cmd) ||
@@ -379,9 +526,41 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
       }
     } else if (isInstall) {
       detail = 'installed';
+    } else if (SHELL_MGMT_TOOLS.test(name)) {
+      detail = `${humanizeToolName(name)} done`;
     } else {
       detail = 'command succeeded';
     }
+  } else if (ASK_TOOLS.test(name)) {
+    state = 'satisfied';
+    detail = 'got your answer';
+  } else if (SKILL_TOOLS.test(name)) {
+    state = 'satisfied';
+    detail = 'skill loaded';
+  } else if (PLAN_TOOLS.test(name)) {
+    state = 'satisfied';
+    detail = SCHEDULE_TOOLS.test(name) ? 'scheduled' : 'planned';
+  } else if (PUBLISH_TOOLS.test(name)) {
+    state = 'proud';
+    detail = /^senduserfile$/i.test(name) ? 'sent' : 'published';
+  } else if (SUBAGENT_TOOLS.test(name)) {
+    // A returning Agent/Task/Workflow/TaskOutput means a helper finished
+    if (AGENT_DONE_TOOLS.test(name)) {
+      state = 'happy';
+      detail = 'agent done';
+    } else if (/^sendmessage$/i.test(name)) {
+      state = 'satisfied';
+      detail = 'message sent';
+    } else {
+      state = 'satisfied';
+      detail = 'checked in';
+    }
+  } else if (REVIEW_TOOLS.test(name)) {
+    state = 'satisfied';
+    detail = 'reviewed';
+  } else if (/^mcp__/.test(name)) {
+    state = 'satisfied';
+    detail = `${splitMcpToolName(name).server} done`;
   } else {
     state = 'satisfied';
     detail = 'step complete';
@@ -390,6 +569,14 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
   // Strip ANSI escape sequences from detail before returning
   if (detail) detail = stripAnsi(detail).replace(/[\r\n]+/g, ' ');
   return { state, detail, diffInfo };
+}
+
+// Detail for a non-zero exit: the forensic message when the output says
+// something specific, otherwise the bare exit code (errorDetail never
+// returns an empty string, so `|| exit N` used to be unreachable).
+function exitDetail(stdout, stderr, code) {
+  const d = errorDetail(stdout, stderr);
+  return d === 'something went wrong' ? `exit ${code}` : d;
 }
 
 // -- Truncated Input Classification -----------------------------------
@@ -429,6 +616,9 @@ function classifyTruncatedInput(hookEvent, rawInput) {
     Stop:               { state: 'responding', detail: 'wrapping up' },
     SessionEnd:         { state: 'responding', detail: 'session ending' },
     Notification:       { state: 'waiting',    detail: 'needs attention' },
+    UserPromptSubmit:   { state: 'thinking',   detail: 'reading your message' },
+    TeammateIdle:       { state: 'waiting',    detail: 'teammate idle' },
+    TaskCompleted:      { state: 'happy',      detail: 'task done' },
     SessionStart:       { state: 'idle',       detail: 'session starting' },
     SubagentStart:      { state: 'subagent',   detail: 'spawning subagent' },
     SubagentStop:       { state: 'happy',      detail: 'subagent done' },
@@ -519,6 +709,23 @@ function defaultStats() {
   };
 }
 
+// Repair a stats object read from disk so every field the hooks touch exists.
+// A truncated write, an older schema, or a hand-edited file can leave `{}` or
+// a partial shape; without this, `stats.session.id` throws inside a hook.
+function normalizeStats(parsed) {
+  const def = defaultStats();
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return def;
+  const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+  const out = { ...def, ...parsed };
+  out.records = { ...def.records, ...obj(parsed.records) };
+  out.session = { ...def.session, ...obj(parsed.session) };
+  if (!Array.isArray(out.session.filesEdited)) out.session.filesEdited = [];
+  out.daily = { ...def.daily, ...obj(parsed.daily) };
+  out.frequentFiles = obj(parsed.frequentFiles);
+  out.topLevelSessions = obj(parsed.topLevelSessions);
+  return out;
+}
+
 // -- Subagent Session State (pure logic) ---------------------------------
 
 // Build the state object for writing to a subagent's session file.
@@ -535,6 +742,29 @@ function buildSubagentSessionState(existing, sub, parentSessionId, defaultCwd) {
     parentSession: parentSessionId,
     taskDescription: existing.taskDescription || sub.taskDescription || sub.description,
   };
+}
+
+// -- Claude Code Subagent Attribution (pure logic) ------------------------
+
+// Claude Code fires every hook inside a subagent call with the PARENT's
+// session_id and adds agent_id / agent_type. The orbital's identity therefore
+// has to be synthesised from both, or all of a parent's agents collapse onto
+// one session id (and onto the main face).
+// Orbital session id for a Claude Code subagent: parent session + agent id.
+function subagentSessionId(sessionId, agentId) {
+  return `${sessionId}-agent-${agentId}`;
+}
+
+// Human label for a subagent orbital: first non-empty line of the prompt
+// (whitespace collapsed, <= 40 chars with a trailing ellipsis), else the
+// agent type, else 'subagent'. SubagentStart carries `invocation_prompt`;
+// `description` / `prompt` cover other hosts and older payloads.
+function subagentLabel(data) {
+  const d = data || {};
+  const src = toText(d.description || d.invocation_prompt || d.prompt);
+  const line = src.split(/\r?\n/).map(s => s.replace(/\s+/g, ' ').trim()).find(Boolean) || '';
+  if (line) return line.length > 40 ? line.slice(0, 39) + '\u2026' : line;
+  return toText(d.agent_type) || 'subagent';
 }
 
 // -- Parallel Session Classification (pure logic) -------------------------
@@ -583,6 +813,8 @@ function pruneTopLevelSessions(registry, now) {
 
 module.exports = {
   toolToState,
+  humanizeToolName,
+  toText,
   EDIT_TOOLS,
   BASH_TOOLS,
   READ_TOOLS,
@@ -590,6 +822,10 @@ module.exports = {
   WEB_TOOLS,
   SUBAGENT_TOOLS,
   REVIEW_TOOLS,
+  ASK_TOOLS,
+  SKILL_TOOLS,
+  PLAN_TOOLS,
+  PUBLISH_TOOLS,
   stdoutErrorPatterns,
   stderrErrorPatterns,
   falsePositives,
@@ -599,15 +835,20 @@ module.exports = {
   errorDetail,
   extractExitCode,
   normalizeToolResponse,
+  diffFromPatch,
+  diffFromInput,
   classifyToolResult,
   classifyTruncatedInput,
   MILESTONES,
   updateStreak,
   defaultStats,
+  normalizeStats,
   MAX_FREQUENT_FILES,
   pruneFrequentFiles,
   topFrequentFiles,
   buildSubagentSessionState,
+  subagentSessionId,
+  subagentLabel,
   classifyForeignSession,
   pruneTopLevelSessions,
   TOP_LEVEL_REGISTRY_MAX,

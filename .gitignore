@@ -8,3 +8,10 @@ nul
 .claude
 TRASH/
 docs/
+
+# Shell redirect debris (tasklist stderr once landed in a file named _ul)
+_ul
+
+# OS noise
+.DS_Store
+Thumbs.db

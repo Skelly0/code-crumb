@@ -2,7 +2,7 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - themes.js                               |
+// |  Code Crumb Test Suite - themes.js                             |
 // +================================================================+
 
 const assert = require('assert');
@@ -14,27 +14,8 @@ const {
   setNoColor, isNoColor, ansi, BREATH_PERIOD,
 } = require('../themes');
 
-let passed = 0;
-let failed = 0;
-let currentDescribe = '';
-
-function describe(name, fn) {
-  currentDescribe = name;
-  console.log(`\n  ${name}`);
-  fn();
-}
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`    \x1b[32m\u2713\x1b[0m ${name}`);
-  } catch (e) {
-    failed++;
-    console.log(`    \x1b[31m\u2717\x1b[0m ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const suite = require('./_harness').createSuite();
+const { describe, test } = suite;
 
 describe('themes.js -- lerpColor', () => {
   test('t=0 → returns color a', () => {
@@ -575,4 +556,4 @@ describe('themes.js -- themes have all 23 states', () => {
   });
 });
 
-module.exports = { passed: () => passed, failed: () => failed };
+module.exports = suite;

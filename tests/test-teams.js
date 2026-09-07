@@ -2,33 +2,16 @@
 'use strict';
 
 // +================================================================+
-// |  Code Crumb Test Suite - Agent Teams support                     |
-// |  Tests for team fields in MiniFace, hashTeamColor,               |
-// |  _assignLabels with teammate names, session schema               |
+// |  Code Crumb Test Suite - Agent Teams support                   |
+// |  Tests for team fields in MiniFace, hashTeamColor,             |
+// |  _assignLabels with teammate names, session schema             |
 // +================================================================+
 
 const assert = require('assert');
 const { MiniFace, OrbitalSystem, hashTeamColor } = require('../grid');
 
-let passed = 0;
-let failed = 0;
-
-function describe(name, fn) {
-  console.log(`\n  ${name}`);
-  fn();
-}
-
-function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`    \x1b[32m\u2713\x1b[0m ${name}`);
-  } catch (e) {
-    failed++;
-    console.log(`    \x1b[31m\u2717\x1b[0m ${name}`);
-    console.log(`      ${e.message}`);
-  }
-}
+const suite = require('./_harness').createSuite();
+const { describe, test } = suite;
 
 // -- hashTeamColor ---------------------------------------------------
 
@@ -253,9 +236,8 @@ describe('teams.js -- Orbital grouping with team data', () => {
       { col: 5, row: 2, face: f1 },
       { col: 60, row: 2, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 30, row: 15, w: 12, h: 8, centerX: 36, centerY: 19 };
-    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210], dots);
+    const result = os._renderGroupTethers(positions, mainPos, [100, 160, 210]);
     // Tether should exist (team members grouped)
     assert.ok(result.length > 0, 'should render tethers for team group');
   });
@@ -268,9 +250,8 @@ describe('teams.js -- Orbital grouping with team data', () => {
       { col: 10, row: 5, face: f1 },
       { col: 30, row: 5, face: f2 },
     ];
-    const dots = [];
     const mainPos = { col: 50, row: 20, w: 12, h: 8, centerX: 56, centerY: 24 };
-    const result = os._renderGroupLabels(positions, 30, 80, dots, mainPos);
+    const result = os._renderGroupLabels(positions, 30, 80, mainPos);
     assert.ok(result.includes('frontend'), 'group label should contain team name');
   });
 
@@ -427,4 +408,4 @@ describe('teams -- OrbitalSystem._assignLabels with taskDescription', () => {
   });
 });
 
-module.exports = { passed: () => passed, failed: () => failed };
+module.exports = suite;

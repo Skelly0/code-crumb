@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 'use strict';
 
-// +================================================================+
-// |  engmux Adapter -- wraps engmux dispatches as Code Crumb orbitals |
-// |                                                                  |
-// |  Spawns engmux as a child process and writes session files so   |
-// |  the dispatched agent appears as an orbital mini-face.           |
-// |                                                                  |
-// |  Usage:                                                          |
-// |    node adapters/engmux-adapter.js [engmux args...]              |
-// |  Example:                                                        |
-// |    node adapters/engmux-adapter.js -E opencode -m opencode/big-pickle -e medium "do X" |
-// +================================================================+
+// +======================================================================+
+// |  engmux Adapter -- wraps engmux dispatches as Code Crumb orbitals    |
+// |                                                                      |
+// |  Spawns engmux as a child process and writes session files so        |
+// |  the dispatched agent appears as an orbital mini-face.               |
+// |                                                                      |
+// |  Usage:                                                              |
+// |    node adapters/engmux-adapter.js [engmux args...]                  |
+// |  Example:                                                            |
+// |    node adapters/engmux-adapter.js -E opencode -m opencode/big-pickle|
+// |      -e medium "do X"                                                |
+// +======================================================================+
 
 const { spawn } = require('child_process');
 const { writeSessionState } = require('./base-adapter');
@@ -52,63 +53,78 @@ function writeState(state, detail, stopped = false) {
 
 // -- Main ---------------------------------------------------------------
 
-const args = process.argv.slice(2);
-if (args.length === 0) {
-  process.stderr.write('Usage: node adapters/engmux-adapter.js [engmux args...]\n');
-  process.exit(1);
-}
+// engmux is a Python module. Only Windows ships a bare `python`; Linux and Homebrew
+// macOS usually have `python3` only. ENGMUX_PYTHON / PYTHON override either.
+const PYTHON = process.env.ENGMUX_PYTHON || process.env.PYTHON
+  || (process.platform === 'win32' ? 'python' : 'python3');
+// Cap captured stdout like every other stdin/stdout reader (1 MB).
+const MAX_OUTPUT = 1048576;
 
-// 1. Write initial spawning state
-writeState('spawning', args.join(' ').slice(0, 40));
-
-// 2. Spawn engmux
-const child = spawn('python', ['-m', 'engmux', ...args], {
-  stdio: ['inherit', 'pipe', 'inherit'],
-  env: { ...process.env, CLAUDE_SESSION_ID: SESSION_ID },
-});
-
-let stdout = '';
-child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-
-// 3. Cycle states while running
-let cycleIndex = 0;
-const cycleTimer = setInterval(() => {
-  cycleIndex = (cycleIndex + 1) % SUB_STATES.length;
-  writeState(SUB_STATES[cycleIndex], args.join(' ').slice(0, 40));
-}, CYCLE_MS);
-
-// 4. On completion — parse result, write final state
-child.on('close', (code) => {
-  clearInterval(cycleTimer);
-
-  let success = false;
-  let detail = '';
-  try {
-    const result = JSON.parse(stdout);
-    success = result.success === true;
-    detail = success
-      ? (result.response || '').slice(0, 40) || 'done'
-      : (result.error || 'failed').slice(0, 40);
-    // Pass through the JSON to our own stdout
-    process.stdout.write(stdout);
-  } catch {
-    success = code === 0;
-    detail = success ? 'done' : `exit ${code}`;
-    process.stdout.write(stdout);
+function main() {
+  const args = process.argv.slice(2);
+  if (args.length === 0) {
+    process.stderr.write('Usage: node adapters/engmux-adapter.js [engmux args...]\n');
+    process.exit(1);
   }
 
-  writeState(success ? 'happy' : 'error', detail, true);
-  process.exit(code || 0);
-});
+  // 1. Write initial spawning state
+  writeState('spawning', args.join(' ').slice(0, 40));
 
-child.on('error', (err) => {
-  clearInterval(cycleTimer);
-  writeState('error', err.message.slice(0, 40), true);
-  process.stderr.write(`engmux-adapter: ${err.message}\n`);
-  process.exit(1);
-});
+  // 2. Spawn engmux
+  const child = spawn(PYTHON, ['-m', 'engmux', ...args], {
+    stdio: ['inherit', 'pipe', 'inherit'],
+    env: { ...process.env, CLAUDE_SESSION_ID: SESSION_ID },
+  });
 
-// Clean up timer on signals to prevent process hanging
-for (const sig of ['SIGINT', 'SIGTERM']) {
-  process.on(sig, () => { clearInterval(cycleTimer); process.exit(0); });
+  let stdout = '';
+  child.stdout.on('data', (chunk) => { if (stdout.length < MAX_OUTPUT) stdout += chunk.toString(); });
+
+  // 3. Cycle states while running
+  let cycleIndex = 0;
+  const cycleTimer = setInterval(() => {
+    cycleIndex = (cycleIndex + 1) % SUB_STATES.length;
+    writeState(SUB_STATES[cycleIndex], args.join(' ').slice(0, 40));
+  }, CYCLE_MS);
+
+  // 4. On completion — parse result, write final state
+  child.on('close', (code) => {
+    clearInterval(cycleTimer);
+
+    let success = false;
+    let detail = '';
+    try {
+      const result = JSON.parse(stdout);
+      success = result.success === true;
+      detail = success
+        ? (result.response || '').slice(0, 40) || 'done'
+        : (result.error || 'failed').slice(0, 40);
+      // Pass through the JSON to our own stdout
+      process.stdout.write(stdout);
+    } catch {
+      success = code === 0;
+      detail = success ? 'done' : `exit ${code}`;
+      process.stdout.write(stdout);
+    }
+
+    writeState(success ? 'happy' : 'error', detail, true);
+    process.exit(code || 0);
+  });
+
+  child.on('error', (err) => {
+    clearInterval(cycleTimer);
+    writeState('error', err.message.slice(0, 40), true);
+    process.stderr.write(`engmux-adapter: ${err.message}\n`);
+    process.exit(1);
+  });
+
+  // Clean up timer on signals to prevent process hanging
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, () => { clearInterval(cycleTimer); process.exit(0); });
+  }
 }
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = { extractModel, extractEngine };
