@@ -128,13 +128,22 @@ function _writeSubagentToolState(sub, state, detail, parentSessionId) {
   } catch {}
 }
 
-// Touch (refresh mtime on) every active subagent file so the renderer's
-// staleness purge doesn't drop an agent that is mid-model-turn and therefore
-// emitting no hooks of its own. The old "all but the newest" rule existed
-// only because the newest was assumed to be reporting under a foreign id --
-// with agent_id routing every entry owns a real file worth keeping alive.
+// Touch (refresh mtime on) the active subagent files that have no writer of
+// their own -- the legacy synthetics, created by a SubagentStart that carried
+// no agent_id. The parent is their only voice: it writes their state through
+// _writeSubagentToolState, so it must also keep their mtime alive.
+//
+// Entries WITH an agentId are deliberately skipped. A real per-agent orbital
+// keeps itself fresh by writing, and a child must never be kept alive solely
+// by its parent's activity: that composes with the renderer accepting a newer
+// mtime on unchanged content (grid.js updateFromFile) into a ghost, where a
+// missed SubagentStop leaves an orbital that the parent's own tool calls
+// revive for the whole SUBAGENT_MAX_AGE_MS window -- pinning the main face at
+// "conducting N" for four hours. The child -> parent heartbeat below is the
+// sound direction: an agent writing proves its parent's family is alive.
 function _touchActiveSubagents(activeSubagents) {
   for (let i = 0; i < activeSubagents.length; i++) {
+    if (activeSubagents[i].agentId) continue;
     _touchSessionFile(activeSubagents[i].id);
   }
 }

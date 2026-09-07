@@ -30,6 +30,10 @@ const {
 const {
   idleCascade, SLEEP_TIMEOUT, THINKING_TIMEOUT, WAIT_HOLD_STALE_MS,
 } = require('../renderer');
+const { ClaudeFace } = require('../face');
+
+// The detail-line separator face.js uses, built without a literal glyph.
+const DETAIL_SEP = ' ' + String.fromCharCode(0x00b7) + ' ';
 
 // Horizontal ellipsis, built without a literal glyph so this file stays ASCII.
 const ELLIPSIS = String.fromCharCode(0x2026);
@@ -353,7 +357,9 @@ describe('update-state -- legacy subagents without agent_id', () => {
 });
 
 describe('update-state -- active subagent ageing net', () => {
-  function seed(env, statsFile, sessionsDir, startedAt) {
+  // opts.legacy seeds a pre-agent_id synthetic entry (no agentId): the parent
+  // is its only writer, so the parent's touch is what keeps it alive.
+  function seed(env, statsFile, sessionsDir, startedAt, opts = {}) {
     fs.mkdirSync(sessionsDir, { recursive: true });
     writeJsonAtomic(sessionFile(sessionsDir, 'p-agent-old'), {
       session_id: 'p-agent-old', state: 'coding', detail: 'working',
@@ -372,7 +378,9 @@ describe('update-state -- active subagent ageing net', () => {
         id: 'p', start: Date.now() - 60000, toolCalls: 0, filesEdited: [],
         subagentCount: 1, commitCount: 0,
         activeSubagents: [{
-          id: 'p-agent-old', agentId: 'old', description: 'long job',
+          id: 'p-agent-old',
+          ...(opts.legacy ? {} : { agentId: 'old' }),
+          description: 'long job',
           taskDescription: 'long job', agentType: 'Explore',
           model: 'Explore', editor: 'claude', startedAt,
         }],
@@ -384,7 +392,7 @@ describe('update-state -- active subagent ageing net', () => {
     });
   }
 
-  test('an 11-minute-old agent survives and its file is touched', () => {
+  test('an 11-minute-old agent survives the ageing net', () => {
     const { tmp, sessionsDir, statsFile, env } = makeTempEnv('p');
     seed(env, statsFile, sessionsDir, Date.now() - 11 * 60000);
 
@@ -396,9 +404,44 @@ describe('update-state -- active subagent ageing net', () => {
     const stats = readJSON(statsFile);
     assert.strictEqual(stats.session.activeSubagents.length, 1,
       'an agent running longer than 10 minutes must not be dropped');
+    cleanup(tmp);
+  });
+
+  // The bookkeeping entry surviving is NOT the same as the orbital surviving.
+  // An agent-owned entry keeps its own file fresh by writing to it; the parent
+  // must not vouch for it, or a missed SubagentStop leaves a ghost orbital
+  // that the parent's own tool calls keep alive for the full 4-hour net.
+  test("a parent tool call does not refresh its agent-owned child's file", () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('p');
+    const startedAt = Date.now() - 11 * 60000;
+    seed(env, statsFile, sessionsDir, startedAt);
+
+    runUpdateState('PreToolUse', {
+      session_id: 'p', hook_event_name: 'PreToolUse', cwd: process.cwd(),
+      tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    }, env);
+
+    const mtime = fs.statSync(sessionFile(sessionsDir, 'p-agent-old')).mtimeMs;
+    assert.ok(Date.now() - mtime > 60000,
+      `a child with an agentId must keep its own file: mtime was refreshed to `
+      + `${Date.now() - mtime}ms old by the parent's activity`);
+    cleanup(tmp);
+  });
+
+  test('a parent tool call still refreshes a legacy synthetic child', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('p');
+    const startedAt = Date.now() - 11 * 60000;
+    seed(env, statsFile, sessionsDir, startedAt, { legacy: true });
+
+    runUpdateState('PreToolUse', {
+      session_id: 'p', hook_event_name: 'PreToolUse', cwd: process.cwd(),
+      tool_name: 'Read', tool_input: { file_path: 'a.js' },
+    }, env);
+
     const mtime = fs.statSync(sessionFile(sessionsDir, 'p-agent-old')).mtimeMs;
     assert.ok(Date.now() - mtime < 2000,
-      `expected a fresh mtime, got ${Date.now() - mtime}ms old`);
+      `a synthetic child has no writer of its own, so the parent must keep it `
+      + `alive: mtime was ${Date.now() - mtime}ms old`);
     cleanup(tmp);
   });
 
@@ -619,6 +662,70 @@ describe('grid.js -- child orbital staleness', () => {
     mf.updateFromFile(data, touched);
     assert.strictEqual(mf.lastUpdate, touched,
       'a touched file must refresh lastUpdate so the face does not go stale under it');
+  });
+});
+
+// -- the conducting face is not a running tool ------------------------
+// `subagent` lives in ACTIVE_WORK_STATES, which answers "what may interrupt
+// what" -- a different question from "is a tool running". Borrowing it for the
+// long-tool escalation made the conducting hold render
+// `conducting 3 - still running ... 240s` and sweat for as long as the agents
+// ran. `responding` was excluded from the cascade's hold for exactly this
+// reason but never from escalation.
+
+describe('face.js -- escalation is for tools, not for held states', () => {
+  function heldFace(state, detail, heldMs) {
+    const face = new ClaudeFace();
+    face.state = state;
+    face.stateDetail = detail;
+    face.lastStateChange = Date.now() - heldMs;
+    return face;
+  }
+
+  test('a conducting face never counts up "still running"', () => {
+    const face = heldFace('subagent', 'conducting 3', 240000);
+    assert.strictEqual(face.displayDetail(), 'conducting 3',
+      'the conducting hold is not a tool call and must not be timed');
+  });
+
+  test('a conducting face never sweats', () => {
+    const face = heldFace('subagent', 'conducting 3', 240000);
+    face.particles.particles.length = 0;
+    for (let i = 0; i < 60; i++) face.update(66);
+    assert.ok(!face.particles.particles.some(p => p.style === 'sweat'),
+      'a multi-agent run must not put the main face in permanent distress');
+  });
+
+  test('a responding face never escalates either', () => {
+    const face = heldFace('responding', 'wrapping up', 240000);
+    assert.strictEqual(face.displayDetail(), 'wrapping up',
+      'responding is a post-turn state, never a tool');
+    face.particles.particles.length = 0;
+    for (let i = 0; i < 60; i++) face.update(66);
+    assert.ok(!face.particles.particles.some(p => p.style === 'sweat'));
+  });
+
+  test('a real long-running tool still escalates and sweats', () => {
+    const face = heldFace('executing', 'npm test', 240000);
+    assert.ok(face.displayDetail().includes('still running'),
+      'the long-tool escalation must survive this fix');
+    assert.ok(face.displayDetail().includes('240s'));
+    face.particles.particles.length = 0;
+    for (let i = 0; i < 60; i++) face.update(66);
+    assert.ok(face.particles.particles.some(p => p.style === 'sweat'));
+  });
+
+  test('every other work state still escalates', () => {
+    for (const s of ['coding', 'reading', 'searching', 'testing',
+      'installing', 'committing', 'reviewing', 'training']) {
+      assert.ok(heldFace(s, 'x', 240000).displayDetail().includes('still running'),
+        `${s} is a real tool and must still escalate`);
+    }
+  });
+
+  test('a waiting face still counts up bare', () => {
+    assert.strictEqual(heldFace('waiting', 'allow?', 45000).displayDetail(),
+      'allow?' + DETAIL_SEP + '45s');
   });
 });
 

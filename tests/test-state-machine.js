@@ -2421,23 +2421,31 @@ describe('update-state.js -- Stop handler does not kill active subagents (Bug #1
 });
 
 // -- Bug fix: mtime touch for active subagents (Bug #3 / Task 12) --
-// Originally "_touchEarlierSubagents" (all but the newest), because the newest
-// was assumed to be reporting under a foreign session id. With agent_id
-// routing every active entry owns a real orbital file, so every one is
-// touched -- a subagent mid-model-turn writes nothing of its own.
+// A legacy synthetic orbital (a SubagentStart that carried no agent_id) has no
+// writer of its own: the parent speaks for it. Only the *newest* entry gets the
+// parent's tool state written to it, so every earlier one would go stale
+// without this mtime touch.
+//
+// The touch deliberately stops at agent-owned entries (those with an agentId).
+// Those orbitals write themselves, and a child kept alive purely by its
+// parent's activity is a ghost: composed with grid.js accepting a newer mtime
+// on unchanged content, a missed SubagentStop would otherwise keep the orbital
+// -- and the main face's conducting hold -- alive for the full 4-hour net.
+// (The earlier "newest included" assertion is gone with it: for a legacy
+// entry the newest is refreshed by _writeSubagentToolState anyway, so it never
+// had teeth once agent-owned entries were the only ones the touch reached.)
 
 describe('update-state.js -- touch active subagent files (Bug #3)', () => {
-  // Both entries carry an agentId, so the parent never rewrites either orbital
-  // file (_writeSubagentToolState is skipped for agent-owned entries). Only the
-  // mtime touch can save them from the staleness purge -- which makes a
-  // refreshed mtime unambiguous evidence that every entry was touched.
-  function seedTwoAgedOrbitals(sessionsDir, statsFile, ownerId) {
+  // sub-1 is the earlier entry, so the parent never *writes* it
+  // (_writeSubagentToolState only targets the newest) -- a refreshed mtime on
+  // sub-1 is therefore unambiguous evidence that the touch ran.
+  function seedTwoAgedOrbitals(sessionsDir, statsFile, ownerId, opts = {}) {
     seedSyntheticOrbital(sessionsDir, ownerId + '-sub-1', ownerId);
     seedSyntheticOrbital(sessionsDir, ownerId + '-sub-2', ownerId);
     const stats = conductingStats(ownerId, ownerId + '-sub-2', Date.now() - 1000);
-    stats.session.activeSubagents[0].agentId = 'agent-2';
     stats.session.activeSubagents.unshift({
-      id: ownerId + '-sub-1', agentId: 'agent-1',
+      id: ownerId + '-sub-1',
+      ...(opts.agentOwned ? { agentId: 'agent-1' } : {}),
       description: 'earlier', taskDescription: 'earlier',
       model: 'haiku', editor: 'claude', startedAt: Date.now() - 2000,
     });
@@ -2449,16 +2457,11 @@ describe('update-state.js -- touch active subagent files (Bug #3)', () => {
     }
   }
 
-  function assertBothRefreshed(sessionsDir, ownerId, since) {
-    for (const n of [1, 2]) {
-      const fp = pathMod.join(sessionsDir, `${ownerId}-sub-${n}.json`);
-      const m = fsMod.statSync(fp).mtimeMs;
-      assert.ok(m >= since,
-        `sub-${n} mtime ${m} was not refreshed (expected >= ${since})`);
-    }
+  function earlierMtime(sessionsDir, ownerId) {
+    return fsMod.statSync(pathMod.join(sessionsDir, `${ownerId}-sub-1.json`)).mtimeMs;
   }
 
-  test('a PreToolUse refreshes every active orbital, newest included', () => {
+  test('a PreToolUse refreshes an earlier synthetic orbital', () => {
     const { tmp, sessionsDir, statsFile, env } = makeTempEnv('touch-pre');
     try {
       seedTwoAgedOrbitals(sessionsDir, statsFile, 'touch-pre');
@@ -2466,11 +2469,12 @@ describe('update-state.js -- touch active subagent files (Bug #3)', () => {
       runUpdateState('PreToolUse', {
         session_id: 'touch-pre', tool_name: 'Read', tool_input: { file_path: 'a.js' },
       }, env);
-      assertBothRefreshed(sessionsDir, 'touch-pre', since);
+      const m = earlierMtime(sessionsDir, 'touch-pre');
+      assert.ok(m >= since, `sub-1 mtime ${m} was not refreshed (expected >= ${since})`);
     } finally { cleanup(tmp); }
   });
 
-  test('a PostToolUse refreshes every active orbital too', () => {
+  test('a PostToolUse refreshes an earlier synthetic orbital too', () => {
     const { tmp, sessionsDir, statsFile, env } = makeTempEnv('touch-post');
     try {
       seedTwoAgedOrbitals(sessionsDir, statsFile, 'touch-post');
@@ -2479,12 +2483,27 @@ describe('update-state.js -- touch active subagent files (Bug #3)', () => {
         session_id: 'touch-post', tool_name: 'Read',
         tool_input: { file_path: 'a.js' }, tool_response: {},
       }, env);
-      assertBothRefreshed(sessionsDir, 'touch-post', since);
+      const m = earlierMtime(sessionsDir, 'touch-post');
+      assert.ok(m >= since, `sub-1 mtime ${m} was not refreshed (expected >= ${since})`);
+    } finally { cleanup(tmp); }
+  });
+
+  test('the touch stops at an agent-owned orbital', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('touch-agent');
+    try {
+      seedTwoAgedOrbitals(sessionsDir, statsFile, 'touch-agent', { agentOwned: true });
+      runUpdateState('PreToolUse', {
+        session_id: 'touch-agent', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+      }, env);
+      const age = Date.now() - earlierMtime(sessionsDir, 'touch-agent');
+      assert.ok(age > 60000,
+        `an agent-owned orbital writes itself and must not be revived by its `
+        + `parent: mtime was refreshed to ${age}ms old`);
     } finally { cleanup(tmp); }
   });
 
   // _touchSessionFile's own utimesSync behaviour and the agent-write family
-  // heartbeat are covered by the two tests above plus, behaviourally,
+  // heartbeat are covered by the tests above plus, behaviourally,
   // tests/test-subagents.js "agent writes heartbeat the parent session file".
 });
 

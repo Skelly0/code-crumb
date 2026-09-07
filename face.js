@@ -48,6 +48,23 @@ const COMPLETION_MIN_SHOW_MS = 1800;
 // start after LONG_TOOL_SWEAT_MS.
 const LONG_TOOL_ESCALATE_MS = 8000;
 const LONG_TOOL_SWEAT_MS = 20000;
+// Which states earn that escalation. ACTIVE_WORK_STATES answers a different
+// question -- what may interrupt what -- and borrowing it here timed two states
+// that are not tool calls at all:
+//   `responding` is a post-turn state (idleCascade already excludes it from the
+//     long-tool hold for exactly this reason);
+//   `subagent` is written by SubagentStart and then re-asserted every frame by
+//     the renderer's conducting hold for as long as agents run, so a multi-agent
+//     session rendered "conducting 3 - still running ... 240s" and sweated
+//     permanently. A `subagent` written by a real Agent/Task call *is* a running
+//     tool, but it is not worth distinguishing: each agent now has its own
+//     orbital showing its own live state, so a counter on the main face
+//     duplicates what is already on screen -- while getting it wrong means
+//     hours of false distress.
+// Derived by subtraction so a genuinely new work state is covered by default.
+const NON_TOOL_WORK_STATES = new Set(['responding', 'subagent']);
+const ESCALATING_STATES = new Set(
+  [...ACTIVE_WORK_STATES].filter(s => !NON_TOOL_WORK_STATES.has(s)));
 // Waiting on the user has no timeout -- the renderer holds the face for as long
 // as the state file says waiting. After this long unanswered the face gets
 // louder instead of politer: bigger question marks, a counting detail line, and
@@ -204,7 +221,7 @@ class ClaudeFace {
     if (this.state === 'waiting') {
       return held >= WAIT_ESCALATE_MS ? `${Math.floor(held / 1000)}s` : '';
     }
-    if (!ACTIVE_WORK_STATES.has(this.state)) return '';
+    if (!ESCALATING_STATES.has(this.state)) return '';
     if (held < LONG_TOOL_ESCALATE_MS) return '';
     return `still running \u2026 ${Math.floor(held / 1000)}s`;
   }
@@ -757,8 +774,10 @@ class ClaudeFace {
     if (this.state === 'responding' && this.frame % 18 === 0) this.particles.spawn(1, 'float');
     if (this.state === 'committing' && this.frame % 5 === 0) this.particles.spawn(2, 'push');
     if (this.state === 'coding' && this.frame % 6 === 0) this.particles.spawn(1, 'rain');
-    // A tool that has been running this long starts to sweat, whatever it is.
-    if (ACTIVE_WORK_STATES.has(this.state) && this.heldMs() >= LONG_TOOL_SWEAT_MS
+    // A tool that has been running this long starts to sweat, whatever it is --
+    // but only a real tool (see ESCALATING_STATES; a held conducting face is
+    // not under strain, it is waiting on agents that have their own orbitals).
+    if (ESCALATING_STATES.has(this.state) && this.heldMs() >= LONG_TOOL_SWEAT_MS
         && this.frame % 12 === 0) this.particles.spawn(1, 'sweat');
 
     // Caffeinated detection — triggers when 5+ state changes happen within 10s.
