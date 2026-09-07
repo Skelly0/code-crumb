@@ -162,7 +162,8 @@ function printClaudeUsage(settingsPath, log) {
      node "${demoPath}"
 
   Plugin install (alternative -- works with marketplace):
-     claude plugin install --plugin-dir "${path.resolve(__dirname).replace(/\\/g, '/')}"
+     claude plugin marketplace add "${path.resolve(__dirname).replace(/\\/g, '/')}"
+     claude plugin install code-crumb@code-crumb
      Use ONE of the two: with both the manual hooks and the plugin
      installed every event fires twice and the counters double.
 

@@ -43,7 +43,8 @@ Clone and install as a local plugin:
 
 ```bash
 git clone https://github.com/Skelly0/code-crumb.git
-claude plugin install --plugin-dir ./code-crumb
+claude plugin marketplace add ./code-crumb
+claude plugin install code-crumb@code-crumb
 ```
 
 Then run the face in a second terminal:
@@ -250,7 +251,7 @@ Any key closes the help overlay or the session list. `t` is disabled when `NO_CO
 
 ### Claude Code
 
-**Plugin install** (recommended): `claude plugin install --plugin-dir ./code-crumb` — hooks into all 21 lifecycle events automatically: PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, Stop, StopFailure, Notification, PermissionRequest, Elicitation, ElicitationResult, SubagentStart, SubagentStop, TeammateIdle, TaskCompleted, SessionStart, SessionEnd, PreCompact, PostCompact, Setup, ConfigChange, and InstructionsLoaded. Subagent sessions appear as orbital mini-faces.
+**Plugin install** (recommended): `claude plugin marketplace add ./code-crumb` then `claude plugin install code-crumb@code-crumb` — hooks into all 21 lifecycle events automatically: PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, Stop, StopFailure, Notification, PermissionRequest, Elicitation, ElicitationResult, SubagentStart, SubagentStop, TeammateIdle, TaskCompleted, SessionStart, SessionEnd, PreCompact, PostCompact, Setup, ConfigChange, and InstructionsLoaded. Subagent sessions appear as orbital mini-faces.
 
 > [!NOTE]
 > Agent teams support requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. When enabled, team members appear in the orbital display with role labels and accent colors.
