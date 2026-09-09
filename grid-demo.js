@@ -61,6 +61,16 @@ const teammates = [
 
 const allSessions = [...subagents, ...teammates];
 
+// The main's session file is a live top-level candidate with a fresh
+// lastPromptAt, so it must be unlinked on the way out -- otherwise the demo
+// face outlives the demo and hides the user's real editor session.
+function cleanupSessions() {
+  for (const s of allSessions) removeSession(s.id);
+  removeSession(mainId);
+}
+
+process.on('SIGINT', () => { cleanupSessions(); process.exit(0); });
+
 // Script: a sequence of { time (ms), actions }
 const script = [
   {
@@ -146,11 +156,9 @@ async function runDemo() {
     await new Promise(r => setTimeout(r, wait));
   }
 
-  // Clean up demo files
+  // Clean up demo files (orbitals plus the main's own session file)
   await new Promise(r => setTimeout(r, 8000));
-  for (const s of allSessions) {
-    removeSession(s.id);
-  }
+  cleanupSessions();
 
   console.log('\n  Demo complete! Sessions cleaned up.\n');
 }

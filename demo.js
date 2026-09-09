@@ -32,6 +32,7 @@ function writeSession(id, state, detail, cwd, stopped = false, taskDescription) 
   const data = {
     session_id: id, state, detail, timestamp: Date.now(),
     cwd: cwd || process.cwd(), stopped, modelName: 'claude',
+    parentSession: mainId,
   };
   if (taskDescription) data.taskDescription = taskDescription;
   fs.writeFileSync(path.join(SESSIONS_DIR, safeFilename(id) + '.json'), JSON.stringify(data), 'utf8');
@@ -48,6 +49,16 @@ const subagents = [
   { id: 'demo-sub-2', cwd: '/home/user/my-app/tests', taskDescription: 'add logging' },
   { id: 'demo-sub-3', cwd: '/home/user/api-server', taskDescription: 'refactor db' },
 ];
+
+// The main's session file is a live top-level candidate with a fresh
+// lastPromptAt, so it must be unlinked on the way out -- otherwise the demo
+// face outlives the demo and hides the user's real editor session.
+function cleanupSessions() {
+  for (const s of subagents) removeSession(s.id);
+  removeSession(mainId);
+}
+
+process.on('SIGINT', () => { cleanupSessions(); process.exit(0); });
 
 // Simulate a session with incrementing tool calls and streak
 let toolCalls = 0;
@@ -189,8 +200,8 @@ async function runDemo() {
     await sleep(s.duration);
   }
 
-  // Clean up orbital session files
-  for (const s of subagents) removeSession(s.id);
+  // Clean up orbital session files and the main's own session file
+  cleanupSessions();
   console.log('\n  Demo complete! The face should now be idle.\n');
 }
 
