@@ -317,7 +317,10 @@ function runStdinAdapter(options) {
           path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
       } catch {}
       const endsTurn = event === 'turn_end' || event === 'Stop' || event === 'session_end' || event === 'error';
-      if (!endsTurn && (!prevSession || prevSession.stopped)) extra.lastPromptAt = Date.now();
+      // A live file with no stamp self-heals rather than staying blind for the
+      // whole turn: an `error` can be the first event a session ever writes,
+      // and an upgrade can land mid-turn over a pre-feature session file.
+      if (!endsTurn && (!prevSession || prevSession.stopped || !prevSession.lastPromptAt)) extra.lastPromptAt = Date.now();
       else if (prevSession && prevSession.lastPromptAt) extra.lastPromptAt = prevSession.lastPromptAt;
 
       let state = 'thinking';

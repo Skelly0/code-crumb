@@ -266,6 +266,7 @@ describe('update-state -- attention fields', () => {
 // -- adapters: attention for non-Claude editors ---------------------------
 
 const OPENCODE_ADAPTER = path.join(__dirname, '..', 'adapters', 'opencode-adapter.js');
+const CODEX_WRAPPER = path.join(__dirname, '..', 'adapters', 'codex-wrapper.js');
 
 function runAdapter(script, payload, env) {
   try {
@@ -275,6 +276,58 @@ function runAdapter(script, payload, env) {
   } catch (e) {
     if (e.status !== 0 && e.status !== null) throw e;
   }
+}
+
+// A stand-in `codex` on PATH that replays a JSONL fixture through the real
+// wrapper spawn path. Unlike the copy in test-adapters.js it paces its lines
+// (CODEX_FAKE_DELAY_MS) and writes them with writeSync, so the gap between two
+// of the wrapper's own writes is observable from the final file alone.
+const FAKE_SRC = [
+  "'use strict';",
+  "const fs = require('fs');",
+  "const text = fs.readFileSync(process.env.CODEX_FAKE_FIXTURE, 'utf8');",
+  "const delay = Number(process.env.CODEX_FAKE_DELAY_MS || 0);",
+  "let first = true;",
+  "for (const line of text.split('\\n')) {",
+  "  if (!line.trim()) continue;",
+  "  if (!first && delay) { const end = Date.now() + delay; while (Date.now() < end) {} }",
+  "  first = false;",
+  "  fs.writeSync(1, line + '\\n');",
+  "}",
+  '',
+].join('\n');
+
+function runFakeCodex(events, delayMs) {
+  const base = makeTempEnv('codex-thread');
+  const binDir = path.join(base.tmp, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+
+  const fixture = path.join(base.tmp, 'fixture.jsonl');
+  fs.writeFileSync(fixture, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+  fs.writeFileSync(path.join(binDir, 'codex-fake.js'), FAKE_SRC, 'utf8');
+
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(binDir, 'codex.cmd'), '@node "%~dp0codex-fake.js" %*\r\n', 'utf8');
+  } else {
+    const sh = path.join(binDir, 'codex');
+    fs.writeFileSync(sh, '#!/bin/sh\nexec node "$(dirname "$0")/codex-fake.js" "$@"\n', 'utf8');
+    fs.chmodSync(sh, 0o755);
+  }
+
+  const env = { ...base.env, CODEX_FAKE_FIXTURE: fixture, CODEX_FAKE_DELAY_MS: String(delayMs || 0) };
+  // Windows env keys are case-insensitive; a stray Path AND PATH confuses the child.
+  for (const k of Object.keys(env)) if (/^path$/i.test(k)) delete env[k];
+  env.PATH = binDir + path.delimiter + (process.env.PATH || '');
+  delete env.CLAUDE_SESSION_ID; // the codex thread id owns the session identity
+
+  try {
+    execFileSync(NODE, [CODEX_WRAPPER, 'a prompt'], {
+      env, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    if (e.status !== 0 && e.status !== null) throw e;
+  }
+  return base;
 }
 
 describe('adapters -- lastPromptAt', () => {
@@ -312,6 +365,44 @@ describe('adapters -- lastPromptAt', () => {
       const spin = Date.now() + 3; while (Date.now() < spin) { /* 3ms */ }
       runAdapter(OPENCODE_ADAPTER, { type: 'session.idle', sessionId: 'ses_c' }, t.env);
       assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'ses_c')).lastPromptAt, first);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a live session file with no stamp self-heals on the next event', () => {
+    // Reachable two ways: an `error` can be the first event a session writes,
+    // and an upgrade can land mid-turn over a pre-feature file. Neither should
+    // leave the window unaddressable for the rest of the turn.
+    const t = makeTempEnv();
+    try {
+      const { writeJsonAtomic } = require('../shared');
+      fs.mkdirSync(t.sessionsDir, { recursive: true });
+      writeJsonAtomic(sessionFile(t.sessionsDir, 'ses_d'), {
+        session_id: 'ses_d', state: 'coding', detail: '', timestamp: Date.now(), stopped: false,
+      });
+      runAdapter(OPENCODE_ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_d', tool: 'read', toolInput: { filePath: 'a.js' } }, t.env);
+      assert.ok(readJSON(sessionFile(t.sessionsDir, 'ses_d')).lastPromptAt > 0, 'healed, not blind for the turn');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('codex-wrapper stamps at turn start and carries it to the end of the turn', () => {
+    // The wrapper is one long-lived process, so the stamp lives in memory and
+    // only the final session file is observable. The fake paces its lines, so
+    // a stamp taken at turn.started is >= 2 delays older than the last write,
+    // while a re-stamp at item.started (1 delay) or turn.completed (0) is not.
+    const D = 50;
+    const t = runFakeCodex([
+      { type: 'thread.started', thread_id: 't1' },
+      { type: 'turn.started' },
+      { type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } },
+      { type: 'turn.completed' },
+    ], D);
+    try {
+      const s = readJSON(sessionFile(t.sessionsDir, 'codex-t1'));
+      assert.strictEqual(s.stopped, true, 'the observed file is the turn.completed write');
+      assert.ok(s.lastPromptAt > 0, 'stamped');
+      assert.ok(s.lastPromptAt <= s.timestamp, 'never later than the write carrying it');
+      const gap = s.timestamp - s.lastPromptAt;
+      assert.ok(gap >= D + D / 2, `carried across item.started and turn.completed, not re-stamped (gap ${gap}ms)`);
     } finally { cleanup(t.tmp); }
   });
 });
