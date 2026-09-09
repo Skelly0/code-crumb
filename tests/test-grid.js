@@ -286,10 +286,16 @@ describe('grid.js -- OrbitalSystem stale cleanup', () => {
   });
 
   test('completion states become stale after STOPPED_LINGER_MS (issue #59 fix)', () => {
+    // #59 was about ghost ORBITALS: a subagent that reported `happy` and went
+    // quiet is finished and must not linger. The short cut is therefore a
+    // child rule -- a top-level session is judged in the same load pass that
+    // built it, before any tick() moves the reward state on, so applying it
+    // there killed live windows at a cold boot.
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     for (const state of completionStates) {
       const face = new MiniFace(state);
       face.state = state;
+      face.parentSession = 'parent';
       face.lastUpdate = Date.now() - 15000; // Past STOPPED_LINGER_MS (10s)
       assert.ok(face.isStale(), `${state} should be stale after 10s`);
     }
@@ -1189,10 +1195,29 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
       const face = new MiniFace('test');
       face.state = state;
       face.stopped = false;
+      face.parentSession = 'parent'; // the short completion cut is a child rule
       face.pid = 0; // no pid — falls through to completion-state timeout
       face.lastUpdate = Date.now() - 15000; // 15s ago — past STOPPED_LINGER_MS (10s)
       assert.ok(face.isStale(),
         `completion state '${state}' past 10s (no pid) should be stale`);
+    }
+  });
+
+  test('a TOP-LEVEL completion face (no pid) survives past STOPPED_LINGER_MS', () => {
+    // Its face is built and judged in one loadSessions pass, before tick()
+    // has moved the reward state on: the 10s cut would drop a live window.
+    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
+    for (const state of completionStates) {
+      const face = new MiniFace('test');
+      face.state = state;
+      face.stopped = false;
+      face.pid = 0;
+      face.lastUpdate = Date.now() - 15000; // past 10s, well within ORPHAN_TIMEOUT
+      assert.ok(!face.isStale(),
+        `top-level '${state}' should hold until ORPHAN_TIMEOUT`);
+      face.lastUpdate = Date.now() - 100000; // past ORPHAN_TIMEOUT (90s)
+      assert.ok(face.isStale(),
+        `top-level '${state}' should still go stale at ORPHAN_TIMEOUT`);
     }
   });
 
@@ -1231,6 +1256,7 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
       const face = new MiniFace('test');
       face.state = state;
       face.stopped = false;
+      face.parentSession = 'parent'; // the short completion cut is a child rule
       face.pid = 999999; // dead process
       face.lastUpdate = Date.now() - 15000; // 15s ago — past STOPPED_LINGER_MS
       assert.ok(face.isStale(),

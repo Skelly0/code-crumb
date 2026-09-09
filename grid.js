@@ -415,8 +415,15 @@ class MiniFace {
     // Non-stopped: if the owning process is alive AND actually ours
     // (start time predates our last write — recycled PIDs fail), never stale
     if (this.pid && isOwnedByLiveProcess(this.pid, this.lastUpdate)) return false;
-    // No pid or dead process: completion states get short timeout
-    if (COMPLETION_STATES.has(this.state)) {
+    // No pid or dead process: a completion state on a CHILD gets the short
+    // timeout -- an agent that reported `happy` and went quiet is finished.
+    // A top-level session is not: its face is built from the file and judged
+    // in the same loadSessions pass, before any tick() has moved the reward
+    // state on (steady state does that at COMPLETION_LINGER). At a cold boot
+    // a window whose last write was `proud` 11s ago would be declared dead on
+    // the spot -- and on win32, with no pid to appeal to, never become a
+    // candidate for the center at all. Top-level faces use ORPHAN_TIMEOUT.
+    if (this.parentSession && COMPLETION_STATES.has(this.state)) {
       return Date.now() - this.lastUpdate > STOPPED_LINGER_MS;
     }
     // Everything else: orphan timeout. A child orbital gets the longer window
@@ -797,12 +804,19 @@ class OrbitalSystem {
       const m = mtimes.get(safeFilename(parentSession) + '.json');
       return m !== undefined && now - m <= STALE_MS;
     };
+    // The center's own file is never purged. On win32 there is no pid, so the
+    // main's face goes stale at ORPHAN_TIMEOUT and stops protecting its file
+    // 30s before the purge fires -- deleting the very file the renderer reads.
+    // The next non-UserPromptSubmit hook recreates it with no lastPromptAt and
+    // the attended window drops to attention 0.
+    const mainFile = this.mainSessionId ? safeFilename(this.mainSessionId) + '.json' : null;
     for (const f of files) {
       try {
         const fp = path.join(dir, f);
         const fileMtimeMs = mtimes.get(f);
         if (fileMtimeMs === undefined) continue;
         if (now - fileMtimeMs > STALE_MS) {
+          if (f === mainFile) continue;  // protected exactly like a knownFace
           // Use reverse map for correct face lookup (safeFilename may transform the ID)
           const faceId = fileToFaceId.get(f) || path.basename(f, '.json');
           const knownFace = this.faces.get(faceId);
@@ -1000,10 +1014,14 @@ class OrbitalSystem {
       }
     }
 
+    // The center's own file is never purged -- see the sync purge above.
+    const mainFile = this.mainSessionId ? safeFilename(this.mainSessionId) + '.json' : null;
+
     for (const r of results) {
       if (r.error || r.empty) { survivingResults.push(r); continue; }
 
       if (now - r.mtimeMs > STALE_MS) {
+        if (r.file === mainFile) { survivingResults.push(r); continue; }
         const faceId = fileToFaceId.get(r.file) || path.basename(r.file, '.json');
         const knownFace = this.faces.get(faceId);
         if (knownFace && !knownFace.stopped) {
@@ -1780,7 +1798,7 @@ function _infoLine(face, labelById, now) {
   let line = parts.join(' \u00b7 ');
   if (face.parentSession) {
     const parent = labelById.get(face.parentSession) || String(face.parentSession).slice(0, 8);
-    line += ` \u21b3 ${parent}`;
+    line += ` \u00b7 \u21b3 ${parent}`;
   }
   return line;
 }

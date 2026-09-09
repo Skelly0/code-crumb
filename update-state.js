@@ -252,6 +252,9 @@ process.stdin.on('end', () => {
   let diffInfo = null;
   let workState = null;
   let workDetail = null;
+  // A compaction restart normally carries lastPromptAt forward off its own
+  // session file. Set when that file is gone, so there is nothing to carry.
+  let compactWithoutPredecessor = false;
 
   try {
     const data = JSON.parse(input);
@@ -619,6 +622,16 @@ process.stdin.on('end', () => {
       if (data.source !== 'compact') {
         const staleSessionFile = path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json');
         try { fs.unlinkSync(staleSessionFile); } catch {}
+      } else {
+        // ...unless there is no file left to carry from. The renderer's stale
+        // purge can remove a live window's session file (a long think on win32
+        // writes nothing for two minutes), and a compact SessionStart is the
+        // one event that recreates it without stamping. An unstamped file is
+        // attention 0, i.e. never the center again, so a fresh stamp is the
+        // least-wrong value here.
+        try {
+          fs.accessSync(path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'));
+        } catch { compactWithoutPredecessor = true; }
       }
       stats.session = {
         id: sessionId, start: Date.now(),
@@ -749,9 +762,12 @@ process.stdin.on('end', () => {
     // Attention stamp: the user just addressed THIS session. The renderer's
     // main-face policy follows the newest one. A SessionStart from compaction
     // is not the user's attention and must not pull the center away from the
-    // window they are typing in.
+    // window they are typing in -- unless its own session file is gone, in
+    // which case there is no earlier stamp to carry and 0 would exile the
+    // window from the center for good (see compactWithoutPredecessor).
     if (hookEvent === 'UserPromptSubmit'
-        || (hookEvent === 'SessionStart' && data.source !== 'compact')) {
+        || (hookEvent === 'SessionStart'
+            && (data.source !== 'compact' || compactWithoutPredecessor))) {
       extra.lastPromptAt = Date.now();
     }
 
@@ -797,6 +813,8 @@ process.stdin.on('end', () => {
     // Subagents should only write to their per-session file so they
     // don't overwrite the main session's state in the renderer.
     let shouldWriteGlobal = true;
+    // Scoped to the GLOBAL write only -- see the owner guard below.
+    let globalStopped = false;
     try {
       const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
       if (existing.sessionId && existing.sessionId !== sessionId &&
@@ -808,12 +826,18 @@ process.stdin.on('end', () => {
       // session id but writes the agent's own file, so none of them apply --
       // without the !isAgentEvent guard a stopped parent would retire a live
       // agent orbital, and the parent's modelName would erase the agent type.
-      // Preserve stopped flag — only late PostToolUse/PostToolUseFailure can arrive after Stop.
-      // PreToolUse (new turn) must be allowed to clear the stopped flag.
+      // Preserve the GLOBAL file's stopped flag — only a late
+      // PostToolUse/PostToolUseFailure can arrive after Stop, and it must not
+      // resurrect ownership. PreToolUse (a new turn) does clear the flag.
+      // This re-stamp is deliberately scoped to the global write: on a session
+      // file `stopped` means SESSION ENDED (SessionEnd), and leaking it here
+      // used to make the orbital loader retire a live window -- the policy then
+      // dropped the attended session and the center bounced away and back with
+      // two swap animations. The session-file block below decides for itself
+      // from the session file's own fields (`stopped`, else `turnEnded`).
       if (!isAgentEvent && existing.stopped && existing.sessionId === sessionId && !stopped &&
           (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')) {
-        stopped = true;
-        extra.stopped = true;
+        globalStopped = true;
       }
       // Preserve model name — subagents sharing session ID must not overwrite the owner's name.
       // See also: base-adapter.js guardedWriteState (adapters) and face.js setStats (env var).
@@ -845,11 +869,12 @@ process.stdin.on('end', () => {
     // SessionStart always takes over global state — explicit new-session signal
     if (hookEvent === 'SessionStart') shouldWriteGlobal = true;
 
-    if (shouldWriteGlobal) writeState(state, detail, extra);
+    if (shouldWriteGlobal) writeState(state, detail, globalStopped ? { ...extra, stopped: true } : extra);
     // Always write the per-session file: it is what the renderer's main face
     // follows and what parallel sessions appear as. SessionStart writes one
-    // too (its stale predecessor was unlinked above), so a fresh session is
-    // a candidate for the center before its first tool call.
+    // too (the unlink above is skipped for `source === 'compact'`, which is
+    // the same live session restarting), so a fresh session is a candidate for
+    // the center before its first tool call.
     {
       // Preserve stopped flag and sticky fields from existing session file
       // (set once at SubagentStart/TeammateIdle, must survive subsequent hook updates)
@@ -870,10 +895,10 @@ process.stdin.on('end', () => {
           }
           // Same rule for the turn boundary: a late PostToolUse must not erase a
           // Stop; a new turn's PreToolUse/UserPromptSubmit does not carry it.
-          // A finished turn reads as `stopped || turnEnded` on a session file:
-          // the owner's late PostToolUse re-stamps `stopped` via the global
-          // guard above, a parallel window's carries `turnEnded` here; the
-          // renderer folds both.
+          // A finished turn reads as `stopped || turnEnded` on a session file
+          // and the renderer folds both -- but only SessionEnd sets `stopped`
+          // here, so the global owner and a parallel window take the same path:
+          // `turnEnded` carried forward.
           if (!stopped && existingSession.turnEnded &&
               (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')) {
             extra.turnEnded = true;

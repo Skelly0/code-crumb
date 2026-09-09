@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR } = require('./shared');
+const { STATE_FILE, SESSIONS_DIR, writeJsonAtomic } = require('./shared');
 
 // Ensure dir exists
 try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -20,8 +20,10 @@ function writeMainState(state, detail, sessionId) {
   const data = { state, detail, timestamp: Date.now(), sessionId, modelName: 'claude' };
   fs.writeFileSync(STATE_FILE, JSON.stringify(data), 'utf8');
   const filename = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_') + '.json';
-  fs.writeFileSync(path.join(SESSIONS_DIR, filename),
-    JSON.stringify({ session_id: sessionId, ...data, lastPromptAt: demoPromptAt, cwd: process.cwd() }), 'utf8');
+  // Atomic: this is the file the main face follows, and the renderer polls it
+  // 15 times a second -- a torn read costs a frame.
+  writeJsonAtomic(path.join(SESSIONS_DIR, filename),
+    { session_id: sessionId, ...data, lastPromptAt: demoPromptAt, cwd: process.cwd() });
 }
 
 function writeSession(id, state, detail, cwd, stopped = false, extra = {}) {

@@ -133,12 +133,31 @@ describe('update-state -- attention fields', () => {
     } finally { cleanup(t.tmp); }
   });
 
-  test('SessionStart from compaction does not stamp lastPromptAt', () => {
+  test('SessionStart from compaction does not stamp lastPromptAt over a live file', () => {
     const t = makeTempEnv('att-2');
     try {
+      // A predecessor file exists (this is the same live session restarting),
+      // so the compaction carries whatever it holds -- here, nothing.
+      runUpdateState('PreToolUse', { session_id: 'att-2', tool_name: 'Read', tool_input: { file_path: 'a.js' } }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'att-2')).lastPromptAt, undefined);
       runUpdateState('SessionStart', { session_id: 'att-2', source: 'compact' }, t.env);
       const s = readJSON(sessionFile(t.sessionsDir, 'att-2'));
-      assert.strictEqual(s.lastPromptAt, undefined);
+      assert.strictEqual(s.lastPromptAt, undefined, 'compaction is not the user addressing the window');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a compact SessionStart with no predecessor file stamps lastPromptAt', () => {
+    // The one case where a compaction must stamp: there is no file left to
+    // carry from (the renderer's stale purge got it, or the file never
+    // existed). Not stamping leaves the window at attention 0 -- permanently
+    // ineligible for the center -- and only a fresh user prompt could fix it.
+    const t = makeTempEnv('att-2d');
+    try {
+      const before = Date.now();
+      assert.ok(!fs.existsSync(sessionFile(t.sessionsDir, 'att-2d')), 'no predecessor');
+      runUpdateState('SessionStart', { session_id: 'att-2d', source: 'compact' }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'att-2d'));
+      assert.ok(s.lastPromptAt >= before, `stamped fresh, got ${s.lastPromptAt}`);
     } finally { cleanup(t.tmp); }
   });
 
@@ -208,17 +227,23 @@ describe('update-state -- attention fields', () => {
     } finally { cleanup(t.tmp); }
   });
 
-  test('a late PostToolUse after Stop still reads as a finished turn; the next PreToolUse does not', () => {
-    // The global-owner guard already re-stamps `stopped` on a late PostToolUse
-    // when this session owns the global file; the session-file guard added
-    // here covers the parallel window that does not. Either way the turn
-    // must still read as ended, and a new turn must clear both.
+  test('a late PostToolUse after Stop carries turnEnded, never stopped, even for the global owner', () => {
+    // This session DOES own the global state file, so the owner guard fires --
+    // and its `stopped` re-stamp is scoped to the global write. On the session
+    // file `stopped` means SESSION ENDED: leaking it here retired a live
+    // window in the orbital loader, so the policy dropped the attended session
+    // (auto-releasing a pin) and ignored its next 10s of writes. The owner
+    // case is now exactly the parallel-window case: turnEnded, no stopped.
     const t = makeTempEnv('att-6');
     try {
       runUpdateState('Stop', { session_id: 'att-6' }, t.env);
+      assert.strictEqual(readJSON(t.stateFile).stopped, true, 'Stop released global ownership');
       runUpdateState('PostToolUse', { session_id: 'att-6', tool_name: 'Read', tool_input: { file_path: 'a.js' }, tool_response: { stdout: 'ok' } }, t.env);
       const late = readJSON(sessionFile(t.sessionsDir, 'att-6'));
-      assert.ok(late.stopped || late.turnEnded, 'still ended after a late PostToolUse');
+      assert.strictEqual(late.turnEnded, true, 'still a finished turn after a late PostToolUse');
+      assert.ok(!late.stopped, 'but NOT a finished session -- the orbital stays live');
+      assert.strictEqual(readJSON(t.stateFile).stopped, true,
+        'the global file keeps its stopped flag: ownership is not resurrected');
       runUpdateState('PreToolUse', { session_id: 'att-6', tool_name: 'Read', tool_input: { file_path: 'b.js' } }, t.env);
       const fresh = readJSON(sessionFile(t.sessionsDir, 'att-6'));
       assert.ok(!fresh.stopped && !fresh.turnEnded, 'a new turn clears both');
@@ -552,6 +577,61 @@ describe('grid -- the main session is loaded but kept off the ring', () => {
     } finally { cleanup(t.tmp); }
   });
 
+  test('a cold load does not declare a top-level session dead for showing a reward face', () => {
+    // The face is built from the file and judged in the SAME pass, before any
+    // tick() has moved a completion state on. Applying the 10s completion cut
+    // to a top-level session therefore killed a live window whose last write
+    // happened to be `proud` -- and on win32, with no pid, it never came back
+    // as a candidate for the center. Children keep the short cut: an agent
+    // that reported `happy` and went quiet really is finished.
+    const t = makeTempEnv();
+    try {
+      const dir = t.sessionsDir;
+      fs.mkdirSync(dir, { recursive: true });
+      const now = Date.now();
+      const old = new Date(now - 15000);
+      const seed = (name, obj) => {
+        const fp = path.join(dir, name);
+        writeJsonAtomic(fp, obj);
+        fs.utimesSync(fp, old, old);
+      };
+      seed('A.json', { session_id: 'A', state: 'proud', timestamp: now - 15000, lastPromptAt: now - 15000 });
+      seed('P-agent-1.json', { session_id: 'P-agent-1', parentSession: 'P', state: 'happy', timestamp: now - 15000 });
+      const orb = new OrbitalSystem();
+      orb._sessionsDir = dir;
+      orb.loadSessions(null);
+      assert.ok(orb.faces.has('A'), 'the top-level reward face survives the load');
+      assert.ok(!orb.faces.get('A').isStale(), 'and is not stale -- ORPHAN_TIMEOUT applies, not the 10s cut');
+      assert.ok(!orb.faces.has('P-agent-1'), 'the finished child is dropped on the 10s cut');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('the purge never unlinks the main session file, however stale', () => {
+    // On win32 there is no pid, so the main's face goes stale at
+    // ORPHAN_TIMEOUT (90s) and stops protecting its file 30s before the
+    // STALE_MS purge fires -- deleting the very file the renderer reads.
+    const t = makeTempEnv();
+    try {
+      const dir = t.sessionsDir;
+      fs.mkdirSync(dir, { recursive: true });
+      const now = Date.now();
+      const old = new Date(now - 130000);
+      const seed = (name, obj) => {
+        const fp = path.join(dir, name);
+        writeJsonAtomic(fp, obj);
+        fs.utimesSync(fp, old, old);
+        return fp;
+      };
+      const mainFp = seed('M.json', { session_id: 'M', state: 'coding', timestamp: now - 130000, lastPromptAt: now - 130000 });
+      const otherFp = seed('B.json', { session_id: 'B', state: 'coding', timestamp: now - 130000 });
+      const orb = new OrbitalSystem();
+      orb._sessionsDir = dir;
+      orb.loadSessions('M');   // no faces yet: nothing else protects either file
+      assert.ok(fs.existsSync(mainFp), 'the center keeps its file');
+      assert.ok(!fs.existsSync(otherFp), 'an unrelated stale top-level file is still purged');
+    } finally { cleanup(t.tmp); }
+  });
+
   test('changing the main re-sorts the ring', () => {
     const t = makeTempEnv();
     try {
@@ -585,7 +665,11 @@ const STAR = String.fromCharCode(0x2605);   // ★
 
 describe('grid -- renderSessionList tree and info row', () => {
   const now = Date.now();
-  const main = { sessionId: 'M', isMain: true, isPinned: false, label: 'claude', state: 'coding', detail: 'edit a.js', editor: 'claude', toolCalls: 12, filesEdited: 3, lastUpdate: now - 3000 };
+  // lastUpdate sits in the MIDDLE of the "3s" bucket, not on its edge: the age
+  // is computed from a second Date.now() inside the renderer, so 3000 exactly
+  // would read as 4s after a 1s stall and as 2s under any backward clock
+  // jitter. 3500 tolerates +-500ms either way.
+  const main = { sessionId: 'M', isMain: true, isPinned: false, label: 'claude', state: 'coding', detail: 'edit a.js', editor: 'claude', toolCalls: 12, filesEdited: 3, lastUpdate: now - 3500 };
 
   test('a child row carries the tree marker and names its parent on the info row', () => {
     const child = mf('M-agent-1', { parentSession: 'M', agentType: 'Explore', label: 'explore', state: 'reading', lastUpdate: now - 65000 });
@@ -715,8 +799,11 @@ describe('renderer -- source invariants of the session-file main', () => {
     // the promoted face's own state for up to 3s after it materialized.
     const start = rendererSrc.indexOf('function checkState()');
     assert.ok(start > 0);
-    const head = rendererSrc.slice(start, rendererSrc.indexOf('    try {', start));
-    assert.ok(head.includes('applyMainPolicy();'), 'the policy runs first');
+    // The head ends at the main try block -- matched on `try {` + newline so
+    // the one-line `try { applyMainPolicy(); } catch {}` does not end it.
+    const head = rendererSrc.slice(start, rendererSrc.indexOf('    try {\n', start));
+    assert.ok(head.includes('try { applyMainPolicy(); } catch {}'),
+      'the policy runs first, and its own throw does not kill the render loop');
     assert.ok(head.includes('if (swapTransition.active) return;'),
       'and the transition guard immediately after it, before the try block');
     // Exactly one guard site inside checkState: the old inner one is gone.

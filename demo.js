@@ -10,7 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, safeFilename } = require('./shared');
+const { STATE_FILE, SESSIONS_DIR, safeFilename, writeJsonAtomic } = require('./shared');
 
 // Ensure sessions dir exists for orbital demo
 try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -25,7 +25,9 @@ function writeState(state, detail = '', extra = {}) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(data), 'utf8');
   const session = { session_id: mainId, ...data, lastPromptAt: demoPromptAt, cwd: process.cwd() };
   if (session.stopped) { delete session.stopped; session.turnEnded = true; }
-  fs.writeFileSync(path.join(SESSIONS_DIR, safeFilename(mainId) + '.json'), JSON.stringify(session), 'utf8');
+  // Atomic: this is the file the main face follows, and the renderer polls it
+  // 15 times a second -- a torn read costs a frame.
+  writeJsonAtomic(path.join(SESSIONS_DIR, safeFilename(mainId) + '.json'), session);
 }
 
 function writeSession(id, state, detail, cwd, stopped = false, taskDescription) {

@@ -367,7 +367,10 @@ function runUnifiedMode() {
   function checkState() {
     const now = Date.now();
     let cachedStateData = null; // Cache readState() to avoid duplicate fs.readFileSync
-    applyMainPolicy();
+    // The policy runs above the main try, so an exception in it (or in
+    // isStale's PID plumbing) would escape checkState and take the render loop
+    // with it. A failed pick must cost one tick, not the face.
+    try { applyMainPolicy(); } catch {}
     // Nothing may touch the face or the trackers while it dissolves. The old
     // guard sat inside the mtime branch, so on the ~3 ticks in 4 where the old
     // main's file is unchanged and this is not a forced read, execution fell
