@@ -1401,6 +1401,12 @@ describe('grid.js -- renderSessionList', () => {
     assert.strictEqual(result, '', 'should return empty for narrow terminal');
   });
 
+  test('handles short terminal gracefully', () => {
+    // Below MIN_SESSION_LIST_ROWS not even one entry plus chrome fits.
+    const result = renderSessionList(80, 8, [], PALETTES[0].themes);
+    assert.strictEqual(result, '', 'should return empty for short terminal');
+  });
+
   test('includes stopped sessions with different indicator', () => {
     const faces = new Map();
     const f = new MiniFace('sess-stopped');
@@ -1468,7 +1474,8 @@ describe('grid.js -- renderSessionList selection', () => {
     };
     const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
     assert.ok(result.includes('select'), 'footer should mention select');
-    assert.ok(result.includes('promote'), 'footer should mention promote');
+    // Index 0 is the main row, whose Enter action is pin (never promote).
+    assert.ok(result.includes('\u23ce pin'), 'footer should mention the enter action');
     assert.ok(result.includes('esc'), 'footer should mention esc');
   });
 
@@ -1507,7 +1514,7 @@ describe('grid.js -- renderSessionList selection', () => {
       label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
     const result = renderSessionList(80, 40, [], PALETTES[0].themes, mainInfo, 0);
-    assert.ok(result.includes('promote'), 'footer shows even with only main');
+    assert.ok(result.includes('\u23ce pin'), 'footer shows even with only main');
   });
 
   test('backward compatible: omitting selectedIndex works', () => {
@@ -1545,14 +1552,15 @@ describe('grid.js -- renderSessionList selection', () => {
   });
 
   test('scrolls to show selected item beyond maxVisible', () => {
-    // 5 subs + main = 6 sessions; rows=15 → maxVisible = floor((15-6)/4) = 2
+    // 5 subs + main = 6 sessions; each entry is 4 rows + 1 separator, so
+    // rows=24 → maxVisible = floor((24-7)/5) = 3
     const faces = _makeFaces(5);
     const mainInfo = {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
       label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
     // Select the last session (index 5 in 0-based sorted array)
-    const result = renderSessionList(80, 15, faces, PALETTES[0].themes, mainInfo, 5);
+    const result = renderSessionList(80, 24, faces, PALETTES[0].themes, mainInfo, 5);
     // The last sub should be visible and selected
     assert.ok(result.includes('\u25b8'), 'should show selection marker');
     assert.ok(result.includes('sub-4'), 'last sub should be visible when scrolled');
@@ -1566,8 +1574,8 @@ describe('grid.js -- renderSessionList selection', () => {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
       label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
-    // Select index 0 — no scrolling needed
-    const result = renderSessionList(80, 15, faces, PALETTES[0].themes, mainInfo, 0);
+    // Select index 0 — no scrolling needed (maxVisible = floor((24-7)/5) = 3)
+    const result = renderSessionList(80, 24, faces, PALETTES[0].themes, mainInfo, 0);
     assert.ok(!result.includes('above'), 'no above indicator at top of list');
   });
 
@@ -1577,8 +1585,8 @@ describe('grid.js -- renderSessionList selection', () => {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
       label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
-    // Select index 0 — items below are hidden
-    const result = renderSessionList(80, 15, faces, PALETTES[0].themes, mainInfo, 0);
+    // Select index 0 — the 3 entries past maxVisible are hidden below
+    const result = renderSessionList(80, 24, faces, PALETTES[0].themes, mainInfo, 0);
     assert.ok(result.includes('more'), 'should show more indicator for items below');
   });
 });
@@ -1642,14 +1650,15 @@ describe('grid.js -- renderSessionList pin indicator', () => {
     assert.ok(!result.includes('unpin'), 'footer should not say unpin');
   });
 
-  test('footer says promote when index 0 selected and not pinned', () => {
+  test('footer says pin when index 0 selected and not pinned', () => {
     const faces = _makeFaces(1);
     const mainInfo = {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
       label: 'claude', stopped: false, firstSeen: 0, isMain: true, isPinned: false,
     };
     const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
-    assert.ok(result.includes('promote'), 'footer should say promote');
+    // The main row's Enter action is pin/unpin only -- it is already the main.
+    assert.ok(result.includes('\u23ce pin'), 'footer should say pin');
     assert.ok(!result.includes('unpin'), 'footer should not say unpin');
     assert.ok(!result.includes('pin+promote'), 'footer should not say pin+promote');
   });

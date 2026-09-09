@@ -1691,6 +1691,8 @@ class OrbitalSystem {
 // subagent sessions with state, label, path, and detail info.
 
 const MIN_SESSION_LIST_COLS = 50;
+const MIN_SESSION_LIST_ROWS = 12;      // chrome + footer + both overflow marks + one entry
+const SESSION_LIST_ENTRY_ROWS = 4;     // state row, path row, detail row, info row
 
 // Age of a write as the list shows it: 3s, 2m, 1h.
 function formatAge(ms) {
@@ -1752,17 +1754,50 @@ function _sessionDot(face, themeMap) {
   return ['\u25cf', theme.border]; // ● colored by state
 }
 
-function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, selectedIndex, outBounds) {
-  const selIdx = typeof selectedIndex === 'number' ? selectedIndex : -1;
-  if (cols < MIN_SESSION_LIST_COLS) return '';
+// The dim info row: what kind of thing this is, how busy, how fresh, whose.
+function _infoLine(face, labelById, now) {
+  const parts = [];
+  if (face.parentSession) {
+    parts.push(face.agentType || (face.isTeammate && face.teamName) || 'agent');
+  } else {
+    parts.push(`${face.toolCalls || 0} tools`, `${face.filesEdited || 0} files`);
+  }
+  if (face.lastUpdate) parts.push(formatAge(now - face.lastUpdate));
+  let line = parts.join(' \u00b7 ');
+  if (face.parentSession) {
+    const parent = labelById.get(face.parentSession) || String(face.parentSession).slice(0, 8);
+    line += ` \u21b3 ${parent}`;
+  }
+  return line;
+}
+
+// entriesOrFaces: [{ face, depth }] from orderSessionList, or a plain array of
+// faces (all depth 0). selected: a session id, or a legacy row index.
+function renderSessionList(cols, rows, entriesOrFaces, paletteThemes, mainInfo, selected) {
+  if (cols < MIN_SESSION_LIST_COLS || rows < MIN_SESSION_LIST_ROWS) return '';
   const themeMap = paletteThemes || themes;
   const r = ansi.reset;
+  const now = Date.now();
 
-  // Build session list: main face first (if provided), then pre-sorted subagents
-  const sorted = [];
-  if (mainInfo) sorted.push(mainInfo);
-  sorted.push(...sortedFaces);
-  const count = sorted.length;
+  // Normalise to entries. A plain face array is the legacy shape: main first.
+  let entries;
+  const raw = entriesOrFaces || [];
+  if (raw.length && raw[0] && raw[0].face) {
+    entries = raw;
+  } else {
+    entries = [];
+    if (mainInfo) entries.push({ face: mainInfo, depth: 0 });
+    for (const f of raw) entries.push({ face: f, depth: 0 });
+  }
+  if (mainInfo && !entries.some(e => e.face === mainInfo)) entries = [{ face: mainInfo, depth: 0 }, ...entries];
+  const count = entries.length;
+
+  const labelById = new Map();
+  for (const e of entries) if (e.face.sessionId) labelById.set(e.face.sessionId, (e.face.label || '?').slice(0, 14));
+
+  let selIdx = -1;
+  if (typeof selected === 'number') selIdx = selected;
+  else if (typeof selected === 'string') selIdx = entries.findIndex(e => e.face.sessionId === selected);
 
   // Box dimensions
   const boxW = Math.min(cols - 4, 54);
@@ -1770,85 +1805,76 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
   const headerText = '  Sessions';
   const countText = `${count} total `;
 
-  // How many sessions can fit? 3 rows per session + separator between
-  const maxVisible = Math.max(1, Math.floor((rows - 6) / 4)); // 3 rows + 1 separator
-  // Scroll: keep selectedIndex inside visible window
+  // Rows left after chrome (4), footer (1) and both overflow marks (2), at
+  // ENTRY_ROWS + 1 separator per entry: the box can never outgrow the screen.
+  const maxVisible = Math.max(1, Math.floor((rows - 7) / (SESSION_LIST_ENTRY_ROWS + 1)));
   const scrollOffset = (selIdx >= 0 && count > maxVisible)
     ? Math.min(Math.max(0, selIdx - (maxVisible - 1)), Math.max(0, count - maxVisible))
     : 0;
-  const visible = sorted.slice(scrollOffset, scrollOffset + maxVisible);
+  const visible = entries.slice(scrollOffset, scrollOffset + maxVisible);
   const overflowBelow = count - (scrollOffset + visible.length);
   const overflowAbove = scrollOffset;
 
-  // Calculate total box height
   let contentRows = 0;
   if (count === 0) {
     contentRows = 1; // "no sessions"
   } else {
-    contentRows = visible.length * 3 + Math.max(0, visible.length - 1); // 3 per face + separators
+    contentRows = visible.length * SESSION_LIST_ENTRY_ROWS + Math.max(0, visible.length - 1);
     if (overflowAbove > 0) contentRows += 1;
     if (overflowBelow > 0) contentRows += 1;
   }
-  // Add footer hint row when selection is active
   const hasFooter = selIdx >= 0 && count > 0;
   if (hasFooter) contentRows += 1;
   const boxH = contentRows + 4; // top border + header + separator + bottom border
 
-  // Center the box
   const bx = Math.max(1, Math.floor((cols - boxW) / 2));
   const by = Math.max(1, Math.floor((rows - boxH - 1) / 2));
 
   const bc = ansi.fg(...dimColor([140, 170, 200], 0.7));
   const tc = ansi.fg(...dimColor([200, 220, 240], 0.9));
   const dc = ansi.fg(...dimColor([140, 170, 200], 0.55));
+  const line = (row, text) => ansi.to(row, bx) + `${bc}\u2502${text}${bc}\u2502${r}`;
+  const centered = (row, text, color) => {
+    const pad = Math.max(0, Math.floor((innerW - text.length) / 2));
+    return line(row, `${color}${' '.repeat(pad)}${text}${' '.repeat(Math.max(0, innerW - pad - text.length))}`);
+  };
 
   let buf = '';
-
-  // Top border with header
   const headerPad = innerW - headerText.length - countText.length;
   buf += ansi.to(by, bx) + `${bc}\u256d${'\u2500'.repeat(innerW)}\u256e${r}`;
-  buf += ansi.to(by + 1, bx) + `${bc}\u2502${tc}${headerText}${' '.repeat(Math.max(0, headerPad))}${dc}${countText}${bc}\u2502${r}`;
+  buf += line(by + 1, `${tc}${headerText}${' '.repeat(Math.max(0, headerPad))}${dc}${countText}`);
   buf += ansi.to(by + 2, bx) + `${bc}\u251c${'\u2500'.repeat(innerW)}\u2524${r}`;
 
   let row = by + 3;
 
   if (count === 0) {
-    const msg = 'no sessions';
-    const msgPad = Math.max(0, Math.floor((innerW - msg.length) / 2));
-    buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(msgPad)}${msg}${' '.repeat(Math.max(0, innerW - msgPad - msg.length))}${bc}\u2502${r}`;
+    buf += centered(row, 'no sessions', dc);
     row++;
   } else {
-    // "Above" scroll indicator
-    if (overflowAbove > 0) {
-      const aboveText = `\u2191${overflowAbove} above`;
-      const aPad = Math.max(0, Math.floor((innerW - aboveText.length) / 2));
-      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(aPad)}${aboveText}${' '.repeat(Math.max(0, innerW - aPad - aboveText.length))}${bc}\u2502${r}`;
-      row++;
-    }
+    if (overflowAbove > 0) { buf += centered(row, `\u2191${overflowAbove} above`, dc); row++; }
     for (let i = 0; i < visible.length; i++) {
-      const face = visible[i];
+      const { face, depth } = visible[i];
       const isSel = i === (selIdx - scrollOffset);
       const [dot, dotColor] = _sessionDot(face, themeMap);
       const dotC = ansi.fg(...dotColor);
       const stateTheme = themeMap[face.state] || themeMap.idle;
       const stateName = (stateTheme.status || face.state).slice(0, 12);
       const label = (face.label || '?').slice(0, 14);
-
-      // Selection marker and colors
       const selMarker = isSel ? '\u25b8' : ' ';
       const rowTc = isSel ? ansi.fg(...dimColor([240, 250, 255], 1.0)) : tc;
       const rowDc = isSel ? ansi.fg(...dimColor([180, 200, 220], 0.8)) : dc;
 
-      // Row 1: " ▸● statename    ⊛/★ label" — dot, state, and label (⊛ pinned, ★ main)
+      // Row 1: " ▸● statename  editor      ⊛/★/☆ label". A child gets a tree
+      // marker before the dot. Width priority: the label (with its marker, the
+      // promote UX) is never sliced; the editor tag drops first; the state
+      // name truncates last.
       const mainTag = face.isMain
         ? (face.isPinned ? '\u229b ' : '\u2605 ')
         : (face.isMainSession ? '\u2606 ' : '');
-      const row1Prefix = 4; // " ▸● " before stateName
+      const treeMark = depth > 0 ? '\u2514 ' : '';
+      const prefix = ` ${selMarker}${treeMark}`;           // before the dot
+      const row1Prefix = prefix.length + 2;                  // + dot + space
       const fullLabel = mainTag + label;
-      // Three segments: state + dim editor tag + right-anchored label. The
-      // label (with its pin/main marker — the promote UX) is never sliced;
-      // the editor tag drops first under width pressure; the state name
-      // truncates only as a last resort.
       const avail = innerW - row1Prefix;
       const tagRaw = (face.editor || '').slice(0, 8);
       let stateSeg = stateName;
@@ -1859,84 +1885,66 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
       const usedLeft = stateSeg.length + (tagSeg ? 2 + tagSeg.length : 0);
       const labelGap = Math.max(2, avail - usedLeft - fullLabel.length);
       const r1Pad = Math.max(0, avail - usedLeft - labelGap - fullLabel.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${r} ${rowTc}${selMarker}${dotC}${dot}${r} ${rowTc}${stateSeg}${tagSeg ? `  ${rowDc}${tagSeg}` : ''}${' '.repeat(labelGap)}${rowTc}${fullLabel}${' '.repeat(r1Pad)}${bc}\u2502${r}`;
+      buf += line(row, `${r}${rowTc}${prefix}${dotC}${dot}${r} ${rowTc}${stateSeg}${tagSeg ? `  ${rowDc}${tagSeg}` : ''}${' '.repeat(labelGap)}${rowTc}${fullLabel}${' '.repeat(r1Pad)}`);
       row++;
 
-      // Row 2: "    ⎇ branch  ~/path" — branch and path share the line
-      const indent2 = '    ';
+      const indent = '    ';
+      const body = innerW - indent.length;
+
+      // Row 2: "    ⎇ branch  ~/path"
       const branchRaw = face.gitBranch || '';
-      let row2Text = '';
+      let row2Text;
       if (branchRaw) {
         const branchDisplay = ('\u2387 ' + branchRaw).slice(0, 20);
-        const pathSpace = innerW - indent2.length - branchDisplay.length - 2; // 2 = gap
-        const cwdStr = _truncatePath(face.cwd, Math.max(8, pathSpace));
-        row2Text = branchDisplay + '  ' + cwdStr;
+        const pathSpace = body - branchDisplay.length - 2;
+        row2Text = branchDisplay + '  ' + _truncatePath(face.cwd, Math.max(8, pathSpace));
       } else {
-        const cwdStr = _truncatePath(face.cwd, innerW - indent2.length);
-        row2Text = cwdStr;
+        row2Text = _truncatePath(face.cwd, body);
       }
-      const row2Full = indent2 + row2Text.slice(0, innerW - indent2.length);
-      const r2Pad = Math.max(0, innerW - row2Full.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${rowDc}${row2Full}${' '.repeat(r2Pad)}${bc}\u2502${r}`;
+      const row2Full = indent + row2Text.slice(0, body);
+      buf += line(row, `${rowDc}${row2Full}${' '.repeat(Math.max(0, innerW - row2Full.length))}`);
       row++;
 
-      // Row 3: "    task/detail text" — full task description preferred, dimmed
-      const indent3 = '    ';
-      const detailText = (face.taskDescription || face.detail || 'waiting...').slice(0, innerW - indent3.length);
-      const row3Full = indent3 + detailText;
-      const r3Pad = Math.max(0, innerW - row3Full.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${rowDc}${row3Full}${' '.repeat(r3Pad)}${bc}\u2502${r}`;
+      // Row 3: "    task/detail text" — full task description preferred
+      const detailText = (face.taskDescription || face.detail || 'waiting...').slice(0, body);
+      const row3Full = indent + detailText;
+      buf += line(row, `${rowDc}${row3Full}${' '.repeat(Math.max(0, innerW - row3Full.length))}`);
       row++;
 
-      // Separator between entries (not after last)
+      // Row 4: "    Explore · 3s · ↳ parent" / "    12 tools · 3 files · 3s"
+      const infoText = _infoLine(face, labelById, now).slice(0, body);
+      const row4Full = indent + infoText;
+      buf += line(row, `${rowDc}${row4Full}${' '.repeat(Math.max(0, innerW - row4Full.length))}`);
+      row++;
+
       if (i < visible.length - 1) {
         buf += ansi.to(row, bx) + `${bc}\u251c${'\u2500'.repeat(innerW)}\u2524${r}`;
         row++;
       }
     }
-
-    // "Below" overflow indicator
-    if (overflowBelow > 0) {
-      const overText = `+${overflowBelow} more`;
-      const oPad = Math.max(0, Math.floor((innerW - overText.length) / 2));
-      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(oPad)}${overText}${' '.repeat(Math.max(0, innerW - oPad - overText.length))}${bc}\u2502${r}`;
-      row++;
-    }
+    if (overflowBelow > 0) { buf += centered(row, `+${overflowBelow} more`, dc); row++; }
   }
 
-  // Footer hint (when selection is active) — context-sensitive
   if (hasFooter) {
-    const isPinned = mainInfo && mainInfo.isPinned;
+    const selEntry = entries[selIdx];
+    const onMain = !!(selEntry && selEntry.face && selEntry.face.isMain);
+    const isPinned = !!(mainInfo && mainInfo.isPinned);
     let hint;
-    if (selIdx === 0 && isPinned) {
-      hint = '\u2191\u2193 select  \u23ce unpin  esc close';
-    } else if (selIdx > 0) {
-      hint = '\u2191\u2193 select  \u23ce pin+promote  esc close';
-    } else {
-      hint = '\u2191\u2193 select  \u23ce promote  esc close';
-    }
-    const hPad = Math.max(0, Math.floor((innerW - hint.length) / 2));
-    buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(hPad)}${hint}${' '.repeat(Math.max(0, innerW - hPad - hint.length))}${bc}\u2502${r}`;
+    if (onMain && isPinned) hint = '\u2191\u2193 select  \u23ce unpin  esc close';
+    else if (onMain) hint = '\u2191\u2193 select  \u23ce pin  esc close';
+    else hint = '\u2191\u2193 select  \u23ce pin+promote  esc close';
+    buf += centered(row, hint, dc);
     row++;
   }
 
-  // Bottom border
   buf += ansi.to(row, bx) + `${bc}\u2570${'\u2500'.repeat(innerW)}\u256f${r}`;
-
-  // Report bounding box so caller can clear on dismiss
-  if (outBounds) {
-    outBounds.bx = bx;
-    outBounds.by = by;
-    outBounds.w = boxW;
-    outBounds.h = row - by + 1;
-  }
-
   return buf;
 }
 
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
   orderSessionList, formatAge,
+  MIN_SESSION_LIST_ROWS, SESSION_LIST_ENTRY_ROWS,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _sweepPidCache,
   _setPidResolver, KNOWN_EDITORS,

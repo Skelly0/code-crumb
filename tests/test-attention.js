@@ -540,4 +540,94 @@ describe('grid -- the main session is loaded but kept off the ring', () => {
   });
 });
 
+// -- grid.js: the list itself ------------------------------------------------
+
+const { renderSessionList, MIN_SESSION_LIST_ROWS } = require('../grid');
+const { PALETTES } = require('../themes');
+const THEMES = PALETTES[0].themes;
+// The list is absolute-positioned: rows are separated by cursor moves, not
+// newlines. Split on those first, then strip the colour codes.
+const strip = (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+const listRows = (raw) => raw.split(/\x1b\[\d+;\d+H/).map(strip).filter(r => r.trim());
+const TREE = String.fromCharCode(0x2514);   // └
+const PARENT = String.fromCharCode(0x21b3); // ↳
+const PIN = String.fromCharCode(0x229b);    // ⊛
+const STAR = String.fromCharCode(0x2605);   // ★
+
+describe('grid -- renderSessionList tree and info row', () => {
+  const now = Date.now();
+  const main = { sessionId: 'M', isMain: true, isPinned: false, label: 'claude', state: 'coding', detail: 'edit a.js', editor: 'claude', toolCalls: 12, filesEdited: 3, lastUpdate: now - 3000 };
+
+  test('a child row carries the tree marker and names its parent on the info row', () => {
+    const child = mf('M-agent-1', { parentSession: 'M', agentType: 'Explore', label: 'explore', state: 'reading', lastUpdate: now - 65000 });
+    const out = strip(renderSessionList(80, 40, orderSessionList(main, [child]), THEMES, main, 'M'));
+    assert.ok(out.includes(TREE), 'tree marker on the child');
+    assert.ok(out.includes('Explore'), 'agent type on the info row');
+    assert.ok(out.includes('1m'), 'age on the info row');
+    assert.ok(out.includes(PARENT + ' claude'), 'parent label on the info row');
+  });
+
+  test('the main row shows tools, files and age', () => {
+    const out = strip(renderSessionList(80, 40, [], THEMES, main, 'M'));
+    assert.ok(/12 tools/.test(out));
+    assert.ok(/3 files/.test(out));
+    assert.ok(/\b3s\b/.test(out));
+  });
+
+  test('a teammate row shows its team and parent', () => {
+    const mate = mf('mate', { parentSession: 'M', isTeammate: true, teamName: 'core', teammateName: 'reviewer', label: 'reviewer', lastUpdate: now });
+    const out = strip(renderSessionList(80, 40, orderSessionList(main, [mate]), THEMES, main, 'M'));
+    assert.ok(out.includes('core'));
+    assert.ok(out.includes(PARENT + ' claude'));
+  });
+
+  test('selection by id highlights that row', () => {
+    const other = mf('B', { label: 'other', state: 'idle', lastUpdate: now });
+    const rows = listRows(renderSessionList(80, 40, orderSessionList(main, [other]), THEMES, main, 'B'));
+    const marker = String.fromCharCode(0x25b8);
+    const lines = rows.filter(l => l.includes(marker));
+    assert.strictEqual(lines.length, 1);
+    assert.ok(lines[0].includes('other'));
+  });
+
+  test('footer says pin on the unpinned main row and unpin on the pinned one', () => {
+    const outA = strip(renderSessionList(80, 40, [], THEMES, main, 'M'));
+    assert.ok(/\u23ce pin\b/.test(outA) && !/pin\+promote/.test(outA));
+    const outB = strip(renderSessionList(80, 40, [], THEMES, { ...main, isPinned: true }, 'M'));
+    assert.ok(/\u23ce unpin/.test(outB));
+    assert.ok(outB.includes(PIN));
+  });
+
+  test('footer says pin+promote on any other row', () => {
+    const other = mf('B', { label: 'other', state: 'idle', lastUpdate: now });
+    const out = strip(renderSessionList(80, 40, orderSessionList(main, [other]), THEMES, main, 'B'));
+    assert.ok(/pin\+promote/.test(out));
+  });
+
+  test('draws nothing below MIN_SESSION_LIST_ROWS and never overruns above it', () => {
+    assert.strictEqual(renderSessionList(80, MIN_SESSION_LIST_ROWS - 1, [], THEMES, main, 'M'), '');
+    const many = Array.from({ length: 9 }, (_, i) => mf(`s${i}`, { label: `s${i}`, state: 'idle', lastUpdate: now }));
+    for (const rows of [MIN_SESSION_LIST_ROWS, 15, 20, 24]) {
+      const out = renderSessionList(80, rows, orderSessionList(main, many), THEMES, main, 's8');
+      const positions = [...out.matchAll(/\x1b\[(\d+);\d+H/g)].map(m => Number(m[1]));
+      assert.ok(Math.max(...positions) <= rows, `rows=${rows}: bottom border at ${Math.max(...positions)}`);
+      assert.ok(Math.min(...positions) >= 1);
+    }
+  });
+
+  test('every row stays exactly boxW wide with the info row present', () => {
+    const child = mf('M-agent-1', { parentSession: 'M', agentType: 'general-purpose', label: 'a very long', state: 'reading', lastUpdate: now });
+    const rows = listRows(renderSessionList(80, 40, orderSessionList(main, [child]), THEMES, main, 'M'));
+    const widths = new Set(rows.map(r => r.length));
+    assert.strictEqual(widths.size, 1, `row widths differ: ${[...widths].join(',')}`);
+  });
+
+  test('plain face arrays and numeric selection still work (legacy callers)', () => {
+    const other = mf('B', { label: 'other', state: 'idle', lastUpdate: now });
+    const out = strip(renderSessionList(80, 40, [other], THEMES, main, 1));
+    assert.ok(out.includes('other'));
+    assert.ok(out.includes(STAR));
+  });
+});
+
 module.exports = suite;
