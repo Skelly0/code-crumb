@@ -437,8 +437,8 @@ describe('adapters -- lastPromptAt', () => {
 
 // -- grid.js: ordering, age, main-in-faces ---------------------------------
 
-const { MiniFace, OrbitalSystem, orderSessionList, formatAge } = require('../grid');
-const { writeJsonAtomic } = require('../shared');
+const { MiniFace, OrbitalSystem, orderSessionList, listNavigableIds, formatAge } = require('../grid');
+const { writeJsonAtomic, STATE_FILE } = require('../shared');
 
 function mf(id, over = {}) {
   const f = new MiniFace(id);
@@ -484,6 +484,35 @@ describe('grid -- orderSessionList', () => {
   test('teammates without a parent are ordered as top-level entries', () => {
     const out = orderSessionList(main, [mf('mate', { isTeammate: true, teammateName: 'reviewer' }), mf('A', { lastPromptAt: 5 })]);
     assert.deepStrictEqual(out.map(e => e.face.sessionId), ['M', 'A', 'mate']);
+  });
+});
+
+describe('grid -- listNavigableIds', () => {
+  test('a stopped entry is drawn but never selectable', () => {
+    // A finished session lingers on the list for ~10s so the user sees it end.
+    // Landing on it would be a dead key: pinning a stopped session is undone
+    // by the policy on the same tick.
+    const main = { sessionId: 'M', isMain: true, label: 'main' };
+    const entries = orderSessionList(main, [
+      mf('A', { lastPromptAt: 30 }),
+      mf('gone', { lastPromptAt: 20, stopped: true }),
+    ]);
+    assert.deepStrictEqual(entries.map(e => e.face.sessionId), ['M', 'A', 'gone'],
+      'sanity: the stopped row is still rendered');
+    assert.deepStrictEqual(listNavigableIds(entries), ['M', 'A']);
+  });
+
+  test('the main row stays navigable even when it reads as stopped', () => {
+    // Between turns the main row's `stopped` is the folded turnEnded, and
+    // Enter on it must still pin/unpin.
+    const main = { sessionId: 'M', isMain: true, stopped: true, label: 'main' };
+    const entries = orderSessionList(main, [mf('A', { lastPromptAt: 1 })]);
+    assert.deepStrictEqual(listNavigableIds(entries), ['M', 'A']);
+  });
+
+  test('empty and malformed input degrade to an empty list', () => {
+    assert.deepStrictEqual(listNavigableIds([]), []);
+    assert.deepStrictEqual(listNavigableIds(null), []);
   });
 });
 
@@ -650,7 +679,25 @@ describe('renderer -- readState follows a session file', () => {
   });
 
   test('readState() with no argument still reads the global file (tmux mode)', () => {
-    assert.ok(rendererSrc.includes('function readState(filePath = STATE_FILE)'));
+    // Behavioural, not a grep: tmux mode calls readState() bare and must keep
+    // getting ~/.code-crumb-state. The runner has already pointed STATE_FILE
+    // into its throwaway home, so writing it here is safe.
+    const t = makeTempEnv();
+    try {
+      writeJsonAtomic(STATE_FILE, { state: 'coding', detail: 'x', timestamp: 7, sessionId: 'g' });
+      assert.strictEqual(rendererMod.readState().state, 'coding');
+      assert.strictEqual(rendererMod.readState().sessionId, 'g');
+
+      const other = path.join(t.tmp, 'other.json');
+      writeJsonAtomic(other, { session_id: 'o', state: 'searching', detail: 'y', timestamp: 8 });
+      assert.strictEqual(rendererMod.readState(other).state, 'searching',
+        'an explicit path wins over the global file');
+      assert.strictEqual(rendererMod.readState().state, 'coding',
+        'and does not disturb the bare call');
+    } finally {
+      try { fs.unlinkSync(STATE_FILE); } catch {}
+      cleanup(t.tmp);
+    }
   });
 });
 
@@ -658,6 +705,34 @@ describe('renderer -- source invariants of the session-file main', () => {
   test('checkState stats the main session file, not the global state file', () => {
     assert.ok(rendererSrc.includes('const fp = mainSessionFile();'));
     assert.ok(!rendererSrc.includes('fs.statSync(STATE_FILE)'), 'the unified renderer no longer reads the global file');
+  });
+
+  test('the swap guard is hoisted to the top of checkState, before anything touches the face', () => {
+    // It used to sit inside the mtime branch, so on a tick where the old
+    // main's file was unchanged and this was not a forced read, the rescue
+    // block, the fresh-read block and idleCascade all still ran against the
+    // session that was leaving -- and the rescue's minDisplayUntil buffered
+    // the promoted face's own state for up to 3s after it materialized.
+    const start = rendererSrc.indexOf('function checkState()');
+    assert.ok(start > 0);
+    const head = rendererSrc.slice(start, rendererSrc.indexOf('    try {', start));
+    assert.ok(head.includes('applyMainPolicy();'), 'the policy runs first');
+    assert.ok(head.includes('if (swapTransition.active) return;'),
+      'and the transition guard immediately after it, before the try block');
+    // Exactly one guard site inside checkState: the old inner one is gone.
+    // (applyMainPolicy has its own, which is a different question.)
+    const body = rendererSrc.slice(start, rendererSrc.indexOf('\n  }\n', start));
+    const guards = body.match(/if \(swapTransition\.active\) return;/g) || [];
+    assert.strictEqual(guards.length, 1, 'checkState guards the transition once, at the top');
+  });
+
+  test('a materialized face shows its own session at once (forceState, not setState)', () => {
+    const start = rendererSrc.indexOf('function _executeSwap()');
+    const body = rendererSrc.slice(start, rendererSrc.indexOf('\n  }\n', start));
+    assert.ok(body.includes("face.forceState(newData.state || 'idle', newData.detail || '')"),
+      'a leftover minDisplayUntil from the old session must not buffer the new one');
+    assert.ok(!body.includes('face.setState('), 'setState would queue behind the old min display');
+    assert.ok(body.includes('face.setStats(newData);'));
   });
 
   test('a fresh turnEnded write is shown as responding before the reward cascade', () => {

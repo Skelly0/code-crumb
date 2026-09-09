@@ -1733,6 +1733,20 @@ function orderSessionList(mainInfo, faces) {
   return out;
 }
 
+// Pure: which of the rendered rows the cursor may land on. A stopped session
+// lingers on the list for ~10s after it ends so the user sees it finish, but
+// it is display-only: pinning it is a no-op the policy immediately undoes
+// (a stopped session is never live, so the pin is released on the same tick),
+// which reads as a dead key. The main row is always navigable -- between turns
+// its `stopped` is the folded `turnEnded`, and pin/unpin must keep working.
+//   entries  [{ face, depth }] from orderSessionList
+// Returns the session ids, in rendered order, that j/k and Enter may select.
+function listNavigableIds(entries) {
+  return (entries || [])
+    .filter(e => e && e.face && (e.face.isMain || !e.face.stopped))
+    .map(e => e.face.sessionId);
+}
+
 function _truncatePath(fullPath, maxLen) {
   if (!fullPath) return '';
   // Normalize to forward slashes
@@ -1943,7 +1957,7 @@ function renderSessionList(cols, rows, entriesOrFaces, paletteThemes, mainInfo, 
 
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
-  orderSessionList, formatAge,
+  orderSessionList, listNavigableIds, formatAge,
   MIN_SESSION_LIST_ROWS, SESSION_LIST_ENTRY_ROWS,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _sweepPidCache,

@@ -23,7 +23,7 @@ const {
 const { mouths, eyes, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { ClaudeFace } = require('./face');
-const { MiniFace, OrbitalSystem, renderSessionList, orderSessionList, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartStatus } = require('./grid');
+const { MiniFace, OrbitalSystem, renderSessionList, orderSessionList, listNavigableIds, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartStatus } = require('./grid');
 const { SwapTransition } = require('./transition');
 
 // -- Config --------------------------------------------------------
@@ -368,6 +368,15 @@ function runUnifiedMode() {
     const now = Date.now();
     let cachedStateData = null; // Cache readState() to avoid duplicate fs.readFileSync
     applyMainPolicy();
+    // Nothing may touch the face or the trackers while it dissolves. The old
+    // guard sat inside the mtime branch, so on the ~3 ticks in 4 where the old
+    // main's file is unchanged and this is not a forced read, execution fell
+    // straight past it into the rescue block, the fresh-read block and
+    // idleCascade -- all still acting on the session that is leaving. The
+    // rescue's forceState('responding') then buffered the promoted face's own
+    // state for up to 3s after it materialized. Returning here costs nothing:
+    // adoptMain resets every tracker at the swap frame anyway.
+    if (swapTransition.active) return;
     try {
       const fp = mainSessionFile();
       if (!fp) throw new Error('no main session yet');
@@ -400,6 +409,12 @@ function runUnifiedMode() {
         }
         // PID liveness check: an armed editor process that died without
         // writing a Stop event (crash, kill) triggers the rescue cascade.
+        // Note `lastStopped` now also covers a plain turn end -- readState
+        // folds the session file's `turnEnded` into `stopped` -- so an editor
+        // that dies while sitting between turns is never seen as editorDead.
+        // It is demoted by staleness instead (the policy drops a stale session
+        // and picks another), which is the honest reading: a session waiting
+        // for its next prompt looks exactly like one whose window was closed.
         if (lastEditorPid && !editorDead && !lastStopped && !RESCUE_EXCLUDE.has(face.state)) {
           if (!isProcessAlive(lastEditorPid)) {
             editorDead = true;
@@ -459,13 +474,10 @@ function runUnifiedMode() {
         // Same proof, kept as a clock: this is the ONLY place the write clock
         // moves forward. No read marker can serve -- lastForceReadTime and its
         // kind are refreshed by every forced re-read of the unchanged file.
-        // Stamped before the swap guard so a write during a transition still
-        // counts as the editor breathing.
+        // (A write landing mid-transition is not seen at all: checkState now
+        // returns at the top while a swap animates. Nothing is lost -- the
+        // swap frame's adoptMain resets this clock for the new session.)
         lastNewWriteAt = noteNewWrite(ts, lastAppliedTimestamp, now, lastNewWriteAt);
-
-        // Don't apply incoming state while a swap transition is animating —
-        // the face should dissolve with its current state until the swap frame.
-        if (swapTransition.active) return;
 
         if (ts > lastAppliedTimestamp) {
           lastAppliedTimestamp = ts;
@@ -510,7 +522,12 @@ function runUnifiedMode() {
         FRESH_READ_STATES.has(face.state) &&
         (face.state === 'thinking' || now - lastForceReadTime > 2000)) {
       try {
-        const freshData = cachedStateData || readState(mainSessionFile());
+        // Explicit, not accidental: with no main session there is no file to
+        // re-read. (readState(null) would throw into its own catch and hand
+        // back a default idle state, which reads like data but is not.)
+        const freshFp = mainSessionFile();
+        if (!cachedStateData && !freshFp) throw new Error('no main session yet');
+        const freshData = cachedStateData || readState(freshFp);
         const freshTs = freshData.timestamp || 0;
         // Detect stopped transition: false->true only (the primary reset is in the apply block above, plus session adoption)
         const stoppedNow = freshData.stopped || false;
@@ -699,7 +716,11 @@ function runUnifiedMode() {
         lastAppliedTimestamp = ts;
         lastAppliedState = newData.state;
         lastStopped = !!newData.stopped;
-        face.setState(newData.state || 'idle', newData.detail || '');
+        // forceState, not setState: a materialized face must show its own
+        // session at once. Any leftover minDisplayUntil belongs to the session
+        // that just left, and setState would buffer this behind it. No third
+        // argument, so the new state's own table minimum applies from here.
+        face.forceState(newData.state || 'idle', newData.detail || '');
         face.setStats(newData);
       }
     } catch {
@@ -799,7 +820,8 @@ function runUnifiedMode() {
         teamName: mainFace ? mainFace.teamName : '',
       } : null;
       const entries = orderSessionList(mainInfo, orbital.getSortedFaces());
-      face.sessionListIds = entries.map(e => e.face.sessionId);
+      // Every entry is drawn; only the live ones can be selected.
+      face.sessionListIds = listNavigableIds(entries);
       if (!face.sessionListIds.includes(face.sessionListSelectedId)) {
         face.sessionListSelectedId = face.sessionListIds[0] || null;
       }
