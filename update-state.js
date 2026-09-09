@@ -611,9 +611,15 @@ process.stdin.on('end', () => {
       stats.topLevelSessions[sessionId] = Date.now();
       pruneTopLevelSessions(stats.topLevelSessions, Date.now());
       // sessionCount already incremented in new-session block above
-      // Clean up any stale session file from previous session with same ID
-      const staleSessionFile = path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json');
-      try { fs.unlinkSync(staleSessionFile); } catch {}
+      // Clean up any stale session file left by a PREVIOUS session with the
+      // same id (resume/startup). A compaction restart is that same live
+      // session, so its file stays put and the sticky read below carries
+      // lastPromptAt forward -- otherwise compacting would demote the window
+      // the user is actively working in from "addressed at T" to never.
+      if (data.source !== 'compact') {
+        const staleSessionFile = path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json');
+        try { fs.unlinkSync(staleSessionFile); } catch {}
+      }
       stats.session = {
         id: sessionId, start: Date.now(),
         toolCalls: 0, filesEdited: [], subagentCount: 0, commitCount: 0,
@@ -848,36 +854,47 @@ process.stdin.on('end', () => {
       // Preserve stopped flag and sticky fields from existing session file
       // (set once at SubagentStart/TeammateIdle, must survive subsequent hook updates)
       const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'editor', 'lastPromptAt'];
-      try {
-        const existingSession = JSON.parse(fs.readFileSync(
-          path.join(SESSIONS_DIR, safeFilename(writeSessionId) + '.json'), 'utf8'));
-        if (!stopped && existingSession.stopped &&
-            (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')) {
-          stopped = true;
-          extra.stopped = true;
-        }
-        // Same rule for the turn boundary: a late PostToolUse must not erase a
-        // Stop; a new turn's PreToolUse/UserPromptSubmit does not carry it.
-        if (!stopped && existingSession.turnEnded &&
-            (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')) {
-          extra.turnEnded = true;
-        }
-        for (const field of STICKY_FIELDS) {
-          if (existingSession[field] && !extra[field]) {
-            extra[field] = existingSession[field];
+      // A fresh session starts with fresh fields, so it reads nothing: the
+      // unlink above normally leaves no file, but a failed unlink (a locked
+      // file on Windows) would otherwise resurrect a dead session's agentType
+      // and team fields onto a brand-new one. A compaction is the same live
+      // session and does read -- that is how it keeps its own sticky fields.
+      if (hookEvent !== 'SessionStart' || data.source === 'compact') {
+        try {
+          const existingSession = JSON.parse(fs.readFileSync(
+            path.join(SESSIONS_DIR, safeFilename(writeSessionId) + '.json'), 'utf8'));
+          if (!stopped && existingSession.stopped &&
+              (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')) {
+            stopped = true;
+            extra.stopped = true;
           }
-        }
-        // Heal sessions falsely stamped as subagents (#134): the stats owner
-        // and classified parallel windows are top-level by definition — drop a
-        // stale parentSession/taskDescription stamp instead of preserving it.
-        // (Teammates keep theirs; their fields are legitimately set. An agent
-        // event writes the agent's file under the parent's session_id, so it
-        // is exempt too -- its parentSession stamp is the correct one.)
-        if (!isAgentEvent && (isParallelSession || stats.session.id === sessionId) && !extra.isTeammate) {
-          delete extra.parentSession;
-          delete extra.taskDescription;
-        }
-      } catch {}
+          // Same rule for the turn boundary: a late PostToolUse must not erase a
+          // Stop; a new turn's PreToolUse/UserPromptSubmit does not carry it.
+          // A finished turn reads as `stopped || turnEnded` on a session file:
+          // the owner's late PostToolUse re-stamps `stopped` via the global
+          // guard above, a parallel window's carries `turnEnded` here; the
+          // renderer folds both.
+          if (!stopped && existingSession.turnEnded &&
+              (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')) {
+            extra.turnEnded = true;
+          }
+          for (const field of STICKY_FIELDS) {
+            if (existingSession[field] && !extra[field]) {
+              extra[field] = existingSession[field];
+            }
+          }
+          // Heal sessions falsely stamped as subagents (#134): the stats owner
+          // and classified parallel windows are top-level by definition — drop a
+          // stale parentSession/taskDescription stamp instead of preserving it.
+          // (Teammates keep theirs; their fields are legitimately set. An agent
+          // event writes the agent's file under the parent's session_id, so it
+          // is exempt too -- its parentSession stamp is the correct one.)
+          if (!isAgentEvent && (isParallelSession || stats.session.id === sessionId) && !extra.isTeammate) {
+            delete extra.parentSession;
+            delete extra.taskDescription;
+          }
+        } catch {}
+      }
       if (hookEvent === 'Stop' && !isAgentEvent) {
         // Stop = end of turn, not end of session. Keep orbital visible as idle.
         // Global state file already has stopped=true for ownership release.

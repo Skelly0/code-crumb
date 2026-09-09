@@ -142,6 +142,34 @@ describe('update-state -- attention fields', () => {
     } finally { cleanup(t.tmp); }
   });
 
+  test('a compaction restart preserves the session lastPromptAt exactly', () => {
+    // A compact SessionStart is the same live session: it must not demote the
+    // window the user is working in from "addressed at T" to "never addressed".
+    const t = makeTempEnv('att-2b');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'att-2b', prompt: 'hi' }, t.env);
+      const first = readJSON(sessionFile(t.sessionsDir, 'att-2b')).lastPromptAt;
+      assert.ok(first > 0);
+      const spin = Date.now() + 3; while (Date.now() < spin) { /* 3ms */ }
+      runUpdateState('SessionStart', { session_id: 'att-2b', source: 'compact' }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'att-2b'));
+      assert.strictEqual(s.lastPromptAt, first, 'carried through the compaction');
+      assert.strictEqual(s.isSessionStart, true);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a real new session re-stamps lastPromptAt over the old one', () => {
+    const t = makeTempEnv('att-2c');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'att-2c', prompt: 'hi' }, t.env);
+      const first = readJSON(sessionFile(t.sessionsDir, 'att-2c')).lastPromptAt;
+      const spin = Date.now() + 3; while (Date.now() < spin) { /* 3ms */ }
+      runUpdateState('SessionStart', { session_id: 'att-2c', source: 'startup' }, t.env);
+      const second = readJSON(sessionFile(t.sessionsDir, 'att-2c')).lastPromptAt;
+      assert.ok(second > first, 'startup is a fresh session, not a continuation');
+    } finally { cleanup(t.tmp); }
+  });
+
   test('UserPromptSubmit stamps lastPromptAt and a later tool event preserves it', () => {
     const t = makeTempEnv('att-3');
     try {
