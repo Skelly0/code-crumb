@@ -263,4 +263,57 @@ describe('update-state -- attention fields', () => {
   });
 });
 
+// -- adapters: attention for non-Claude editors ---------------------------
+
+const OPENCODE_ADAPTER = path.join(__dirname, '..', 'adapters', 'opencode-adapter.js');
+
+function runAdapter(script, payload, env) {
+  try {
+    execFileSync(NODE, [script], {
+      input: JSON.stringify(payload), env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    if (e.status !== 0 && e.status !== null) throw e;
+  }
+}
+
+describe('adapters -- lastPromptAt', () => {
+  test('the first event of a session stamps lastPromptAt and a tool event preserves it', () => {
+    const t = makeTempEnv();
+    try {
+      runAdapter(OPENCODE_ADAPTER, { type: 'session.created', sessionId: 'ses_a' }, t.env);
+      const first = readJSON(sessionFile(t.sessionsDir, 'ses_a')).lastPromptAt;
+      assert.ok(first > 0, 'stamped on session start');
+      runAdapter(OPENCODE_ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_a', tool: 'read', toolInput: { filePath: 'a.js' } }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'ses_a')).lastPromptAt, first, 'sticky');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('the first event after a turn end is a new turn and re-stamps', () => {
+    const t = makeTempEnv();
+    try {
+      runAdapter(OPENCODE_ADAPTER, { type: 'session.created', sessionId: 'ses_b' }, t.env);
+      const first = readJSON(sessionFile(t.sessionsDir, 'ses_b')).lastPromptAt;
+      runAdapter(OPENCODE_ADAPTER, { type: 'session.idle', sessionId: 'ses_b' }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'ses_b')).stopped, true, 'turn end still marks the file stopped');
+      const spin = Date.now() + 3; while (Date.now() < spin) { /* 3ms */ }
+      runAdapter(OPENCODE_ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_b', tool: 'read', toolInput: { filePath: 'a.js' } }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'ses_b'));
+      assert.ok(s.lastPromptAt > first, 'new turn = new attention');
+      assert.ok(!s.stopped);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a turn end does not itself stamp attention', () => {
+    const t = makeTempEnv();
+    try {
+      runAdapter(OPENCODE_ADAPTER, { type: 'session.created', sessionId: 'ses_c' }, t.env);
+      const first = readJSON(sessionFile(t.sessionsDir, 'ses_c')).lastPromptAt;
+      const spin = Date.now() + 3; while (Date.now() < spin) { /* 3ms */ }
+      runAdapter(OPENCODE_ADAPTER, { type: 'session.idle', sessionId: 'ses_c' }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'ses_c')).lastPromptAt, first);
+    } finally { cleanup(t.tmp); }
+  });
+});
+
 module.exports = suite;

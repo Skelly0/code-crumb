@@ -307,6 +307,19 @@ function runStdinAdapter(options) {
 
       const extra = buildExtra(stats, sessionId, modelName, editor);
 
+      // Attention stamp for the renderer's main-face policy. Each adapter
+      // event is its own process, so the session file is the only memory:
+      // the first event of a session, or the first after a turn end, starts a
+      // new turn and stamps now; anything else carries the old stamp forward.
+      let prevSession = null;
+      try {
+        prevSession = JSON.parse(fs.readFileSync(
+          path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
+      } catch {}
+      const endsTurn = event === 'turn_end' || event === 'Stop' || event === 'session_end' || event === 'error';
+      if (!endsTurn && (!prevSession || prevSession.stopped)) extra.lastPromptAt = Date.now();
+      else if (prevSession && prevSession.lastPromptAt) extra.lastPromptAt = prevSession.lastPromptAt;
+
       let state = 'thinking';
       let detail = '';
       let stopped = false;
