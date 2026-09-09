@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js 18+](https://img.shields.io/badge/node-18%2B-brightgreen.svg)](https://nodejs.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-blue.svg)](#)
-[![1965 Tests](https://img.shields.io/badge/tests-1965-brightgreen.svg)](#)
+[![2039 Tests](https://img.shields.io/badge/tests-2039-brightgreen.svg)](#)
 
 A terminal tamagotchi that shows what your AI coding assistant is doing.
 
@@ -180,6 +180,8 @@ When your session spawns subagents (e.g. Claude Code's `Task` tool), mini-faces 
 - Sessions appear when subagents start, linger briefly after they stop, then fade
 - Toggle with `o`
 
+**Which face is in the center?** The center follows your attention: the session you most recently sent a prompt to. Start a new window or type in an old one and the big face swaps to it (a `SessionStart` from `/compact` does not count). Promoting a session from the list (`l`, then `Enter`) pins it there, shown as `⊛`; the pin releases by itself when that session ends or goes quiet, and `Enter` on the main row un-pins it. Each entry in the list has an info row: tool and file counts with the age of the last write for a session, agent type with its parent for a subagent.
+
 ### Color Palettes
 
 Six palettes — press `t` to cycle. Preferences persist between sessions.
@@ -213,7 +215,7 @@ Six palettes — press `t` to cycle. Preferences persist between sessions.
 | `o` | Toggle orbital subagents |
 | `l` | Open session list |
 | `↑↓` / `j/k` | Navigate session list |
-| `Enter` | Promote selected orbital to main (on the first row: un-pin and resume auto-swap) |
+| `Enter` | On the main row: pin / unpin it. On any other row: pin and promote it to the center |
 | `h` / `?` | Toggle help overlay |
 | `q` / Ctrl+C | Quit |
 
