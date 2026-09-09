@@ -101,4 +101,138 @@ describe('renderer -- pickMainSession', () => {
   });
 });
 
+// -- update-state.js: the fields the policy reads ------------------------
+
+const NODE = process.execPath;
+const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
+
+function runUpdateState(event, inputObj, env) {
+  try {
+    execFileSync(NODE, [UPDATE_STATE, event], {
+      input: typeof inputObj === 'string' ? inputObj : JSON.stringify(inputObj),
+      env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    if (e.status !== 0 && e.status !== null) throw e;
+  }
+}
+
+const sessionFile = (dir, id) => path.join(dir, `${id}.json`);
+
+describe('update-state -- attention fields', () => {
+  test('SessionStart writes a session file with isSessionStart and lastPromptAt', () => {
+    const t = makeTempEnv('att-1');
+    try {
+      const before = Date.now();
+      runUpdateState('SessionStart', { session_id: 'att-1', source: 'startup' }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'att-1'));
+      assert.strictEqual(s.isSessionStart, true);
+      assert.strictEqual(s.state, 'idle');
+      assert.ok(s.lastPromptAt >= before, 'lastPromptAt stamped');
+      assert.ok(!s.stopped);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('SessionStart from compaction does not stamp lastPromptAt', () => {
+    const t = makeTempEnv('att-2');
+    try {
+      runUpdateState('SessionStart', { session_id: 'att-2', source: 'compact' }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'att-2'));
+      assert.strictEqual(s.lastPromptAt, undefined);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('UserPromptSubmit stamps lastPromptAt and a later tool event preserves it', () => {
+    const t = makeTempEnv('att-3');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'att-3', prompt: 'hi' }, t.env);
+      const first = readJSON(sessionFile(t.sessionsDir, 'att-3')).lastPromptAt;
+      assert.ok(first > 0);
+      runUpdateState('PreToolUse', { session_id: 'att-3', tool_name: 'Read', tool_input: { file_path: 'a.js' } }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'att-3'));
+      assert.strictEqual(s.state, 'reading');
+      assert.strictEqual(s.lastPromptAt, first, 'sticky across later writes');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a second UserPromptSubmit moves lastPromptAt forward', () => {
+    const t = makeTempEnv('att-4');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'att-4', prompt: 'a' }, t.env);
+      const first = readJSON(sessionFile(t.sessionsDir, 'att-4')).lastPromptAt;
+      const spin = Date.now() + 3; while (Date.now() < spin) { /* 3ms */ }
+      runUpdateState('UserPromptSubmit', { session_id: 'att-4', prompt: 'b' }, t.env);
+      const second = readJSON(sessionFile(t.sessionsDir, 'att-4')).lastPromptAt;
+      assert.ok(second > first);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('Stop writes idle / between turns with turnEnded and no stopped', () => {
+    const t = makeTempEnv('att-5');
+    try {
+      runUpdateState('PreToolUse', { session_id: 'att-5', tool_name: 'Bash', tool_input: { command: 'ls' } }, t.env);
+      runUpdateState('Stop', { session_id: 'att-5' }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'att-5'));
+      assert.strictEqual(s.state, 'idle');
+      assert.strictEqual(s.detail, 'between turns');
+      assert.strictEqual(s.turnEnded, true);
+      assert.ok(!s.stopped, 'a turn end is not a session end');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a late PostToolUse after Stop still reads as a finished turn; the next PreToolUse does not', () => {
+    // The global-owner guard already re-stamps `stopped` on a late PostToolUse
+    // when this session owns the global file; the session-file guard added
+    // here covers the parallel window that does not. Either way the turn
+    // must still read as ended, and a new turn must clear both.
+    const t = makeTempEnv('att-6');
+    try {
+      runUpdateState('Stop', { session_id: 'att-6' }, t.env);
+      runUpdateState('PostToolUse', { session_id: 'att-6', tool_name: 'Read', tool_input: { file_path: 'a.js' }, tool_response: { stdout: 'ok' } }, t.env);
+      const late = readJSON(sessionFile(t.sessionsDir, 'att-6'));
+      assert.ok(late.stopped || late.turnEnded, 'still ended after a late PostToolUse');
+      runUpdateState('PreToolUse', { session_id: 'att-6', tool_name: 'Read', tool_input: { file_path: 'b.js' } }, t.env);
+      const fresh = readJSON(sessionFile(t.sessionsDir, 'att-6'));
+      assert.ok(!fresh.stopped && !fresh.turnEnded, 'a new turn clears both');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a parallel window (not the global owner) keeps turnEnded through a late PostToolUse', () => {
+    const t = makeTempEnv('att-6b');
+    try {
+      // Another session owns the global file and is fresh.
+      const { writeJsonAtomic } = require('../shared');
+      writeJsonAtomic(t.stateFile, { state: 'coding', detail: '', timestamp: Date.now(), sessionId: 'owner' });
+      runUpdateState('Stop', { session_id: 'att-6b' }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'att-6b')).turnEnded, true);
+      runUpdateState('PostToolUse', { session_id: 'att-6b', tool_name: 'Read', tool_input: { file_path: 'a.js' }, tool_response: { stdout: 'ok' } }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'att-6b')).turnEnded, true, 'session-file guard carries it');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('an agent Stop does not stamp turnEnded on the agent orbital', () => {
+    const t = makeTempEnv('att-7');
+    try {
+      runUpdateState('Stop', { session_id: 'att-7', agent_id: 'ag1', agent_type: 'Explore' }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'att-7-agent-ag1'));
+      assert.strictEqual(s.turnEnded, undefined);
+      assert.strictEqual(s.state, 'responding');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('fallback (empty stdin): SessionStart and UserPromptSubmit stamp lastPromptAt, Stop stamps turnEnded', () => {
+    const t = makeTempEnv('att-8');
+    try {
+      runUpdateState('SessionStart', '', t.env);
+      assert.ok(readJSON(sessionFile(t.sessionsDir, 'att-8')).lastPromptAt > 0);
+      runUpdateState('UserPromptSubmit', '', t.env);
+      assert.ok(readJSON(sessionFile(t.sessionsDir, 'att-8')).lastPromptAt > 0);
+      runUpdateState('Stop', '', t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'att-8'));
+      assert.strictEqual(s.turnEnded, true);
+      assert.strictEqual(s.state, 'idle');
+    } finally { cleanup(t.tmp); }
+  });
+});
+
 module.exports = suite;

@@ -740,6 +740,15 @@ process.stdin.on('end', () => {
     if (workState) { extra.workState = workState; extra.workDetail = workDetail; }
     if (hookEvent === 'SessionStart') extra.isSessionStart = true;
 
+    // Attention stamp: the user just addressed THIS session. The renderer's
+    // main-face policy follows the newest one. A SessionStart from compaction
+    // is not the user's attention and must not pull the center away from the
+    // window they are typing in.
+    if (hookEvent === 'UserPromptSubmit'
+        || (hookEvent === 'SessionStart' && data.source !== 'compact')) {
+      extra.lastPromptAt = Date.now();
+    }
+
     // Claude Code subagent event: everything below writes the agent's own
     // orbital, never the parent's records. There is no separate synthetic to
     // retire -- the SubagentStart file IS this orbital.
@@ -831,12 +840,14 @@ process.stdin.on('end', () => {
     if (hookEvent === 'SessionStart') shouldWriteGlobal = true;
 
     if (shouldWriteGlobal) writeState(state, detail, extra);
-    // Always write per-session file so parallel Claude Code sessions
-    // appear as orbitals. The renderer excludes the main session by ID.
-    if (hookEvent !== 'SessionStart') {
+    // Always write the per-session file: it is what the renderer's main face
+    // follows and what parallel sessions appear as. SessionStart writes one
+    // too (its stale predecessor was unlinked above), so a fresh session is
+    // a candidate for the center before its first tool call.
+    {
       // Preserve stopped flag and sticky fields from existing session file
       // (set once at SubagentStart/TeammateIdle, must survive subsequent hook updates)
-      const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'editor'];
+      const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'editor', 'lastPromptAt'];
       try {
         const existingSession = JSON.parse(fs.readFileSync(
           path.join(SESSIONS_DIR, safeFilename(writeSessionId) + '.json'), 'utf8'));
@@ -844,6 +855,12 @@ process.stdin.on('end', () => {
             (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')) {
           stopped = true;
           extra.stopped = true;
+        }
+        // Same rule for the turn boundary: a late PostToolUse must not erase a
+        // Stop; a new turn's PreToolUse/UserPromptSubmit does not carry it.
+        if (!stopped && existingSession.turnEnded &&
+            (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')) {
+          extra.turnEnded = true;
         }
         for (const field of STICKY_FIELDS) {
           if (existingSession[field] && !extra[field]) {
@@ -864,7 +881,7 @@ process.stdin.on('end', () => {
       if (hookEvent === 'Stop' && !isAgentEvent) {
         // Stop = end of turn, not end of session. Keep orbital visible as idle.
         // Global state file already has stopped=true for ownership release.
-        const idleExtra = { ...extra };
+        const idleExtra = { ...extra, turnEnded: true };
         delete idleExtra.stopped;
         writeSessionState(sessionId, 'idle', 'between turns', false, idleExtra);
       } else {
@@ -929,6 +946,7 @@ process.stdin.on('end', () => {
     } else if (hookEvent === 'UserPromptSubmit') {
       fallbackState = 'thinking';
       fallbackDetail = 'reading your message';
+      fallbackExtra.lastPromptAt = Date.now();
     } else if (hookEvent === 'TeammateIdle') {
       fallbackState = 'waiting';
       fallbackDetail = 'teammate idle';
@@ -939,6 +957,9 @@ process.stdin.on('end', () => {
       fallbackState = 'idle';
       fallbackDetail = 'session starting';
       fallbackExtra.isSessionStart = true;
+      // No payload here, so no `source` to check: a fallback SessionStart
+      // always counts as attention (see the main path's compaction guard).
+      fallbackExtra.lastPromptAt = Date.now();
       // Clean up any stale session file from previous session with same ID
       const staleSessionFile = path.join(SESSIONS_DIR, safeFilename(fallbackSessionId) + '.json');
       try { fs.unlinkSync(staleSessionFile); } catch {}
@@ -994,7 +1015,7 @@ process.stdin.on('end', () => {
     const sessionFileId = shouldWriteGlobal ? fallbackSessionId : originalFallbackId;
     const sessionExtra = { ...fallbackExtra, sessionId: sessionFileId };
     if (hookEvent === 'Stop') {
-      const idleFallbackExtra = { ...sessionExtra };
+      const idleFallbackExtra = { ...sessionExtra, turnEnded: true };
       delete idleFallbackExtra.stopped;
       writeSessionState(sessionFileId, 'idle', 'between turns', false, idleFallbackExtra);
     } else {
