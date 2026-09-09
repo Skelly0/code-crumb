@@ -435,4 +435,109 @@ describe('adapters -- lastPromptAt', () => {
   });
 });
 
+// -- grid.js: ordering, age, main-in-faces ---------------------------------
+
+const { MiniFace, OrbitalSystem, orderSessionList, formatAge } = require('../grid');
+const { writeJsonAtomic } = require('../shared');
+
+function mf(id, over = {}) {
+  const f = new MiniFace(id);
+  Object.assign(f, over);
+  return f;
+}
+
+describe('grid -- formatAge', () => {
+  test('seconds under a minute', () => { assert.strictEqual(formatAge(3200), '3s'); });
+  test('minutes under an hour', () => { assert.strictEqual(formatAge(125000), '2m'); });
+  test('hours beyond', () => { assert.strictEqual(formatAge(3700000), '1h'); });
+  test('negative or NaN reads as 0s', () => { assert.strictEqual(formatAge(-5), '0s'); assert.strictEqual(formatAge(NaN), '0s'); });
+});
+
+describe('grid -- orderSessionList', () => {
+  const main = { sessionId: 'M', isMain: true, label: 'main' };
+
+  test('main first, its children under it, then other top-levels by attention with their children, orphans last', () => {
+    const faces = [
+      mf('B', { lastPromptAt: 20, firstSeen: 5 }),
+      mf('M-agent-2', { parentSession: 'M', firstSeen: 9 }),
+      mf('A', { lastPromptAt: 30, firstSeen: 6 }),
+      mf('M-agent-1', { parentSession: 'M', firstSeen: 3 }),
+      mf('A-agent-1', { parentSession: 'A', firstSeen: 7 }),
+      mf('lost-agent', { parentSession: 'ghost', firstSeen: 1 }),
+    ];
+    const out = orderSessionList(main, faces);
+    assert.deepStrictEqual(out.map(e => e.face.sessionId),
+      ['M', 'M-agent-1', 'M-agent-2', 'A', 'A-agent-1', 'B', 'lost-agent']);
+    assert.deepStrictEqual(out.map(e => e.depth), [0, 1, 1, 0, 1, 0, 0]);
+  });
+
+  test('equal attention breaks on firstSeen', () => {
+    const out = orderSessionList(main, [mf('B', { firstSeen: 9 }), mf('A', { firstSeen: 2 })]);
+    assert.deepStrictEqual(out.map(e => e.face.sessionId), ['M', 'A', 'B']);
+  });
+
+  test('no main: top-levels only', () => {
+    const out = orderSessionList(null, [mf('A', { lastPromptAt: 1 })]);
+    assert.deepStrictEqual(out.map(e => e.face.sessionId), ['A']);
+  });
+
+  test('teammates without a parent are ordered as top-level entries', () => {
+    const out = orderSessionList(main, [mf('mate', { isTeammate: true, teammateName: 'reviewer' }), mf('A', { lastPromptAt: 5 })]);
+    assert.deepStrictEqual(out.map(e => e.face.sessionId), ['M', 'A', 'mate']);
+  });
+});
+
+describe('grid -- the main session is loaded but kept off the ring', () => {
+  test('loadSessions(mainId) keeps the main in faces, getSortedFaces excludes it, liveChildCount still counts', () => {
+    const t = makeTempEnv();
+    try {
+      const dir = t.sessionsDir;
+      fs.mkdirSync(dir, { recursive: true });
+      const now = Date.now();
+      writeJsonAtomic(path.join(dir, 'M.json'), { session_id: 'M', state: 'coding', timestamp: now, lastPromptAt: now, toolCalls: 7, filesEdited: 2 });
+      writeJsonAtomic(path.join(dir, 'M-agent-1.json'), { session_id: 'M-agent-1', state: 'reading', timestamp: now, parentSession: 'M' });
+      writeJsonAtomic(path.join(dir, 'B.json'), { session_id: 'B', state: 'idle', timestamp: now });
+      const orb = new OrbitalSystem();
+      orb._sessionsDir = dir; // OrbitalSystem reads this._sessionsDir || SESSIONS_DIR
+      orb.loadSessions('M');
+      assert.ok(orb.faces.has('M'), 'main is loaded');
+      assert.strictEqual(orb.faces.get('M').lastPromptAt, now);
+      assert.strictEqual(orb.faces.get('M').toolCalls, 7);
+      assert.strictEqual(orb.faces.get('M').filesEdited, 2);
+      assert.deepStrictEqual(orb.getSortedFaces().map(f => f.sessionId).sort(), ['B', 'M-agent-1']);
+      assert.strictEqual(orb.liveChildCount(), 1);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('loadSessions(null) loads everything and excludes nothing', () => {
+    const t = makeTempEnv();
+    try {
+      const dir = t.sessionsDir;
+      fs.mkdirSync(dir, { recursive: true });
+      writeJsonAtomic(path.join(dir, 'A.json'), { session_id: 'A', state: 'idle', timestamp: Date.now() });
+      const orb = new OrbitalSystem();
+      orb._sessionsDir = dir;
+      orb.loadSessions(null);
+      assert.deepStrictEqual(orb.getSortedFaces().map(f => f.sessionId), ['A']);
+      assert.strictEqual(orb.mainSessionId, null);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('changing the main re-sorts the ring', () => {
+    const t = makeTempEnv();
+    try {
+      const dir = t.sessionsDir;
+      fs.mkdirSync(dir, { recursive: true });
+      writeJsonAtomic(path.join(dir, 'A.json'), { session_id: 'A', state: 'idle', timestamp: Date.now() });
+      writeJsonAtomic(path.join(dir, 'B.json'), { session_id: 'B', state: 'idle', timestamp: Date.now() });
+      const orb = new OrbitalSystem();
+      orb._sessionsDir = dir;
+      orb.loadSessions('A');
+      assert.deepStrictEqual(orb.getSortedFaces().map(f => f.sessionId), ['B']);
+      orb.setMainSession('B');
+      assert.deepStrictEqual(orb.getSortedFaces().map(f => f.sessionId), ['A']);
+    } finally { cleanup(t.tmp); }
+  });
+});
+
 module.exports = suite;

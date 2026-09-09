@@ -333,8 +333,9 @@ describe('grid.js -- OrbitalSystem session schema validation', () => {
     try { fs.unlinkSync(parallelFile); } catch {}
   });
 
-  test('loadSessions excludes session matching excludeId', () => {
-    // The main session should be excluded by its ID, not by missing fields
+  test('loadSessions loads the main session but keeps it off the ring', () => {
+    // The main session is read like any other file (the big face follows it)
+    // and is excluded from the orbitals by its ID, not by missing fields
     const fs = require('fs');
     const path = require('path');
     const { SESSIONS_DIR } = require('../shared');
@@ -350,8 +351,10 @@ describe('grid.js -- OrbitalSystem session schema validation', () => {
     }));
 
     orbital.loadSessions('main-session');
-    assert.ok(!orbital.faces.has('main-session'),
-      'session matching excludeId should be excluded');
+    assert.ok(orbital.faces.has('main-session'),
+      'the main session is loaded like any other session file');
+    assert.ok(!orbital.getSortedFaces().some(f => f.sessionId === 'main-session'),
+      'session matching excludeId should be excluded from the ring');
 
     // Clean up
     try { fs.unlinkSync(mainFile); } catch {}
@@ -2738,16 +2741,18 @@ describe('grid.js -- _applySessionResults', () => {
     assert.strictEqual(os.faces.get('sub2').state, 'reading');
   });
 
-  test('excludes main session from results', () => {
+  test('loads the main session from results but keeps it off the ring', () => {
     const os = new OrbitalSystem();
+    os.setMainSession('main-id');
     const results = [
       { file: 'main.json', data: { session_id: 'main-id', state: 'thinking' }, mtimeMs: Date.now() },
       { file: 'sub1.json', data: { session_id: 'sub1', state: 'coding' }, mtimeMs: Date.now() },
     ];
     os._applySessionResults('main-id', results);
-    assert.strictEqual(os.faces.size, 1);
-    assert.ok(os.faces.has('sub1'));
-    assert.ok(!os.faces.has('main-id'));
+    assert.strictEqual(os.faces.size, 2, 'the main is loaded like any other file');
+    assert.ok(os.faces.has('main-id'));
+    assert.deepStrictEqual(os.getSortedFaces().map(f => f.sessionId), ['sub1'],
+      'but it never appears among the orbitals');
   });
 
   test('protects existing face on empty file result', () => {
@@ -2847,10 +2852,16 @@ describe('grid.js -- loadSessionsAsync re-entrancy guard', () => {
     os._applySessionResults = original;
   });
 
-  test('skips load when excludeId is falsy', () => {
+  test('a falsy excludeId loads everything instead of bailing out', () => {
+    // Nothing is known to be the main face yet, so nothing is kept off the
+    // ring -- but every session file is still read. Points at a directory that
+    // does not exist so the async readdir fails and touches no real files.
+    const absentDir = require('path').join(require('os').tmpdir(), 'code-crumb-absent-sessions');
     const os = new OrbitalSystem();
+    os._sessionsDir = absentDir;
     os.loadSessionsAsync(null);
-    assert.ok(!os._loadingInProgress, 'should not set loading flag for null excludeId');
+    assert.strictEqual(os.mainSessionId, null, 'no session is kept off the ring');
+    assert.ok(os._loadingInProgress, 'the load runs rather than bailing out');
   });
 });
 

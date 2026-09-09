@@ -296,6 +296,9 @@ class MiniFace {
     this.gitBranch = null;     // current git branch (if known)
     this.taskDescription = ''; // sticky task description from SubagentStart
     this.pid = 0;              // owning process PID for liveness detection
+    this.lastPromptAt = 0;     // when the user last prompted this session (attention)
+    this.toolCalls = 0;        // session tool-call counter, for the list's info row
+    this.filesEdited = 0;
     this._lastDataTimestamp = 0; // Track JSON timestamp to skip redundant updates (ms precision)
     this.minDisplayUntil = 0;  // Minimum display time to prevent flashing
     this.pendingState = null;  // Buffered state when minDisplayUntil blocks
@@ -392,6 +395,9 @@ class MiniFace {
     if (data.gitBranch) this.gitBranch = data.gitBranch;
     if (data.taskDescription) this.taskDescription = data.taskDescription;
     if (data.pid) this.pid = data.pid;
+    if (data.lastPromptAt) this.lastPromptAt = data.lastPromptAt;
+    if (typeof data.toolCalls === 'number') this.toolCalls = data.toolCalls;
+    if (typeof data.filesEdited === 'number') this.filesEdited = data.filesEdited;
     // Classify: independent session = no parentSession and not a teammate
     this.isMainSession = !this.parentSession && !this.isTeammate;
 
@@ -732,24 +738,39 @@ class OrbitalSystem {
     this._loadingInProgress = false; // Re-entrancy guard for loadSessionsAsync
     this._groupsCache = null;        // Cached _buildGroups result
     this._groupsDirty = true;        // Flag to invalidate groups cache
+    this.mainSessionId = null;       // Session drawn as the big face, kept off the ring
+    this._sessionsDir = null;        // test seam; production reads SESSIONS_DIR
+  }
+
+  // The main session is loaded like any other file (the renderer's face
+  // follows its file through the same reads) but never drawn on the ring.
+  setMainSession(id) {
+    const next = id || null;
+    if (next !== this.mainSessionId) {
+      this.mainSessionId = next;
+      this._sortedDirty = true;
+      this._groupsDirty = true;
+    }
   }
 
   getSortedFaces() {
     if (this._sortedDirty) {
-      this._sortedCache = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+      this._sortedCache = [...this.faces.values()]
+        .filter(f => f.sessionId !== this.mainSessionId)
+        .sort((a, b) => a.firstSeen - b.firstSeen);
       this._sortedDirty = false;
     }
     return this._sortedCache;
   }
 
   loadSessions(excludeId) {
-    if (!excludeId) return;  // Can't filter main session yet — wait for mainSessionId
-    this.mainSessionId = excludeId;
+    const dir = this._sessionsDir || SESSIONS_DIR;
+    this.setMainSession(excludeId);
     const prevSize = this.faces.size;
     const prevKeys = new Set(this.faces.keys());
     let files;
     try {
-      files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'));
+      files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
     } catch {
       return;
     }
@@ -770,7 +791,7 @@ class OrbitalSystem {
     // really is a gone parent and its ghosts degrade on the normal schedule.
     const mtimes = new Map();
     for (const f of files) {
-      try { mtimes.set(f, fs.statSync(path.join(SESSIONS_DIR, f)).mtimeMs); } catch {}
+      try { mtimes.set(f, fs.statSync(path.join(dir, f)).mtimeMs); } catch {}
     }
     const parentIsFresh = (parentSession) => {
       const m = mtimes.get(safeFilename(parentSession) + '.json');
@@ -778,7 +799,7 @@ class OrbitalSystem {
     };
     for (const f of files) {
       try {
-        const fp = path.join(SESSIONS_DIR, f);
+        const fp = path.join(dir, f);
         const fileMtimeMs = mtimes.get(f);
         if (fileMtimeMs === undefined) continue;
         if (now - fileMtimeMs > STALE_MS) {
@@ -809,14 +830,14 @@ class OrbitalSystem {
       } catch {}
     }
     files = files.filter(f => {
-      try { return fs.existsSync(path.join(SESSIONS_DIR, f)); } catch { return false; }
+      try { return fs.existsSync(path.join(dir, f)); } catch { return false; }
     });
 
     const seenIds = new Set();
 
     for (const file of files) {
       try {
-        const fp = path.join(SESSIONS_DIR, file);
+        const fp = path.join(dir, file);
         const mtimeMs = fs.statSync(fp).mtimeMs;
         const raw = fs.readFileSync(fp, 'utf8').trim();
         if (!raw) {
@@ -832,9 +853,6 @@ class OrbitalSystem {
         // renderer's synchronous boot scan this enqueues all PIDs at once,
         // so one batched exec resolves them before the next purge cycle.
         if (data.pid) requestPidStartTime(data.pid);
-
-        // Skip the main session — it's the big face, not an orbital
-        if (excludeId && id === excludeId) continue;
 
         seenIds.add(id);
 
@@ -887,12 +905,12 @@ class OrbitalSystem {
   // (keypresses) can be processed between I/O operations.
 
   loadSessionsAsync(excludeId) {
-    if (!excludeId) return;
     if (this._loadingInProgress) return; // Re-entrancy guard
+    const dir = this._sessionsDir || SESSIONS_DIR;
     this._loadingInProgress = true;
-    this.mainSessionId = excludeId;
+    this.setMainSession(excludeId);
 
-    fs.readdir(SESSIONS_DIR, (err, allFiles) => {
+    fs.readdir(dir, (err, allFiles) => {
       if (err) { this._loadingInProgress = false; return; }
       const files = allFiles.filter(f => f.endsWith('.json'));
       if (files.length === 0) {
@@ -912,7 +930,7 @@ class OrbitalSystem {
       };
 
       for (const file of files) {
-        const fp = path.join(SESSIONS_DIR, file);
+        const fp = path.join(dir, file);
         fs.stat(fp, (statErr, stats) => {
           if (statErr) { results.push({ file, error: true }); onComplete(); return; }
           fs.readFile(fp, 'utf8', (readErr, raw) => {
@@ -952,7 +970,11 @@ class OrbitalSystem {
     return n;
   }
 
+  // excludeId is kept in the signature (loadSessionsAsync's call shape) but no
+  // longer filters: the main session is loaded like every other file and is
+  // only kept off the ring by getSortedFaces.
   _applySessionResults(excludeId, results) {
+    const dir = this._sessionsDir || SESSIONS_DIR;
     const prevSize = this.faces.size;
     const prevKeys = new Set(this.faces.keys());
 
@@ -1008,7 +1030,7 @@ class OrbitalSystem {
           continue;
         }
         // Stale and unprotected — delete asynchronously
-        fs.unlink(path.join(SESSIONS_DIR, r.file), () => {});
+        fs.unlink(path.join(dir, r.file), () => {});
         continue;
       }
       survivingResults.push(r);
@@ -1026,7 +1048,6 @@ class OrbitalSystem {
 
       const id = r.data.session_id || path.basename(r.file, '.json');
       if (r.data.pid) requestPidStartTime(r.data.pid); // keep start-time cache warm
-      if (excludeId && id === excludeId) continue;
       seenIds.add(id);
 
       if (!this.faces.has(id)) {
@@ -1067,7 +1088,9 @@ class OrbitalSystem {
   }
 
   _assignLabels() {
-    const sorted = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+    const sorted = [...this.faces.values()]
+      .filter(f => f.sessionId !== this.mainSessionId)
+      .sort((a, b) => a.firstSeen - b.firstSeen);
     if (sorted.length === 0) return;
 
     const cwdCounts = {};
@@ -1669,6 +1692,45 @@ class OrbitalSystem {
 
 const MIN_SESSION_LIST_COLS = 50;
 
+// Age of a write as the list shows it: 3s, 2m, 1h.
+function formatAge(ms) {
+  const s = Math.max(0, Math.floor((Number.isFinite(ms) ? ms : 0) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h`;
+}
+
+// Pure: the list's tree order. Main first with its agents under it, then the
+// other top-level sessions by attention (newest prompt first, then firstSeen),
+// each with its agents, then children whose parent is not on screen.
+//   mainInfo  the synthesized main row ({ sessionId, ... }) or null
+//   faces     the orbital MiniFaces (the main is not among them)
+// Returns [{ face, depth }] with depth 0 (top-level) or 1 (child).
+function orderSessionList(mainInfo, faces) {
+  const list = [...faces];
+  const mainId = mainInfo ? mainInfo.sessionId : null;
+  const byFirstSeen = (a, b) => (a.firstSeen || 0) - (b.firstSeen || 0);
+  const children = (pid) => list.filter(f => f.parentSession && f.parentSession === pid).sort(byFirstSeen);
+  const out = [];
+  const place = (face, depth) => out.push({ face, depth });
+
+  if (mainInfo) {
+    place(mainInfo, 0);
+    for (const c of children(mainId)) place(c, 1);
+  }
+  const tops = list
+    .filter(f => f.sessionId !== mainId && !f.parentSession)
+    .sort((a, b) => ((b.lastPromptAt || 0) - (a.lastPromptAt || 0)) || byFirstSeen(a, b));
+  for (const t of tops) {
+    place(t, 0);
+    for (const c of children(t.sessionId)) place(c, 1);
+  }
+  const placed = new Set(out.map(e => e.face.sessionId));
+  for (const f of list) if (!placed.has(f.sessionId)) place(f, 0);
+  return out;
+}
+
 function _truncatePath(fullPath, maxLen) {
   if (!fullPath) return '';
   // Normalize to forward slashes
@@ -1874,6 +1936,7 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
 
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
+  orderSessionList, formatAge,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _sweepPidCache,
   _setPidResolver, KNOWN_EDITORS,
