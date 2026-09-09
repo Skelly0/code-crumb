@@ -268,6 +268,12 @@ describe('update-state -- attention fields', () => {
 const OPENCODE_ADAPTER = path.join(__dirname, '..', 'adapters', 'opencode-adapter.js');
 const CODEX_WRAPPER = path.join(__dirname, '..', 'adapters', 'codex-wrapper.js');
 
+// The wrapper guards main() behind require.main, so requiring it spawns
+// nothing. test.js redirected HOME before loading this file, so shared.js has
+// already fixed SESSIONS_DIR inside the runner's throwaway home.
+const wrapper = require('../adapters/codex-wrapper');
+const { SESSIONS_DIR, safeFilename } = require('../shared');
+
 function runAdapter(script, payload, env) {
   try {
     execFileSync(NODE, [script], {
@@ -279,25 +285,19 @@ function runAdapter(script, payload, env) {
 }
 
 // A stand-in `codex` on PATH that replays a JSONL fixture through the real
-// wrapper spawn path. Unlike the copy in test-adapters.js it paces its lines
-// (CODEX_FAKE_DELAY_MS) and writes them with writeSync, so the gap between two
-// of the wrapper's own writes is observable from the final file alone.
+// wrapper spawn path (the pattern lives in test-adapters.js; copied, not
+// imported). writeSync flushes each line rather than leaving it in a pipe.
 const FAKE_SRC = [
   "'use strict';",
   "const fs = require('fs');",
   "const text = fs.readFileSync(process.env.CODEX_FAKE_FIXTURE, 'utf8');",
-  "const delay = Number(process.env.CODEX_FAKE_DELAY_MS || 0);",
-  "let first = true;",
   "for (const line of text.split('\\n')) {",
-  "  if (!line.trim()) continue;",
-  "  if (!first && delay) { const end = Date.now() + delay; while (Date.now() < end) {} }",
-  "  first = false;",
-  "  fs.writeSync(1, line + '\\n');",
+  "  if (line.trim()) fs.writeSync(1, line + '\\n');",
   "}",
   '',
 ].join('\n');
 
-function runFakeCodex(events, delayMs) {
+function runFakeCodex(events) {
   const base = makeTempEnv('codex-thread');
   const binDir = path.join(base.tmp, 'bin');
   fs.mkdirSync(binDir, { recursive: true });
@@ -314,7 +314,7 @@ function runFakeCodex(events, delayMs) {
     fs.chmodSync(sh, 0o755);
   }
 
-  const env = { ...base.env, CODEX_FAKE_FIXTURE: fixture, CODEX_FAKE_DELAY_MS: String(delayMs || 0) };
+  const env = { ...base.env, CODEX_FAKE_FIXTURE: fixture };
   // Windows env keys are case-insensitive; a stray Path AND PATH confuses the child.
   for (const k of Object.keys(env)) if (/^path$/i.test(k)) delete env[k];
   env.PATH = binDir + path.delimiter + (process.env.PATH || '');
@@ -384,25 +384,53 @@ describe('adapters -- lastPromptAt', () => {
     } finally { cleanup(t.tmp); }
   });
 
-  test('codex-wrapper stamps at turn start and carries it to the end of the turn', () => {
-    // The wrapper is one long-lived process, so the stamp lives in memory and
-    // only the final session file is observable. The fake paces its lines, so
-    // a stamp taken at turn.started is >= 2 delays older than the last write,
-    // while a re-stamp at item.started (1 delay) or turn.completed (0) is not.
-    const D = 50;
+  // In-process on purpose: telling a carried stamp from a re-stamped one needs
+  // the session file read after each single event, which one subprocess run --
+  // which only ever leaves its final file behind -- cannot give deterministically.
+  test('codex-wrapper: a turn start re-stamps, the rest of the turn carries it', () => {
+    // A unique thread id per run: the wrapper is a module, so its lastPromptAt
+    // and sessionId are shared with any other in-process user of it.
+    const threadId = `att-wrap-${Date.now()}`;
+    const file = path.join(SESSIONS_DIR, safeFilename(`codex-${threadId}`) + '.json');
+    const spin = () => { const until = Date.now() + 3; while (Date.now() < until) { /* 3ms */ } };
+
+    wrapper.handleEvent({ type: 'thread.started', thread_id: threadId });
+    assert.ok(fs.existsSync(file), 'thread.started writes the session file');
+    const a = readJSON(file).lastPromptAt;
+    assert.ok(a > 0, 'thread.started stamps');
+
+    spin();
+    wrapper.handleEvent({ type: 'turn.started' });
+    const b = readJSON(file).lastPromptAt;
+    assert.ok(b > a, 'a turn start is a new prompt, so it re-stamps');
+
+    spin();
+    wrapper.handleEvent({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'ls', status: 'in_progress' } });
+    const mid = readJSON(file);
+    assert.strictEqual(mid.lastPromptAt, b, 'a tool call carries the stamp, never re-stamps');
+    assert.ok(mid.timestamp > b, 'and the write itself is later than the stamp it carries');
+
+    wrapper.handleEvent({ type: 'turn.completed', usage: {} });
+    const last = readJSON(file);
+    assert.strictEqual(last.lastPromptAt, b, 'still the turn stamp when the turn ends');
+    assert.strictEqual(last.stopped, true);
+  });
+
+  test('codex-wrapper carries the stamp through a real spawned run', () => {
+    // End to end over the real spawn path. The final file is the
+    // codex.on('close') commit rather than the turn.completed one (both mark
+    // it stopped), so this pins the stamp's survival to the end of the process.
     const t = runFakeCodex([
       { type: 'thread.started', thread_id: 't1' },
       { type: 'turn.started' },
       { type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } },
       { type: 'turn.completed' },
-    ], D);
+    ]);
     try {
       const s = readJSON(sessionFile(t.sessionsDir, 'codex-t1'));
-      assert.strictEqual(s.stopped, true, 'the observed file is the turn.completed write');
       assert.ok(s.lastPromptAt > 0, 'stamped');
       assert.ok(s.lastPromptAt <= s.timestamp, 'never later than the write carrying it');
-      const gap = s.timestamp - s.lastPromptAt;
-      assert.ok(gap >= D + D / 2, `carried across item.started and turn.completed, not re-stamped (gap ${gap}ms)`);
+      assert.strictEqual(s.stopped, true, 'the run ended stopped');
     } finally { cleanup(t.tmp); }
   });
 });
