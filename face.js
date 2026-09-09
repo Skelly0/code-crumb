@@ -157,9 +157,9 @@ class ClaudeFace {
     this.showStats = true;
     this.showHelp = false;
     this.showSessionList = false;
-    this.sessionListIndex = 0;
-    this.sessionListCount = 0;
-    this.sessionListPromote = null;
+    this.sessionListSelectedId = null; // session id under the cursor
+    this.sessionListIds = [];          // rendered order, for j/k
+    this.sessionListPromote = null;    // session id to promote, set by Enter
     this.petTimer = 0;
     this.petWiggle = 0;
     this.petTimes = [];
@@ -602,7 +602,7 @@ class ClaudeFace {
     this.showSessionList = !this.showSessionList;
     if (this.showSessionList) {
       this.showHelp = false;
-      this.sessionListIndex = 0;
+      this.sessionListSelectedId = null;
       this.sessionListPromote = null;
     }
   }

@@ -1846,14 +1846,14 @@ describe('face.js -- toggleSessionList', () => {
     assert.strictEqual(face.showSessionList, false);
   });
 
-  test('sessionListIndex initializes to 0', () => {
+  test('sessionListSelectedId initializes to null', () => {
     const face = new ClaudeFace();
-    assert.strictEqual(face.sessionListIndex, 0);
+    assert.strictEqual(face.sessionListSelectedId, null);
   });
 
-  test('sessionListCount initializes to 0', () => {
+  test('sessionListIds initializes to an empty array', () => {
     const face = new ClaudeFace();
-    assert.strictEqual(face.sessionListCount, 0);
+    assert.deepStrictEqual(face.sessionListIds, []);
   });
 
   test('sessionListPromote initializes to null', () => {
@@ -1861,13 +1861,13 @@ describe('face.js -- toggleSessionList', () => {
     assert.strictEqual(face.sessionListPromote, null);
   });
 
-  test('toggleSessionList resets sessionListIndex and sessionListPromote', () => {
+  test('toggleSessionList resets sessionListSelectedId and sessionListPromote', () => {
     const face = new ClaudeFace();
-    face.sessionListIndex = 5;
-    face.sessionListPromote = 2;
+    face.sessionListSelectedId = 'x';
+    face.sessionListPromote = 'y';
     face.toggleSessionList(); // open
     assert.strictEqual(face.showSessionList, true);
-    assert.strictEqual(face.sessionListIndex, 0);
+    assert.strictEqual(face.sessionListSelectedId, null);
     assert.strictEqual(face.sessionListPromote, null);
   });
 });
