@@ -144,6 +144,42 @@ function noteNewWrite(ts, lastTs, now, lastAt) {
   return ts > lastTs ? now : lastAt;
 }
 
+// -- Main session policy ---------------------------------------------
+// Pure: which session should the center face follow?
+//
+// The center follows the user's attention: the live top-level session with the
+// newest `lastPromptAt` (stamped by SessionStart and UserPromptSubmit). A pin
+// (manual promotion) wins while its session is live and is released the moment
+// it is not, so a promoted agent hands the center back when it stops.
+//
+//   sessions   [{ id, parentSession, isTeammate, stopped, stale, attentionAt, lastUpdate }]
+//   currentId  the session on screen now (null before the first pick)
+//   pinnedId   the manual pin, or null
+// Returns { mainId, pinnedId }. mainId is currentId when nothing live beats
+// it -- the on-screen face then decays through its own cascade.
+function pickMainSession({ sessions, currentId, pinnedId }) {
+  const byId = new Map();
+  for (const s of sessions) byId.set(s.id, s);
+  const live = (s) => !!s && !s.stopped && !s.stale;
+  const topLevel = (s) => live(s) && !s.parentSession && !s.isTeammate;
+
+  if (pinnedId && live(byId.get(pinnedId))) return { mainId: pinnedId, pinnedId };
+
+  let best = null;
+  for (const s of sessions) {
+    if (!topLevel(s)) continue;
+    if (!best) { best = s; continue; }
+    const a = s.attentionAt || 0;
+    const b = best.attentionAt || 0;
+    if (a > b) { best = s; continue; }
+    if (a < b) continue;
+    // Tie: the current main keeps its seat; with no current, the newest write.
+    if (best.id === currentId) continue;
+    if (s.id === currentId || (s.lastUpdate || 0) > (best.lastUpdate || 0)) best = s;
+  }
+  return { mainId: best ? best.id : (currentId || null), pinnedId: null };
+}
+
 // -- Terminal title -------------------------------------------------
 // The tab/window title mirrors the face so a backgrounded terminal still
 // says what is going on. While the face has been waiting on the user for a
@@ -877,7 +913,7 @@ if (require.main === module) {
     IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
     PALETTES, PALETTE_NAMES,
     readState, ACTIVE_WORK_STATES, COMPLETION_STATES, FRESH_READ_STATES,
-    idleCascade, buildTitle, noteNewWrite,
+    idleCascade, buildTitle, noteNewWrite, pickMainSession,
     IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
     LONG_TOOL_HOLD_MS, WAIT_HOLD_STALE_MS,
   };

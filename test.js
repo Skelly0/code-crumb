@@ -52,6 +52,7 @@ const testModules = [
   './tests/test-emotions.js',
   './tests/test-platform.js',
   './tests/test-subagents.js',
+  './tests/test-attention.js',
 ];
 
 const GREEN = '\x1b[32m';
