@@ -14,14 +14,14 @@ const { STATE_FILE, SESSIONS_DIR } = require('./shared');
 // Ensure dir exists
 try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
 
+const demoPromptAt = Date.now();
+
 function writeMainState(state, detail, sessionId) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify({
-    state,
-    detail,
-    timestamp: Date.now(),
-    sessionId,
-    modelName: 'claude',
-  }), 'utf8');
+  const data = { state, detail, timestamp: Date.now(), sessionId, modelName: 'claude' };
+  fs.writeFileSync(STATE_FILE, JSON.stringify(data), 'utf8');
+  const filename = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_') + '.json';
+  fs.writeFileSync(path.join(SESSIONS_DIR, filename),
+    JSON.stringify({ session_id: sessionId, ...data, lastPromptAt: demoPromptAt, cwd: process.cwd() }), 'utf8');
 }
 
 function writeSession(id, state, detail, cwd, stopped = false, extra = {}) {

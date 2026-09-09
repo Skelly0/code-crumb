@@ -16,11 +16,16 @@ const { STATE_FILE, SESSIONS_DIR, safeFilename } = require('./shared');
 try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
 
 const mainId = 'demo-main';
+const demoPromptAt = Date.now();
 
+// The renderer follows the main's SESSION file; the global file is kept for
+// tmux mode. A `stopped` demo write is a turn end on the session file.
 function writeState(state, detail = '', extra = {}) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify({
-    state, detail, timestamp: Date.now(), sessionId: mainId, modelName: 'claude', ...extra,
-  }), 'utf8');
+  const data = { state, detail, timestamp: Date.now(), sessionId: mainId, modelName: 'claude', ...extra };
+  fs.writeFileSync(STATE_FILE, JSON.stringify(data), 'utf8');
+  const session = { session_id: mainId, ...data, lastPromptAt: demoPromptAt, cwd: process.cwd() };
+  if (session.stopped) { delete session.stopped; session.turnEnded = true; }
+  fs.writeFileSync(path.join(SESSIONS_DIR, safeFilename(mainId) + '.json'), JSON.stringify(session), 'utf8');
 }
 
 function writeSession(id, state, detail, cwd, stopped = false, taskDescription) {
