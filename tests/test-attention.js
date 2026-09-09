@@ -630,4 +630,66 @@ describe('grid -- renderSessionList tree and info row', () => {
   });
 });
 
+// -- renderer.js: following the session file ---------------------------------
+
+const rendererMod = require('../renderer');
+const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+
+describe('renderer -- readState follows a session file', () => {
+  test('readState(path) reads the given file and folds turnEnded into stopped', () => {
+    const t = makeTempEnv();
+    try {
+      const fp = path.join(t.tmp, 's.json');
+      writeJsonAtomic(fp, { session_id: 'x', sessionId: 'x', state: 'idle', detail: 'between turns', timestamp: 5, turnEnded: true, lastPromptAt: 4 });
+      const s = rendererMod.readState(fp);
+      assert.strictEqual(s.state, 'idle');
+      assert.strictEqual(s.stopped, true, 'turnEnded reads as stopped for the main face');
+      assert.strictEqual(s.lastPromptAt, 4);
+      assert.strictEqual(s.sessionId, 'x');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('readState() with no argument still reads the global file (tmux mode)', () => {
+    assert.ok(rendererSrc.includes('function readState(filePath = STATE_FILE)'));
+  });
+});
+
+describe('renderer -- source invariants of the session-file main', () => {
+  test('checkState stats the main session file, not the global state file', () => {
+    assert.ok(rendererSrc.includes('const fp = mainSessionFile();'));
+    assert.ok(!rendererSrc.includes('fs.statSync(STATE_FILE)'), 'the unified renderer no longer reads the global file');
+  });
+
+  test('a fresh turnEnded write is shown as responding before the reward cascade', () => {
+    assert.ok(rendererSrc.includes("stateData.state === 'idle' && stateData.stopped && ts > lastAppliedTimestamp"));
+  });
+
+  test('promotion resolves by session id and pins; the policy does the swap', () => {
+    assert.ok(rendererSrc.includes('pinnedSessionId = face.sessionListPromote'));
+    assert.ok(!rendererSrc.includes('face.sessionListPromote - 1'));
+  });
+
+  test('every path that changes the main session goes through adoptMain', () => {
+    assert.ok(rendererSrc.includes('function adoptMain(newId)'));
+    assert.ok(rendererSrc.includes('mainSessionId = newId;'));
+    // The old direct assignments are gone.
+    assert.ok(!rendererSrc.includes('mainSessionId = stateData.sessionId'));
+    assert.ok(!rendererSrc.includes('mainSessionId = incomingId'));
+    // Only the declaration and adoptMain assign it.
+    const assigns = (rendererSrc.match(/(?<![.\w])mainSessionId = /g) || []).length;
+    assert.strictEqual(assigns, 2, 'let-declaration plus adoptMain');
+  });
+
+  test('_executeSwap no longer writes a synthetic old-main file nor unlinks the promoted one', () => {
+    const start = rendererSrc.indexOf('function _executeSwap()');
+    const body = rendererSrc.slice(start, rendererSrc.indexOf('\n  }\n', start));
+    assert.ok(!body.includes('writeFileSync'));
+    assert.ok(!body.includes('unlinkSync'));
+  });
+
+  test('the old 120s lastMainUpdate adoption guard is gone', () => {
+    assert.ok(!rendererSrc.includes('lastMainUpdate'));
+  });
+});
+
 module.exports = suite;

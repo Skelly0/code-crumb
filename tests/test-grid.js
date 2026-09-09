@@ -1007,26 +1007,15 @@ describe('grid.js -- SessionStart adoption (issue #58)', () => {
       'SessionStart should force shouldWriteGlobal to true');
   });
 
-  test('renderer adoption: detail "session starting" triggers main session takeover', () => {
-    // Simulates the renderer's adoption logic: a new session with
-    // detail='session starting' should be adopted even if the old session
-    // is not stopped and not stale.
-    const mainSessionId = 'old-session-abc';
-    const incomingId = 'new-session-xyz';
-    const lastStopped = false;
-    const lastMainUpdate = Date.now() - 5000; // 5s ago — not stale
-    const stateData = { detail: 'session starting' };
-
-    let adopted = false;
-    if (incomingId && mainSessionId && incomingId !== mainSessionId) {
-      if (lastStopped || Date.now() - lastMainUpdate > 120000
-          || stateData.detail === 'session starting') {
-        adopted = true;
-      }
-    }
-
-    assert.strictEqual(adopted, true,
-      'renderer should adopt new session when detail is "session starting"');
+  test('renderer adoption: a fresh SessionStart elsewhere wins the center through pickMainSession', () => {
+    const { pickMainSession } = require('../renderer');
+    const r = pickMainSession({
+      sessions: [
+        { id: 'old', attentionAt: 100, lastUpdate: 100 },
+        { id: 'new', attentionAt: 200, lastUpdate: 200 },
+      ], currentId: 'old', pinnedId: null,
+    });
+    assert.strictEqual(r.mainId, 'new');
   });
 
   test('subagent with parentSession is blocked from global state writes', () => {
@@ -1081,24 +1070,15 @@ describe('grid.js -- SessionStart adoption (issue #58)', () => {
       'lastStopped must be true when state has stopped flag');
   });
 
-  test('renderer does NOT adopt random subagent writing to state file', () => {
-    // A subagent with a different detail should NOT trigger adoption
-    const mainSessionId = 'main-session';
-    const incomingId = 'subagent-session';
-    const lastStopped = false;
-    const lastMainUpdate = Date.now() - 5000; // 5s ago — not stale
-    const stateData = { detail: 'editing foo.js' };
-
-    let adopted = false;
-    if (incomingId && mainSessionId && incomingId !== mainSessionId) {
-      if (lastStopped || Date.now() - lastMainUpdate > 120000
-          || stateData.detail === 'session starting') {
-        adopted = true;
-      }
-    }
-
-    assert.strictEqual(adopted, false,
-      'renderer should NOT adopt subagent with non-SessionStart detail');
+  test('renderer does NOT adopt a subagent writing its own file', () => {
+    const { pickMainSession } = require('../renderer');
+    const r = pickMainSession({
+      sessions: [
+        { id: 'old', attentionAt: 100, lastUpdate: 100 },
+        { id: 'old-agent-1', parentSession: 'old', attentionAt: 999, lastUpdate: 999 },
+      ], currentId: 'old', pinnedId: null,
+    });
+    assert.strictEqual(r.mainId, 'old');
   });
 });
 
