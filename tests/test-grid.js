@@ -286,10 +286,16 @@ describe('grid.js -- OrbitalSystem stale cleanup', () => {
   });
 
   test('completion states become stale after STOPPED_LINGER_MS (issue #59 fix)', () => {
+    // #59 was about ghost ORBITALS: a subagent that reported `happy` and went
+    // quiet is finished and must not linger. The short cut is therefore a
+    // child rule -- a top-level session is judged in the same load pass that
+    // built it, before any tick() moves the reward state on, so applying it
+    // there killed live windows at a cold boot.
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     for (const state of completionStates) {
       const face = new MiniFace(state);
       face.state = state;
+      face.parentSession = 'parent';
       face.lastUpdate = Date.now() - 15000; // Past STOPPED_LINGER_MS (10s)
       assert.ok(face.isStale(), `${state} should be stale after 10s`);
     }
@@ -333,8 +339,9 @@ describe('grid.js -- OrbitalSystem session schema validation', () => {
     try { fs.unlinkSync(parallelFile); } catch {}
   });
 
-  test('loadSessions excludes session matching excludeId', () => {
-    // The main session should be excluded by its ID, not by missing fields
+  test('loadSessions loads the main session but keeps it off the ring', () => {
+    // The main session is read like any other file (the big face follows it)
+    // and is excluded from the orbitals by its ID, not by missing fields
     const fs = require('fs');
     const path = require('path');
     const { SESSIONS_DIR } = require('../shared');
@@ -350,8 +357,10 @@ describe('grid.js -- OrbitalSystem session schema validation', () => {
     }));
 
     orbital.loadSessions('main-session');
-    assert.ok(!orbital.faces.has('main-session'),
-      'session matching excludeId should be excluded');
+    assert.ok(orbital.faces.has('main-session'),
+      'the main session is loaded like any other session file');
+    assert.ok(!orbital.getSortedFaces().some(f => f.sessionId === 'main-session'),
+      'session matching excludeId should be excluded from the ring');
 
     // Clean up
     try { fs.unlinkSync(mainFile); } catch {}
@@ -1004,26 +1013,15 @@ describe('grid.js -- SessionStart adoption (issue #58)', () => {
       'SessionStart should force shouldWriteGlobal to true');
   });
 
-  test('renderer adoption: detail "session starting" triggers main session takeover', () => {
-    // Simulates the renderer's adoption logic: a new session with
-    // detail='session starting' should be adopted even if the old session
-    // is not stopped and not stale.
-    const mainSessionId = 'old-session-abc';
-    const incomingId = 'new-session-xyz';
-    const lastStopped = false;
-    const lastMainUpdate = Date.now() - 5000; // 5s ago — not stale
-    const stateData = { detail: 'session starting' };
-
-    let adopted = false;
-    if (incomingId && mainSessionId && incomingId !== mainSessionId) {
-      if (lastStopped || Date.now() - lastMainUpdate > 120000
-          || stateData.detail === 'session starting') {
-        adopted = true;
-      }
-    }
-
-    assert.strictEqual(adopted, true,
-      'renderer should adopt new session when detail is "session starting"');
+  test('renderer adoption: a fresh SessionStart elsewhere wins the center through pickMainSession', () => {
+    const { pickMainSession } = require('../renderer');
+    const r = pickMainSession({
+      sessions: [
+        { id: 'old', attentionAt: 100, lastUpdate: 100 },
+        { id: 'new', attentionAt: 200, lastUpdate: 200 },
+      ], currentId: 'old', pinnedId: null,
+    });
+    assert.strictEqual(r.mainId, 'new');
   });
 
   test('subagent with parentSession is blocked from global state writes', () => {
@@ -1078,24 +1076,15 @@ describe('grid.js -- SessionStart adoption (issue #58)', () => {
       'lastStopped must be true when state has stopped flag');
   });
 
-  test('renderer does NOT adopt random subagent writing to state file', () => {
-    // A subagent with a different detail should NOT trigger adoption
-    const mainSessionId = 'main-session';
-    const incomingId = 'subagent-session';
-    const lastStopped = false;
-    const lastMainUpdate = Date.now() - 5000; // 5s ago — not stale
-    const stateData = { detail: 'editing foo.js' };
-
-    let adopted = false;
-    if (incomingId && mainSessionId && incomingId !== mainSessionId) {
-      if (lastStopped || Date.now() - lastMainUpdate > 120000
-          || stateData.detail === 'session starting') {
-        adopted = true;
-      }
-    }
-
-    assert.strictEqual(adopted, false,
-      'renderer should NOT adopt subagent with non-SessionStart detail');
+  test('renderer does NOT adopt a subagent writing its own file', () => {
+    const { pickMainSession } = require('../renderer');
+    const r = pickMainSession({
+      sessions: [
+        { id: 'old', attentionAt: 100, lastUpdate: 100 },
+        { id: 'old-agent-1', parentSession: 'old', attentionAt: 999, lastUpdate: 999 },
+      ], currentId: 'old', pinnedId: null,
+    });
+    assert.strictEqual(r.mainId, 'old');
   });
 });
 
@@ -1206,10 +1195,29 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
       const face = new MiniFace('test');
       face.state = state;
       face.stopped = false;
+      face.parentSession = 'parent'; // the short completion cut is a child rule
       face.pid = 0; // no pid — falls through to completion-state timeout
       face.lastUpdate = Date.now() - 15000; // 15s ago — past STOPPED_LINGER_MS (10s)
       assert.ok(face.isStale(),
         `completion state '${state}' past 10s (no pid) should be stale`);
+    }
+  });
+
+  test('a TOP-LEVEL completion face (no pid) survives past STOPPED_LINGER_MS', () => {
+    // Its face is built and judged in one loadSessions pass, before tick()
+    // has moved the reward state on: the 10s cut would drop a live window.
+    const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
+    for (const state of completionStates) {
+      const face = new MiniFace('test');
+      face.state = state;
+      face.stopped = false;
+      face.pid = 0;
+      face.lastUpdate = Date.now() - 15000; // past 10s, well within ORPHAN_TIMEOUT
+      assert.ok(!face.isStale(),
+        `top-level '${state}' should hold until ORPHAN_TIMEOUT`);
+      face.lastUpdate = Date.now() - 100000; // past ORPHAN_TIMEOUT (90s)
+      assert.ok(face.isStale(),
+        `top-level '${state}' should still go stale at ORPHAN_TIMEOUT`);
     }
   });
 
@@ -1248,6 +1256,7 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
       const face = new MiniFace('test');
       face.state = state;
       face.stopped = false;
+      face.parentSession = 'parent'; // the short completion cut is a child rule
       face.pid = 999999; // dead process
       face.lastUpdate = Date.now() - 15000; // 15s ago — past STOPPED_LINGER_MS
       assert.ok(face.isStale(),
@@ -1398,6 +1407,12 @@ describe('grid.js -- renderSessionList', () => {
     assert.strictEqual(result, '', 'should return empty for narrow terminal');
   });
 
+  test('handles short terminal gracefully', () => {
+    // Below MIN_SESSION_LIST_ROWS not even one entry plus chrome fits.
+    const result = renderSessionList(80, 8, [], PALETTES[0].themes);
+    assert.strictEqual(result, '', 'should return empty for short terminal');
+  });
+
   test('includes stopped sessions with different indicator', () => {
     const faces = new Map();
     const f = new MiniFace('sess-stopped');
@@ -1465,7 +1480,8 @@ describe('grid.js -- renderSessionList selection', () => {
     };
     const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
     assert.ok(result.includes('select'), 'footer should mention select');
-    assert.ok(result.includes('promote'), 'footer should mention promote');
+    // Index 0 is the main row, whose Enter action is pin (never promote).
+    assert.ok(result.includes('\u23ce pin'), 'footer should mention the enter action');
     assert.ok(result.includes('esc'), 'footer should mention esc');
   });
 
@@ -1504,7 +1520,7 @@ describe('grid.js -- renderSessionList selection', () => {
       label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
     const result = renderSessionList(80, 40, [], PALETTES[0].themes, mainInfo, 0);
-    assert.ok(result.includes('promote'), 'footer shows even with only main');
+    assert.ok(result.includes('\u23ce pin'), 'footer shows even with only main');
   });
 
   test('backward compatible: omitting selectedIndex works', () => {
@@ -1542,14 +1558,15 @@ describe('grid.js -- renderSessionList selection', () => {
   });
 
   test('scrolls to show selected item beyond maxVisible', () => {
-    // 5 subs + main = 6 sessions; rows=15 → maxVisible = floor((15-6)/4) = 2
+    // 5 subs + main = 6 sessions; each entry is 4 rows + 1 separator, so
+    // rows=24 → maxVisible = floor((24-7)/5) = 3
     const faces = _makeFaces(5);
     const mainInfo = {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
       label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
     // Select the last session (index 5 in 0-based sorted array)
-    const result = renderSessionList(80, 15, faces, PALETTES[0].themes, mainInfo, 5);
+    const result = renderSessionList(80, 24, faces, PALETTES[0].themes, mainInfo, 5);
     // The last sub should be visible and selected
     assert.ok(result.includes('\u25b8'), 'should show selection marker');
     assert.ok(result.includes('sub-4'), 'last sub should be visible when scrolled');
@@ -1563,8 +1580,8 @@ describe('grid.js -- renderSessionList selection', () => {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
       label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
-    // Select index 0 — no scrolling needed
-    const result = renderSessionList(80, 15, faces, PALETTES[0].themes, mainInfo, 0);
+    // Select index 0 — no scrolling needed (maxVisible = floor((24-7)/5) = 3)
+    const result = renderSessionList(80, 24, faces, PALETTES[0].themes, mainInfo, 0);
     assert.ok(!result.includes('above'), 'no above indicator at top of list');
   });
 
@@ -1574,8 +1591,8 @@ describe('grid.js -- renderSessionList selection', () => {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
       label: 'claude', stopped: false, firstSeen: 0, isMain: true,
     };
-    // Select index 0 — items below are hidden
-    const result = renderSessionList(80, 15, faces, PALETTES[0].themes, mainInfo, 0);
+    // Select index 0 — the 3 entries past maxVisible are hidden below
+    const result = renderSessionList(80, 24, faces, PALETTES[0].themes, mainInfo, 0);
     assert.ok(result.includes('more'), 'should show more indicator for items below');
   });
 });
@@ -1639,14 +1656,15 @@ describe('grid.js -- renderSessionList pin indicator', () => {
     assert.ok(!result.includes('unpin'), 'footer should not say unpin');
   });
 
-  test('footer says promote when index 0 selected and not pinned', () => {
+  test('footer says pin when index 0 selected and not pinned', () => {
     const faces = _makeFaces(1);
     const mainInfo = {
       state: 'idle', detail: '', cwd: '/home', gitBranch: 'main',
       label: 'claude', stopped: false, firstSeen: 0, isMain: true, isPinned: false,
     };
     const result = renderSessionList(80, 40, faces, PALETTES[0].themes, mainInfo, 0);
-    assert.ok(result.includes('promote'), 'footer should say promote');
+    // The main row's Enter action is pin/unpin only -- it is already the main.
+    assert.ok(result.includes('\u23ce pin'), 'footer should say pin');
     assert.ok(!result.includes('unpin'), 'footer should not say unpin');
     assert.ok(!result.includes('pin+promote'), 'footer should not say pin+promote');
   });
@@ -2738,16 +2756,18 @@ describe('grid.js -- _applySessionResults', () => {
     assert.strictEqual(os.faces.get('sub2').state, 'reading');
   });
 
-  test('excludes main session from results', () => {
+  test('loads the main session from results but keeps it off the ring', () => {
     const os = new OrbitalSystem();
+    os.setMainSession('main-id');
     const results = [
       { file: 'main.json', data: { session_id: 'main-id', state: 'thinking' }, mtimeMs: Date.now() },
       { file: 'sub1.json', data: { session_id: 'sub1', state: 'coding' }, mtimeMs: Date.now() },
     ];
     os._applySessionResults('main-id', results);
-    assert.strictEqual(os.faces.size, 1);
-    assert.ok(os.faces.has('sub1'));
-    assert.ok(!os.faces.has('main-id'));
+    assert.strictEqual(os.faces.size, 2, 'the main is loaded like any other file');
+    assert.ok(os.faces.has('main-id'));
+    assert.deepStrictEqual(os.getSortedFaces().map(f => f.sessionId), ['sub1'],
+      'but it never appears among the orbitals');
   });
 
   test('protects existing face on empty file result', () => {
@@ -2847,10 +2867,16 @@ describe('grid.js -- loadSessionsAsync re-entrancy guard', () => {
     os._applySessionResults = original;
   });
 
-  test('skips load when excludeId is falsy', () => {
+  test('a falsy excludeId loads everything instead of bailing out', () => {
+    // Nothing is known to be the main face yet, so nothing is kept off the
+    // ring -- but every session file is still read. Points at a directory that
+    // does not exist so the async readdir fails and touches no real files.
+    const absentDir = require('path').join(require('os').tmpdir(), 'code-crumb-absent-sessions');
     const os = new OrbitalSystem();
+    os._sessionsDir = absentDir;
     os.loadSessionsAsync(null);
-    assert.ok(!os._loadingInProgress, 'should not set loading flag for null excludeId');
+    assert.strictEqual(os.mainSessionId, null, 'no session is kept off the ring');
+    assert.ok(os._loadingInProgress, 'the load runs rather than bailing out');
   });
 });
 

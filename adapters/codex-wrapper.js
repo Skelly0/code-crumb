@@ -52,6 +52,8 @@ let lastState = null;
 let lastDetail = '';
 let turnOutcome = null; // 'completed' | 'failed' once the turn ends
 
+let lastPromptAt = 0; // attention stamp: set on thread/turn start, carried on every write
+
 // A failed codex turn emits BOTH a top-level `error` and a `turn.failed`.
 // Breaking the streak on each would leave brokenStreak at 0 -- the face reads
 // that as "no streak was lost" and skips the reaction -- and would count the
@@ -232,6 +234,7 @@ function commit(decide) {
       const extra = { ...buildExtra(stats, sessionId, modelName, EDITOR), pid: process.pid };
       if (out.diffInfo) extra.diffInfo = out.diffInfo;
       if (out.stopped) extra.stopped = true;
+      if (lastPromptAt) extra.lastPromptAt = lastPromptAt;
       writeGlobal(out.state, detail, extra);
       writeSessionState(sessionId, out.state, detail, !!out.stopped, extra);
       lastState = out.state;
@@ -288,10 +291,12 @@ function handleEvent(event) {
         sessionId = `codex-${event.thread_id}`;
         ownIds.add(sessionId);
       }
+      lastPromptAt = Date.now();
       commit(() => ({ state: 'starting', detail: 'codex is waking up' }));
     }
     else if (type === 'turn.started') {
       streakBrokenThisTurn = false;
+      lastPromptAt = Date.now();
       commit(() => ({ state: 'thinking', detail: 'reading your message' }));
     }
     else if (type === 'turn.completed') {

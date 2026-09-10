@@ -10,23 +10,31 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, safeFilename } = require('./shared');
+const { STATE_FILE, SESSIONS_DIR, safeFilename, writeJsonAtomic } = require('./shared');
 
 // Ensure sessions dir exists for orbital demo
 try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
 
 const mainId = 'demo-main';
+const demoPromptAt = Date.now();
 
+// The renderer follows the main's SESSION file; the global file is kept for
+// tmux mode. A `stopped` demo write is a turn end on the session file.
 function writeState(state, detail = '', extra = {}) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify({
-    state, detail, timestamp: Date.now(), sessionId: mainId, modelName: 'claude', ...extra,
-  }), 'utf8');
+  const data = { state, detail, timestamp: Date.now(), sessionId: mainId, modelName: 'claude', ...extra };
+  fs.writeFileSync(STATE_FILE, JSON.stringify(data), 'utf8');
+  const session = { session_id: mainId, ...data, lastPromptAt: demoPromptAt, cwd: process.cwd() };
+  if (session.stopped) { delete session.stopped; session.turnEnded = true; }
+  // Atomic: this is the file the main face follows, and the renderer polls it
+  // 15 times a second -- a torn read costs a frame.
+  writeJsonAtomic(path.join(SESSIONS_DIR, safeFilename(mainId) + '.json'), session);
 }
 
 function writeSession(id, state, detail, cwd, stopped = false, taskDescription) {
   const data = {
     session_id: id, state, detail, timestamp: Date.now(),
     cwd: cwd || process.cwd(), stopped, modelName: 'claude',
+    parentSession: mainId,
   };
   if (taskDescription) data.taskDescription = taskDescription;
   fs.writeFileSync(path.join(SESSIONS_DIR, safeFilename(id) + '.json'), JSON.stringify(data), 'utf8');
@@ -43,6 +51,16 @@ const subagents = [
   { id: 'demo-sub-2', cwd: '/home/user/my-app/tests', taskDescription: 'add logging' },
   { id: 'demo-sub-3', cwd: '/home/user/api-server', taskDescription: 'refactor db' },
 ];
+
+// The main's session file is a live top-level candidate with a fresh
+// lastPromptAt, so it must be unlinked on the way out -- otherwise the demo
+// face outlives the demo and hides the user's real editor session.
+function cleanupSessions() {
+  for (const s of subagents) removeSession(s.id);
+  removeSession(mainId);
+}
+
+process.on('SIGINT', () => { cleanupSessions(); process.exit(0); });
 
 // Simulate a session with incrementing tool calls and streak
 let toolCalls = 0;
@@ -184,8 +202,8 @@ async function runDemo() {
     await sleep(s.duration);
   }
 
-  // Clean up orbital session files
-  for (const s of subagents) removeSession(s.id);
+  // Clean up orbital session files and the main's own session file
+  cleanupSessions();
   console.log('\n  Demo complete! The face should now be idle.\n');
 }
 

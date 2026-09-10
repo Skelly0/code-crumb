@@ -9,19 +9,21 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR } = require('./shared');
+const { STATE_FILE, SESSIONS_DIR, writeJsonAtomic } = require('./shared');
 
 // Ensure dir exists
 try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
 
+const demoPromptAt = Date.now();
+
 function writeMainState(state, detail, sessionId) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify({
-    state,
-    detail,
-    timestamp: Date.now(),
-    sessionId,
-    modelName: 'claude',
-  }), 'utf8');
+  const data = { state, detail, timestamp: Date.now(), sessionId, modelName: 'claude' };
+  fs.writeFileSync(STATE_FILE, JSON.stringify(data), 'utf8');
+  const filename = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_') + '.json';
+  // Atomic: this is the file the main face follows, and the renderer polls it
+  // 15 times a second -- a torn read costs a frame.
+  writeJsonAtomic(path.join(SESSIONS_DIR, filename),
+    { session_id: sessionId, ...data, lastPromptAt: demoPromptAt, cwd: process.cwd() });
 }
 
 function writeSession(id, state, detail, cwd, stopped = false, extra = {}) {
@@ -60,6 +62,16 @@ const teammates = [
 ];
 
 const allSessions = [...subagents, ...teammates];
+
+// The main's session file is a live top-level candidate with a fresh
+// lastPromptAt, so it must be unlinked on the way out -- otherwise the demo
+// face outlives the demo and hides the user's real editor session.
+function cleanupSessions() {
+  for (const s of allSessions) removeSession(s.id);
+  removeSession(mainId);
+}
+
+process.on('SIGINT', () => { cleanupSessions(); process.exit(0); });
 
 // Script: a sequence of { time (ms), actions }
 const script = [
@@ -146,11 +158,9 @@ async function runDemo() {
     await new Promise(r => setTimeout(r, wait));
   }
 
-  // Clean up demo files
+  // Clean up demo files (orbitals plus the main's own session file)
   await new Promise(r => setTimeout(r, 8000));
-  for (const s of allSessions) {
-    removeSession(s.id);
-  }
+  cleanupSessions();
 
   console.log('\n  Demo complete! Sessions cleaned up.\n');
 }

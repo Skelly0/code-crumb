@@ -660,15 +660,19 @@ describe('emotions -- the timeout cascade keeps its pre-existing branches', () =
   // check: every path that changes which session is main must clear the file
   // state the hold is keyed on, or a promoted face inherits the old main's tool.
   test('every path that changes the main session clears lastAppliedState', () => {
+    // There is now exactly one such path: adoptMain. The swap frame and the
+    // policy's first pick both go through it, so clearing the per-session
+    // trackers once there covers every route.
     const src = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8');
-    const swap = src.slice(src.indexOf('function _executeSwap()'));
-    const body = swap.slice(0, swap.indexOf('\n  function '));
-    assert.ok(body.includes('mainSessionId = newId;'), 'swap should adopt the new session id');
+    const start = src.indexOf('function adoptMain(newId)');
+    assert.ok(start > 0, 'adoptMain should be the single adoption path');
+    const body = src.slice(start, src.indexOf('\n  }\n', start));
+    assert.ok(body.includes('mainSessionId = newId;'), 'adoptMain should adopt the new session id');
     assert.ok(body.includes('lastAppliedState = null;'),
-      '_executeSwap must clear lastAppliedState when it changes the main session');
-    const adopt = src.slice(src.indexOf('// New editor session'));
-    assert.ok(adopt.slice(0, 300).includes('lastAppliedState = null;'),
-      'session adoption must clear lastAppliedState');
+      'adoptMain must clear lastAppliedState when it changes the main session');
+    // The old direct assignment sites are gone.
+    assert.ok(!src.includes('mainSessionId = stateData.sessionId'));
+    assert.ok(!src.includes('mainSessionId = incomingId'));
   });
 
   test('the renderer still exports the timeout constants it cascades on', () => {
@@ -830,17 +834,22 @@ describe('emotions -- the write clock behind the waiting bound', () => {
   // it was the clock being refreshed somewhere else. Pin the wiring.
   test('the renderer keys the bound on the write clock, never on the read marker', () => {
     const src = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8');
-    assert.ok(!/fileAgeMs:\s*now - lastMainUpdate/.test(src),
-      'lastMainUpdate is refreshed by every forced re-read -- it must not key the bound');
+    assert.ok(!/fileAgeMs:\s*now - (lastMainUpdate|lastForceReadTime)/.test(src),
+      'a read marker is refreshed by every forced re-read -- it must not key the bound');
     assert.ok(/lastNewWriteAt = noteNewWrite\(/.test(src),
       'the write clock should be advanced through noteNewWrite');
-    // Declaration + exactly one assignment. A second assignment site is how the
-    // read-path refresh would creep back in. `\s*=[^=]` so that a whitespace-free
-    // `lastNewWriteAt= Date.now()` cannot sneak past, and so that a comparison
-    // (`==`/`===`) is not miscounted as an assignment.
+    // Declaration, adoptMain's per-session reset, and exactly one advancing
+    // assignment. A second *advancing* site is how the read-path refresh would
+    // creep back in; a reset to 0 cannot fake freshness, it can only forget.
+    // `\s*=[^=]` so that a whitespace-free `lastNewWriteAt= Date.now()` cannot
+    // sneak past, and so a comparison (`==`/`===`) is not miscounted.
     const assignments = src.match(/lastNewWriteAt\s*=[^=]/g) || [];
-    assert.strictEqual(assignments.length, 2,
-      'lastNewWriteAt should have its declaration and exactly one assignment site');
+    assert.strictEqual(assignments.length, 3,
+      'lastNewWriteAt: declaration, the adoptMain reset, and one assignment site');
+    const resets = src.match(/lastNewWriteAt\s*=\s*0\s*;/g) || [];
+    assert.strictEqual(resets.length, 2, 'the declaration and the adoptMain reset');
+    assert.strictEqual(assignments.length - resets.length, 1,
+      'only noteNewWrite may move the write clock forward');
   });
 });
 

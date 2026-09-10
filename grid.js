@@ -296,6 +296,9 @@ class MiniFace {
     this.gitBranch = null;     // current git branch (if known)
     this.taskDescription = ''; // sticky task description from SubagentStart
     this.pid = 0;              // owning process PID for liveness detection
+    this.lastPromptAt = 0;     // when the user last prompted this session (attention)
+    this.toolCalls = 0;        // session tool-call counter, for the list's info row
+    this.filesEdited = 0;
     this._lastDataTimestamp = 0; // Track JSON timestamp to skip redundant updates (ms precision)
     this.minDisplayUntil = 0;  // Minimum display time to prevent flashing
     this.pendingState = null;  // Buffered state when minDisplayUntil blocks
@@ -392,6 +395,9 @@ class MiniFace {
     if (data.gitBranch) this.gitBranch = data.gitBranch;
     if (data.taskDescription) this.taskDescription = data.taskDescription;
     if (data.pid) this.pid = data.pid;
+    if (data.lastPromptAt) this.lastPromptAt = data.lastPromptAt;
+    if (typeof data.toolCalls === 'number') this.toolCalls = data.toolCalls;
+    if (typeof data.filesEdited === 'number') this.filesEdited = data.filesEdited;
     // Classify: independent session = no parentSession and not a teammate
     this.isMainSession = !this.parentSession && !this.isTeammate;
 
@@ -409,8 +415,15 @@ class MiniFace {
     // Non-stopped: if the owning process is alive AND actually ours
     // (start time predates our last write — recycled PIDs fail), never stale
     if (this.pid && isOwnedByLiveProcess(this.pid, this.lastUpdate)) return false;
-    // No pid or dead process: completion states get short timeout
-    if (COMPLETION_STATES.has(this.state)) {
+    // No pid or dead process: a completion state on a CHILD gets the short
+    // timeout -- an agent that reported `happy` and went quiet is finished.
+    // A top-level session is not: its face is built from the file and judged
+    // in the same loadSessions pass, before any tick() has moved the reward
+    // state on (steady state does that at COMPLETION_LINGER). At a cold boot
+    // a window whose last write was `proud` 11s ago would be declared dead on
+    // the spot -- and on win32, with no pid to appeal to, never become a
+    // candidate for the center at all. Top-level faces use ORPHAN_TIMEOUT.
+    if (this.parentSession && COMPLETION_STATES.has(this.state)) {
       return Date.now() - this.lastUpdate > STOPPED_LINGER_MS;
     }
     // Everything else: orphan timeout. A child orbital gets the longer window
@@ -732,24 +745,39 @@ class OrbitalSystem {
     this._loadingInProgress = false; // Re-entrancy guard for loadSessionsAsync
     this._groupsCache = null;        // Cached _buildGroups result
     this._groupsDirty = true;        // Flag to invalidate groups cache
+    this.mainSessionId = null;       // Session drawn as the big face, kept off the ring
+    this._sessionsDir = null;        // test seam; production reads SESSIONS_DIR
+  }
+
+  // The main session is loaded like any other file (the renderer's face
+  // follows its file through the same reads) but never drawn on the ring.
+  setMainSession(id) {
+    const next = id || null;
+    if (next !== this.mainSessionId) {
+      this.mainSessionId = next;
+      this._sortedDirty = true;
+      this._groupsDirty = true;
+    }
   }
 
   getSortedFaces() {
     if (this._sortedDirty) {
-      this._sortedCache = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+      this._sortedCache = [...this.faces.values()]
+        .filter(f => f.sessionId !== this.mainSessionId)
+        .sort((a, b) => a.firstSeen - b.firstSeen);
       this._sortedDirty = false;
     }
     return this._sortedCache;
   }
 
   loadSessions(excludeId) {
-    if (!excludeId) return;  // Can't filter main session yet — wait for mainSessionId
-    this.mainSessionId = excludeId;
+    const dir = this._sessionsDir || SESSIONS_DIR;
+    this.setMainSession(excludeId);
     const prevSize = this.faces.size;
     const prevKeys = new Set(this.faces.keys());
     let files;
     try {
-      files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'));
+      files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
     } catch {
       return;
     }
@@ -770,18 +798,25 @@ class OrbitalSystem {
     // really is a gone parent and its ghosts degrade on the normal schedule.
     const mtimes = new Map();
     for (const f of files) {
-      try { mtimes.set(f, fs.statSync(path.join(SESSIONS_DIR, f)).mtimeMs); } catch {}
+      try { mtimes.set(f, fs.statSync(path.join(dir, f)).mtimeMs); } catch {}
     }
     const parentIsFresh = (parentSession) => {
       const m = mtimes.get(safeFilename(parentSession) + '.json');
       return m !== undefined && now - m <= STALE_MS;
     };
+    // The center's own file is never purged. On win32 there is no pid, so the
+    // main's face goes stale at ORPHAN_TIMEOUT and stops protecting its file
+    // 30s before the purge fires -- deleting the very file the renderer reads.
+    // The next non-UserPromptSubmit hook recreates it with no lastPromptAt and
+    // the attended window drops to attention 0.
+    const mainFile = this.mainSessionId ? safeFilename(this.mainSessionId) + '.json' : null;
     for (const f of files) {
       try {
-        const fp = path.join(SESSIONS_DIR, f);
+        const fp = path.join(dir, f);
         const fileMtimeMs = mtimes.get(f);
         if (fileMtimeMs === undefined) continue;
         if (now - fileMtimeMs > STALE_MS) {
+          if (f === mainFile) continue;  // protected exactly like a knownFace
           // Use reverse map for correct face lookup (safeFilename may transform the ID)
           const faceId = fileToFaceId.get(f) || path.basename(f, '.json');
           const knownFace = this.faces.get(faceId);
@@ -809,14 +844,14 @@ class OrbitalSystem {
       } catch {}
     }
     files = files.filter(f => {
-      try { return fs.existsSync(path.join(SESSIONS_DIR, f)); } catch { return false; }
+      try { return fs.existsSync(path.join(dir, f)); } catch { return false; }
     });
 
     const seenIds = new Set();
 
     for (const file of files) {
       try {
-        const fp = path.join(SESSIONS_DIR, file);
+        const fp = path.join(dir, file);
         const mtimeMs = fs.statSync(fp).mtimeMs;
         const raw = fs.readFileSync(fp, 'utf8').trim();
         if (!raw) {
@@ -832,9 +867,6 @@ class OrbitalSystem {
         // renderer's synchronous boot scan this enqueues all PIDs at once,
         // so one batched exec resolves them before the next purge cycle.
         if (data.pid) requestPidStartTime(data.pid);
-
-        // Skip the main session — it's the big face, not an orbital
-        if (excludeId && id === excludeId) continue;
 
         seenIds.add(id);
 
@@ -887,12 +919,12 @@ class OrbitalSystem {
   // (keypresses) can be processed between I/O operations.
 
   loadSessionsAsync(excludeId) {
-    if (!excludeId) return;
     if (this._loadingInProgress) return; // Re-entrancy guard
+    const dir = this._sessionsDir || SESSIONS_DIR;
     this._loadingInProgress = true;
-    this.mainSessionId = excludeId;
+    this.setMainSession(excludeId);
 
-    fs.readdir(SESSIONS_DIR, (err, allFiles) => {
+    fs.readdir(dir, (err, allFiles) => {
       if (err) { this._loadingInProgress = false; return; }
       const files = allFiles.filter(f => f.endsWith('.json'));
       if (files.length === 0) {
@@ -912,7 +944,7 @@ class OrbitalSystem {
       };
 
       for (const file of files) {
-        const fp = path.join(SESSIONS_DIR, file);
+        const fp = path.join(dir, file);
         fs.stat(fp, (statErr, stats) => {
           if (statErr) { results.push({ file, error: true }); onComplete(); return; }
           fs.readFile(fp, 'utf8', (readErr, raw) => {
@@ -952,7 +984,11 @@ class OrbitalSystem {
     return n;
   }
 
+  // excludeId is kept in the signature (loadSessionsAsync's call shape) but no
+  // longer filters: the main session is loaded like every other file and is
+  // only kept off the ring by getSortedFaces.
   _applySessionResults(excludeId, results) {
+    const dir = this._sessionsDir || SESSIONS_DIR;
     const prevSize = this.faces.size;
     const prevKeys = new Set(this.faces.keys());
 
@@ -978,10 +1014,14 @@ class OrbitalSystem {
       }
     }
 
+    // The center's own file is never purged -- see the sync purge above.
+    const mainFile = this.mainSessionId ? safeFilename(this.mainSessionId) + '.json' : null;
+
     for (const r of results) {
       if (r.error || r.empty) { survivingResults.push(r); continue; }
 
       if (now - r.mtimeMs > STALE_MS) {
+        if (r.file === mainFile) { survivingResults.push(r); continue; }
         const faceId = fileToFaceId.get(r.file) || path.basename(r.file, '.json');
         const knownFace = this.faces.get(faceId);
         if (knownFace && !knownFace.stopped) {
@@ -1008,7 +1048,7 @@ class OrbitalSystem {
           continue;
         }
         // Stale and unprotected — delete asynchronously
-        fs.unlink(path.join(SESSIONS_DIR, r.file), () => {});
+        fs.unlink(path.join(dir, r.file), () => {});
         continue;
       }
       survivingResults.push(r);
@@ -1026,7 +1066,6 @@ class OrbitalSystem {
 
       const id = r.data.session_id || path.basename(r.file, '.json');
       if (r.data.pid) requestPidStartTime(r.data.pid); // keep start-time cache warm
-      if (excludeId && id === excludeId) continue;
       seenIds.add(id);
 
       if (!this.faces.has(id)) {
@@ -1067,7 +1106,9 @@ class OrbitalSystem {
   }
 
   _assignLabels() {
-    const sorted = [...this.faces.values()].sort((a, b) => a.firstSeen - b.firstSeen);
+    const sorted = [...this.faces.values()]
+      .filter(f => f.sessionId !== this.mainSessionId)
+      .sort((a, b) => a.firstSeen - b.firstSeen);
     if (sorted.length === 0) return;
 
     const cwdCounts = {};
@@ -1668,6 +1709,61 @@ class OrbitalSystem {
 // subagent sessions with state, label, path, and detail info.
 
 const MIN_SESSION_LIST_COLS = 50;
+const MIN_SESSION_LIST_ROWS = 12;      // chrome + footer + both overflow marks + one entry
+const SESSION_LIST_ENTRY_ROWS = 4;     // state row, path row, detail row, info row
+
+// Age of a write as the list shows it: 3s, 2m, 1h.
+function formatAge(ms) {
+  const s = Math.max(0, Math.floor((Number.isFinite(ms) ? ms : 0) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h`;
+}
+
+// Pure: the list's tree order. Main first with its agents under it, then the
+// other top-level sessions by attention (newest prompt first, then firstSeen),
+// each with its agents, then children whose parent is not on screen.
+//   mainInfo  the synthesized main row ({ sessionId, ... }) or null
+//   faces     the orbital MiniFaces (the main is not among them)
+// Returns [{ face, depth }] with depth 0 (top-level) or 1 (child).
+function orderSessionList(mainInfo, faces) {
+  const list = [...faces];
+  const mainId = mainInfo ? mainInfo.sessionId : null;
+  const byFirstSeen = (a, b) => (a.firstSeen || 0) - (b.firstSeen || 0);
+  const children = (pid) => list.filter(f => f.parentSession && f.parentSession === pid).sort(byFirstSeen);
+  const out = [];
+  const place = (face, depth) => out.push({ face, depth });
+
+  if (mainInfo) {
+    place(mainInfo, 0);
+    for (const c of children(mainId)) place(c, 1);
+  }
+  const tops = list
+    .filter(f => f.sessionId !== mainId && !f.parentSession)
+    .sort((a, b) => ((b.lastPromptAt || 0) - (a.lastPromptAt || 0)) || byFirstSeen(a, b));
+  for (const t of tops) {
+    place(t, 0);
+    for (const c of children(t.sessionId)) place(c, 1);
+  }
+  const placed = new Set(out.map(e => e.face.sessionId));
+  for (const f of list) if (!placed.has(f.sessionId)) place(f, 0);
+  return out;
+}
+
+// Pure: which of the rendered rows the cursor may land on. A stopped session
+// lingers on the list for ~10s after it ends so the user sees it finish, but
+// it is display-only: pinning it is a no-op the policy immediately undoes
+// (a stopped session is never live, so the pin is released on the same tick),
+// which reads as a dead key. The main row is always navigable -- between turns
+// its `stopped` is the folded `turnEnded`, and pin/unpin must keep working.
+//   entries  [{ face, depth }] from orderSessionList
+// Returns the session ids, in rendered order, that j/k and Enter may select.
+function listNavigableIds(entries) {
+  return (entries || [])
+    .filter(e => e && e.face && (e.face.isMain || !e.face.stopped))
+    .map(e => e.face.sessionId);
+}
 
 function _truncatePath(fullPath, maxLen) {
   if (!fullPath) return '';
@@ -1690,17 +1786,50 @@ function _sessionDot(face, themeMap) {
   return ['\u25cf', theme.border]; // ● colored by state
 }
 
-function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, selectedIndex, outBounds) {
-  const selIdx = typeof selectedIndex === 'number' ? selectedIndex : -1;
-  if (cols < MIN_SESSION_LIST_COLS) return '';
+// The dim info row: what kind of thing this is, how busy, how fresh, whose.
+function _infoLine(face, labelById, now) {
+  const parts = [];
+  if (face.parentSession) {
+    parts.push(face.agentType || (face.isTeammate && face.teamName) || 'agent');
+  } else {
+    parts.push(`${face.toolCalls || 0} tools`, `${face.filesEdited || 0} files`);
+  }
+  if (face.lastUpdate) parts.push(formatAge(now - face.lastUpdate));
+  let line = parts.join(' \u00b7 ');
+  if (face.parentSession) {
+    const parent = labelById.get(face.parentSession) || String(face.parentSession).slice(0, 8);
+    line += ` \u00b7 \u21b3 ${parent}`;
+  }
+  return line;
+}
+
+// entriesOrFaces: [{ face, depth }] from orderSessionList, or a plain array of
+// faces (all depth 0). selected: a session id, or a legacy row index.
+function renderSessionList(cols, rows, entriesOrFaces, paletteThemes, mainInfo, selected) {
+  if (cols < MIN_SESSION_LIST_COLS || rows < MIN_SESSION_LIST_ROWS) return '';
   const themeMap = paletteThemes || themes;
   const r = ansi.reset;
+  const now = Date.now();
 
-  // Build session list: main face first (if provided), then pre-sorted subagents
-  const sorted = [];
-  if (mainInfo) sorted.push(mainInfo);
-  sorted.push(...sortedFaces);
-  const count = sorted.length;
+  // Normalise to entries. A plain face array is the legacy shape: main first.
+  let entries;
+  const raw = entriesOrFaces || [];
+  if (raw.length && raw[0] && raw[0].face) {
+    entries = raw;
+  } else {
+    entries = [];
+    if (mainInfo) entries.push({ face: mainInfo, depth: 0 });
+    for (const f of raw) entries.push({ face: f, depth: 0 });
+  }
+  if (mainInfo && !entries.some(e => e.face === mainInfo)) entries = [{ face: mainInfo, depth: 0 }, ...entries];
+  const count = entries.length;
+
+  const labelById = new Map();
+  for (const e of entries) if (e.face.sessionId) labelById.set(e.face.sessionId, (e.face.label || '?').slice(0, 14));
+
+  let selIdx = -1;
+  if (typeof selected === 'number') selIdx = selected;
+  else if (typeof selected === 'string') selIdx = entries.findIndex(e => e.face.sessionId === selected);
 
   // Box dimensions
   const boxW = Math.min(cols - 4, 54);
@@ -1708,85 +1837,76 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
   const headerText = '  Sessions';
   const countText = `${count} total `;
 
-  // How many sessions can fit? 3 rows per session + separator between
-  const maxVisible = Math.max(1, Math.floor((rows - 6) / 4)); // 3 rows + 1 separator
-  // Scroll: keep selectedIndex inside visible window
+  // Rows left after chrome (4), footer (1) and both overflow marks (2), at
+  // ENTRY_ROWS + 1 separator per entry: the box can never outgrow the screen.
+  const maxVisible = Math.max(1, Math.floor((rows - 7) / (SESSION_LIST_ENTRY_ROWS + 1)));
   const scrollOffset = (selIdx >= 0 && count > maxVisible)
     ? Math.min(Math.max(0, selIdx - (maxVisible - 1)), Math.max(0, count - maxVisible))
     : 0;
-  const visible = sorted.slice(scrollOffset, scrollOffset + maxVisible);
+  const visible = entries.slice(scrollOffset, scrollOffset + maxVisible);
   const overflowBelow = count - (scrollOffset + visible.length);
   const overflowAbove = scrollOffset;
 
-  // Calculate total box height
   let contentRows = 0;
   if (count === 0) {
     contentRows = 1; // "no sessions"
   } else {
-    contentRows = visible.length * 3 + Math.max(0, visible.length - 1); // 3 per face + separators
+    contentRows = visible.length * SESSION_LIST_ENTRY_ROWS + Math.max(0, visible.length - 1);
     if (overflowAbove > 0) contentRows += 1;
     if (overflowBelow > 0) contentRows += 1;
   }
-  // Add footer hint row when selection is active
   const hasFooter = selIdx >= 0 && count > 0;
   if (hasFooter) contentRows += 1;
   const boxH = contentRows + 4; // top border + header + separator + bottom border
 
-  // Center the box
   const bx = Math.max(1, Math.floor((cols - boxW) / 2));
   const by = Math.max(1, Math.floor((rows - boxH - 1) / 2));
 
   const bc = ansi.fg(...dimColor([140, 170, 200], 0.7));
   const tc = ansi.fg(...dimColor([200, 220, 240], 0.9));
   const dc = ansi.fg(...dimColor([140, 170, 200], 0.55));
+  const line = (row, text) => ansi.to(row, bx) + `${bc}\u2502${text}${bc}\u2502${r}`;
+  const centered = (row, text, color) => {
+    const pad = Math.max(0, Math.floor((innerW - text.length) / 2));
+    return line(row, `${color}${' '.repeat(pad)}${text}${' '.repeat(Math.max(0, innerW - pad - text.length))}`);
+  };
 
   let buf = '';
-
-  // Top border with header
   const headerPad = innerW - headerText.length - countText.length;
   buf += ansi.to(by, bx) + `${bc}\u256d${'\u2500'.repeat(innerW)}\u256e${r}`;
-  buf += ansi.to(by + 1, bx) + `${bc}\u2502${tc}${headerText}${' '.repeat(Math.max(0, headerPad))}${dc}${countText}${bc}\u2502${r}`;
+  buf += line(by + 1, `${tc}${headerText}${' '.repeat(Math.max(0, headerPad))}${dc}${countText}`);
   buf += ansi.to(by + 2, bx) + `${bc}\u251c${'\u2500'.repeat(innerW)}\u2524${r}`;
 
   let row = by + 3;
 
   if (count === 0) {
-    const msg = 'no sessions';
-    const msgPad = Math.max(0, Math.floor((innerW - msg.length) / 2));
-    buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(msgPad)}${msg}${' '.repeat(Math.max(0, innerW - msgPad - msg.length))}${bc}\u2502${r}`;
+    buf += centered(row, 'no sessions', dc);
     row++;
   } else {
-    // "Above" scroll indicator
-    if (overflowAbove > 0) {
-      const aboveText = `\u2191${overflowAbove} above`;
-      const aPad = Math.max(0, Math.floor((innerW - aboveText.length) / 2));
-      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(aPad)}${aboveText}${' '.repeat(Math.max(0, innerW - aPad - aboveText.length))}${bc}\u2502${r}`;
-      row++;
-    }
+    if (overflowAbove > 0) { buf += centered(row, `\u2191${overflowAbove} above`, dc); row++; }
     for (let i = 0; i < visible.length; i++) {
-      const face = visible[i];
+      const { face, depth } = visible[i];
       const isSel = i === (selIdx - scrollOffset);
       const [dot, dotColor] = _sessionDot(face, themeMap);
       const dotC = ansi.fg(...dotColor);
       const stateTheme = themeMap[face.state] || themeMap.idle;
       const stateName = (stateTheme.status || face.state).slice(0, 12);
       const label = (face.label || '?').slice(0, 14);
-
-      // Selection marker and colors
       const selMarker = isSel ? '\u25b8' : ' ';
       const rowTc = isSel ? ansi.fg(...dimColor([240, 250, 255], 1.0)) : tc;
       const rowDc = isSel ? ansi.fg(...dimColor([180, 200, 220], 0.8)) : dc;
 
-      // Row 1: " ▸● statename    ⊛/★ label" — dot, state, and label (⊛ pinned, ★ main)
+      // Row 1: " ▸● statename  editor      ⊛/★/☆ label". A child gets a tree
+      // marker before the dot. Width priority: the label (with its marker, the
+      // promote UX) is never sliced; the editor tag drops first; the state
+      // name truncates last.
       const mainTag = face.isMain
         ? (face.isPinned ? '\u229b ' : '\u2605 ')
         : (face.isMainSession ? '\u2606 ' : '');
-      const row1Prefix = 4; // " ▸● " before stateName
+      const treeMark = depth > 0 ? '\u2514 ' : '';
+      const prefix = ` ${selMarker}${treeMark}`;           // before the dot
+      const row1Prefix = prefix.length + 2;                  // + dot + space
       const fullLabel = mainTag + label;
-      // Three segments: state + dim editor tag + right-anchored label. The
-      // label (with its pin/main marker — the promote UX) is never sliced;
-      // the editor tag drops first under width pressure; the state name
-      // truncates only as a last resort.
       const avail = innerW - row1Prefix;
       const tagRaw = (face.editor || '').slice(0, 8);
       let stateSeg = stateName;
@@ -1797,83 +1917,66 @@ function renderSessionList(cols, rows, sortedFaces, paletteThemes, mainInfo, sel
       const usedLeft = stateSeg.length + (tagSeg ? 2 + tagSeg.length : 0);
       const labelGap = Math.max(2, avail - usedLeft - fullLabel.length);
       const r1Pad = Math.max(0, avail - usedLeft - labelGap - fullLabel.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${r} ${rowTc}${selMarker}${dotC}${dot}${r} ${rowTc}${stateSeg}${tagSeg ? `  ${rowDc}${tagSeg}` : ''}${' '.repeat(labelGap)}${rowTc}${fullLabel}${' '.repeat(r1Pad)}${bc}\u2502${r}`;
+      buf += line(row, `${r}${rowTc}${prefix}${dotC}${dot}${r} ${rowTc}${stateSeg}${tagSeg ? `  ${rowDc}${tagSeg}` : ''}${' '.repeat(labelGap)}${rowTc}${fullLabel}${' '.repeat(r1Pad)}`);
       row++;
 
-      // Row 2: "    ⎇ branch  ~/path" — branch and path share the line
-      const indent2 = '    ';
+      const indent = '    ';
+      const body = innerW - indent.length;
+
+      // Row 2: "    ⎇ branch  ~/path"
       const branchRaw = face.gitBranch || '';
-      let row2Text = '';
+      let row2Text;
       if (branchRaw) {
         const branchDisplay = ('\u2387 ' + branchRaw).slice(0, 20);
-        const pathSpace = innerW - indent2.length - branchDisplay.length - 2; // 2 = gap
-        const cwdStr = _truncatePath(face.cwd, Math.max(8, pathSpace));
-        row2Text = branchDisplay + '  ' + cwdStr;
+        const pathSpace = body - branchDisplay.length - 2;
+        row2Text = branchDisplay + '  ' + _truncatePath(face.cwd, Math.max(8, pathSpace));
       } else {
-        const cwdStr = _truncatePath(face.cwd, innerW - indent2.length);
-        row2Text = cwdStr;
+        row2Text = _truncatePath(face.cwd, body);
       }
-      const row2Full = indent2 + row2Text.slice(0, innerW - indent2.length);
-      const r2Pad = Math.max(0, innerW - row2Full.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${rowDc}${row2Full}${' '.repeat(r2Pad)}${bc}\u2502${r}`;
+      const row2Full = indent + row2Text.slice(0, body);
+      buf += line(row, `${rowDc}${row2Full}${' '.repeat(Math.max(0, innerW - row2Full.length))}`);
       row++;
 
-      // Row 3: "    task/detail text" — full task description preferred, dimmed
-      const indent3 = '    ';
-      const detailText = (face.taskDescription || face.detail || 'waiting...').slice(0, innerW - indent3.length);
-      const row3Full = indent3 + detailText;
-      const r3Pad = Math.max(0, innerW - row3Full.length);
-      buf += ansi.to(row, bx) + `${bc}\u2502${rowDc}${row3Full}${' '.repeat(r3Pad)}${bc}\u2502${r}`;
+      // Row 3: "    task/detail text" — full task description preferred
+      const detailText = (face.taskDescription || face.detail || 'waiting...').slice(0, body);
+      const row3Full = indent + detailText;
+      buf += line(row, `${rowDc}${row3Full}${' '.repeat(Math.max(0, innerW - row3Full.length))}`);
       row++;
 
-      // Separator between entries (not after last)
+      // Row 4: "    Explore · 3s · ↳ parent" / "    12 tools · 3 files · 3s"
+      const infoText = _infoLine(face, labelById, now).slice(0, body);
+      const row4Full = indent + infoText;
+      buf += line(row, `${rowDc}${row4Full}${' '.repeat(Math.max(0, innerW - row4Full.length))}`);
+      row++;
+
       if (i < visible.length - 1) {
         buf += ansi.to(row, bx) + `${bc}\u251c${'\u2500'.repeat(innerW)}\u2524${r}`;
         row++;
       }
     }
-
-    // "Below" overflow indicator
-    if (overflowBelow > 0) {
-      const overText = `+${overflowBelow} more`;
-      const oPad = Math.max(0, Math.floor((innerW - overText.length) / 2));
-      buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(oPad)}${overText}${' '.repeat(Math.max(0, innerW - oPad - overText.length))}${bc}\u2502${r}`;
-      row++;
-    }
+    if (overflowBelow > 0) { buf += centered(row, `+${overflowBelow} more`, dc); row++; }
   }
 
-  // Footer hint (when selection is active) — context-sensitive
   if (hasFooter) {
-    const isPinned = mainInfo && mainInfo.isPinned;
+    const selEntry = entries[selIdx];
+    const onMain = !!(selEntry && selEntry.face && selEntry.face.isMain);
+    const isPinned = !!(mainInfo && mainInfo.isPinned);
     let hint;
-    if (selIdx === 0 && isPinned) {
-      hint = '\u2191\u2193 select  \u23ce unpin  esc close';
-    } else if (selIdx > 0) {
-      hint = '\u2191\u2193 select  \u23ce pin+promote  esc close';
-    } else {
-      hint = '\u2191\u2193 select  \u23ce promote  esc close';
-    }
-    const hPad = Math.max(0, Math.floor((innerW - hint.length) / 2));
-    buf += ansi.to(row, bx) + `${bc}\u2502${dc}${' '.repeat(hPad)}${hint}${' '.repeat(Math.max(0, innerW - hPad - hint.length))}${bc}\u2502${r}`;
+    if (onMain && isPinned) hint = '\u2191\u2193 select  \u23ce unpin  esc close';
+    else if (onMain) hint = '\u2191\u2193 select  \u23ce pin  esc close';
+    else hint = '\u2191\u2193 select  \u23ce pin+promote  esc close';
+    buf += centered(row, hint, dc);
     row++;
   }
 
-  // Bottom border
   buf += ansi.to(row, bx) + `${bc}\u2570${'\u2500'.repeat(innerW)}\u256f${r}`;
-
-  // Report bounding box so caller can clear on dismiss
-  if (outBounds) {
-    outBounds.bx = bx;
-    outBounds.by = by;
-    outBounds.w = boxW;
-    outBounds.h = row - by + 1;
-  }
-
   return buf;
 }
 
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
+  orderSessionList, listNavigableIds, formatAge,
+  MIN_SESSION_LIST_ROWS, SESSION_LIST_ENTRY_ROWS,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _sweepPidCache,
   _setPidResolver, KNOWN_EDITORS,

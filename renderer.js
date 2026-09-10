@@ -23,7 +23,7 @@ const {
 const { mouths, eyes, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { ClaudeFace } = require('./face');
-const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartStatus } = require('./grid');
+const { MiniFace, OrbitalSystem, renderSessionList, orderSessionList, listNavigableIds, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartStatus } = require('./grid');
 const { SwapTransition } = require('./transition');
 
 // -- Config --------------------------------------------------------
@@ -144,6 +144,42 @@ function noteNewWrite(ts, lastTs, now, lastAt) {
   return ts > lastTs ? now : lastAt;
 }
 
+// -- Main session policy ---------------------------------------------
+// Pure: which session should the center face follow?
+//
+// The center follows the user's attention: the live top-level session with the
+// newest `lastPromptAt` (stamped by SessionStart and UserPromptSubmit). A pin
+// (manual promotion) wins while its session is live and is released the moment
+// it is not, so a promoted agent hands the center back when it stops.
+//
+//   sessions   [{ id, parentSession, isTeammate, stopped, stale, attentionAt, lastUpdate }]
+//   currentId  the session on screen now (null before the first pick)
+//   pinnedId   the manual pin, or null
+// Returns { mainId, pinnedId }. mainId is currentId when nothing live beats
+// it -- the on-screen face then decays through its own cascade.
+function pickMainSession({ sessions, currentId, pinnedId }) {
+  const byId = new Map();
+  for (const s of sessions) byId.set(s.id, s);
+  const live = (s) => !!s && !s.stopped && !s.stale;
+  const topLevel = (s) => live(s) && !s.parentSession && !s.isTeammate;
+
+  if (pinnedId && live(byId.get(pinnedId))) return { mainId: pinnedId, pinnedId };
+
+  let best = null;
+  for (const s of sessions) {
+    if (!topLevel(s)) continue;
+    if (!best) { best = s; continue; }
+    const a = s.attentionAt || 0;
+    const b = best.attentionAt || 0;
+    if (a > b) { best = s; continue; }
+    if (a < b) continue;
+    // Tie: the current main keeps its seat; with no current, the newest write.
+    if (best.id === currentId) continue;
+    if (s.id === currentId || (s.lastUpdate || 0) > (best.lastUpdate || 0)) best = s;
+  }
+  return { mainId: best ? best.id : (currentId || null), pinnedId: null };
+}
+
 // -- Terminal title -------------------------------------------------
 // The tab/window title mirrors the face so a backgrounded terminal still
 // says what is going on. While the face has been waiting on the user for a
@@ -156,16 +192,21 @@ function buildTitle(modelName, status, flash) {
 
 // -- Shared runtime -------------------------------------------------
 
-function readState() {
+// Read one state file into the shape the main face consumes. The unified
+// renderer passes the main session's own file; tmux mode keeps the global
+// file. A session file marks a finished turn with `turnEnded` (its `stopped`
+// means the session ended, which the orbitals need to tell apart); for the
+// main face both simply mean "the turn is over", so they fold into `stopped`.
+function readState(filePath = STATE_FILE) {
   try {
-    const raw = fs.readFileSync(STATE_FILE, 'utf8').trim();
+    const raw = fs.readFileSync(filePath, 'utf8').trim();
     if (!raw) return { state: 'idle', detail: '' };
     const data = JSON.parse(raw);
     return {
       state: data.state || 'idle',
       detail: data.detail || '',
       timestamp: data.timestamp || 0,
-      sessionId: data.sessionId || '',
+      sessionId: data.sessionId || data.session_id || '',
       modelName: data.modelName || '',
       toolCalls: data.toolCalls || 0,
       filesEdited: data.filesEdited || 0,
@@ -179,7 +220,7 @@ function readState() {
       dailySessions: data.dailySessions || 0,
       dailyCumulativeMs: data.dailyCumulativeMs || 0,
       frequentFiles: data.frequentFiles || {},
-      stopped: data.stopped || false,
+      stopped: !!(data.stopped || data.turnEnded),
       cwd: data.cwd || null,
       isWorktree: data.isWorktree || false,
       gitBranch: data.gitBranch || null,
@@ -189,6 +230,7 @@ function readState() {
       workDetail: data.workDetail || '',
       pid: data.pid || 0,
       editor: data.editor || '',
+      lastPromptAt: data.lastPromptAt || 0,
     };
   } catch {
     return { state: 'idle', detail: '' };
@@ -255,13 +297,15 @@ function runUnifiedMode() {
     if (typeof prefs.showOrbitals === 'boolean') face.showOrbitals = prefs.showOrbitals;
   }
 
-  // Main session isolation
+  // Main session: which session file the center face follows. Chosen by
+  // pickMainSession over the orbital loader's faces (the main is loaded like
+  // any other session and merely kept off the ring). Changing it always goes
+  // through adoptMain so every per-session tracker below is reset together.
   let mainSessionId = null;
   let pinnedSessionId = null; // Set when user manually promotes — prevents auto-swap
-  let lastMainUpdate = 0;
 
   let lastMtime = 0;
-  let lastStopped = false;    // Track if Stop hook has fired (session ended)
+  let lastStopped = false;    // Track if Stop hook has fired (turn ended)
   let lastForceReadTime = 0;  // Track periodic forced re-reads (bypasses mtime race)
   let lastEditorPid = 0;      // Validated (armed) PID of the editor process
   let candidatePid = 0;       // PID from the latest state write, pending validation
@@ -271,11 +315,75 @@ function runUnifiedMode() {
   let lastAppliedTimestamp = 0; // Dedup: skip re-applying state with same timestamp
   let lastAppliedState = null;  // State named by that write -- "is this tool still running?"
   let lastNewWriteAt = 0;       // When a NEW write last arrived (not a re-read) -- see noteNewWrite
+
+  function mainSessionFile() {
+    return mainSessionId ? path.join(SESSIONS_DIR, safeFilename(mainSessionId) + '.json') : null;
+  }
+
+  // Every path that changes which session is main lands here: the trackers
+  // above are all per-session, and a stale one (a held work state, an armed
+  // PID, an old write clock) would otherwise leak onto the new face.
+  function adoptMain(newId) {
+    mainSessionId = newId;
+    orbital.setMainSession(newId);
+    lastAppliedState = null;
+    lastAppliedTimestamp = 0;
+    lastStopped = false;
+    editorDead = false;
+    lastEditorPid = 0;
+    candidatePid = 0;
+    lastNewWriteAt = 0;
+    lastMtime = 0;
+    lastForceReadTime = 0;
+    const mf = orbital.faces.get(newId);
+    if (mf) {
+      if (mf.modelName && !process.env.CODE_CRUMB_MODEL) face.modelName = mf.modelName;
+      if (mf.editor && !process.env.CODE_CRUMB_EDITOR) face.editor = mf.editor;
+      if (mf.cwd) face.cwd = mf.cwd;
+      if (mf.gitBranch) face.gitBranch = mf.gitBranch;
+    }
+  }
+
+  // Ask the policy which session the center should follow, and start the
+  // swap if it is not the one on screen. The first pick is silent.
+  function applyMainPolicy() {
+    if (swapTransition.active) return;
+    const sessions = [];
+    for (const f of orbital.faces.values()) {
+      sessions.push({
+        id: f.sessionId, parentSession: f.parentSession, isTeammate: f.isTeammate,
+        // The renderer knows one thing the file does not: the main's editor died.
+        stopped: f.stopped || (f.sessionId === mainSessionId && editorDead),
+        stale: f.isStale(), attentionAt: f.lastPromptAt || 0, lastUpdate: f.lastUpdate,
+      });
+    }
+    const pick = pickMainSession({ sessions, currentId: mainSessionId, pinnedId: pinnedSessionId });
+    pinnedSessionId = pick.pinnedId;
+    if (!pick.mainId || pick.mainId === mainSessionId) return;
+    if (!mainSessionId) adoptMain(pick.mainId);
+    else swapTransition.start(mainSessionId, pick.mainId);
+  }
+
   function checkState() {
     const now = Date.now();
     let cachedStateData = null; // Cache readState() to avoid duplicate fs.readFileSync
+    // The policy runs above the main try, so an exception in it (or in
+    // isStale's PID plumbing) would escape checkState and take the render loop
+    // with it. A failed pick must cost one tick, not the face.
+    try { applyMainPolicy(); } catch {}
+    // Nothing may touch the face or the trackers while it dissolves. The old
+    // guard sat inside the mtime branch, so on the ~3 ticks in 4 where the old
+    // main's file is unchanged and this is not a forced read, execution fell
+    // straight past it into the rescue block, the fresh-read block and
+    // idleCascade -- all still acting on the session that is leaving. The
+    // rescue's forceState('responding') then buffered the promoted face's own
+    // state for up to 3s after it materialized. Returning here costs nothing:
+    // adoptMain resets every tracker at the swap frame anyway.
+    if (swapTransition.active) return;
     try {
-      const stat = fs.statSync(STATE_FILE);
+      const fp = mainSessionFile();
+      if (!fp) throw new Error('no main session yet');
+      const stat = fs.statSync(fp);
       // Every 2s, bypass mtime check to eliminate NTFS 1-second mtime race
       const forceRead = (now - lastForceReadTime > 2000);
       if (forceRead) {
@@ -304,6 +412,12 @@ function runUnifiedMode() {
         }
         // PID liveness check: an armed editor process that died without
         // writing a Stop event (crash, kill) triggers the rescue cascade.
+        // Note `lastStopped` now also covers a plain turn end -- readState
+        // folds the session file's `turnEnded` into `stopped` -- so an editor
+        // that dies while sitting between turns is never seen as editorDead.
+        // It is demoted by staleness instead (the policy drops a stale session
+        // and picks another), which is the honest reading: a session waiting
+        // for its next prompt looks exactly like one whose window was closed.
         if (lastEditorPid && !editorDead && !lastStopped && !RESCUE_EXCLUDE.has(face.state)) {
           if (!isProcessAlive(lastEditorPid)) {
             editorDead = true;
@@ -313,7 +427,7 @@ function runUnifiedMode() {
       if (stat.mtimeMs > lastMtime || forceRead) {
         if (forceRead) lastForceReadTime = now;
         lastMtime = stat.mtimeMs;
-        const stateData = readState();
+        const stateData = readState(fp);
         cachedStateData = stateData;
 
         // Use JSON timestamp (ms precision) for staleness instead of
@@ -339,43 +453,15 @@ function runUnifiedMode() {
           }
         }
 
-        // First session we see becomes "main"
-        if (!mainSessionId && stateData.sessionId) {
-          mainSessionId = stateData.sessionId;
+        // The session file's picture of a finished turn is the orbital's
+        // "idle / between turns". The main face's is responding -> happy ->
+        // idle, so a NEW turn-end write is shown as responding first and the
+        // existing cascade does the rest.
+        if (stateData.state === 'idle' && stateData.stopped && ts > lastAppliedTimestamp) {
+          stateData.state = 'responding';
+          stateData.detail = 'wrapping up';
         }
 
-        // If sessionId is missing, treat as belonging to current main session
-        // (fallback for older hooks or parse failures)
-        const incomingId = stateData.sessionId || mainSessionId;
-
-        // If a different session is writing to the state file:
-        if (incomingId && mainSessionId && incomingId !== mainSessionId) {
-          // Never auto-swap away from a pinned session
-          if (pinnedSessionId && pinnedSessionId === mainSessionId) {
-            return;
-          }
-          // Adopt as new main only if old main session ended (stopped or its
-          // editor process died), is very stale, or a new session is
-          // explicitly starting (SessionStart hook)
-          if (lastStopped || editorDead || Date.now() - lastMainUpdate > 120000
-              || stateData.isSessionStart === true) {
-            if (!swapTransition.active) {
-              swapTransition.start(mainSessionId, incomingId);
-            }
-            // Actual swap happens on the 'swap' frame in the render loop
-            lastStopped = false;
-            // New editor session — drop PID tracking from the old one
-            lastEditorPid = 0;
-            candidatePid = 0;
-            editorDead = false;
-            // The old session's tool is no longer what the file names
-            lastAppliedState = null;
-          } else {
-            return; // Ignore — this is a subagent writing to the state file
-          }
-        }
-
-        lastMainUpdate = Date.now();
         lastStopped = !!stateData.stopped;
         // Track the writer's PID as a validation candidate (same PID repeated
         // keeps its original sighting time so it can pass the 2.5s window).
@@ -389,14 +475,12 @@ function runUnifiedMode() {
         // alive — overrides a false PID death (e.g. PID reuse).
         if (editorDead && ts > lastAppliedTimestamp) editorDead = false;
         // Same proof, kept as a clock: this is the ONLY place the write clock
-        // moves. lastMainUpdate above cannot serve -- it is refreshed by every
-        // forced re-read of the unchanged file. Stamped before the swap guard
-        // so a write during a transition still counts as the editor breathing.
+        // moves forward. No read marker can serve -- lastForceReadTime and its
+        // kind are refreshed by every forced re-read of the unchanged file.
+        // (A write landing mid-transition is not seen at all: checkState now
+        // returns at the top while a swap animates. Nothing is lost -- the
+        // swap frame's adoptMain resets this clock for the new session.)
         lastNewWriteAt = noteNewWrite(ts, lastAppliedTimestamp, now, lastNewWriteAt);
-
-        // Don't apply incoming state while a swap transition is animating —
-        // the face should dissolve with its current state until the swap frame.
-        if (swapTransition.active) return;
 
         if (ts > lastAppliedTimestamp) {
           lastAppliedTimestamp = ts;
@@ -439,9 +523,14 @@ function runUnifiedMode() {
     // granularity (common on Windows FAT/NTFS with 1-second mtime resolution).
     if (now >= face.minDisplayUntil &&
         FRESH_READ_STATES.has(face.state) &&
-        (face.state === 'thinking' || now - lastMainUpdate > 2000)) {
+        (face.state === 'thinking' || now - lastForceReadTime > 2000)) {
       try {
-        const freshData = cachedStateData || readState();
+        // Explicit, not accidental: with no main session there is no file to
+        // re-read. (readState(null) would throw into its own catch and hand
+        // back a default idle state, which reads like data but is not.)
+        const freshFp = mainSessionFile();
+        if (!cachedStateData && !freshFp) throw new Error('no main session yet');
+        const freshData = cachedStateData || readState(freshFp);
         const freshTs = freshData.timestamp || 0;
         // Detect stopped transition: false->true only (the primary reset is in the apply block above, plus session adoption)
         const stoppedNow = freshData.stopped || false;
@@ -486,20 +575,18 @@ function runUnifiedMode() {
     else if (next) face.setState(next);
   }
 
-  checkState();
-
-  // Watch state file for changes (leading-edge throttle: first event fires
-  // immediately, duplicates within 50ms are suppressed — Windows fs.watch
-  // fires multiple events per write)
   let stateWatchThrottled = false;
   let stateWatcher = null;
   let sessionWatcher = null;
   let sessionWatchTimer = null;
+  // The main face follows its session file: a change to that file re-reads
+  // it at once (leading-edge throttle: first event fires immediately,
+  // duplicates within 50ms are suppressed — Windows fs.watch fires multiple
+  // events per write). Any other file in the directory reloads the ring below.
   try {
-    const dir = path.dirname(STATE_FILE);
-    const basename = path.basename(STATE_FILE);
-    stateWatcher = fs.watch(dir, (eventType, filename) => {
-      if (!filename || filename === basename) {
+    stateWatcher = fs.watch(SESSIONS_DIR, (eventType, filename) => {
+      const mainName = mainSessionId ? safeFilename(mainSessionId) + '.json' : null;
+      if (!filename || filename === mainName) {
         if (!stateWatchThrottled) {
           stateWatchThrottled = true;
           checkState();
@@ -512,26 +599,24 @@ function runUnifiedMode() {
     });
   } catch {}
 
-  // Watch sessions directory for subagent changes (skipped in minimal mode)
-  if (!minimal) {
-    try {
-      sessionWatcher = fs.watch(SESSIONS_DIR, () => {
-        if (sessionWatchTimer) clearTimeout(sessionWatchTimer);
-        sessionWatchTimer = setTimeout(() => {
-          if (mainSessionId) orbital.loadSessionsAsync(mainSessionId);
-        }, 80);
-      });
-      sessionWatcher.on('error', (err) => {
-        try { process.stderr.write(`[code-crumb] session watcher error: ${err.code || err.message}\n`); } catch {}
-      });
-    } catch {}
-  }
+  // Watch sessions directory for session changes. Minimal mode needs the
+  // loader too -- it just never draws the ring.
+  try {
+    sessionWatcher = fs.watch(SESSIONS_DIR, () => {
+      if (sessionWatchTimer) clearTimeout(sessionWatchTimer);
+      sessionWatchTimer = setTimeout(() => {
+        orbital.loadSessionsAsync(mainSessionId);
+      }, 80);
+    });
+    sessionWatcher.on('error', (err) => {
+      try { process.stderr.write(`[code-crumb] session watcher error: ${err.code || err.message}\n`); } catch {}
+    });
+  } catch {}
 
-  // Pre-populate mainSessionId before loading sessions (prevents phantom orbital race)
-  if (!minimal) checkState();
-
-  // Initial session load (skipped in minimal mode)
-  if (!minimal) orbital.loadSessions(mainSessionId);
+  // Boot: load every session file, let the policy pick the main, read it.
+  orbital.loadSessions(null);
+  applyMainPolicy();
+  checkState();
 
   // -- Cleanup (accessible to keypress handler + signal handlers) ----
   function cleanup() {
@@ -571,24 +656,29 @@ function runUnifiedMode() {
       }
       // Help dismiss: any key while help is showing closes it
       if (face.showHelp) { face.showHelp = false; return; }
-      // Session list navigation: arrows/j/k to navigate, Enter to promote, Esc/other to dismiss
+      // Session list navigation: arrows/j/k move through the rendered order,
+      // Enter pins/unpins the main row or pins+promotes any other, anything
+      // else dismisses.
       if (face.showSessionList) {
-        const maxIdx = face.sessionListCount - 1;
+        const ids = face.sessionListIds;
+        let idx = ids.indexOf(face.sessionListSelectedId);
+        if (idx < 0) idx = 0;
         if (key === '\x1b[A' || key === 'k') {
-          face.sessionListIndex = Math.max(0, face.sessionListIndex - 1);
+          face.sessionListSelectedId = ids[Math.max(0, idx - 1)] || null;
         } else if (key === '\x1b[B' || key === 'j') {
-          face.sessionListIndex = Math.min(Math.max(0, maxIdx), face.sessionListIndex + 1);
+          face.sessionListSelectedId = ids[Math.min(ids.length - 1, idx + 1)] || null;
         } else if (key === '\r' || key === '\n') {
-          if (face.sessionListIndex === 0 && pinnedSessionId) {
-            pinnedSessionId = null; // Unpin — resume normal auto-swap
-          } else if (face.sessionListIndex > 0) {
-            face.sessionListPromote = face.sessionListIndex;
+          const sel = face.sessionListSelectedId;
+          if (sel && sel === mainSessionId) {
+            pinnedSessionId = pinnedSessionId === mainSessionId ? null : mainSessionId;
+          } else if (sel) {
+            face.sessionListPromote = sel;
           }
           face.showSessionList = false;
-          face.sessionListIndex = 0;
+          face.sessionListSelectedId = null;
         } else {
           face.showSessionList = false;
-          face.sessionListIndex = 0;
+          face.sessionListSelectedId = null;
         }
         return;
       }
@@ -616,51 +706,28 @@ function runUnifiedMode() {
 
   // Execute the actual main↔orbital swap (called on 'swap' frame or forced by resize)
   function _executeSwap() {
-    const oldId = swapTransition.fromId;
     const newId = swapTransition.toId;
-    if (!oldId || !newId) return;
+    if (!newId) return;
 
-    // Write old main's current state as an orbital session file
+    // Both sessions already own their files: the old main reappears on the
+    // ring at the next load, the new main is read from its file right here.
+    adoptMain(newId);
     try {
-      fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-      const oldData = {
-        session_id: oldId,
-        state: face.state,
-        detail: face.stateDetail,
-        timestamp: Date.now(),
-        modelName: face.modelName || 'claude',
-        editor: face.editor || '',
-        cwd: face.cwd,
-        gitBranch: face.gitBranch,
-        stopped: lastStopped,
-      };
-      fs.writeFileSync(
-        path.join(SESSIONS_DIR, safeFilename(oldId) + '.json'),
-        JSON.stringify(oldData), 'utf8'
-      );
-    } catch {}
-
-    // Adopt the new session as main. Every path that changes which session is
-    // main must also forget the file state the hold is keyed on -- a manual
-    // promotion pins the session, so a stale work state would otherwise hold
-    // the promoted face for the full LONG_TOOL_HOLD_MS.
-    mainSessionId = newId;
-    lastAppliedState = null;
-
-    // Read the new main's session file and apply state
-    try {
-      const newFile = path.join(SESSIONS_DIR, safeFilename(newId) + '.json');
-      const newData = JSON.parse(fs.readFileSync(newFile, 'utf8'));
-      face.setState(newData.state || 'idle', newData.detail || '');
-      if (newData.modelName) face.modelName = newData.modelName;
-      if (newData.editor) face.editor = newData.editor;
-      if (newData.cwd) face.cwd = newData.cwd;
-      if (newData.gitBranch) face.gitBranch = newData.gitBranch;
-      lastStopped = !!newData.stopped;
-      // Remove promoted session's orbital file
-      try { fs.unlinkSync(newFile); } catch {}
+      const newData = readState(mainSessionFile());
+      const ts = newData.timestamp || 0;
+      if (ts > 0) {
+        lastAppliedTimestamp = ts;
+        lastAppliedState = newData.state;
+        lastStopped = !!newData.stopped;
+        // forceState, not setState: a materialized face must show its own
+        // session at once. Any leftover minDisplayUntil belongs to the session
+        // that just left, and setState would buffer this behind it. No third
+        // argument, so the new state's own table minimum applies from here.
+        face.forceState(newData.state || 'idle', newData.detail || '');
+        face.setStats(newData);
+      }
     } catch {
-      // If session file can't be read, just adopt the ID and read state next cycle
+      // No readable file yet: the id is adopted and checkState reads it next cycle
     }
 
     // Spawn celebration particles
@@ -694,14 +761,10 @@ function runUnifiedMode() {
       }
     }
 
-    // -- Manual promotion from session list --
-    if (face.sessionListPromote !== null && !swapTransition.active) {
-      const subSorted = orbital.getSortedFaces();
-      const promoteIdx = face.sessionListPromote - 1; // subtract 1 for main at index 0
-      if (promoteIdx >= 0 && promoteIdx < subSorted.length) {
-        const target = subSorted[promoteIdx];
-        pinnedSessionId = target.sessionId; // Pin the promoted session
-        swapTransition.start(mainSessionId, target.sessionId);
+    // -- Manual promotion from session list: pin it; the policy swaps. --
+    if (face.sessionListPromote !== null) {
+      if (face.sessionListPromote !== mainSessionId && orbital.faces.has(face.sessionListPromote)) {
+        pinnedSessionId = face.sessionListPromote;
       }
       face.sessionListPromote = null;
     }
@@ -714,7 +777,7 @@ function runUnifiedMode() {
     if (face.frame % Math.floor(FPS / 2) === 0) checkState();
 
     // Tell face how many subagents are active (for status line)
-    face.subagentCount = orbital.faces.size;
+    face.subagentCount = orbital.getSortedFaces().length;
 
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
@@ -738,9 +801,9 @@ function runUnifiedMode() {
     // Session list overlay (drawn on top of orbital, not dimmed)
     if (!minimal && face.showSessionList) {
       const paletteThemes = (PALETTES[face.paletteIndex] || PALETTES[0]).themes;
-      const subSorted = orbital.getSortedFaces();
-      face.sessionListCount = 1 + subSorted.length; // main + orbitals
-      const mainInfo = {
+      const mainFace = mainSessionId ? orbital.faces.get(mainSessionId) : null;
+      const mainInfo = mainSessionId ? {
+        sessionId: mainSessionId,
         state: face.state,
         detail: face.stateDetail,
         cwd: face.cwd,
@@ -748,11 +811,24 @@ function runUnifiedMode() {
         label: face.modelName || 'claude',
         editor: face.editor || '',
         stopped: lastStopped,
-        firstSeen: 0, // sort first
         isMain: true,
-        isPinned: !!pinnedSessionId,
-      };
-      try { out += renderSessionList(cols, rows, subSorted, paletteThemes, mainInfo, face.sessionListIndex); } catch {}
+        isPinned: pinnedSessionId === mainSessionId,
+        toolCalls: face.toolCallCount,
+        filesEdited: face.filesEditedCount,
+        lastUpdate: lastNewWriteAt,
+        taskDescription: mainFace ? mainFace.taskDescription : '',
+        agentType: mainFace ? mainFace.agentType : '',
+        parentSession: mainFace ? mainFace.parentSession : null,
+        isTeammate: mainFace ? mainFace.isTeammate : false,
+        teamName: mainFace ? mainFace.teamName : '',
+      } : null;
+      const entries = orderSessionList(mainInfo, orbital.getSortedFaces());
+      // Every entry is drawn; only the live ones can be selected.
+      face.sessionListIds = listNavigableIds(entries);
+      if (!face.sessionListIds.includes(face.sessionListSelectedId)) {
+        face.sessionListSelectedId = face.sessionListIds[0] || null;
+      }
+      try { out += renderSessionList(cols, rows, entries, paletteThemes, mainInfo, face.sessionListSelectedId); } catch {}
     }
 
     // Update terminal title bar to reflect current state. A wait the user has
@@ -877,7 +953,7 @@ if (require.main === module) {
     IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
     PALETTES, PALETTE_NAMES,
     readState, ACTIVE_WORK_STATES, COMPLETION_STATES, FRESH_READ_STATES,
-    idleCascade, buildTitle, noteNewWrite,
+    idleCascade, buildTitle, noteNewWrite, pickMainSession,
     IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
     LONG_TOOL_HOLD_MS, WAIT_HOLD_STALE_MS,
   };
