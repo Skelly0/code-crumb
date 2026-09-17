@@ -2658,4 +2658,93 @@ describe('face.js -- no incremental clear band', () => {
   });
 });
 
+// -- Model identity in the status line -----------------------------------
+
+describe('face.js -- model name on the face', () => {
+  const origCols = process.stdout.columns;
+  const origRows = process.stdout.rows;
+
+  function render(face) {
+    process.stdout.columns = 80;
+    process.stdout.rows = 30;
+    const out = face.render().replace(/\x1b\[[^m]*m/g, '');
+    process.stdout.columns = origCols;
+    process.stdout.rows = origRows;
+    return out;
+  }
+
+  test('setStats picks up model and leaves modelName alone', () => {
+    const face = new ClaudeFace();
+    face.setStats({ modelName: 'claude', model: 'Opus' });
+    assert.strictEqual(face.model, 'Opus');
+    assert.strictEqual(face.modelName, 'claude');
+  });
+
+  test('a later write without a model does not clear a known one', () => {
+    const face = new ClaudeFace();
+    face.setStats({ model: 'Sonnet' });
+    face.setStats({ modelName: 'claude' });
+    assert.strictEqual(face.model, 'Sonnet');
+  });
+
+  test('status line leads with the model when known', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    face.setStats({ modelName: 'claude', model: 'Opus' });
+    const out = render(face);
+    assert.ok(out.includes('Opus is'), 'status line should read "Opus is ..."');
+    assert.ok(!out.includes('claude is'), 'the editor should not headline the status line');
+  });
+
+  test('status line falls back to modelName when no model is known', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    face.setStats({ modelName: 'codex' });
+    const out = render(face);
+    assert.ok(out.includes('codex is'), 'should fall back to the editor display name');
+  });
+
+  test('the editor tag appears on the indicators row once the model headlines', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    face.setStats({ modelName: 'claude', model: 'Opus', editor: 'claude' });
+    const out = render(face);
+    assert.ok(out.includes('Opus is'), 'model headlines');
+    assert.ok(out.includes('claude'), 'editor is still on screen, as a tag');
+  });
+
+  test('no editor tag while the status line is still showing the editor', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    face.setStats({ modelName: 'claude', editor: 'claude' });
+    const out = render(face);
+    // "claude is thinking" is the only occurrence -- no duplicate tag.
+    assert.strictEqual(out.split('claude').length - 1, 1,
+      'the editor name should appear exactly once');
+  });
+
+  test('a long unrecognised model id cannot overrun the status line', () => {
+    const face = new ClaudeFace();
+    face.setState('thinking');
+    // prettyModelName passes an unknown id through verbatim by design, so the
+    // bound has to live here or a 38-column terminal wraps into the detail row.
+    face.setStats({ modelName: 'codex', model: 'qwen3-coder-480b-a35b-instruct' });
+    const out = render(face);
+    assert.ok(!out.includes('qwen3-coder-480b-a35b-instruct'), 'the raw id is sliced');
+    assert.ok(out.includes('qwen3-coder-480b is'), 'but the first 16 chars survive');
+  });
+
+  test('minimal mode draws no editor tag', () => {
+    const face = new ClaudeFace();
+    face.minimalMode = true;
+    face.setState('thinking');
+    face.setStats({ modelName: 'claude', model: 'Opus', editor: 'claude' });
+    const out = render(face);
+    assert.ok(out.includes('Opus is'), 'the status line still names the model');
+    assert.ok(!out.includes('accs'), 'indicators row is skipped entirely');
+    assert.strictEqual(out.split('claude').length - 1, 0,
+      'no editor tag in minimal mode');
+  });
+});
+
 module.exports = suite;

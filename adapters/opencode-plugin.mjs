@@ -73,6 +73,21 @@ function translate(hook, input, output) {
         return { type: 'permission.asked', sessionId: p.sessionID, title: p.title || p.type };
       case 'permission.replied':
         return { type: 'permission.replied', sessionId: p.sessionID, response: p.response };
+      // An assistant message names the provider model it ran on. This is the
+      // only place OpenCode reports it, and it is NOT forwarded as an event
+      // of its own -- `send` records it and spawns nothing, then stamps it
+      // onto the payloads already going out. Otherwise a streaming turn would
+      // cost a node start per message update.
+      //
+      // UNVERIFIED against a live OpenCode: the field names below are the
+      // documented SDK shape, but nobody has watched a real message.updated
+      // go past. Guarded so a wrong guess simply yields no model.
+      case 'message.updated': {
+        const info = p.info || {};
+        return info.modelID
+          ? { type: 'model.observed', sessionId: info.sessionID, model: String(info.modelID) }
+          : null;
+      }
       case 'message.part.updated': {
         const part = p.part || {};
         if (part.type === 'reasoning') {
@@ -170,12 +185,29 @@ function throttled(payload, now) {
   return false;
 }
 
+// The last provider model reported, per session. Keyed the same way
+// `throttled` is, and for the same reason: one OpenCode process can have
+// several sessions in flight, and an unkeyed value would stamp session A's
+// model onto session B's orbital. Cleared wholesale rather than pruned.
+const lastModelBySession = new Map();
+const MAX_MODEL_KEYS = 64;
+
 // Returns whether the payload was handed to a child process. OpenCode
 // ignores what a hook resolves to; the tests use it to count sends.
 function send(payload) {
   if (!payload) return false;
   try {
+    // Observation only: record and spend no process on it.
+    if (payload.type === 'model.observed') {
+      if (payload.model) {
+        if (lastModelBySession.size >= MAX_MODEL_KEYS) lastModelBySession.clear();
+        lastModelBySession.set(payload.sessionId || '', payload.model);
+      }
+      return false;
+    }
     if (throttled(payload, Date.now())) return false;
+    const known = lastModelBySession.get(payload.sessionId || '');
+    if (known && !payload.model) payload = { ...payload, model: known };
     const json = JSON.stringify(payload);
     const node = nodeBinary();
     if (SYNC_TYPES.has(payload.type)) {

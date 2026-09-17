@@ -28,7 +28,7 @@ const {
   handleToolStart, handleToolEnd, processJsonlStream,
 } = require('./base-adapter');
 const {
-  toolToState, humanizeToolName, updateStreak, pruneFrequentFiles,
+  toolToState, humanizeToolName, updateStreak, pruneFrequentFiles, prettyModelName,
 } = require('../state-machine');
 const { buildEditorSpawn } = require('../launch');
 const shared = require('../shared');
@@ -40,6 +40,21 @@ const { withStatsLock } = shared;
 let sessionId = process.env.CLAUDE_SESSION_ID || `codex-${process.pid}`;
 const modelName = process.env.CODE_CRUMB_MODEL || 'codex';
 const EDITOR = 'codex';
+// Real model identity, from the `-m` this wrapper forwards to codex. Filled in
+// by main(); '' when the run did not name one (codex then uses its configured
+// default, which nothing in the event stream reports).
+let codexModel = '';
+
+// The model flag codex takes. Deliberately NOT shared with engmux's
+// extractModel: that one strips a vendor prefix and returns an 'engmux'
+// sentinel, and neither behaviour is right here.
+function extractCodexModel(args) {
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] === '-m' || args[i] === '--model') && args[i + 1]) return args[i + 1];
+    if (args[i].startsWith('--model=')) return args[i].slice('--model='.length);
+  }
+  return '';
+}
 
 // Every id this process has owned. guardedWriteState refuses to touch a state
 // file owned by another live session -- but the placeholder id used before
@@ -231,7 +246,7 @@ function commit(decide) {
     const out = decide(stats);
     if (out && out.state) {
       const detail = out.detail === undefined ? lastDetail : out.detail;
-      const extra = { ...buildExtra(stats, sessionId, modelName, EDITOR), pid: process.pid };
+      const extra = { ...buildExtra(stats, sessionId, modelName, EDITOR, codexModel), pid: process.pid };
       if (out.diffInfo) extra.diffInfo = out.diffInfo;
       if (out.stopped) extra.stopped = true;
       if (lastPromptAt) extra.lastPromptAt = lastPromptAt;
@@ -341,8 +356,11 @@ function main() {
   // A first frame before codex answers. No stats cycle and no session file:
   // the identity is a placeholder until thread.started and must not count as
   // a session of its own.
+  codexModel = prettyModelName(extractCodexModel(args));
+
   writeGlobal('thinking', 'starting codex...', {
-    sessionId, modelName, editor: EDITOR, pid: process.pid,
+    sessionId, modelName, ...(codexModel ? { model: codexModel } : {}),
+    editor: EDITOR, pid: process.pid,
   });
   lastState = 'thinking';
   lastDetail = 'starting codex...';

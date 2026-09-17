@@ -852,6 +852,173 @@ describe('renderer -- source invariants of the session-file main', () => {
   test('the old 120s lastMainUpdate adoption guard is gone', () => {
     assert.ok(!rendererSrc.includes('lastMainUpdate'));
   });
+
+  // The main row is synthesized rather than read from a MiniFace, so every
+  // display field has to be copied explicitly -- `model` was missed once,
+  // leaving the main row the only one in the list with no model segment.
+  test('the synthesized main row carries model', () => {
+    const block = rendererSrc.slice(rendererSrc.indexOf('const mainInfo = mainSessionId'));
+    const obj = block.slice(0, block.indexOf('} : null'));
+    assert.ok(/model:\s*face\.model/.test(obj), 'mainInfo should copy face.model');
+  });
+});
+
+// -- Main-session model identity -----------------------------------------
+//
+// SessionStart is the one payload Claude Code stamps with a model, and
+// PostModelSwitch is the only documented way to follow a /model change.
+// Both are free: no file is read. The Stop tail-read exists only to cover a
+// SessionStart that omitted the field.
+
+describe('update-state -- main session model', () => {
+  // A main transcript whose newest assistant line names `modelId`.
+  function writeMainTranscript(tmp, sid, modelId) {
+    const dir = path.join(tmp, 'projects', 'proj');
+    fs.mkdirSync(dir, { recursive: true });
+    const f = path.join(dir, `${sid}.jsonl`);
+    fs.writeFileSync(f, [
+      JSON.stringify({ type: 'user', message: { role: 'user' } }),
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', model: modelId } }),
+    ].join('\n') + '\n');
+    return f;
+  }
+
+  test('SessionStart stamps the model straight from the payload', () => {
+    const t = makeTempEnv('mdl-1');
+    try {
+      runUpdateState('SessionStart', {
+        session_id: 'mdl-1', source: 'startup', model: 'claude-sonnet-5',
+      }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'mdl-1')).model, 'Sonnet');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('the model survives later tool events (sticky)', () => {
+    const t = makeTempEnv('mdl-2');
+    try {
+      runUpdateState('SessionStart', {
+        session_id: 'mdl-2', source: 'startup', model: 'claude-opus-5',
+      }, t.env);
+      runUpdateState('PreToolUse', {
+        session_id: 'mdl-2', tool_name: 'Edit', tool_input: { file_path: 'a.js' },
+      }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'mdl-2')).model, 'Opus');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('PostModelSwitch follows a /model change via to_model', () => {
+    const t = makeTempEnv('mdl-3');
+    try {
+      runUpdateState('SessionStart', {
+        session_id: 'mdl-3', source: 'startup', model: 'claude-opus-5',
+      }, t.env);
+      runUpdateState('PostModelSwitch', {
+        session_id: 'mdl-3', from_model: 'claude-opus-5',
+        to_model: 'claude-haiku-4-5-20251001', requested_model: 'haiku', source: 'command',
+      }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'mdl-3'));
+      assert.strictEqual(s.model, 'Haiku', 'a switch overrides the sticky value');
+      assert.strictEqual(s.detail, 'now Haiku', 'and the face says so');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a SessionStart with no model leaves the field absent', () => {
+    const t = makeTempEnv('mdl-4');
+    try {
+      runUpdateState('SessionStart', { session_id: 'mdl-4', source: 'startup' }, t.env);
+      assert.ok(!readJSON(sessionFile(t.sessionsDir, 'mdl-4')).model);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('Stop reads the transcript tail when SessionStart gave no model', () => {
+    const t = makeTempEnv('mdl-5');
+    try {
+      const tp = writeMainTranscript(t.tmp, 'mdl-5', 'claude-fable-5-1');
+      runUpdateState('SessionStart', { session_id: 'mdl-5', source: 'startup' }, t.env);
+      runUpdateState('Stop', { session_id: 'mdl-5', transcript_path: tp }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'mdl-5')).model, 'Fable');
+    } finally { cleanup(t.tmp); }
+  });
+
+  // Not gated on "already known": an install predating the PostModelSwitch
+  // hook never sees a switch event, so a gate would pin the first model it
+  // ever saw and keep showing it confidently after a /model.
+  test('Stop re-reads the tail so a stale model self-heals', () => {
+    const t = makeTempEnv('mdl-6');
+    try {
+      const tp = writeMainTranscript(t.tmp, 'mdl-6', 'claude-haiku-4-5-20251001');
+      runUpdateState('SessionStart', {
+        session_id: 'mdl-6', source: 'startup', model: 'claude-opus-5',
+      }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'mdl-6')).model, 'Opus');
+      runUpdateState('Stop', { session_id: 'mdl-6', transcript_path: tp }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'mdl-6')).model, 'Haiku',
+        'the turn that just ended is the truth, even without PostModelSwitch');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a /model in a parallel window leaves a conducting owner intact', () => {
+    const t = makeTempEnv('owner-pm');
+    try {
+      // The other window exists first, so it lands in the topLevelSessions
+      // registry (a SessionStart legitimately takes the stats session; that is
+      // not the behaviour under test here).
+      runUpdateState('SessionStart', { session_id: 'other-pm', source: 'startup' }, t.env);
+      // Owner starts, spawns an agent, and is conducting.
+      runUpdateState('SessionStart', { session_id: 'owner-pm', source: 'startup' }, t.env);
+      runUpdateState('SubagentStart', {
+        session_id: 'owner-pm', subagent_id: 'sub-1', agent_type: 'Explore',
+      }, t.env);
+      const before = readJSON(t.statsFile).session.activeSubagents.length;
+      assert.ok(before > 0, 'owner is conducting');
+
+      // Now the other window runs /model. This is the event under test.
+      runUpdateState('PostModelSwitch', {
+        session_id: 'other-pm', to_model: 'claude-haiku-4-5-20251001', source: 'command',
+      }, t.env);
+
+      const stats = readJSON(t.statsFile);
+      assert.strictEqual(stats.session.id, 'owner-pm',
+        'the parallel window must not steal the stats session');
+      assert.strictEqual(stats.session.activeSubagents.length, before,
+        'and must not wipe the owner-s activeSubagents');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('Stop with no transcript at all is harmless', () => {
+    const t = makeTempEnv('mdl-7');
+    try {
+      runUpdateState('SessionStart', { session_id: 'mdl-7', source: 'startup' }, t.env);
+      runUpdateState('Stop', { session_id: 'mdl-7', transcript_path: '/nope/missing.jsonl' }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'mdl-7'));
+      assert.ok(!s.model, 'no model');
+      assert.strictEqual(s.turnEnded, true, 'and the turn still ended normally');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('the global state file carries the model for tmux readers', () => {
+    const t = makeTempEnv('mdl-8');
+    try {
+      runUpdateState('SessionStart', {
+        session_id: 'mdl-8', source: 'startup', model: 'claude-opus-5',
+      }, t.env);
+      runUpdateState('PreToolUse', {
+        session_id: 'mdl-8', tool_name: 'Read', tool_input: {},
+      }, t.env);
+      assert.strictEqual(readJSON(t.stateFile).model, 'Opus',
+        'the owner guard carries it across writes that do not re-acquire it');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('empty stdin on PostModelSwitch still writes a sane face', () => {
+    const t = makeTempEnv('mdl-9');
+    try {
+      runUpdateState('PostModelSwitch', '', t.env);
+      const s = readJSON(t.stateFile);
+      assert.strictEqual(s.state, 'thinking');
+      assert.strictEqual(s.detail, 'model switched');
+    } finally { cleanup(t.tmp); }
+  });
 });
 
 module.exports = suite;

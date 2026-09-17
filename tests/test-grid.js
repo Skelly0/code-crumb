@@ -3779,9 +3779,11 @@ describe('grid.js -- recycled-PID purge integration', () => {
 
 describe('grid.js -- session list editor tag', () => {
   const strip = s => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+  // Carries a `model` so the exact-width assertion below exercises the info
+  // row with a model segment present, not just the legacy shape.
   const mkFace = (over = {}) => Object.assign(new MiniFace('sess-1'), {
     state: 'coding', detail: 'editing foo', label: 'scorp3', cwd: '/tmp/proj',
-    gitBranch: 'main', editor: 'opencode',
+    gitBranch: 'main', editor: 'opencode', model: 'Opus',
   }, over);
 
   test('row 1 shows the editor tag after state name', () => {
@@ -3843,6 +3845,95 @@ describe('grid.js -- no incremental clear buffer', () => {
     const out = os.render(80, 24, mainPos);
     assert.ok(!/^(\x1b\[\d+;\d+H +)+/.test(out),
       'render should not prepend blanks for the previous frame');
+  });
+});
+
+// -- Model identity on the orbitals --------------------------------------
+
+describe('grid.js -- model on orbital row 5', () => {
+  const strip = (s) => s.replace(/\x1b\[[^m]*m/g, '');
+
+  test('a child shows its model instead of the redundant branch', () => {
+    const f = new MiniFace('par-agent-a1');
+    f.state = 'coding';
+    f.parentSession = 'par';
+    f.model = 'Haiku';
+    f.gitBranch = 'main';
+    f.cwd = '/home/user/my-app';
+    f.label = 'explore';
+    const out = strip(f.render(1, 1, 0, PALETTES[0].themes));
+    assert.ok(out.includes('Haiku'), 'row 5 should show the model');
+    assert.ok(!out.includes('main'), 'the parent-identical branch is dropped');
+  });
+
+  test('a top-level orbital keeps its branch even with a model', () => {
+    const f = new MiniFace('other-window');
+    f.state = 'coding';
+    f.model = 'Opus';
+    f.gitBranch = 'dev';
+    f.label = 'win2';
+    const out = strip(f.render(1, 1, 0, PALETTES[0].themes));
+    assert.ok(out.includes('dev'), 'a parallel window may be on another branch');
+    assert.ok(!out.includes('Opus'), 'its model does not take the branch slot');
+  });
+
+  test('a child without a model falls back to the branch', () => {
+    const f = new MiniFace('par-agent-a2');
+    f.state = 'coding';
+    f.parentSession = 'par';
+    f.gitBranch = 'main';
+    f.label = 'plan';
+    const out = strip(f.render(1, 1, 0, PALETTES[0].themes));
+    assert.ok(out.includes('main'), 'unchanged behaviour when no model is known');
+  });
+
+  test('a long model name is sliced to BOX_W like every other row', () => {
+    const f = new MiniFace('par-agent-a3');
+    f.state = 'coding';
+    f.parentSession = 'par';
+    f.model = 'some-very-long-model-id';
+    const out = strip(f.render(1, 1, 0, PALETTES[0].themes));
+    assert.ok(!out.includes('some-very-long'), 'sliced at the renderer, not the producer');
+    assert.ok(out.includes('some-ver'), 'first BOX_W chars survive');
+  });
+});
+
+describe('grid.js -- model in the session list info row', () => {
+  const strip = (s) => s.replace(/\x1b\[[^m]*m/g, '');
+
+  test('a top-level row shows the model beside its counters', () => {
+    const f = Object.assign(new MiniFace('sess-m1'), {
+      state: 'coding', detail: 'editing', label: 'win', cwd: '/tmp/p',
+      editor: 'claude', model: 'Sonnet', toolCalls: 12, filesEdited: 3,
+    });
+    const out = strip(renderSessionList(120, 40, [f], null, null, -1, {}));
+    assert.ok(out.includes('12 tools'), 'counters still rendered');
+    assert.ok(out.includes('Sonnet'), 'model segment present');
+  });
+
+  test('a child row shows the model beside its agent type', () => {
+    const f = Object.assign(new MiniFace('par-agent-a9'), {
+      state: 'searching', detail: 'grep', label: 'explore', cwd: '/tmp/p',
+      editor: 'claude', model: 'Haiku', parentSession: 'par', agentType: 'Explore',
+    });
+    const out = strip(renderSessionList(120, 40, [f], null, null, -1, {}));
+    assert.ok(out.includes('Explore'), 'agent type still rendered');
+    assert.ok(out.includes('Haiku'), 'model segment present');
+  });
+
+  test('rows stay exactly innerW wide when a very long model is carried', () => {
+    const f = Object.assign(new MiniFace('sess-m2'), {
+      state: 'coding', detail: 'editing', label: 'win', cwd: '/tmp/p',
+      editor: 'claude', model: 'an-absurdly-long-model-identifier-abcdefghijklmnop',
+      toolCalls: 12, filesEdited: 3,
+    });
+    const out = renderSessionList(120, 40, [f], null, null, -1, {});
+    const rows = out.split(/\x1b\[\d+;\d+H/).map(strip).filter(l => l.startsWith('│') && l.length > 2);
+    assert.ok(rows.length >= 3, 'should have content rows');
+    for (const line of rows) {
+      const inner = line.slice(1, line.lastIndexOf('│'));
+      assert.strictEqual(inner.length, 52, `row width drifted: "${inner}" (${inner.length})`);
+    }
   });
 });
 

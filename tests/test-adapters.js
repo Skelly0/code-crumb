@@ -643,6 +643,51 @@ describe('adapters -- opencode-plugin translate()', () => {
     await hooks.event({ event: { type: 'lsp.updated', properties: {} } });
   });
 
+  // NOTE: the message.updated shape below is the documented SDK shape, not one
+  // observed against a running OpenCode. Every branch is guarded, so a wrong
+  // guess costs a missing model and nothing else.
+  test.async('message.updated becomes a model observation, not an event', async () => {
+    const { translate } = await load();
+    const got = translate('event', bus('message.updated', {
+      info: { id: 'm1', sessionID: 's1', modelID: 'claude-sonnet-5', providerID: 'anthropic' },
+    }));
+    assert.deepStrictEqual(got,
+      { type: 'model.observed', sessionId: 's1', model: 'claude-sonnet-5' });
+  });
+
+  test.async('a message.updated without a modelID yields nothing', async () => {
+    const { translate } = await load();
+    assert.strictEqual(translate('event', bus('message.updated', { info: { id: 'm1' } })), null);
+    assert.strictEqual(translate('event', bus('message.updated', {})), null);
+  });
+
+  test.async('an observed model spawns nothing but labels later payloads', async () => {
+    const mod = await loadIsolated('model-observe');
+    const hooks = await mod.CodeCrumbPlugin({ project: {}, directory: '.', worktree: '.' });
+    const pending = withoutSpawning(() => [
+      hooks.event(bus('message.updated', { info: { modelID: 'claude-opus-5' } })),
+      hooks['tool.execute.before']({ sessionID: 's1', callID: 'c1', tool: 'read' }, { args: {} }),
+    ]);
+    const sent = await Promise.all(pending);
+    assert.strictEqual(sent[0], false, 'an observation costs no process');
+    assert.strictEqual(sent[1], true, 'the real event still goes out');
+  });
+
+  test.async('an observed model is remembered per session, not globally', async () => {
+    const { translate } = await load();
+    // One OpenCode process can have several sessions in flight; an unkeyed
+    // memory would stamp session A's model onto session B's orbital.
+    const a = translate('event', bus('message.updated', {
+      info: { sessionID: 'ses_a', modelID: 'claude-opus-5' },
+    }));
+    assert.strictEqual(a.sessionId, 'ses_a', 'the observation carries its session');
+    const b = translate('event', bus('message.updated', {
+      info: { sessionID: 'ses_b', modelID: 'claude-haiku-4-5' },
+    }));
+    assert.strictEqual(b.sessionId, 'ses_b');
+    assert.notStrictEqual(a.model, b.model);
+  });
+
   // Proves the two tests below really do start nothing: the plugin reads
   // CODE_CRUMB_NODE per spawn, so a bogus binary disarms delivery. (If it
   // were captured at import instead, those tests would quietly go on
@@ -1560,7 +1605,7 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     '',
   ].join('\n');
 
-  function runFakeCodex(events, seedStats) {
+  function runFakeCodex(events, seedStats, extraArgs = []) {
     const base = makeTempEnv('codex-thread');
     const binDir = path.join(base.tmp, 'bin');
     fs.mkdirSync(binDir, { recursive: true });
@@ -1585,7 +1630,7 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     delete env.CLAUDE_SESSION_ID; // the codex thread id owns the session identity
 
     try {
-      execFileSync(NODE, [WRAPPER, 'a prompt'], {
+      execFileSync(NODE, [WRAPPER, ...extraArgs, 'a prompt'], {
         env, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (e) {
@@ -1819,6 +1864,40 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     assert.strictEqual(state.detail, 'wrapping up');
     assert.strictEqual(state.stopped, true);
     assert.strictEqual(state.sessionId, 'codex-live');
+    cleanup(tmp);
+  });
+
+  test('-m stamps the model on the state file', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'thread.started', thread_id: 'tm1' },
+      { type: 'turn.started' },
+      { type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'ls', status: 'in_progress' } },
+    ], null, ['-m', 'gpt-5']);
+    const state = readJSON(stateFile);
+    assert.strictEqual(state.model, 'gpt-5', 'the flag its header has always documented');
+    assert.strictEqual(state.editor, 'codex');
+    cleanup(tmp);
+  });
+
+  test('--model=<id> is parsed too, and prettified when it is a known family', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'thread.started', thread_id: 'tm2' },
+      { type: 'turn.started' },
+      { type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'ls', status: 'in_progress' } },
+    ], null, ['--model=anthropic/claude-opus-5']);
+    assert.strictEqual(readJSON(stateFile).model, 'Opus');
+    cleanup(tmp);
+  });
+
+  test('no -m leaves the model absent rather than guessing', () => {
+    const { tmp, stateFile } = runFakeCodex([
+      { type: 'thread.started', thread_id: 'tm3' },
+      { type: 'turn.started' },
+      { type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'ls', status: 'in_progress' } },
+    ]);
+    const state = readJSON(stateFile);
+    assert.ok(!state.model, 'codex-s configured default is not reported in the event stream');
+    assert.strictEqual(state.modelName, 'codex', 'the display name is unaffected');
     cleanup(tmp);
   });
 });
@@ -3564,6 +3643,50 @@ describe('update-state.js -- parallel hooks keep every stats increment', () => {
       }
       assert.ok(!fs.existsSync(path.join(tmp, '.code-crumb-stats.lock')),
         'process.exit skips finally -- the exit paths must release explicitly');
+    } finally { cleanup(tmp); }
+  });
+});
+
+// -- Model identity through the adapters ---------------------------------
+
+describe('adapters -- buildExtra carries model', () => {
+  const { buildExtra } = require('../adapters/base-adapter');
+  const { defaultStats } = require('../state-machine');
+
+  test('emits the model when given one', () => {
+    const e = buildExtra(defaultStats(), 's1', 'codex', 'codex', 'Opus');
+    assert.strictEqual(e.model, 'Opus');
+    assert.strictEqual(e.modelName, 'codex', 'modelName is still the editor display name');
+  });
+
+  test('omits the key entirely when not given one', () => {
+    const e = buildExtra(defaultStats(), 's1', 'codex', 'codex');
+    assert.ok(!('model' in e), 'no empty model key against the ~1KB budget');
+  });
+
+  test('an empty model is treated as absent', () => {
+    const e = buildExtra(defaultStats(), 's1', 'codex', 'codex', '');
+    assert.ok(!('model' in e));
+  });
+
+  // writeSessionState rebuilds its object from scratch, so guardedWriteState is
+  // the only thing making `model` sticky on the adapter path. It matters for
+  // OpenCode, whose plugin holds the model in memory: an OpenCode restart would
+  // otherwise drop the field from the session file on disk.
+  test('guardedWriteState carries a known model across a write that lacks one', () => {
+    const { tmp, stateFile, env } = makeTempEnv('gw-model');
+    try {
+      const ADAPTER = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+      runStdinAdapter(ADAPTER, {
+        type: 'tool.execute.before', sessionId: 'gw-model',
+        tool: 'read', toolInput: {}, model: 'claude-opus-5',
+      }, env);
+      assert.strictEqual(readJSON(stateFile).model, 'Opus', 'first write stamps it');
+      // A later event with no model at all (the plugin forgot it).
+      runStdinAdapter(ADAPTER, {
+        type: 'tool.execute.before', sessionId: 'gw-model', tool: 'edit', toolInput: {},
+      }, env);
+      assert.strictEqual(readJSON(stateFile).model, 'Opus', 'and it survives');
     } finally { cleanup(tmp); }
   });
 });

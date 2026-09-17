@@ -45,6 +45,9 @@ const HOOK_EVENTS = [
   'PreCompact', 'PostCompact', 'PermissionRequest', 'Setup',
   'Elicitation', 'ElicitationResult', 'ConfigChange',
   'InstructionsLoaded', 'StopFailure', 'UserPromptSubmit',
+  // The only documented, zero-cost way to follow a /model switch. Codex does
+  // not fire it, so it is deliberately absent from CODEX_HOOK_EVENTS below.
+  'PostModelSwitch',
 ];
 
 // Codex 0.146 fires a subset of the same event names (no Notification, no

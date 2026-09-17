@@ -11,7 +11,7 @@
 // |          SessionStart, SessionEnd, PreCompact, PostCompact,    |
 // |          PermissionRequest, Setup, Elicitation,                |
 // |          ElicitationResult, ConfigChange, InstructionsLoaded,  |
-// |          StopFailure                                           |
+// |          StopFailure, PostModelSwitch                          |
 // |                                                                |
 // |  Works with Claude Code, Codex CLI, and OpenCode               |
 // +================================================================+
@@ -29,6 +29,7 @@ const {
   pruneFrequentFiles, topFrequentFiles, buildSubagentSessionState,
   subagentSessionId, subagentLabel,
   classifyForeignSession, pruneTopLevelSessions,
+  prettyModelName, agentTranscriptPath,
 } = require('./state-machine');
 
 // Safety net for a missed SubagentStop: an activeSubagents entry older than
@@ -36,13 +37,18 @@ const {
 // and the old 10-minute cut silently erased every long-running one.
 const SUBAGENT_MAX_AGE_MS = 4 * 3600000;
 
+// Bounds on transcript scanning. A main transcript reaches megabytes, so the
+// model is read out of a fixed window at one end -- never readFileSync.
+const TRANSCRIPT_READ_BYTES = 32768;
+const TRANSCRIPT_MAX_LINES = 200;
+
 // Events that carry agent_id but are NOT the subagent's own work: lifecycle
 // and session-level hooks keep their existing handlers. `Stop` is deliberately
 // absent -- a Stop with agent_id is the subagent's own turn ending.
 const AGENT_EXCLUDED_EVENTS = new Set([
   'SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop',
   'PreCompact', 'PostCompact', 'Setup', 'ConfigChange',
-  'InstructionsLoaded', 'StopFailure',
+  'InstructionsLoaded', 'StopFailure', 'PostModelSwitch',
 ]);
 
 // Argv: `[--editor <name>] <Event>` (cross-platform -- no env var tricks).
@@ -161,6 +167,57 @@ function _touchSessionFile(sessionId) {
     const now = new Date();
     fs.utimesSync(fp, now, now);
   } catch {}
+}
+
+// Raw model id out of a transcript JSONL, or '' for anything unreadable.
+//
+// Always scans the TAIL, newest line first. That is obviously right for a main
+// session (the newest line reflects a mid-session /model switch) and turns out
+// to be the only thing that works for a subagent too: an agent's transcript
+// opens with attachment and context entries that ran to 26-64 KB per line on
+// every real sample, so the first `message.model` sits far past any sane head
+// window -- while the model cannot change within an agent's run, so the newest
+// line is just as true as the first. Reading the head found nothing on all
+// five real agent transcripts; the tail found the model on all five.
+//
+// Only TRANSCRIPT_READ_BYTES are read -- a transcript reaches megabytes and
+// readFileSync would blow the ~50ms hook budget on its own.
+//
+// The transcript's shape is NOT a documented interface, so this is
+// best-effort by construction: every failure returns '' and the caller simply
+// carries on without a model.
+function _readTranscriptModel(filePath) {
+  if (!filePath) return '';
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const size = fs.fstatSync(fd).size;
+    if (!size) return '';
+    const want = Math.min(size, TRANSCRIPT_READ_BYTES);
+    const pos = size - want;
+    const buf = Buffer.alloc(want);
+    const read = fs.readSync(fd, buf, 0, want, pos);
+    const lines = buf.toString('utf8', 0, read).split('\n');
+    // Drop the line the window cut in half.
+    if (pos > 0) lines.shift();
+    lines.reverse();
+    let scanned = 0;
+    for (const line of lines) {
+      if (scanned++ >= TRANSCRIPT_MAX_LINES) break;
+      if (line.length < 16 || line.indexOf('"model"') === -1) continue;
+      try {
+        const entry = JSON.parse(line);
+        // `message.model` specifically: a bare "model" also appears inside
+        // attachment entries, which are not what we are after.
+        const m = entry && entry.message && entry.message.model;
+        if (typeof m === 'string' && m) return m;
+      } catch {}
+    }
+  } catch {
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch {} }
+  }
+  return '';
 }
 
 // Persistent stats (streaks, records, session counters). normalizeStats
@@ -308,6 +365,13 @@ process.stdin.on('end', () => {
     // Lifecycle events have dedicated handlers and must not be rerouted to subagent files.
     // Per-session interactive events (PermissionRequest, Elicitation, ElicitationResult)
     // stay OUT of this set so they correctly route to orbital files in subagent context.
+    // `PostModelSwitch` is deliberately NOT here, unlike in
+    // AGENT_EXCLUDED_EVENTS -- the two sets answer different questions. This
+    // one only decides whether the foreign-session heuristic runs, and
+    // skipping it lets the session-reset below fire: a `/model` in a parallel
+    // window would wipe a conducting owner's activeSubagents (orphaning its
+    // orbitals and breaking SubagentStop matching). A `/model` is frequent and
+    // user-triggered, and a subagent never fires one, so it must classify.
     const LIFECYCLE_EVENTS = new Set([
       'SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop',
       'PreCompact', 'PostCompact', 'Setup', 'ConfigChange',
@@ -387,6 +451,47 @@ process.stdin.on('end', () => {
     if (stats.recentMilestone && Date.now() - stats.recentMilestone.at > 8000) {
       stats.recentMilestone = null;
     }
+
+    // Real model identity. No hook payload carries it except SessionStart
+    // (`model`) and PostModelSwitch (`to_model`), so everything else is either
+    // carried forward by STICKY_FIELDS or read out of a transcript once.
+    // Every transcript-backed path needs one, and only Claude Code sends it:
+    // checking first keeps Codex and the adapters at zero extra reads.
+    const transcriptPath = toText(data.transcript_path);
+    let rawModel = '';
+    if (isAgentEvent && transcriptPath) {
+      // SubagentStart carries no model at all, so an agent's own transcript is
+      // the only source. The agent's session file is the memory: once stamped,
+      // this never reads again -- hence one bounded read per agent, not per
+      // hook. (The file does not exist yet at SubagentStart, which is excluded
+      // from isAgentEvent anyway; the first real tool event resolves it, and
+      // an event before the agent's first model reply simply retries later.)
+      let known = '';
+      try {
+        known = JSON.parse(fs.readFileSync(
+          path.join(SESSIONS_DIR, safeFilename(agentSessionId) + '.json'), 'utf8')).model || '';
+      } catch {}
+      if (!known) {
+        rawModel = _readTranscriptModel(agentTranscriptPath(transcriptPath, agentId));
+      }
+    } else if (hookEvent === 'SessionStart' || hookEvent === 'PostModelSwitch') {
+      // Both are free -- a payload field, no file touched. PostModelSwitch also
+      // fires with source 'resume', so a restored session re-stamps itself.
+      rawModel = toText(hookEvent === 'PostModelSwitch' ? data.to_model : data.model);
+    } else if (hookEvent === 'Stop' && transcriptPath) {
+      // Covers the hole in the free path: SessionStart's `model` is optional
+      // and Claude Code does not always send it. The tail at a turn end (after
+      // the assistant has written) is the model that was actually just used.
+      //
+      // Deliberately NOT gated on "no model known yet". An install predating
+      // the PostModelSwitch hook never gets the switch event, so a gate would
+      // pin the first model it ever saw and show it confidently forever after
+      // a /model. A stale label is worse than none; re-reading once per turn
+      // self-heals, and costs one bounded read against a hook whose cost is
+      // already dominated by getGitBranch's child process.
+      rawModel = _readTranscriptModel(transcriptPath);
+    }
+    const model = prettyModelName(rawModel);
 
     if (hookEvent === 'PreToolUse') {
       ({ state, detail } = toolToState(toolName, toolInput));
@@ -708,6 +813,12 @@ process.stdin.on('end', () => {
       const fp = data.file_path || '';
       detail = fp ? path.basename(fp) : 'loading instructions';
     }
+    else if (hookEvent === 'PostModelSwitch') {
+      // The model just changed under the face -- say so, then let the normal
+      // cascade take over. `model` was resolved from to_model above.
+      state = 'thinking';
+      detail = model ? `now ${model}` : 'model switched';
+    }
     else if (hookEvent === 'StopFailure') {
       state = 'error';
       const errorType = data.error || data.error_type || '';
@@ -728,7 +839,9 @@ process.stdin.on('end', () => {
       }
     }
 
-    // Model name: from event data, env var, or the editor this hook serves
+    // Model name: from event data, env var, or the editor this hook serves.
+    // Despite the name this is the EDITOR tag in every production path
+    // (DEFAULT_MODEL_NAME = EDITOR) -- real model identity is `model`, below.
     const modelName = data.model_name || process.env.CODE_CRUMB_MODEL || DEFAULT_MODEL_NAME;
 
     // Build extra data for state files
@@ -736,6 +849,7 @@ process.stdin.on('end', () => {
     const extra = {
       sessionId,
       modelName,
+      ...(model ? { model } : {}),
       editor: EDITOR,
       toolCalls: stats.session.toolCalls,
       filesEdited: stats.session.filesEdited?.length || 0,
@@ -850,6 +964,13 @@ process.stdin.on('end', () => {
           extra.editor !== existing.editor) {
         extra.editor = existing.editor;
       }
+      // The global write happens BEFORE the session file's STICKY_FIELDS loop,
+      // so without this the global file would carry `model` only on the two
+      // acquisition events and blank in between -- a flicker for tmux mode and
+      // any external reader.
+      if (!isAgentEvent && existing.sessionId === sessionId && existing.model && !extra.model) {
+        extra.model = existing.model;
+      }
     } catch {}
 
     // Subagents should never take over the global state file —
@@ -878,7 +999,11 @@ process.stdin.on('end', () => {
     {
       // Preserve stopped flag and sticky fields from existing session file
       // (set once at SubagentStart/TeammateIdle, must survive subsequent hook updates)
-      const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'editor', 'lastPromptAt'];
+      // `model` is live here (unlike the dead 'editor' entry): extra.model is
+      // set only when acquisition actually produced something, so the
+      // `!extra[field]` guard both carries it forward and lets a real
+      // PostModelSwitch override it.
+      const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'editor', 'lastPromptAt', 'model'];
       // A fresh session starts with fresh fields, so it reads nothing: the
       // unlink above normally leaves no file, but a failed unlink (a locked
       // file on Windows) would otherwise resurrect a dead session's agentType
@@ -1044,6 +1169,10 @@ process.stdin.on('end', () => {
     } else if (hookEvent === 'InstructionsLoaded') {
       fallbackState = 'reading';
       fallbackDetail = 'loading instructions';
+    } else if (hookEvent === 'PostModelSwitch') {
+      // No payload here, so no to_model to name.
+      fallbackState = 'thinking';
+      fallbackDetail = 'model switched';
     } else if (hookEvent === 'StopFailure') {
       fallbackState = 'error';
       fallbackDetail = 'API error';

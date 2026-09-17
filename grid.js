@@ -270,6 +270,7 @@ class MiniFace {
     this.cwd = '';
     this._cwdBasename = '';
     this.modelName = '';
+    this.model = '';           // real model identity (Opus/Sonnet/...), when known
     this.editor = '';          // editor provenance (claude/codex/opencode/...)
     this.lastUpdate = Date.now();
     this.firstSeen = Date.now();
@@ -375,6 +376,7 @@ class MiniFace {
     this.lastUpdate = fileMtimeMs || Date.now();
     if (data.cwd) this.cwd = data.cwd;
     if (data.modelName) this.modelName = data.modelName;
+    if (data.model) this.model = data.model;
     if (data.editor) this.editor = data.editor;
     else if (!this.editor) {
       // Best-effort legacy derivation: modelName-as-editor, then ID prefix
@@ -709,11 +711,16 @@ class MiniFace {
     buf += `${lc}${' '.repeat(lPad)}${lbl}${' '.repeat(BOX_W - lPad - lbl.length)}${r}`;
 
     const cwdBase = this.cwdBasename;
-    const statusStr = this.gitBranch
+    // A child shares its parent's repo and folder, so branch/cwd on this row
+    // is pure redundancy -- the model is the one thing you cannot read
+    // anywhere else. A TOP-LEVEL orbital keeps the branch: a parallel editor
+    // window may genuinely be somewhere else.
+    const modelRow = (this.parentSession && this.model) ? this.model.slice(0, BOX_W) : '';
+    const statusStr = modelRow || (this.gitBranch
       ? ('\u2387 ' + this.gitBranch).slice(0, BOX_W)   // ⎇ branchname
       : cwdBase
         ? cwdBase.slice(0, BOX_W)
-        : (theme.status || '').slice(0, BOX_W);
+        : (theme.status || '').slice(0, BOX_W));
     const sPad = Math.max(0, Math.floor((BOX_W - statusStr.length) / 2));
     buf += ansi.to(startRow + 5, startCol);
     buf += `${dc}${' '.repeat(sPad)}${statusStr}${' '.repeat(BOX_W - sPad - statusStr.length)}${r}`;
@@ -1794,6 +1801,9 @@ function _infoLine(face, labelById, now) {
   } else {
     parts.push(`${face.toolCalls || 0} tools`, `${face.filesEdited || 0} files`);
   }
+  // Pushed into parts BEFORE the join, so the caller's slice(0, body) still
+  // bounds the whole row -- appending after it would overrun the box.
+  if (face.model) parts.push(face.model);
   if (face.lastUpdate) parts.push(formatAge(now - face.lastUpdate));
   let line = parts.join(' \u00b7 ');
   if (face.parentSession) {

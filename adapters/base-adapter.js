@@ -26,7 +26,7 @@ const {
 const {
   toolToState, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
   EDIT_TOOLS,
-  pruneFrequentFiles, topFrequentFiles,
+  pruneFrequentFiles, topFrequentFiles, prettyModelName,
 } = require('../state-machine');
 
 // -- State file writing ------------------------------------------------
@@ -98,6 +98,15 @@ function guardedWriteState(sessionId, state, detail, extra) {
       writeExtra = { ...writeExtra, editor: existing.editor };
       extra.editor = existing.editor;
     }
+    // And for the real model. This is what makes `model` sticky on the adapter
+    // path at all -- writeSessionState rebuilds its object from scratch, so
+    // nothing else carries it forward. It matters for OpenCode: the plugin
+    // remembers the model in memory, so an OpenCode restart would otherwise
+    // drop the field from the session file until the next assistant message.
+    if (existing.sessionId === sessionId && existing.model && !extra.model) {
+      writeExtra = { ...writeExtra, model: existing.model };
+      extra.model = existing.model;
+    }
   } catch {}
   writeState(state, detail, writeExtra);
 }
@@ -124,11 +133,15 @@ function initSession(stats, sessionId) {
 // -- Extra fields builder ----------------------------------------------
 // Constructs the metadata object included in every state file write.
 
-function buildExtra(stats, sessionId, modelName, editor) {
+// `model` is spread conditionally rather than defaulted to '': an empty key in
+// every write costs the ~1 KB state-file budget for nothing, and would defeat
+// the `!extra[field]` sticky test on the reading side.
+function buildExtra(stats, sessionId, modelName, editor, model) {
   const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
   return {
     sessionId,
     modelName,
+    ...(model ? { model } : {}),
     editor: editor || '',
     toolCalls: stats.session.toolCalls,
     filesEdited: stats.session.filesEdited.length,
@@ -295,6 +308,10 @@ function runStdinAdapter(options) {
       || data.editor
       || process.env.CODE_CRUMB_EDITOR
       || defaultEditor;
+    // Real model identity, when an adapter can supply one. No env fallback:
+    // CODE_CRUMB_MODEL overrides modelName (the display name), not this.
+    // Prettified here so every adapter can just forward the provider's raw id.
+    const model = prettyModelName(norm.model || data.model || '');
 
     // Read -> mutate -> write of the shared stats file, serialized: several
     // adapter processes can run at once and the last writer would otherwise
@@ -305,7 +322,7 @@ function runStdinAdapter(options) {
       const stats = readStats();
       initSession(stats, sessionId);
 
-      const extra = buildExtra(stats, sessionId, modelName, editor);
+      const extra = buildExtra(stats, sessionId, modelName, editor, model);
 
       // Attention stamp for the renderer's main-face policy. Each adapter
       // event is its own process, so the session file is the only memory:

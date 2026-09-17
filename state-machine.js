@@ -631,6 +631,7 @@ function classifyTruncatedInput(hookEvent, rawInput) {
     ElicitationResult:  { state: 'satisfied',  detail: 'input received' },
     ConfigChange:       { state: 'reading',    detail: 'config updated' },
     InstructionsLoaded: { state: 'reading',    detail: 'loading instructions' },
+    PostModelSwitch:    { state: 'thinking',   detail: 'model switched' },
   };
   return eventMap[hookEvent] || { state: 'thinking', detail: 'large input' };
 }
@@ -729,13 +730,16 @@ function normalizeStats(parsed) {
 // -- Subagent Session State (pure logic) ---------------------------------
 
 // Build the state object for writing to a subagent's session file.
-// Preserves sticky fields (modelName, editor, taskDescription, cwd, gitBranch)
-// from the existing session file, falling back to values from the sub entry.
+// Preserves sticky fields (modelName, model, editor, taskDescription, cwd,
+// gitBranch) from the existing session file, falling back to values from the
+// sub entry. `model` is spread conditionally so an agent whose model was never
+// resolved carries no empty key (the state file has a ~1 KB budget).
 function buildSubagentSessionState(existing, sub, parentSessionId, defaultCwd) {
   if (existing.stopped) return null;
   return {
     sessionId: sub.id,
     modelName: existing.modelName || sub.model || 'haiku',
+    ...(existing.model ? { model: existing.model } : {}),
     editor: existing.editor || sub.editor || '',
     cwd: existing.cwd || defaultCwd || '',
     gitBranch: existing.gitBranch || '',
@@ -753,6 +757,56 @@ function buildSubagentSessionState(existing, sub, parentSessionId, defaultCwd) {
 // Orbital session id for a Claude Code subagent: parent session + agent id.
 function subagentSessionId(sessionId, agentId) {
   return `${sessionId}-agent-${agentId}`;
+}
+
+// -- Model Identity (pure logic) ------------------------------------------
+
+// Model families we know how to name. First substring hit wins, so a new
+// family is one entry here and nothing else. Deliberately tiny: this is the
+// only Claude-specific knowledge in the codebase.
+const MODEL_FAMILIES = [
+  [/opus/i, 'Opus'],
+  [/sonnet/i, 'Sonnet'],
+  [/haiku/i, 'Haiku'],
+  [/fable/i, 'Fable'],
+];
+
+// Raw model id -> display name. `claude-opus-5` / `claude-opus-5[1m]` /
+// `anthropic/claude-opus` all become `Opus`.
+//
+// An unrecognised id is returned verbatim rather than prettified: the render
+// sites already truncate (grid.js slices row 5 to BOX_W), and a plain `gpt-5`
+// is more honest than a made-up family name. No length cap here for the same
+// reason -- producers produce, renderers slice, and the session list has room
+// for the full name.
+function prettyModelName(raw) {
+  let id = toText(raw).trim();
+  if (!id) return '';
+  id = id.replace(/\[[^\]]*\]\s*$/, '');           // "claude-opus-5[1m]"
+  id = id.replace(/^.*\//, '');                     // "anthropic/claude-opus"
+  id = id.trim();
+  if (!id) return '';
+  for (const [pattern, name] of MODEL_FAMILIES) {
+    if (pattern.test(id)) return name;
+  }
+  return id;
+}
+
+// Path to a Claude Code subagent's own transcript, derived from the parent's
+// `transcript_path` in the hook payload. Documented layout:
+//   <projects>/<project>/<parentSessionId>/subagents/agent-<agentId>.jsonl
+// Returns '' for anything it cannot derive safely. The agent id charset guard
+// is a path-traversal guard -- an id carrying `..` or a separator must never
+// compose a path.
+function agentTranscriptPath(transcriptPath, agentId) {
+  const tp = toText(transcriptPath).trim();
+  const id = toText(agentId).trim();
+  if (!tp || !id) return '';
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) return '';
+  const base = path.basename(tp);
+  if (!/\.jsonl$/i.test(base)) return '';
+  return path.join(path.dirname(tp), path.basename(tp, path.extname(tp)),
+    'subagents', `agent-${id}.jsonl`);
 }
 
 // Human label for a subagent orbital: first non-empty line of the prompt
@@ -849,6 +903,9 @@ module.exports = {
   buildSubagentSessionState,
   subagentSessionId,
   subagentLabel,
+  MODEL_FAMILIES,
+  prettyModelName,
+  agentTranscriptPath,
   classifyForeignSession,
   pruneTopLevelSessions,
   TOP_LEVEL_REGISTRY_MAX,

@@ -39,6 +39,8 @@ const {
   pruneTopLevelSessions,
   TOP_LEVEL_REGISTRY_MAX,
   TOP_LEVEL_REGISTRY_TTL_MS,
+  prettyModelName,
+  agentTranscriptPath,
 } = require('../state-machine');
 
 const suite = require('./_harness').createSuite();
@@ -3371,6 +3373,96 @@ describe('update-state.js -- parallel session wiring (#134)', () => {
       assert.strictEqual(readJSON(statsFile).session.id, 'owner-1',
         'and it does not steal the stats session');
     } finally { cleanup(tmp); }
+  });
+});
+
+// -- Model identity ------------------------------------------------------
+
+describe('state-machine.js -- prettyModelName', () => {
+  test('maps the Claude families to their display names', () => {
+    const table = [
+      ['claude-opus-5', 'Opus'],
+      ['claude-sonnet-5', 'Sonnet'],
+      ['claude-haiku-4-5-20251001', 'Haiku'],
+      ['claude-fable-5-1', 'Fable'],
+      ['claude-opus-4-6', 'Opus'],
+    ];
+    for (const [raw, want] of table) {
+      assert.strictEqual(prettyModelName(raw), want, raw);
+    }
+  });
+
+  test('strips a bracketed context suffix', () => {
+    assert.strictEqual(prettyModelName('claude-opus-5[1m]'), 'Opus');
+    assert.strictEqual(prettyModelName('claude-sonnet-5[1m]'), 'Sonnet');
+  });
+
+  test('strips a vendor prefix', () => {
+    assert.strictEqual(prettyModelName('anthropic/claude-opus'), 'Opus');
+    assert.strictEqual(prettyModelName('opencode/anthropic/claude-haiku'), 'Haiku');
+  });
+
+  test('returns an unrecognised id verbatim rather than inventing a family', () => {
+    assert.strictEqual(prettyModelName('gpt-5'), 'gpt-5');
+    assert.strictEqual(prettyModelName('deepseek-v3'), 'deepseek-v3');
+    assert.strictEqual(prettyModelName('opencode/big-pickle'), 'big-pickle');
+  });
+
+  test('never truncates -- producers produce, renderers slice', () => {
+    const long = 'some-extremely-long-model-identifier-v2';
+    assert.strictEqual(prettyModelName(long), long);
+  });
+
+  test('coerces junk to empty string (toText convention)', () => {
+    for (const bad of ['', '   ', null, undefined, {}, []]) {
+      assert.strictEqual(prettyModelName(bad), '', JSON.stringify(bad));
+    }
+  });
+
+  test('is case-insensitive about the family', () => {
+    assert.strictEqual(prettyModelName('CLAUDE-OPUS-5'), 'Opus');
+    assert.strictEqual(prettyModelName('Claude-Sonnet-5'), 'Sonnet');
+  });
+});
+
+describe('state-machine.js -- agentTranscriptPath', () => {
+  const path = require('path');
+
+  test('derives the documented per-agent transcript path', () => {
+    const got = agentTranscriptPath('/projects/proj/sess-1.jsonl', 'a123');
+    assert.strictEqual(got,
+      path.join('/projects/proj', 'sess-1', 'subagents', 'agent-a123.jsonl'));
+  });
+
+  test('rejects an agent id that could escape the directory', () => {
+    for (const bad of ['../../etc/passwd', 'a/b', 'a\\b', '..', 'a b']) {
+      assert.strictEqual(agentTranscriptPath('/p/s.jsonl', bad), '', bad);
+    }
+  });
+
+  test('rejects a transcript path that is not a .jsonl', () => {
+    assert.strictEqual(agentTranscriptPath('/p/s.txt', 'a1'), '');
+    assert.strictEqual(agentTranscriptPath('/p/s', 'a1'), '');
+  });
+
+  test('returns empty for missing or junk arguments', () => {
+    assert.strictEqual(agentTranscriptPath('', 'a1'), '');
+    assert.strictEqual(agentTranscriptPath('/p/s.jsonl', ''), '');
+    assert.strictEqual(agentTranscriptPath(null, null), '');
+    assert.strictEqual(agentTranscriptPath({}, []), '');
+  });
+});
+
+describe('state-machine.js -- buildSubagentSessionState model stickiness', () => {
+  test('preserves an existing model', () => {
+    const out = buildSubagentSessionState(
+      { model: 'Opus' }, { id: 'sub-1' }, 'parent', '/cwd');
+    assert.strictEqual(out.model, 'Opus');
+  });
+
+  test('omits the key entirely when no model is known', () => {
+    const out = buildSubagentSessionState({}, { id: 'sub-1' }, 'parent', '/cwd');
+    assert.ok(!('model' in out), 'no empty model key in the ~1KB state file');
   });
 });
 

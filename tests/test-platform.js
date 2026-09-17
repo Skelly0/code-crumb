@@ -607,7 +607,7 @@ describe('platform -- setup.js is a module first, a CLI second', () => {
       assert.strictEqual(typeof setup[k], k === 'HOOK_EVENTS' ? 'object' : 'function', k);
     }
     assert.ok(setup.HOOK_EVENTS.includes('UserPromptSubmit'));
-    assert.strictEqual(setup.HOOK_EVENTS.length, 21);
+    assert.strictEqual(setup.HOOK_EVENTS.length, 22);
   });
 });
 
@@ -625,7 +625,7 @@ describe('platform -- setupClaude never clobbers settings.json', () => {
       const r = setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
       assert.strictEqual(r.ok, true);
       const s = readJSON(settingsPath);
-      assert.strictEqual(Object.keys(s.hooks).length, 21);
+      assert.strictEqual(Object.keys(s.hooks).length, 22);
       assert.ok(s.hooks.UserPromptSubmit[0].hooks[0].command.includes(HOOK));
     } finally { cleanup(dir); }
   });
@@ -719,7 +719,7 @@ describe('platform -- setupClaude never clobbers settings.json', () => {
       setup.setupClaude({ settingsPath, hookPath: '/somewhere/else/update-state.js', ...quiet });
       const r = setup.uninstallClaude({ settingsPath, ...quiet });
       assert.strictEqual(r.ok, true);
-      assert.strictEqual(r.removed, 21);
+      assert.strictEqual(r.removed, 22);
       const s = readJSON(settingsPath);
       assert.deepStrictEqual(Object.keys(s.hooks), ['PreToolUse']);
       assert.strictEqual(s.hooks.PreToolUse.length, 1);

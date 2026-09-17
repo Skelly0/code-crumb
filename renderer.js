@@ -208,6 +208,7 @@ function readState(filePath = STATE_FILE) {
       timestamp: data.timestamp || 0,
       sessionId: data.sessionId || data.session_id || '',
       modelName: data.modelName || '',
+      model: data.model || '',
       toolCalls: data.toolCalls || 0,
       filesEdited: data.filesEdited || 0,
       sessionStart: data.sessionStart || 0,
@@ -335,9 +336,13 @@ function runUnifiedMode() {
     lastNewWriteAt = 0;
     lastMtime = 0;
     lastForceReadTime = 0;
+    // Cleared, not just overwritten: the incoming session may have no model at
+    // all, and the outgoing one's must not linger on its face.
+    face.model = '';
     const mf = orbital.faces.get(newId);
     if (mf) {
       if (mf.modelName && !process.env.CODE_CRUMB_MODEL) face.modelName = mf.modelName;
+      if (mf.model) face.model = mf.model;
       if (mf.editor && !process.env.CODE_CRUMB_EDITOR) face.editor = mf.editor;
       if (mf.cwd) face.cwd = mf.cwd;
       if (mf.gitBranch) face.gitBranch = mf.gitBranch;
@@ -810,6 +815,9 @@ function runUnifiedMode() {
         gitBranch: face.gitBranch,
         label: face.modelName || 'claude',
         editor: face.editor || '',
+        // Without this the main row is the one row in the list with no model
+        // segment, while every orbital below it has one.
+        model: face.model || '',
         stopped: lastStopped,
         isMain: true,
         isPinned: pinnedSessionId === mainSessionId,
@@ -837,7 +845,7 @@ function runUnifiedMode() {
     const _pal = PALETTES[face.paletteIndex] || PALETTES[0];
     const _status = (_pal.themes[face.state] || _pal.themes.idle).status;
     const flash = face.waitEscalated() && Math.floor(face.frame / 8) % 2 === 0;
-    const _title = buildTitle(face.modelName, _status, flash);
+    const _title = buildTitle(face.model || face.modelName, _status, flash);
 
     // The title is part of the frame: a blink with identical body still needs
     // writing, so dedupe on both.
@@ -876,7 +884,7 @@ function runTmuxMode() {
       const theme = defaultThemes[state] || defaultThemes.idle;
       const emoji = theme.emoji || '';
       const status = theme.status || state;
-      const model = data.modelName || process.env.CODE_CRUMB_MODEL || 'claude';
+      const model = data.model || data.modelName || process.env.CODE_CRUMB_MODEL || 'claude';
       const branch = data.gitBranch || getGitBranch() || '';
       const streak = data.streak || 0;
 

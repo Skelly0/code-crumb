@@ -90,6 +90,10 @@ const CAFFEINE_WINDOW = 10000;
 const CAFFEINE_THRESHOLD = 5;
 const MIN_COLS_SINGLE = 38;
 const MIN_ROWS_SINGLE = 20;
+// Bound on the name in "<name> is thinking". Every known model family fits;
+// this only clips an unrecognised raw id, which prettyModelName passes
+// through verbatim by design.
+const MAX_STATUS_NAME = 16;
 const PET_SPAM_WINDOW = 2000;      // 2s window to detect rapid petting
 const PET_SPAM_THRESHOLD = 8;      // pets in window to trigger easter egg
 const PET_SPAM_DURATION = 45;      // ~3s at 15fps
@@ -180,8 +184,15 @@ class ClaudeFace {
     // Minimal mode (--minimal flag: face + status only, no chrome)
     this.minimalMode = false;
 
-    // Model name (shown in status line: "{name} is thinking")
+    // Model name (shown in status line: "{name} is thinking").
+    // Despite the name this is the EDITOR tag in practice -- the hook writers
+    // default it to the editor. Real model identity is `model`, below.
     this.modelName = process.env.CODE_CRUMB_MODEL || 'claude';
+
+    // Real model identity ("Opus" / "Sonnet" / ...), when the editor gives us
+    // one. Empty for every editor that cannot report it, and the status line
+    // falls back to modelName.
+    this.model = '';
 
     // Editor provenance (shown in the session list)
     this.editor = process.env.CODE_CRUMB_EDITOR || 'claude';
@@ -429,6 +440,10 @@ class ClaudeFace {
     // Lower layers (update-state.js guard, base-adapter.js guardedWriteState) preserve
     // the owner's name on disk; this layer ensures the env var always wins at render time.
     if (data.modelName && !process.env.CODE_CRUMB_MODEL) this.modelName = data.modelName;
+    // Real model identity. No env interaction: CODE_CRUMB_MODEL overrides the
+    // display name (modelName), which is a different field. An absent value
+    // never clears a known one -- most writes simply do not carry it.
+    if (data.model) this.model = data.model;
     // Editor provenance: same env-wins-at-render priority as modelName
     if (data.editor && !process.env.CODE_CRUMB_EDITOR) this.editor = data.editor;
     this.toolCallCount = data.toolCalls || 0;
@@ -1105,7 +1120,15 @@ class ClaudeFace {
     if (this.state === 'subagent' && this.subagentCount > 0) {
       statusSuffix = ` ${this.subagentCount} subagent${this.subagentCount === 1 ? '' : 's'}`;
     }
-    const statusText = `${emoji}  ${this.modelName} is ${theme.status}${statusSuffix}  ${emoji}`;
+    // The model is the headline when we know it ("Opus is thinking"); the
+    // editor tag moves to the indicators row so nothing is lost.
+    //
+    // Sliced because an unrecognised id passes through prettyModelName
+    // verbatim: a codex `-m gpt-5.1-codex-max` or a local OpenCode model can
+    // run to 30+ chars, which at the 38-column minimum wraps the status line
+    // into the detail row and garbles the frame.
+    const who = (this.model || this.modelName).slice(0, MAX_STATUS_NAME);
+    const statusText = `${emoji}  ${who} is ${theme.status}${statusSuffix}  ${emoji}`;
     const statusPad = Math.floor((faceW - statusText.length) / 2);
     // A long unanswered wait pulses the status line (~0.5s each way at 15 FPS).
     const statusPulse = this.waitEscalated() && Math.floor(this.frame / 8) % 2 === 0;
@@ -1262,11 +1285,18 @@ class ClaudeFace {
       const subText = this.showOrbitals ? '\u25cf subs' : '\u25cb subs';
       const leftText = `${accText}  ${subText}`;
       const pName = this.paletteIndex > 0 ? (PALETTE_NAMES[this.paletteIndex] || '') : '';
+      // The editor tag only earns a place here once the status line has given
+      // its slot away to the model -- otherwise it would just say "claude"
+      // twice. Palette name drops first when both cannot fit the right side.
+      const eTag = this.model ? this.editor : '';
+      let rightText = [pName, eTag].filter(Boolean).join('  ');
+      const rightRoom = faceW - leftText.length - 2;
+      if (rightText.length > rightRoom) rightText = eTag.slice(0, Math.max(0, rightRoom));
 
       buf += ansi.to(startRow + 8, startCol) + `${dc}${leftText}${r}`;
-      if (pName) {
-        buf += ansi.to(startRow + 8, startCol + faceW - pName.length);
-        buf += `${dc}${pName}${r}`;
+      if (rightText) {
+        buf += ansi.to(startRow + 8, startCol + faceW - rightText.length);
+        buf += `${dc}${rightText}${r}`;
       }
     }
 

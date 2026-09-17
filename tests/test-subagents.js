@@ -876,4 +876,167 @@ describe('grid.js -- liveChildCount bounds the conducting hold', () => {
   });
 });
 
+// -- Per-agent model resolution ------------------------------------------
+//
+// SubagentStart carries no model at all, so an agent's own transcript is the
+// only source. These run the real hook as a subprocess against a fixture
+// transcript laid out exactly as Claude Code writes one.
+
+describe('update-state.js -- subagent model from its own transcript', () => {
+  // <dir>/<sid>.jsonl plus <dir>/<sid>/subagents/agent-<aid>.jsonl
+  function writeTranscript(tmp, sid, aid, modelId, opts = {}) {
+    const dir = path.join(tmp, 'projects', 'proj');
+    fs.mkdirSync(path.join(dir, sid, 'subagents'), { recursive: true });
+    const parent = path.join(dir, `${sid}.jsonl`);
+    fs.writeFileSync(parent, JSON.stringify({ type: 'user', message: { role: 'user' } }) + '\n');
+    if (opts.noAgentFile) return parent;
+    const lines = [
+      JSON.stringify({ type: 'user', isSidechain: true, message: { role: 'user' } }),
+      opts.malformed ? '{not json at all' : JSON.stringify({
+        type: 'assistant', isSidechain: true, agentId: aid,
+        message: { role: 'assistant', model: modelId },
+      }),
+    ];
+    fs.writeFileSync(path.join(dir, sid, 'subagents', `agent-${aid}.jsonl`),
+      lines.join('\n') + '\n');
+    return parent;
+  }
+
+  test('an agent tool event stamps the agent orbital with its own model', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('parent-m1');
+    try {
+      const transcript = writeTranscript(tmp, 'parent-m1', 'ag1', 'claude-haiku-4-5-20251001');
+      runUpdateState('PreToolUse', {
+        session_id: 'parent-m1', agent_id: 'ag1', agent_type: 'Explore',
+        transcript_path: transcript, tool_name: 'Grep', tool_input: { pattern: 'x' },
+      }, env);
+      const agent = readJSON(sessionFile(sessionsDir, subagentSessionId('parent-m1', 'ag1')));
+      assert.strictEqual(agent.model, 'Haiku', 'orbital carries the agent-s own model');
+    } finally { cleanup(tmp); }
+  });
+
+  test('two agents of the same parent each get their own model', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('parent-m2');
+    try {
+      const transcript = writeTranscript(tmp, 'parent-m2', 'agA', 'claude-opus-5');
+      writeTranscript(tmp, 'parent-m2', 'agB', 'claude-haiku-4-5-20251001');
+      for (const id of ['agA', 'agB']) {
+        runUpdateState('PreToolUse', {
+          session_id: 'parent-m2', agent_id: id, agent_type: 'Explore',
+          transcript_path: transcript, tool_name: 'Read', tool_input: {},
+        }, env);
+      }
+      assert.strictEqual(
+        readJSON(sessionFile(sessionsDir, subagentSessionId('parent-m2', 'agA'))).model, 'Opus');
+      assert.strictEqual(
+        readJSON(sessionFile(sessionsDir, subagentSessionId('parent-m2', 'agB'))).model, 'Haiku');
+    } finally { cleanup(tmp); }
+  });
+
+  test('the model is read once and then carried, not re-read every hook', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('parent-m3');
+    try {
+      const transcript = writeTranscript(tmp, 'parent-m3', 'ag3', 'claude-opus-5');
+      const payload = {
+        session_id: 'parent-m3', agent_id: 'ag3', agent_type: 'Explore',
+        transcript_path: transcript, tool_name: 'Read', tool_input: {},
+      };
+      runUpdateState('PreToolUse', payload, env);
+      // Delete the transcript: a second read would now find nothing, so a
+      // surviving model proves the value is sticky rather than re-resolved.
+      fs.rmSync(path.join(tmp, 'projects', 'proj', 'parent-m3'), { recursive: true, force: true });
+      runUpdateState('PreToolUse', payload, env);
+      assert.strictEqual(
+        readJSON(sessionFile(sessionsDir, subagentSessionId('parent-m3', 'ag3'))).model, 'Opus');
+    } finally { cleanup(tmp); }
+  });
+
+  test('a missing agent transcript degrades silently', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('parent-m4');
+    try {
+      const transcript = writeTranscript(tmp, 'parent-m4', 'ag4', 'x', { noAgentFile: true });
+      runUpdateState('PreToolUse', {
+        session_id: 'parent-m4', agent_id: 'ag4', agent_type: 'Explore',
+        transcript_path: transcript, tool_name: 'Read', tool_input: {},
+      }, env);
+      const agent = readJSON(sessionFile(sessionsDir, subagentSessionId('parent-m4', 'ag4')));
+      assert.ok(!agent.model, 'no model key');
+      assert.strictEqual(agent.state, 'reading', 'but the orbital still works');
+    } finally { cleanup(tmp); }
+  });
+
+  test('a malformed transcript degrades silently', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('parent-m5');
+    try {
+      const transcript = writeTranscript(tmp, 'parent-m5', 'ag5', 'x', { malformed: true });
+      runUpdateState('PreToolUse', {
+        session_id: 'parent-m5', agent_id: 'ag5', agent_type: 'Explore',
+        transcript_path: transcript, tool_name: 'Read', tool_input: {},
+      }, env);
+      const agent = readJSON(sessionFile(sessionsDir, subagentSessionId('parent-m5', 'ag5')));
+      assert.ok(!agent.model, 'no model key');
+      assert.strictEqual(agent.state, 'reading', 'but the orbital still works');
+    } finally { cleanup(tmp); }
+  });
+
+  test('an agent_id that could escape the directory resolves nothing', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('parent-m6');
+    try {
+      const transcript = writeTranscript(tmp, 'parent-m6', 'ag6', 'claude-opus-5');
+      runUpdateState('PreToolUse', {
+        session_id: 'parent-m6', agent_id: '../../etc', agent_type: 'Explore',
+        transcript_path: transcript, tool_name: 'Read', tool_input: {},
+      }, env);
+      // Whatever the id sanitises to, no session file may gain a model from it.
+      const written = fs.readdirSync(sessionsDir).map(f => readJSON(path.join(sessionsDir, f)));
+      assert.ok(written.length > 0, 'the hook still wrote its state');
+      assert.ok(written.every(s => !s.model), 'traversal-shaped id resolves no model');
+    } finally { cleanup(tmp); }
+  });
+
+  // Regression: the reader originally scanned the HEAD, which found nothing on
+  // every real agent transcript. A real one opens with attachment and context
+  // entries of 26-64 KB per line, and the first entry that carries a bare
+  // "model" string is an `attachment`, not a message. Both traps are here.
+  test('resolves past a multi-window preamble and ignores attachment entries', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('parent-m8');
+    try {
+      const dir = path.join(tmp, 'projects', 'proj');
+      fs.mkdirSync(path.join(dir, 'parent-m8', 'subagents'), { recursive: true });
+      const transcript = path.join(dir, 'parent-m8.jsonl');
+      fs.writeFileSync(transcript, JSON.stringify({ type: 'user', message: {} }) + '\n');
+      const lines = [
+        // A decoy: carries "model" but not at message.model.
+        JSON.stringify({ type: 'attachment', attachment: { model: 'claude-decoy-9' } }),
+        // Two lines well past the 32KB window on their own.
+        JSON.stringify({ type: 'user', message: { content: 'x'.repeat(40000) } }),
+        JSON.stringify({ type: 'user', message: { content: 'y'.repeat(40000) } }),
+        JSON.stringify({ type: 'assistant', message: { role: 'assistant', model: 'claude-opus-5' } }),
+      ];
+      fs.writeFileSync(path.join(dir, 'parent-m8', 'subagents', 'agent-ag8.jsonl'),
+        lines.join('\n') + '\n');
+      runUpdateState('PreToolUse', {
+        session_id: 'parent-m8', agent_id: 'ag8', agent_type: 'Explore',
+        transcript_path: transcript, tool_name: 'Read', tool_input: {},
+      }, env);
+      const agent = readJSON(sessionFile(sessionsDir, subagentSessionId('parent-m8', 'ag8')));
+      assert.strictEqual(agent.model, 'Opus',
+        'the newest message.model wins over a huge preamble and a decoy attachment');
+    } finally { cleanup(tmp); }
+  });
+
+  test('a parent tool event never reads an agent transcript onto the parent', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('parent-m7');
+    try {
+      const transcript = writeTranscript(tmp, 'parent-m7', 'ag7', 'claude-haiku-4-5-20251001');
+      runUpdateState('PreToolUse', {
+        session_id: 'parent-m7', transcript_path: transcript,
+        tool_name: 'Read', tool_input: {},
+      }, env);
+      const parent = readJSON(sessionFile(sessionsDir, 'parent-m7'));
+      assert.ok(!parent.model, 'the parent does not inherit an agent-s model');
+    } finally { cleanup(tmp); }
+  });
+});
+
 module.exports = suite;

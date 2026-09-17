@@ -315,7 +315,7 @@ Uses Pi's extension system. Run `node setup.js openclaw` for instructions. The a
 | Variable | Default | Purpose |
 |---|---|---|
 | `CODE_CRUMB_STATE` | `~/.code-crumb-state` | Override state file path |
-| `CODE_CRUMB_MODEL` | `claude` | Display name in status line |
+| `CODE_CRUMB_MODEL` | `claude` | Display name in status line (the editor fallback, not the real model) |
 | `CODE_CRUMB_EDITOR` | `claude` (adapters set their own) | Editor tag shown in the session list; beats the `--editor` hook argument |
 | `CODE_CRUMB_NODE` | `node` | Node binary the OpenCode plugin spawns for the adapter |
 | `CLAUDE_SESSION_ID` | `<editor>-<parent PID>` | Session identifier |
@@ -325,7 +325,9 @@ Uses Pi's extension system. Run `node setup.js openclaw` for instructions. The a
 
 Renderer flags: `--minimal` (face + status only), `--tmux` (write a status line for tmux instead of drawing), `--no-color`.
 
-The status line shows `claude is thinking`, `codex is coding`, etc. Each adapter sets a sensible default. The model name can also be passed via the `model_name` field in event JSON.
+**The status line names the model when Code Crumb can find one** — `Opus is thinking`, `Sonnet is coding` — and the editor moves to a dim tag under the face. Subagent orbitals show their own model too, so a swarm of agents on different models is readable at a glance.
+
+Claude Code supplies it through `SessionStart` and `PostModelSwitch` (re-run `npm run setup` to register the latter), and a subagent's comes from its own transcript. Codex picks it up from `-m`/`--model`. Where no model can be found nothing changes: the status line falls back to `claude is thinking`, `codex is coding`, etc. Each adapter sets a sensible default, and the display name can also be passed via the `model_name` field in event JSON.
 
 ### Manual Hook Setup
 

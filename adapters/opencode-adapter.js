@@ -88,7 +88,11 @@ function normaliseEvent(data) {
 
   const sessionId = data.sessionId || data.session_id || '';
 
-  return { event, toolName, toolInput, toolOutput, isError, stderr, sessionId };
+  // Raw provider model id, when the plugin observed one. Prettified by
+  // base-adapter -- this side just carries it.
+  const model = data.model || '';
+
+  return { event, toolName, toolInput, toolOutput, isError, stderr, sessionId, model };
 }
 
 // -- Custom event mapping -----------------------------------------------
