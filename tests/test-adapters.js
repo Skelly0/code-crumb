@@ -3089,20 +3089,36 @@ describe('bug fix structural tests', () => {
       'a missing activeSubagents throws on the first SubagentStart');
   });
 
-  // Bug #13 -- base-adapter guardedWriteState preserves existing.stopped flag
-  test('guardedWriteState preserves a prior stopped flag for the same session', () => {
+  // Bug #13 -- base-adapter guardedWriteState preserves existing.stopped flag,
+  // but only for a tool END: that is the only write that can straggle in after
+  // the turn it belongs to (the update-state.js rule).
+  test('guardedWriteState preserves a prior stopped flag for a late tool end', () => {
     const baseAdapter = require(BASE_ADAPTER);
     const result = withStateFile({
       state: 'responding', detail: 'wrapping up', sessionId: 'gws-stopped',
       stopped: true, timestamp: Date.now(),
     }, () => {
       baseAdapter.guardedWriteState('gws-stopped', 'relieved', 'command succeeded',
-        { sessionId: 'gws-stopped' });
+        { sessionId: 'gws-stopped' }, { toolEnd: true });
       return readJSON(SHARED.STATE_FILE);
     });
     assert.strictEqual(result.state, 'relieved', 'the late write still lands');
     assert.strictEqual(result.stopped, true,
       'a late PostToolUse must not erase the Stop that already happened');
+  });
+
+  test('guardedWriteState lets any other event clear a prior stopped flag', () => {
+    const baseAdapter = require(BASE_ADAPTER);
+    const result = withStateFile({
+      state: 'happy', detail: 'all done!', sessionId: 'gws-newturn',
+      stopped: true, timestamp: Date.now(),
+    }, () => {
+      baseAdapter.guardedWriteState('gws-newturn', 'executing', 'running ls',
+        { sessionId: 'gws-newturn' });
+      return readJSON(SHARED.STATE_FILE);
+    });
+    assert.strictEqual(result.state, 'executing');
+    assert.ok(!result.stopped, 'the next turn is not stopped');
   });
 });
 
@@ -3686,6 +3702,315 @@ describe('adapters -- buildExtra carries model', () => {
       assert.strictEqual(readJSON(stateFile).model, 'Opus', 'and it survives');
     } finally { cleanup(tmp); }
   });
+});
+
+// -- Adapter turn-end / session-end contract (Sep 2026 review) --------
+// A turn end writes `stopped` to the global file and `turnEnded` to the
+// session file; `stopped` on a session file means the session is over. A late
+// tool end keeps whichever end is already recorded; nothing else does.
+
+const POSIX = process.platform !== 'win32';
+
+// Poll until fn() is truthy (or throw after `ms`).
+async function waitFor(fn, ms = 10000, what = 'condition') {
+  const until = Date.now() + ms;
+  for (;;) {
+    let ok = false;
+    try { ok = fn(); } catch {}
+    if (ok) return ok;
+    if (Date.now() > until) throw new Error(`timed out waiting for ${what}`);
+    await new Promise(r => setTimeout(r, 50));
+  }
+}
+
+// Resolves with { code, signal } when the child exits.
+function exited(child) {
+  return new Promise(resolve => child.on('exit', (code, signal) => resolve({ code, signal })));
+}
+
+describe('adapters -- late tool ends and the next turn (base-adapter)', () => {
+  const OPENCODE = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+  const OPENCLAW = path.join(ADAPTERS_DIR, 'openclaw-adapter.js');
+  const spin = () => { const until = Date.now() + 3; while (Date.now() < until) { /* 3ms */ } };
+
+  test('the next turn\'s tool start clears the global stopped flag', () => {
+    const t = makeTempEnv('lt-1');
+    try {
+      runStdinAdapter(OPENCODE, { type: 'session.created', sessionId: 'lt-1' }, t.env);
+      runStdinAdapter(OPENCODE, { type: 'session.idle', sessionId: 'lt-1' }, t.env);
+      assert.strictEqual(readJSON(t.stateFile).stopped, true, 'the turn end stops the global file');
+      runStdinAdapter(OPENCODE, { type: 'tool.execute.before', sessionId: 'lt-1', tool: 'bash', toolInput: { command: 'ls' } }, t.env);
+      const g = readJSON(t.stateFile);
+      assert.strictEqual(g.state, 'executing');
+      assert.ok(!g.stopped, 'tmux must see a working session, not a finished one');
+      const s = readJSON(path.join(t.sessionsDir, 'lt-1.json'));
+      assert.ok(!s.stopped && !s.turnEnded, 'the session file is a live turn again');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a late tool end keeps the turn end on both files and does not re-stamp attention', () => {
+    const t = makeTempEnv('lt-2');
+    try {
+      runStdinAdapter(OPENCODE, { type: 'session.created', sessionId: 'lt-2' }, t.env);
+      const stamp = readJSON(path.join(t.sessionsDir, 'lt-2.json')).lastPromptAt;
+      assert.ok(stamp > 0);
+      runStdinAdapter(OPENCODE, { type: 'session.idle', sessionId: 'lt-2' }, t.env);
+      spin();
+      runStdinAdapter(OPENCODE, {
+        type: 'tool.execute.after', sessionId: 'lt-2', tool: 'bash',
+        toolInput: { command: 'ls' }, output: 'a.js',
+      }, t.env);
+      const s = readJSON(path.join(t.sessionsDir, 'lt-2.json'));
+      assert.strictEqual(s.turnEnded, true, 'the late tool end must not erase the turn end');
+      assert.strictEqual(s.stopped, false, 'and must not turn it into a session end');
+      assert.strictEqual(s.lastPromptAt, stamp, 'a straggler is not the user addressing the session');
+      assert.strictEqual(readJSON(t.stateFile).stopped, true, 'the global file stays stopped too');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a late tool end after a session end keeps the session stopped', () => {
+    const t = makeTempEnv('lt-3');
+    try {
+      runStdinAdapter(OPENCLAW, { event: 'tool_call', toolName: 'read', input: { file_path: 'a.js' } }, t.env);
+      runStdinAdapter(OPENCLAW, { event: 'session_end' }, t.env);
+      runStdinAdapter(OPENCLAW, { event: 'tool_result', toolName: 'read', input: { file_path: 'a.js' }, output: 'x' }, t.env);
+      const s = readJSON(path.join(t.sessionsDir, 'lt-3.json'));
+      assert.strictEqual(s.stopped, true, 'a finished session is not revived by a straggler');
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('adapters -- codex-notify marks a turn end', () => {
+  const ADAPTER = path.join(ADAPTERS_DIR, 'codex-notify.js');
+  function notify(event, env) {
+    try {
+      execFileSync(NODE, [ADAPTER, JSON.stringify(event)], {
+        env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      if (e.status !== 0 && e.status !== null) throw e;
+    }
+  }
+
+  test('agent-turn-complete: turnEnded on the session file, stopped on the global one', () => {
+    const t = makeTempEnv('nt-1');
+    try {
+      notify({ type: 'agent-turn-complete', 'thread-id': 'nt-1', 'last-assistant-message': 'done' }, t.env);
+      const s = readJSON(path.join(t.sessionsDir, 'nt-1.json'));
+      assert.strictEqual(s.state, 'happy');
+      assert.strictEqual(s.turnEnded, true, 'the renderer must see the turn finish');
+      assert.strictEqual(s.stopped, false, 'a turn end must not retire the orbital');
+      assert.strictEqual(readJSON(t.stateFile).stopped, true, 'tmux sees the turn end');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('an unknown notify event is not a turn end', () => {
+    const t = makeTempEnv('nt-2');
+    try {
+      notify({ type: 'something-new', 'thread-id': 'nt-2' }, t.env);
+      const s = readJSON(path.join(t.sessionsDir, 'nt-2.json'));
+      assert.ok(!s.turnEnded && !s.stopped);
+      assert.ok(!readJSON(t.stateFile).stopped);
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('adapters -- codex-wrapper turn end vs session end', () => {
+  const wrapper = require('../adapters/codex-wrapper');
+  const { signalExitCode } = require('../adapters/base-adapter');
+
+  // In-process: only the session file after each single event can tell a turn
+  // end from the close handler's session end, which overwrites it.
+  test('turn.completed / turn.failed are turn ends; the next turn clears them', () => {
+    const threadId = `te-${Date.now()}`;
+    const file = path.join(SHARED.SESSIONS_DIR, SHARED.safeFilename(`codex-${threadId}`) + '.json');
+    withStateFile({ sessionId: 'nobody', stopped: true, timestamp: 0 }, () => {
+      wrapper.handleEvent({ type: 'thread.started', thread_id: threadId });
+      wrapper.handleEvent({ type: 'turn.started' });
+      wrapper.handleEvent({ type: 'turn.completed', usage: {} });
+      let s = readJSON(file);
+      assert.strictEqual(s.state, 'responding');
+      assert.strictEqual(s.turnEnded, true);
+      assert.strictEqual(s.stopped, false, 'a turn end must not retire the codex orbital');
+      assert.strictEqual(readJSON(SHARED.STATE_FILE).stopped, true, 'the global file keeps stopped for tmux');
+
+      wrapper.handleEvent({ type: 'turn.started' });
+      s = readJSON(file);
+      assert.ok(!s.turnEnded && !s.stopped, 'a new turn is live');
+      assert.ok(!readJSON(SHARED.STATE_FILE).stopped, 'and so is the global file');
+
+      wrapper.handleEvent({ type: 'turn.failed', error: { message: 'boom' } });
+      s = readJSON(file);
+      assert.strictEqual(s.state, 'error');
+      assert.strictEqual(s.turnEnded, true);
+      assert.strictEqual(s.stopped, false);
+    });
+  });
+
+  test('signalExitCode is 128 + the signal number', () => {
+    assert.strictEqual(signalExitCode('SIGINT'), 130);
+    assert.strictEqual(signalExitCode('SIGTERM'), 143);
+    assert.strictEqual(signalExitCode('SIGKILL'), 137);
+    assert.strictEqual(signalExitCode('NOPE'), 1, 'an unknown signal is still a failure');
+    assert.strictEqual(signalExitCode(null), 1);
+  });
+
+  test('closeOutcome: a signal-killed codex is an error, never a success', () => {
+    const o = wrapper.closeOutcome({ code: null, signal: 'SIGTERM', caught: null, turnOutcome: null, lastState: 'executing', lastDetail: 'npm test' });
+    assert.strictEqual(o.state, 'error');
+    assert.strictEqual(o.detail, 'codex killed (SIGTERM)');
+    assert.strictEqual(o.stopped, true);
+    assert.strictEqual(o.exitCode, 143, 'code null used to exit 0');
+  });
+
+  test('closeOutcome: a caught Ctrl+C reads as interrupted and exits 130', () => {
+    const o = wrapper.closeOutcome({ code: 0, signal: null, caught: 'SIGINT', turnOutcome: 'completed', lastState: 'responding', lastDetail: 'x' });
+    assert.strictEqual(o.state, 'error');
+    assert.strictEqual(o.detail, 'interrupted');
+    assert.strictEqual(o.exitCode, 130);
+  });
+
+  test('closeOutcome: the exit-code branches are unchanged', () => {
+    const crash = wrapper.closeOutcome({ code: 2, signal: null, caught: null, turnOutcome: 'completed', lastState: 'responding', lastDetail: 'x' });
+    assert.deepStrictEqual([crash.state, crash.detail, crash.exitCode], ['error', 'codex exited 2', 2]);
+    const failed = wrapper.closeOutcome({ code: 1, signal: null, caught: null, turnOutcome: 'failed', lastState: 'error', lastDetail: 'boom' });
+    assert.deepStrictEqual([failed.state, failed.detail, failed.exitCode], ['error', 'boom', 1]);
+    const clean = wrapper.closeOutcome({ code: 0, signal: null, caught: null, turnOutcome: null, lastState: null, lastDetail: '' });
+    assert.deepStrictEqual([clean.state, clean.detail, clean.exitCode, clean.stopped], ['responding', 'codex finished', 0, true]);
+  });
+
+  // Real signals need POSIX: on win32 a kill from another process terminates
+  // outright and never reaches a handler.
+  const WRAPPER = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
+  const HANG_SRC = [
+    "'use strict';",
+    "const fs = require('fs');",
+    "fs.writeSync(1, JSON.stringify({ type: 'thread.started', thread_id: 'sig' }) + '\\n');",
+    "fs.writeSync(1, JSON.stringify({ type: 'turn.started' }) + '\\n');",
+    "fs.writeSync(1, JSON.stringify({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } }) + '\\n');",
+    "if (process.env.CODEX_FAKE_THEN === 'kill') setTimeout(() => process.kill(process.pid, 'SIGKILL'), 300);",
+    "else setInterval(() => {}, 1000);",
+    '',
+  ].join('\n');
+
+  function spawnHangingWrapper(then) {
+    const base = makeTempEnv('codex-sig');
+    const binDir = path.join(base.tmp, 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(path.join(binDir, 'codex-fake.js'), HANG_SRC, 'utf8');
+    const sh = path.join(binDir, 'codex');
+    fs.writeFileSync(sh, '#!/bin/sh\nexec node "$(dirname "$0")/codex-fake.js" "$@"\n', 'utf8');
+    fs.chmodSync(sh, 0o755);
+    const env = { ...base.env, CODEX_FAKE_THEN: then || '' };
+    for (const k of Object.keys(env)) if (/^path$/i.test(k)) delete env[k];
+    env.PATH = binDir + path.delimiter + (process.env.PATH || '');
+    delete env.CLAUDE_SESSION_ID;
+    const child = spawn(NODE, [WRAPPER, 'a prompt'], { env, stdio: ['ignore', 'ignore', 'ignore'] });
+    return { ...base, child, done: exited(child), sessionFile: path.join(base.sessionsDir, 'codex-sig.json') };
+  }
+
+  if (POSIX) {
+    test.async('SIGTERM to the wrapper retires the session and exits 143', async () => {
+      const w = spawnHangingWrapper('hang');
+      try {
+        await waitFor(() => readJSON(w.sessionFile).state === 'testing', 10000, 'the running tool');
+        w.child.kill('SIGTERM');
+        const { code } = await w.done;
+        assert.strictEqual(code, 143);
+        const s = readJSON(w.sessionFile);
+        assert.strictEqual(s.stopped, true, 'no ghost orbital on its last work face');
+        assert.strictEqual(s.state, 'error');
+      } finally { try { w.child.kill('SIGKILL'); } catch {} cleanup(w.tmp); }
+    });
+
+    test.async('a codex killed by a signal ends on the error face with 128+N', async () => {
+      const w = spawnHangingWrapper('kill');
+      try {
+        const { code } = await w.done;
+        assert.strictEqual(code, 137, 'a killed child used to exit 0');
+        const s = readJSON(w.sessionFile);
+        assert.strictEqual(s.state, 'error');
+        assert.strictEqual(s.detail, 'codex killed (SIGKILL)');
+        assert.strictEqual(s.stopped, true);
+      } finally { cleanup(w.tmp); }
+    });
+  }
+});
+
+describe('adapters -- engmux interrupted dispatch', () => {
+  const ADAPTER = path.join(ADAPTERS_DIR, 'engmux-adapter.js');
+  if (POSIX) {
+    test.async('SIGTERM retires the orbital as interrupted and exits 143', async () => {
+      const base = makeTempEnv('engmux-sig');
+      const py = path.join(base.tmp, 'fake-python');
+      fs.writeFileSync(py, '#!/bin/sh\nexec sleep 30\n', 'utf8');
+      fs.chmodSync(py, 0o755);
+      const child = spawn(NODE, [ADAPTER, '-E', 'opencode', 'do X'], {
+        env: { ...base.env, ENGMUX_PYTHON: py }, stdio: ['ignore', 'ignore', 'ignore'],
+      });
+      const done = exited(child);
+      try {
+        const file = await waitFor(() => {
+          const f = fs.readdirSync(base.sessionsDir)[0];
+          return f && path.join(base.sessionsDir, f);
+        }, 10000, 'the spawning orbital');
+        child.kill('SIGTERM');
+        const { code } = await done;
+        assert.strictEqual(code, 143, 'used to exit 0');
+        const s = readJSON(file);
+        assert.strictEqual(s.state, 'error');
+        assert.strictEqual(s.detail, 'interrupted');
+        assert.strictEqual(s.stopped, true, 'the orbital is retired, not left cycling');
+      } finally { try { child.kill('SIGKILL'); } catch {} cleanup(base.tmp); }
+    });
+  }
+});
+
+describe('setup -- the demo hint only names a demo that exists', () => {
+  const setup = require('../setup');
+  function usage(baseDir) {
+    const lines = [];
+    setup.printClaudeUsage('/x/settings.json', (s) => lines.push(s), baseDir);
+    return lines.join('\n');
+  }
+
+  test('an npm install (no demo.js) is not told to run one', () => {
+    const t = makeTempEnv('setup-nodemo');
+    try {
+      const out = usage(t.tmp);
+      assert.ok(!out.includes('demo.js'), 'the npm tarball excludes demo.js');
+      assert.ok(out.includes('renderer.js'), 'the rest of the usage is still printed');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a clone (demo.js present) still gets the hint', () => {
+    const out = usage(path.join(__dirname, '..'));
+    assert.ok(out.includes('demo.js'));
+    assert.ok(out.includes('preview all expressions'));
+  });
+});
+
+describe('demos -- clean up demo-main on every terminating signal', () => {
+  // POSIX only: a win32 kill terminates without running handlers.
+  for (const script of ['demo.js', 'grid-demo.js']) {
+    for (const sig of ['SIGTERM', 'SIGHUP']) {
+      if (!POSIX) continue;
+      test.async(`${script}: ${sig} unlinks the demo-main session file`, async () => {
+        const base = makeTempEnv('demo-sig');
+        const child = spawn(NODE, [path.join(__dirname, '..', script)], {
+          env: base.env, stdio: ['ignore', 'ignore', 'ignore'],
+        });
+        const done = exited(child);
+        const file = path.join(base.sessionsDir, 'demo-main.json');
+        try {
+          await waitFor(() => fs.existsSync(file), 10000, 'demo-main');
+          child.kill(sig);
+          await done;
+          assert.ok(!fs.existsSync(file), 'demo-main would hold the center over the real session');
+        } finally { try { child.kill('SIGKILL'); } catch {} cleanup(base.tmp); }
+      });
+    }
+  }
 });
 
 module.exports = suite;

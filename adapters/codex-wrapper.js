@@ -25,7 +25,7 @@ const path = require('path');
 const {
   writeState, writeSessionState, readStats, writeStats, guardedWriteState,
   initSession, buildExtra, trackEditedFile,
-  handleToolStart, handleToolEnd, processJsonlStream,
+  handleToolStart, handleToolEnd, processJsonlStream, signalExitCode,
 } = require('./base-adapter');
 const {
   toolToState, humanizeToolName, updateStreak, pruneFrequentFiles, prettyModelName,
@@ -237,8 +237,13 @@ function writeGlobal(state, detail, extra) {
 }
 
 // One stats read -> mutate -> write cycle plus the state files it implies.
-// `decide(stats)` returns { state, detail, stopped, diffInfo } or null; a
-// missing detail keeps the one already on screen.
+// `decide(stats)` returns { state, detail, stopped, turnEnded, diffInfo } or
+// null; a missing detail keeps the one already on screen.
+//
+// `stopped` is the SESSION ending (the wrapper exiting) and goes to both
+// files. `turnEnded` is a turn ending: `stopped` on the global file (tmux and
+// the ownership guard), `turnEnded` on the session file -- `stopped` there
+// would retire the orbital and drop the session from the main-face policy.
 function commit(decide) {
   withStatsLock(() => {
     const stats = readStats();
@@ -248,10 +253,13 @@ function commit(decide) {
       const detail = out.detail === undefined ? lastDetail : out.detail;
       const extra = { ...buildExtra(stats, sessionId, modelName, EDITOR, codexModel), pid: process.pid };
       if (out.diffInfo) extra.diffInfo = out.diffInfo;
-      if (out.stopped) extra.stopped = true;
+      if (out.stopped || out.turnEnded) extra.stopped = true;
       if (lastPromptAt) extra.lastPromptAt = lastPromptAt;
       writeGlobal(out.state, detail, extra);
-      writeSessionState(sessionId, out.state, detail, !!out.stopped, extra);
+      const sessionExtra = { ...extra };
+      if (!out.stopped) delete sessionExtra.stopped;
+      if (out.turnEnded && !out.stopped) sessionExtra.turnEnded = true;
+      writeSessionState(sessionId, out.state, detail, !!out.stopped, sessionExtra);
       lastState = out.state;
       lastDetail = detail;
     }
@@ -316,7 +324,7 @@ function handleEvent(event) {
     }
     else if (type === 'turn.completed') {
       turnOutcome = 'completed';
-      commit(() => ({ state: 'responding', detail: 'wrapping up', stopped: true }));
+      commit(() => ({ state: 'responding', detail: 'wrapping up', turnEnded: true }));
     }
     else if (type === 'turn.failed') {
       turnOutcome = 'failed';
@@ -325,7 +333,7 @@ function handleEvent(event) {
       const detail = shortText(message) || 'turn failed';
       commit((stats) => {
         breakStreak(stats);
-        return { state: 'error', detail, stopped: true };
+        return { state: 'error', detail, turnEnded: true };
       });
     }
     else if (type === 'error') {
@@ -341,6 +349,47 @@ function handleEvent(event) {
   } catch {
     // Silent failure -- a broken face must not break the wrapper
   }
+}
+
+// -- Ending the session ------------------------------------------------
+
+// The final frame and exit code when codex closes. Pure, so every branch is
+// testable without a real codex or a real signal.
+//   code / signal - what the child's 'close' reported
+//   caught        - a signal the WRAPPER received (Ctrl+C, a kill), or null
+// A child killed by a signal reports code null: `code || 0` used to read that
+// as success and leave the last work face standing.
+function closeOutcome({ code, signal, caught, turnOutcome: outcome, lastState: ls, lastDetail: ld }) {
+  const sig = caught || signal || null;
+  if (sig) {
+    return {
+      state: 'error',
+      detail: sig === 'SIGINT' ? 'interrupted' : `codex killed (${sig})`,
+      stopped: true,
+      exitCode: signalExitCode(sig),
+    };
+  }
+  if (code && outcome !== 'failed') {
+    return { state: 'error', detail: `codex exited ${code}`, stopped: true, exitCode: code };
+  }
+  return {
+    state: ls || 'responding',
+    detail: ls ? ld : 'codex finished',
+    stopped: true,
+    exitCode: code || 0,
+  };
+}
+
+// The session-ending write happens exactly once, whichever of 'close' or a
+// caught signal gets there first.
+let finished = false;
+function finishSession(outcome) {
+  if (finished) return false;
+  finished = true;
+  try {
+    commit(() => ({ state: outcome.state, detail: outcome.detail, stopped: true }));
+  } catch {}
+  return true;
 }
 
 // -- Main: spawn codex exec --json and parse JSONL -------------------
@@ -387,23 +436,31 @@ function main() {
     process.exit(1);
   });
 
+  // A caught signal (Ctrl+C, a kill) used to end the wrapper before 'close'
+  // ever fired: no final write, and the orbital stood on its last work face
+  // until it went stale. Now the session is retired at once, the signal is
+  // passed on to codex, and 'close' exits 128+N when codex goes. If codex
+  // ignores it, a short grace timer exits anyway; a second signal exits now.
+  let caught = null;
+  const onSignal = (sig) => {
+    if (caught) process.exit(signalExitCode(caught));
+    caught = sig;
+    finishSession(closeOutcome({ code: null, signal: null, caught: sig }));
+    try { codex.kill(sig); } catch {}
+    setTimeout(() => process.exit(signalExitCode(sig)), 2000).unref();
+  };
+  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => onSignal(sig));
+
   // 'close', not 'exit': exit fires while stdout may still hold buffered
   // JSONL, so the last events of a turn (turn.completed included) could be
   // lost to the process.exit below.
-  codex.on('close', (code) => {
+  codex.on('close', (code, signal) => {
     // The stream already said how the turn ended; exiting only stops the
-    // session. A non-zero exit with no failure reported is the crash case.
-    commit(() => {
-      if (code && turnOutcome !== 'failed') {
-        return { state: 'error', detail: `codex exited ${code}`, stopped: true };
-      }
-      return {
-        state: lastState || 'responding',
-        detail: lastState ? lastDetail : 'codex finished',
-        stopped: true,
-      };
-    });
-    process.exit(code || 0);
+    // session. A non-zero exit with no failure reported is the crash case,
+    // and a signal (ours or anyone's) is an interruption.
+    const outcome = closeOutcome({ code, signal, caught, turnOutcome, lastState, lastDetail });
+    finishSession(outcome);
+    process.exit(outcome.exitCode);
   });
 }
 
@@ -411,4 +468,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { classifyItem, handleEvent };
+module.exports = { classifyItem, handleEvent, closeOutcome };
