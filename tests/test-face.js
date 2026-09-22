@@ -2747,4 +2747,101 @@ describe('face.js -- model name on the face', () => {
   });
 });
 
+// -- Review round 2 regressions -----------------------------------------
+
+describe('face.js -- caffeine never replaces a queued state', () => {
+  // Five recent state changes with the current work state still inside its
+  // min display, so setState would buffer anything that arrives.
+  function hotFace() {
+    const face = new ClaudeFace();
+    face.setState('executing', 'npm test');
+    const now = Date.now();
+    face.stateChangeTimes = [now - 500, now - 400, now - 300, now - 200, now - 100];
+    face.minDisplayUntil = now + 5000;
+    return face;
+  }
+
+  test('a queued waiting (permission prompt) survives the caffeine check', () => {
+    const face = hotFace();
+    face.setState('waiting', 'allow?');
+    assert.strictEqual(face.pendingState, 'waiting');
+    face.update(16);
+    face.update(16);
+    assert.strictEqual(face.pendingState, 'waiting', 'caffeine overwrote the queued prompt');
+    assert.strictEqual(face.pendingDetail, 'allow?');
+    face.minDisplayUntil = 0;
+    face.update(16);
+    assert.strictEqual(face.state, 'waiting');
+  });
+
+  test('a queued thinking survives the caffeine check', () => {
+    const face = hotFace();
+    face.setState('thinking', 'reading your message');
+    face.update(16);
+    assert.strictEqual(face.pendingState, 'thinking');
+  });
+
+  test('caffeine decay does not overwrite a queued state either', () => {
+    const face = new ClaudeFace();
+    face.state = 'caffeinated';
+    face.prevState = 'executing';
+    face.minDisplayUntil = Date.now() + 5000;
+    face.pendingState = 'waiting';
+    face.pendingDetail = 'allow?';
+    face.stateChangeTimes = [];
+    face.update(16);
+    assert.strictEqual(face.pendingState, 'waiting');
+  });
+
+  test('caffeine still triggers with nothing queued', () => {
+    const face = hotFace();
+    face.minDisplayUntil = 0;
+    face.update(16);
+    assert.strictEqual(face.state, 'caffeinated');
+  });
+});
+
+describe('face.js -- same-state work write drops a stale queued completion', () => {
+  test('fast Bash -> relieved queued -> second Bash keeps showing executing', () => {
+    const face = new ClaudeFace();
+    face.setState('executing', 'ls');
+    face.setState('relieved', 'command succeeded');
+    assert.strictEqual(face.pendingState, 'relieved', 'precondition: completion queued behind work');
+    face.setState('executing', 'npm run build');
+    assert.strictEqual(face.pendingState, null, 'stale completion must be dropped');
+    assert.strictEqual(face.state, 'executing');
+    assert.strictEqual(face.stateDetail, 'npm run build');
+    face.minDisplayUntil = 0;
+    face.update(16);
+    assert.strictEqual(face.state, 'executing', 'relieved flushed over the running tool');
+  });
+
+  test('stale pendingWork behind the dropped completion is cleared too', () => {
+    const face = new ClaudeFace();
+    face.setState('executing', 'ls');
+    face.pendingState = 'relieved';
+    face.pendingDetail = 'command succeeded';
+    face.pendingWork = { state: 'reading', detail: 'old.js' };
+    face.setState('executing', 'npm run build');
+    assert.strictEqual(face.pendingState, null);
+    assert.strictEqual(face.pendingWork, null);
+  });
+
+  test('a same-state completion still leaves a queued completion alone', () => {
+    const face = new ClaudeFace();
+    face.setState('happy', 'done');
+    face.pendingState = 'proud';
+    face.setState('happy', 'done again');
+    assert.strictEqual(face.pendingState, 'proud');
+  });
+
+  test('a queued error is never dropped by a same-state work write', () => {
+    const face = new ClaudeFace();
+    face.setState('executing', 'ls');
+    face.pendingState = 'error';
+    face.setState('executing', 'again');
+    assert.strictEqual(face.pendingState, 'error');
+  });
+});
+
 module.exports = suite;

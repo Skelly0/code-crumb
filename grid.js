@@ -70,6 +70,12 @@ const REPOSITION_MS = 4000;        // Duration of orbital reposition animation i
 const CYCLE_WORK_STATES = ['thinking', 'reading', 'searching', 'coding', 'executing'];
 const CYCLE_INTERVAL = 2500;       // ms between state changes
 const CYCLE_STALE_MS = 3000;       // start cycling after 3s of no real data
+// Real states cycling must never paint over: an actionable wait, an error, a
+// reward (COMPLETION_LINGER retires it to thinking, and cycling resumes from
+// there) and the post-turn responding.
+const CYCLE_PROTECTED_STATES = new Set([
+  'waiting', 'error', 'responding', ...COMPLETION_STATES,
+]);
 
 // Signal 0 tests process existence without killing it (works cross-platform in Node.js)
 function isProcessAlive(pid) {
@@ -121,15 +127,20 @@ function _sweepPidCache(now = Date.now()) {
 
 // Enqueue a PID for background start-time resolution. Fresh entries are
 // left alone; TTL-expired entries keep their old value (still used by the
-// gate) while a refresh rides the next batch.
+// gate) while a refresh rides the next batch. The `refreshing` marker says
+// that refresh is already queued or in flight: without it every caller
+// during the exec saw the same expired entry, re-queued the pid, and a
+// redundant second batch ran as soon as the first returned. `done` replaces
+// or deletes the entry, which clears the marker.
 function requestPidStartTime(pid, aliveFn = isProcessAlive) {
   if (!pid || pid <= 1) return;
   const now = Date.now();
   _sweepPidCache(now);
   const e = _pidStartCache.get(pid);
-  if (e && (e.value === 'pending' || now - e.resolvedAt < PID_CACHE_TTL_MS)) return;
+  if (e && (e.value === 'pending' || e.refreshing || now - e.resolvedAt < PID_CACHE_TTL_MS)) return;
   if (!aliveFn(pid)) { _pidStartCache.delete(pid); return; }
   if (!e) _pidStartCache.set(pid, { value: 'pending', resolvedAt: now });
+  else e.refreshing = true;
   _pidResolveQueue.add(pid);
   _kickPidResolve();
 }
@@ -148,6 +159,9 @@ function _setPidResolver(fn) {
   _pidResolver = fn || _resolvePidStartTimes;
   _pidExecInFlight = false;
   _pidResolveQueue.clear();
+  // A refresh that was queued or in flight will never report back now, so
+  // its marker would otherwise block that pid from ever refreshing again.
+  for (const e of _pidStartCache.values()) delete e.refreshing;
 }
 
 // One outstanding exec at a time; queued PIDs ride the next batch.
@@ -368,6 +382,12 @@ class MiniFace {
       // Same state — refresh the timer and update detail
       this.minDisplayUntil = now + 1500;
       this.detail = data.detail || '';
+      // A fresh write of the same WORK state is a new tool call; a completion
+      // still queued from the previous one would otherwise flush over it.
+      if (ACTIVE_WORK_STATES.has(newState) && COMPLETION_STATES.has(this.pendingState)) {
+        this.pendingState = null;
+        this.pendingDetail = null;
+      }
     }
     // Use file mtime (when available) so lastUpdate reflects when the hook
     // handler actually wrote the file, not when the renderer polled it.
@@ -417,15 +437,20 @@ class MiniFace {
     // Non-stopped: if the owning process is alive AND actually ours
     // (start time predates our last write — recycled PIDs fail), never stale
     if (this.pid && isOwnedByLiveProcess(this.pid, this.lastUpdate)) return false;
-    // No pid or dead process: a completion state on a CHILD gets the short
-    // timeout -- an agent that reported `happy` and went quiet is finished.
-    // A top-level session is not: its face is built from the file and judged
-    // in the same loadSessions pass, before any tick() has moved the reward
-    // state on (steady state does that at COMPLETION_LINGER). At a cold boot
-    // a window whose last write was `proud` 11s ago would be declared dead on
-    // the spot -- and on win32, with no pid to appeal to, never become a
-    // candidate for the center at all. Top-level faces use ORPHAN_TIMEOUT.
-    if (this.parentSession && COMPLETION_STATES.has(this.state)) {
+    // No pid or dead process: a completion state on an ORPHANED child gets the
+    // short timeout -- an agent that reported `happy` and went quiet while its
+    // parent shows no sign of life is finished.
+    // A face is built from its file and judged in the same loadSessions pass,
+    // before any tick() has moved the reward state on (steady-state ticks
+    // retire a reward within its COMPLETION_LINGER, all under 10s), so this
+    // rule effectively only ever judges a freshly built face. Applied to a
+    // top-level window at a cold boot it declared a live session dead for
+    // having last written `proud` (on win32 it never became a center
+    // candidate). Applied to a child of a LIVE family it did the same to every
+    // agent whose last write was a reward: created and deleted on every pass,
+    // liveChildCount() 0, and the main face lost its conducting hold. So it
+    // needs both: a child, and a parent whose file is no longer fresh.
+    if (this.parentSession && !this.parentAlive && COMPLETION_STATES.has(this.state)) {
       return Date.now() - this.lastUpdate > STOPPED_LINGER_MS;
     }
     // Everything else: orphan timeout. A child orbital gets the longer window
@@ -506,7 +531,13 @@ class MiniFace {
     // Activity cycling for synthetic subagent faces — while a subagent tool
     // is running, the parent emits no further hook events. Cycle through work
     // states to show the face is alive and working.
-    if (this.parentSession && !this.stopped && !this.spawning) {
+    //
+    // Only synthetic faces cycle (see _cyclesActivity): a real agent orbital
+    // reports its own tools, so cycling would paint invented work over real
+    // state. And a face whose real state is actionable or meaningful --
+    // waiting on a permission prompt, an error, a reward, responding -- is
+    // never overwritten by fake reading/searching after CYCLE_STALE_MS.
+    if (this.parentSession && !this.stopped && !this.spawning && this._cyclesActivity()) {
       const sinceUpdate = now - this.lastUpdate;
       if (sinceUpdate > CYCLE_STALE_MS) {
         const cycleTime = now - this.firstSeen;
@@ -542,6 +573,15 @@ class MiniFace {
       this.state = 'sleeping';
       this.minDisplayUntil = now + 1500;
     }
+  }
+
+  // Whether activity cycling may drive this face. A Claude Code agent orbital
+  // is named `{parent}-agent-{agentId}` (subagentSessionId) and writes its own
+  // hooks, so it is never synthetic. For the rest, cycling may only replace a
+  // neutral state or its own previous cycle state.
+  _cyclesActivity() {
+    if (/-agent-/.test(String(this.sessionId))) return false;
+    return !CYCLE_PROTECTED_STATES.has(this.state);
   }
 
   _cycleDetail() {
@@ -1217,14 +1257,19 @@ class OrbitalSystem {
 
       const base = face.cwdBasename;
 
+      // Documented order: teammateName > taskDescription > cwd basename >
+      // modelName > sub-N. A top-level face's modelName used to win before
+      // its cwd, so two parallel windows in different folders both read
+      // `claude`. It is now only the fallback when the folder cannot tell
+      // this face apart (no cwd, or a basename shared with another face).
       if (face.taskDescription) {
         face.label = face.taskDescription.slice(0, 8);
-      } else if (face.isMainSession && face.modelName) {
-        face.label = face.modelName.slice(0, 8);
       } else if (sorted.length === 1) {
         face.label = base ? base.slice(0, 8) : (face.modelName || 'sub').slice(0, 8);
       } else if (base && cwdCounts[base] === 1) {
         face.label = base.slice(0, 8);
+      } else if (face.isMainSession && face.modelName) {
+        face.label = face.modelName.slice(0, 8);
       } else {
         cwdIndex[base] = (cwdIndex[base] || 0) + 1;
         face.label = 'sub-' + (i + 1);
