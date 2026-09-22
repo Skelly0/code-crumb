@@ -147,9 +147,20 @@ function writeSettings(settingsPath, settings, existed, raw, log) {
   return ok;
 }
 
-function printClaudeUsage(settingsPath, log) {
-  const rendererPath = path.resolve(__dirname, 'renderer.js').replace(/\\/g, '/');
-  const demoPath = path.resolve(__dirname, 'demo.js').replace(/\\/g, '/');
+// `baseDir` is where the install lives (a test seam; production is __dirname).
+// The demo hint is printed only when demo.js is actually there: package.json's
+// "files" whitelist keeps the demos out of the npm tarball, so an npm install
+// was told to run a file it does not have (Cannot find module).
+function printClaudeUsage(settingsPath, log, baseDir = __dirname) {
+  const rendererPath = path.resolve(baseDir, 'renderer.js').replace(/\\/g, '/');
+  const demoFile = path.resolve(baseDir, 'demo.js');
+  const demoPath = demoFile.replace(/\\/g, '/');
+  const demoHint = fs.existsSync(demoFile)
+    ? `
+  3. To preview all expressions:
+     node "${demoPath}"
+`
+    : '';
   log(`
   ${'─'.repeat(42)}
 
@@ -160,12 +171,9 @@ function printClaudeUsage(settingsPath, log) {
 
   2. Use Claude Code as normal in another terminal.
      The face will react to what Claude is doing!
-
-  3. To preview all expressions:
-     node "${demoPath}"
-
+${demoHint}
   Plugin install (alternative -- works with marketplace):
-     claude plugin marketplace add "${path.resolve(__dirname).replace(/\\/g, '/')}"
+     claude plugin marketplace add "${path.resolve(baseDir).replace(/\\/g, '/')}"
      claude plugin install code-crumb@code-crumb
      Use ONE of the two: with both the manual hooks and the plugin
      installed every event fires twice and the counters double.
@@ -879,6 +887,7 @@ if (require.main === module) {
 
 module.exports = {
   setupClaude,
+  printClaudeUsage,
   uninstallClaude,
   setupOpenCode,
   uninstallOpenCode,

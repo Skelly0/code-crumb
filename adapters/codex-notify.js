@@ -40,11 +40,13 @@ try {
   // through as a thinking face labelled with its own name.
   let state = 'thinking';
   let detail = eventType || 'codex event';
+  let turnEnded = false;
   if (eventType === 'agent-turn-complete') {
     const lastMsg = event['last-assistant-message'] || '';
     const short = lastMsg.length > 40 ? lastMsg.slice(0, 37) + '...' : lastMsg;
     state = 'happy';
     detail = short || 'turn complete';
+    turnEnded = true;
   }
 
   // Without the stats cycle, notify-mode sessions rendered with a blank status
@@ -53,8 +55,18 @@ try {
     const stats = readStats();
     initSession(stats, sessionId);
     const extra = buildExtra(stats, sessionId, modelName, editor);
-    guardedWriteState(sessionId, state, detail, extra);
-    writeSessionState(sessionId, state, detail, false, extra);
+    // A turn end, on the adapter contract: `stopped` on the global file (tmux
+    // and the ownership guard read it), `turnEnded` on the session file --
+    // `stopped` there means the session is OVER and would retire the orbital.
+    // Without either, the renderer never saw the turn finish at all.
+    // guardedWriteState copies the owner's modelName/editor/model back onto
+    // the object it is given, so the session write is derived from that one.
+    const globalExtra = turnEnded ? { ...extra, stopped: true } : extra;
+    guardedWriteState(sessionId, state, detail, globalExtra);
+    const sessionExtra = { ...globalExtra };
+    delete sessionExtra.stopped;
+    if (turnEnded) sessionExtra.turnEnded = true;
+    writeSessionState(sessionId, state, detail, false, sessionExtra);
     writeStats(stats);
   });
 } catch {
