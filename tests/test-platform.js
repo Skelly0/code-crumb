@@ -382,6 +382,30 @@ describe('shared.js -- acquireFileLock / withStatsLock', () => {
   });
 });
 
+describe('shared.js -- a delete-pending lock (win32 EPERM) is held, not free', () => {
+  test('an EPERM create waits and retries instead of proceeding unlocked', () => {
+    const { tmp } = makeTempEnv('lock-eperm');
+    const lockFile = path.join(tmp, 'eperm.lock');
+    const real = fs.writeFileSync;
+    let failures = 2;
+    fs.writeFileSync = function (file, data, opts) {
+      if (file === lockFile && opts && opts.flag === 'wx' && failures > 0) {
+        failures--;
+        const e = new Error('EPERM: operation not permitted'); e.code = 'EPERM';
+        throw e;
+      }
+      return real.apply(this, arguments);
+    };
+    try {
+      const release = shared.acquireFileLock(lockFile, { waitMs: 1000, spinMs: 1 });
+      assert.strictEqual(failures, 0, 'both EPERMs were retried');
+      assert.ok(fs.existsSync(lockFile), 'the lock was really taken (a no-op release used to be returned)');
+      release();
+      assert.ok(!fs.existsSync(lockFile), 'and really released');
+    } finally { fs.writeFileSync = real; cleanup(tmp); }
+  });
+});
+
 // Six processes, twenty increments each: without serialization the read-modify-write
 // races and the total lands short of 120.
 describe('shared.js -- the stats lock serializes parallel read-modify-write', () => {

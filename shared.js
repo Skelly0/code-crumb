@@ -136,6 +136,8 @@ function sleepSync(ms) {
 }
 
 let lockSeq = 0;
+// Create errors that mean "someone holds (or is just releasing) the lock".
+const LOCK_HELD_CODES = new Set(['EEXIST', 'EPERM', 'EACCES', 'EBUSY']);
 
 // Remove a lock file that looked stale, so the caller can retry its O_EXCL
 // create. Returns true when the caller should retry at once (the stale file
@@ -189,8 +191,13 @@ function acquireFileLock(lockFile, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE
       fs.writeFileSync(lockFile, token, { flag: 'wx', mode: 0o600 });
       return release;
     } catch (e) {
-      // Anything but "already held" (no directory, permissions) -- proceed.
-      if (!e || e.code !== 'EEXIST') return () => {};
+      // Anything but "held" (no directory, say) -- proceed. On Windows a
+      // lock that is being unlinked by its owner sits in a delete-pending
+      // state, and creating it then fails EPERM/EACCES, not EEXIST (~0.2% of
+      // attempts with six contending writers). Treating that as "proceed"
+      // ran the read-modify-write unlocked and lost increments; it is held,
+      // so it waits like EEXIST. A genuine permission failure costs waitMs.
+      if (!e || !LOCK_HELD_CODES.has(e.code)) return () => {};
       let stale = false;
       try {
         stale = Date.now() - fs.statSync(lockFile).mtimeMs > staleMs;
