@@ -961,6 +961,36 @@ describe('update-state -- main session model', () => {
     } finally { cleanup(t.tmp); }
   });
 
+  test("a parallel window's SessionStart parks the owner's agents instead of wiping them", () => {
+    const t = makeTempEnv('owner-lc');
+    try {
+      runUpdateState('SessionStart', { session_id: 'owner-lc', source: 'startup' }, t.env);
+      runUpdateState('SubagentStart', {
+        session_id: 'owner-lc', subagent_id: 'sub-1', agent_type: 'Explore',
+      }, t.env);
+      assert.strictEqual(readJSON(t.statsFile).session.activeSubagents.length, 1, 'owner is conducting');
+
+      // A lifecycle event skips the foreign-session classifier and takes the
+      // stats session -- that is allowed; losing the owner's agents is not.
+      runUpdateState('SessionStart', { session_id: 'other-lc', source: 'startup' }, t.env);
+      let stats = readJSON(t.statsFile);
+      assert.strictEqual(stats.session.id, 'other-lc');
+      assert.strictEqual(stats.sessionCounters['owner-lc'].activeSubagents.length, 1,
+        "the owner's agent waits on its own counter entry");
+
+      // The owner's next event takes ownership back, agents and all.
+      runUpdateState('PreToolUse', { session_id: 'owner-lc', tool_name: 'Read', tool_input: { file_path: 'a.js' } }, t.env);
+      stats = readJSON(t.statsFile);
+      assert.strictEqual(stats.session.id, 'owner-lc');
+      assert.strictEqual(stats.session.activeSubagents.length, 1, 'restored');
+      assert.ok(!stats.sessionCounters['owner-lc'].activeSubagents, 'and no longer parked');
+
+      // ...so its SubagentStop still has something to match.
+      runUpdateState('SubagentStop', { session_id: 'owner-lc', subagent_id: 'sub-1', agent_type: 'Explore' }, t.env);
+      assert.strictEqual(readJSON(t.statsFile).session.activeSubagents.length, 0, 'retired by match');
+    } finally { cleanup(t.tmp); }
+  });
+
   test('a /model in a parallel window leaves a conducting owner intact', () => {
     const t = makeTempEnv('owner-pm');
     try {

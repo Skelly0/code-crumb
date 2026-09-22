@@ -300,6 +300,32 @@ function tmuxDisplayState(data, now) {
   return age > limit ? 'idle' : state;
 }
 
+// -- Startup gate -----------------------------------------------------------
+// Pure: what the main face does with a write read at time `now`, given when
+// the renderer started. Returns 'apply', 'skip' (ignore, look again next read)
+// or 'record' (never show it, but mark it applied so it cannot come back).
+//   - During the first STARTUP_WINDOW_MS a finished turn, or a live write more
+//     than STARTUP_STALE_MS older than the renderer, is 'record': a fresh
+//     renderer must not resurrect a session that went quiet before it started.
+//     It used to be a plain skip, so the same old write read as "new" the
+//     moment the window closed and was applied after all (a finished turn as
+//     responding -> done!, a stale one as whatever tool it last named).
+//   - After that window only writes from more than RUNTIME_STALE_MS before
+//     the renderer started are skipped.
+const STARTUP_WINDOW_MS = 5000;
+const STARTUP_STALE_MS = 15000;
+const RUNTIME_STALE_MS = 120000;
+
+function startupGate(ts, stopped, now, rendererStartTime) {
+  if (now - rendererStartTime < STARTUP_WINDOW_MS) {
+    if (stopped) return 'record';
+    if (ts > 0 && ts < rendererStartTime - STARTUP_STALE_MS) return 'record';
+    return 'apply';
+  }
+  if (ts > 0 && ts < rendererStartTime - RUNTIME_STALE_MS) return 'skip';
+  return 'apply';
+}
+
 // -- Shared runtime -------------------------------------------------
 
 // Read one state file into the shape the main face consumes. The unified
@@ -556,30 +582,18 @@ function runUnifiedMode() {
         // never updates if Claude is thinking with no tool calls).
         // Skip state older than 2 minutes pre-renderer-start — truly stale.
         const ts = stateData.timestamp || 0;
-        const isStartup = (Date.now() - rendererStartTime < 5000);
-        if (isStartup) {
-          // Don't resurrect dead sessions on fresh renderer start
-          if (stateData.stopped) {
-            lastStopped = true;
-            // Record the write as applied. Without this, once the 5s startup
-            // window closed the same old turn-end write read as "new"
-            // (ts > 0) and was translated into responding -> done!, a reward
-            // for a turn that ended before the renderer was even running.
-            if (ts > lastAppliedTimestamp) {
-              lastAppliedTimestamp = ts;
-              lastAppliedState = stateData.state;
-            }
-            return;
+        const gate = startupGate(ts, !!stateData.stopped, Date.now(), rendererStartTime);
+        if (gate === 'skip') return;
+        if (gate === 'record') {
+          // Don't resurrect dead sessions on fresh renderer start -- and
+          // record the write as applied, or it reads as "new" (ts > 0) once
+          // the startup window closes and is shown after all.
+          lastStopped = !!stateData.stopped;
+          if (ts > lastAppliedTimestamp) {
+            lastAppliedTimestamp = ts;
+            lastAppliedState = stateData.state;
           }
-          // Tighter window: active sessions write every few seconds
-          if (ts > 0 && ts < rendererStartTime - 15000) {
-            return;
-          }
-        } else {
-          // Normal runtime: 2-minute guard for live session tolerance
-          if (ts > 0 && ts < rendererStartTime - 120000) {
-            return;
-          }
+          return;
         }
 
         // The session file's picture of a finished turn is the orbital's
@@ -1125,6 +1139,7 @@ if (require.main === module) {
     readState, ACTIVE_WORK_STATES, COMPLETION_STATES, FRESH_READ_STATES,
     idleCascade, buildTitle, noteNewWrite, pickMainSession,
     RESCUE_EXCLUDE, needsRescue, policySessions, splitKeys, tmuxDisplayState,
+    startupGate,
     IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
     LONG_TOOL_HOLD_MS, WAIT_HOLD_STALE_MS,
   };

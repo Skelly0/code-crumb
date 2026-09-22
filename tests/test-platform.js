@@ -127,6 +127,13 @@ describe('platform -- buildRendererCommands lives in shared.js and quotes paths'
     assert.ok(cmds.wt.args.includes('--minimal'), 'plain flags stay bare');
     assert.strictEqual(cmds.cmd.args[1], 'start "Code Crumb" node "C:\\R&D\\renderer.js" --minimal');
   });
+  test('win32 wt escapes ; as \\; (wt splits subcommands on ; even inside quotes)', () => {
+    const cmds = shared.buildRendererCommands('win32', ['C:\\a;b\\renderer.js'], 'Crumb;Face');
+    assert.ok(cmds.wt.args.includes('"C:\\a\\;b\\renderer.js"'), cmds.wt.args.join(' '));
+    assert.ok(cmds.wt.args.includes('"Crumb\\;Face"'), 'the title too');
+    // The cmd fallback has no subcommand syntax: its ; stays inside quotes.
+    assert.strictEqual(cmds.cmd.args[1], 'start "Crumb;Face" node "C:\\a;b\\renderer.js"');
+  });
   test('win32 cmd fallback keeps a %-bearing path out of cmd\'s variable expansion', () => {
     const cmds = shared.buildRendererCommands('win32', ['C:\\100%\\renderer.js'], title);
     assert.strictEqual(cmds.cmd.args[1], 'start "Code Crumb" node "C:\\100"^%"\\renderer.js"');

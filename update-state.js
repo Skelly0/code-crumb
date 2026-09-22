@@ -107,6 +107,31 @@ function _normalizeCounter(c, now) {
   return c;
 }
 
+// While a session does not own stats.session, its running agents (and its
+// subagent count) wait on its counter entry. Only stored when there is
+// something to keep, so an idle window's entry stays small.
+const COUNTER_MAX_AGENTS = 32;
+
+function _parkAgents(c, session) {
+  if (!c || !session) return;
+  const active = Array.isArray(session.activeSubagents)
+    ? session.activeSubagents.filter(s => s && typeof s === 'object').slice(0, COUNTER_MAX_AGENTS) : [];
+  if (active.length) c.activeSubagents = active; else delete c.activeSubagents;
+  if (session.subagentCount > 0) c.subagentCount = session.subagentCount; else delete c.subagentCount;
+}
+
+function _unparkAgents(c, session) {
+  if (!c || !session) return;
+  if (Array.isArray(c.activeSubagents)) {
+    session.activeSubagents = c.activeSubagents.filter(s => s && typeof s === 'object');
+  }
+  if (typeof c.subagentCount === 'number' && Number.isFinite(c.subagentCount)) {
+    session.subagentCount = c.subagentCount;
+  }
+  delete c.activeSubagents;
+  delete c.subagentCount;
+}
+
 function _pruneCounters(map, keepId, now) {
   for (const id of Object.keys(map)) {
     const c = map[id];
@@ -796,15 +821,24 @@ process.stdin.on('end', () => {
     if (stats.session.id !== sessionId && !isAgentEvent && !isKnownSubagent && !isParallelSession) {
       // Credit the outgoing owner's records, then adopt this session with its
       // OWN counters -- a switch is not a new session.
-      if (stats.session.id) _creditSession(stats, counters[stats.session.id], now);
+      const outgoing = stats.session.id ? counters[stats.session.id] : null;
+      if (outgoing) _creditSession(stats, outgoing, now);
       if ((stats.session.subagentCount || 0) > (stats.records.mostSubagents || 0)) {
         stats.records.mostSubagents = stats.session.subagentCount;
       }
+      // Park the outgoing owner's agent bookkeeping on its own counter entry
+      // and restore this session's. A lifecycle event from a parallel window
+      // (SessionStart, PreCompact...) skips the foreign-session classifier and
+      // takes ownership, and that used to wipe a conducting owner's
+      // activeSubagents -- orphaning its synthetic orbitals and leaving its
+      // SubagentStops nothing to match once it took ownership back.
+      _parkAgents(outgoing, stats.session);
       stats.session = {
         id: sessionId, start: counter.start,
         toolCalls: counter.toolCalls, filesEdited: counter.filesEdited.slice(),
         subagentCount: 0, commitCount: counter.commitCount,
       };
+      _unparkAgents(counter, stats.session);
     }
 
     // Initialize subagent tracking for synthetic orbital sessions

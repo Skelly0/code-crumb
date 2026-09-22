@@ -967,8 +967,8 @@ describe('emotions -- a dead editor stays dead after the center moves away', () 
 // runtime observable short of a spawned TTY renderer (the scratchpad repros
 // s1_startup / s5_resume cover them end to end).
 describe('emotions -- renderer closure fixes (source lint)', () => {
-  test('the startup stopped branch records the write as applied', () => {
-    assert.ok(/if \(stateData\.stopped\) \{\s*lastStopped = true;[\s\S]{0,600}?lastAppliedTimestamp = ts;\s*lastAppliedState = stateData\.state;[\s\S]{0,40}?\}\s*return;/.test(RENDERER_SRC));
+  test('a startup-gated write is recorded as applied, not just skipped', () => {
+    assert.ok(/if \(gate === 'record'\) \{[\s\S]{0,400}?lastAppliedTimestamp = ts;\s*lastAppliedState = stateData\.state;[\s\S]{0,40}?\}\s*return;/.test(RENDERER_SRC));
   });
 
   test('a newer write under a new pid retires the armed pid and clears editorDead', () => {
@@ -1051,6 +1051,32 @@ describe('emotions -- tmux mode decays like the face does', () => {
 
   test('tmux mode uses it', () => {
     assert.ok(/const state = tmuxDisplayState\(data, Date\.now\(\)\);/.test(RENDERER_SRC));
+  });
+});
+
+describe('emotions -- the startup gate never replays an old write', () => {
+  const { startupGate } = renderer;
+  const START = 10000000;
+  // [label, ts, stopped, now, expected]
+  const table = [
+    ['a fresh live write at boot applies', START - 2000, false, START + 1000, 'apply'],
+    ['a finished turn at boot is recorded', START - 2000, true, START + 1000, 'record'],
+    ['a live write 30s older than boot is recorded', START - 30000, false, START + 1000, 'record'],
+    ['after the window a fresh write applies', START + 6000, false, START + 7000, 'apply'],
+    ['after the window a 30s-older write applies', START - 30000, false, START + 7000, 'apply'],
+    ['after the window a 3-minute-older write is skipped', START - 180000, false, START + 7000, 'skip'],
+    ['no timestamp applies at boot', 0, false, START + 1000, 'apply'],
+  ];
+  for (const [label, ts, stopped, now, expected] of table) {
+    test(label, () => assert.strictEqual(startupGate(ts, stopped, now, START), expected));
+  }
+  // The regression: a write recorded at boot must not read as new after the
+  // window, which the renderer checks with `ts > lastAppliedTimestamp`. The
+  // gate says 'apply' for it post-window, so the record is what stops it.
+  test('a write recorded at boot is the one later reads would re-apply', () => {
+    const ts = START - 30000;
+    assert.strictEqual(startupGate(ts, false, START + 1000, START), 'record');
+    assert.strictEqual(startupGate(ts, false, START + 7000, START), 'apply');
   });
 });
 

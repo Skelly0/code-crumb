@@ -277,6 +277,14 @@ function appleScriptEscape(s) {
 // Returns { key: { cmd, args, opts } }; Linux returns several candidates to
 // probe in order. Used by launch.js and by update-state.js autolaunch so the
 // two can never disagree on quoting again.
+// Windows Terminal splits its command line into subcommands on `;` -- even
+// inside double quotes -- so a literal semicolon must be written `\;` (wt
+// strips the backslash). Without it a renderer path containing `;` was cut
+// in two and the tab never opened. Applied after quoteArg, to wt args only.
+function wtEscape(quotedArg) {
+  return String(quotedArg).replace(/;/g, '\\;');
+}
+
 function buildRendererCommands(platform, rendererArgs, windowTitle) {
   const detached = { detached: true, stdio: 'ignore' };
   if (platform === 'win32') {
@@ -286,7 +294,7 @@ function buildRendererCommands(platform, rendererArgs, windowTitle) {
       // shell; shell:true joins args verbatim, so every arg is pre-quoted.
       wt: {
         cmd: 'wt',
-        args: ['-w', '0', 'new-tab', '--title', quoteArg(windowTitle), 'node', ...quoted],
+        args: ['-w', '0', 'new-tab', '--title', wtEscape(quoteArg(windowTitle)), 'node', ...quoted.map(wtEscape)],
         opts: { ...detached, shell: true },
       },
       // cmd.exe's `start` parses its own line; hand it one verbatim string.
