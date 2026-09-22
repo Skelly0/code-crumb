@@ -349,6 +349,17 @@ class ClaudeFace {
     } else {
       this.lastStateChange = Date.now();
       this.stateDetail = detail;
+      // A fresh write of the work state already on screen is a NEW tool call
+      // (fast Bash -> relieved queued -> second Bash arrives as executing
+      // again). The queued completion belongs to the tool that finished, so
+      // flushing it now would show `relieved` over the tool that is running --
+      // and break the renderer's long-tool hold, which needs the face to name
+      // the same state as the file. Drop it, and any work remembered behind it.
+      if (ACTIVE_WORK_STATES.has(newState) && COMPLETION_STATES.has(this.pendingState)) {
+        this.pendingState = null;
+        this.pendingDetail = '';
+        this.pendingWork = null;
+      }
     }
 
     // Immediately show new activity in thought bubble
@@ -834,13 +845,19 @@ class ClaudeFace {
     // Routes through setState() for proper minDisplayUntil / lastStateChange tracking.
     // Excludes completion, idle, error, and post-stop states to prevent oscillation
     // (responding + caffeinated would feed stateChangeTimes indefinitely).
+    // Never while something is queued: setState would buffer caffeinated too,
+    // and a buffered state overwrites pendingState -- a queued `waiting`
+    // (permission prompt) or `thinking` was replaced ~60ms later and the
+    // prompt never showed. The queued state is real news; caffeine is garnish.
     const now = Date.now();
     let recentCount = 0;
     for (let i = this.stateChangeTimes.length - 1; i >= 0; i--) {
       if (now - this.stateChangeTimes[i] < CAFFEINE_WINDOW) recentCount++;
       else break; // times are in order, no need to check further
     }
-    if (recentCount >= CAFFEINE_THRESHOLD &&
+    if (this.pendingState) {
+      // leave the queue alone; update() flushes it once its time comes
+    } else if (recentCount >= CAFFEINE_THRESHOLD &&
         this.state !== 'idle' && this.state !== 'sleeping' &&
         this.state !== 'happy' && this.state !== 'satisfied' &&
         this.state !== 'proud' && this.state !== 'relieved' &&

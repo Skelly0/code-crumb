@@ -54,7 +54,18 @@ const WAIT_HOLD_STALE_MS = 1800000;
 
 // -- Hoisted sets for checkState() hot path ---------------------------
 const { ACTIVE_WORK_STATES, COMPLETION_STATES } = require('./shared');
-const RESCUE_EXCLUDE = new Set(['idle', 'sleeping', 'responding', 'starting', 'happy', 'satisfied', 'proud', 'relieved']);
+// States the stopped/dead rescue must leave alone. `error` is here because it
+// decays by itself (idleCascade takes a non-active error to idle after
+// IDLE_TIMEOUT) and is the one face that must never be skipped: a late
+// PostToolUseFailure arriving after Stop writes error + turnEnded, and without
+// this the rescue replaced "hit a snag" with responding -> done! on the same
+// tick, before its 4000ms minimum was ever drawn.
+const RESCUE_EXCLUDE = new Set(['idle', 'sleeping', 'responding', 'starting', 'happy', 'satisfied', 'proud', 'relieved', 'error']);
+
+// Pure: should the stopped/dead rescue force the face to responding now?
+function needsRescue(face, lastStopped, editorDead) {
+  return !!((lastStopped || editorDead) && !RESCUE_EXCLUDE.has(face.state));
+}
 // States in which a missed Stop/start event is worth a fresh file read: every
 // active work state, every completion, and thinking. Derived so a new work
 // state can never be forgotten here (committing/reviewing/subagent/training were).
@@ -190,6 +201,131 @@ function buildTitle(modelName, status, flash) {
     : `\x1b]0;Code Crumb \u00b7 ${modelName} is ${status}\x07`;
 }
 
+// -- Policy input ------------------------------------------------------
+// Pure (apart from pruning `deadSessions`, which it owns): project the orbital
+// loader's faces into pickMainSession's input.
+//
+// The renderer knows one thing no file says: that a session's armed editor PID
+// died. While that session is main, `editorDead` carries it -- but adoptMain
+// clears editorDead the moment the center moves away, and a crashed session's
+// MiniFace is neither stopped (no Stop was written) nor stale for another ~90s.
+// It then looked live again and won the center straight back on attention,
+// showing its last, frozen "writing code". `deadSessions` (id -> the JSON
+// timestamp of the newest write seen when it died) remembers the death after
+// the swap: the session is projected as stopped until it writes something
+// newer (a resumed editor), and the entry is dropped once the session's file
+// is gone.
+//
+//   faces        iterable of MiniFace-like objects
+//   mainId       the session on screen now
+//   editorDead   the main's armed PID is known dead
+//   deadSessions Map<id, deathTimestamp>, pruned in place
+function policySessions(faces, { mainId, editorDead, deadSessions }) {
+  const sessions = [];
+  const seen = new Set();
+  for (const f of faces) {
+    seen.add(f.sessionId);
+    let dead = f.sessionId === mainId && !!editorDead;
+    if (deadSessions && deadSessions.has(f.sessionId)) {
+      if ((f._lastDataTimestamp || 0) > deadSessions.get(f.sessionId)) deadSessions.delete(f.sessionId);
+      else dead = true;
+    }
+    sessions.push({
+      id: f.sessionId, parentSession: f.parentSession, isTeammate: f.isTeammate,
+      stopped: !!f.stopped || dead,
+      stale: f.isStale(), attentionAt: f.lastPromptAt || 0, lastUpdate: f.lastUpdate,
+    });
+  }
+  if (deadSessions) {
+    for (const id of [...deadSessions.keys()]) if (!seen.has(id)) deadSessions.delete(id);
+  }
+  return sessions;
+}
+
+// -- Keypress tokenizer ---------------------------------------------------
+// Pure: split one stdin chunk into individual keys. A terminal delivers
+// several keys in one chunk whenever they arrive faster than the event loop
+// drains them -- a held arrow key ('\x1b[B\x1b[B'), a fast double tap ('qq'),
+// a paste -- and comparing the whole chunk to a single key matched none of
+// them (a held arrow in the session list fell through to "any other key" and
+// closed the list). CSI sequences (ESC [ params final) and SS3 sequences
+// (ESC O x) stay whole; everything else is one code point per token.
+function splitKeys(chunk) {
+  const chars = Array.from(String(chunk == null ? '' : chunk));
+  const keys = [];
+  let i = 0;
+  while (i < chars.length) {
+    const c = chars[i];
+    if (c === '\x1b' && chars[i + 1] === '[') {
+      let j = i + 2;
+      // Parameter (0x30-0x3F) and intermediate (0x20-0x2F) bytes, then one
+      // final byte (0x40-0x7E). A sequence cut off mid-chunk keeps what it has.
+      while (j < chars.length) {
+        const code = chars[j].charCodeAt(0);
+        if (code >= 0x40 && code <= 0x7e) { j++; break; }
+        if (code < 0x20 || code > 0x3f) break;
+        j++;
+      }
+      keys.push(chars.slice(i, j).join(''));
+      i = j;
+    } else if (c === '\x1b' && chars[i + 1] === 'O' && i + 2 < chars.length) {
+      keys.push(chars.slice(i, i + 3).join(''));
+      i += 3;
+    } else {
+      keys.push(c);
+      i++;
+    }
+  }
+  return keys;
+}
+
+// -- tmux decay -------------------------------------------------------------
+// Pure: which state should the tmux status line show for a global-file read?
+// The full renderer runs idleCascade; tmux mode used to print whatever the file
+// last said, forever -- a crashed or finished session read "writing code" in
+// the status bar all night. The same bounds, simplified for a 2s poll:
+//   - waiting is held (an idle_prompt arrives after Stop) until the write is
+//     WAIT_HOLD_STALE_MS old
+//   - a finished turn keeps its last face for IDLE_TIMEOUT, then rests
+//   - a tool call is held for LONG_TOOL_HOLD_MS, anything else for
+//     THINKING_TIMEOUT, then idle
+// A missing timestamp is treated as fresh, like noteNewWrite's 0.
+function tmuxDisplayState(data, now) {
+  const state = (data && data.state) || 'idle';
+  const ts = (data && data.timestamp) || 0;
+  const age = ts ? now - ts : 0;
+  if (state === 'waiting') return age > WAIT_HOLD_STALE_MS ? 'idle' : 'waiting';
+  if (data && data.stopped) return age > IDLE_TIMEOUT ? 'idle' : state;
+  const limit = (ACTIVE_WORK_STATES.has(state) && state !== 'responding') ? LONG_TOOL_HOLD_MS : THINKING_TIMEOUT;
+  return age > limit ? 'idle' : state;
+}
+
+// -- Startup gate -----------------------------------------------------------
+// Pure: what the main face does with a write read at time `now`, given when
+// the renderer started. Returns 'apply', 'skip' (ignore, look again next read)
+// or 'record' (never show it, but mark it applied so it cannot come back).
+//   - During the first STARTUP_WINDOW_MS a finished turn, or a live write more
+//     than STARTUP_STALE_MS older than the renderer, is 'record': a fresh
+//     renderer must not resurrect a session that went quiet before it started.
+//     It used to be a plain skip, so the same old write read as "new" the
+//     moment the window closed and was applied after all (a finished turn as
+//     responding -> done!, a stale one as whatever tool it last named).
+//   - After that window only writes from more than RUNTIME_STALE_MS before
+//     the renderer started are skipped.
+const STARTUP_WINDOW_MS = 5000;
+const STARTUP_STALE_MS = 15000;
+const RUNTIME_STALE_MS = 120000;
+
+function startupGate(ts, stopped, now, rendererStartTime) {
+  if (now - rendererStartTime < STARTUP_WINDOW_MS) {
+    if (stopped) return 'record';
+    if (ts > 0 && ts < rendererStartTime - STARTUP_STALE_MS) return 'record';
+    return 'apply';
+  }
+  if (ts > 0 && ts < rendererStartTime - RUNTIME_STALE_MS) return 'skip';
+  return 'apply';
+}
+
 // -- Shared runtime -------------------------------------------------
 
 // Read one state file into the shape the main face consumes. The unified
@@ -316,6 +452,15 @@ function runUnifiedMode() {
   let lastAppliedTimestamp = 0; // Dedup: skip re-applying state with same timestamp
   let lastAppliedState = null;  // State named by that write -- "is this tool still running?"
   let lastNewWriteAt = 0;       // When a NEW write last arrived (not a re-read) -- see noteNewWrite
+  // Sessions whose armed editor PID died: id -> the write timestamp at death.
+  // Outlives adoptMain (which must clear editorDead) -- see policySessions.
+  const deadSessions = new Map();
+
+  // The main's armed editor is dead: flag it and remember it past a swap.
+  function markMainDead() {
+    editorDead = true;
+    if (mainSessionId) deadSessions.set(mainSessionId, lastAppliedTimestamp);
+  }
 
   function mainSessionFile() {
     return mainSessionId ? path.join(SESSIONS_DIR, safeFilename(mainSessionId) + '.json') : null;
@@ -358,15 +503,9 @@ function runUnifiedMode() {
   // swap if it is not the one on screen. The first pick is silent.
   function applyMainPolicy() {
     if (swapTransition.active) return;
-    const sessions = [];
-    for (const f of orbital.faces.values()) {
-      sessions.push({
-        id: f.sessionId, parentSession: f.parentSession, isTeammate: f.isTeammate,
-        // The renderer knows one thing the file does not: the main's editor died.
-        stopped: f.stopped || (f.sessionId === mainSessionId && editorDead),
-        stale: f.isStale(), attentionAt: f.lastPromptAt || 0, lastUpdate: f.lastUpdate,
-      });
-    }
+    // The renderer knows one thing the files do not: which editors died.
+    const sessions = policySessions(orbital.faces.values(),
+      { mainId: mainSessionId, editorDead, deadSessions });
     const pick = pickMainSession({ sessions, currentId: mainSessionId, pinnedId: pinnedSessionId });
     pinnedSessionId = pick.pinnedId;
     if (!pick.mainId || pick.mainId === mainSessionId) return;
@@ -429,9 +568,7 @@ function runUnifiedMode() {
         // and picks another), which is the honest reading: a session waiting
         // for its next prompt looks exactly like one whose window was closed.
         if (lastEditorPid && !editorDead && !lastStopped && !RESCUE_EXCLUDE.has(face.state)) {
-          if (!isProcessAlive(lastEditorPid)) {
-            editorDead = true;
-          }
+          if (!isProcessAlive(lastEditorPid)) markMainDead();
         }
       }
       if (stat.mtimeMs > lastMtime || forceRead) {
@@ -445,22 +582,18 @@ function runUnifiedMode() {
         // never updates if Claude is thinking with no tool calls).
         // Skip state older than 2 minutes pre-renderer-start — truly stale.
         const ts = stateData.timestamp || 0;
-        const isStartup = (Date.now() - rendererStartTime < 5000);
-        if (isStartup) {
-          // Don't resurrect dead sessions on fresh renderer start
-          if (stateData.stopped) {
-            lastStopped = true;
-            return;
+        const gate = startupGate(ts, !!stateData.stopped, Date.now(), rendererStartTime);
+        if (gate === 'skip') return;
+        if (gate === 'record') {
+          // Don't resurrect dead sessions on fresh renderer start -- and
+          // record the write as applied, or it reads as "new" (ts > 0) once
+          // the startup window closes and is shown after all.
+          lastStopped = !!stateData.stopped;
+          if (ts > lastAppliedTimestamp) {
+            lastAppliedTimestamp = ts;
+            lastAppliedState = stateData.state;
           }
-          // Tighter window: active sessions write every few seconds
-          if (ts > 0 && ts < rendererStartTime - 15000) {
-            return;
-          }
-        } else {
-          // Normal runtime: 2-minute guard for live session tolerance
-          if (ts > 0 && ts < rendererStartTime - 120000) {
-            return;
-          }
+          return;
         }
 
         // The session file's picture of a finished turn is the orbital's
@@ -473,6 +606,18 @@ function runUnifiedMode() {
         }
 
         lastStopped = !!stateData.stopped;
+        // Same session id, new editor process (e.g. `claude --resume` after a
+        // crash): a NEWER write reporting a different PID retires the armed
+        // one at once. Otherwise the death check kept testing the old, dead
+        // PID until the new one armed (>= 2.5s), and every forced re-read of
+        // an already-applied write set editorDead again -- a false responding
+        // flash, and possibly a swap away from a perfectly live session.
+        if (stateData.pid && lastEditorPid && stateData.pid !== lastEditorPid
+            && ts > lastAppliedTimestamp) {
+          lastEditorPid = 0;
+          editorDead = false;
+          if (mainSessionId) deadSessions.delete(mainSessionId);
+        }
         // Track the writer's PID as a validation candidate (same PID repeated
         // keeps its original sighting time so it can pass the 2.5s window).
         if (stateData.pid && stateData.pid !== lastEditorPid
@@ -483,7 +628,12 @@ function runUnifiedMode() {
         }
         // A write newer than anything we've applied proves the editor is
         // alive — overrides a false PID death (e.g. PID reuse).
-        if (editorDead && ts > lastAppliedTimestamp) editorDead = false;
+        // (The main's deadSessions record exists only while editorDead is set,
+        // so it is dropped here too.)
+        if (editorDead && ts > lastAppliedTimestamp) {
+          editorDead = false;
+          if (mainSessionId) deadSessions.delete(mainSessionId);
+        }
         // Same proof, kept as a clock: this is the ONLY place the write clock
         // moves forward. No read marker can serve -- lastForceReadTime and its
         // kind are refreshed by every forced re-read of the unchanged file.
@@ -524,7 +674,7 @@ function runUnifiedMode() {
     // We bypass setState() here to avoid it re-buffering the state.
     // Completion states (happy/satisfied/proud/relieved) are excluded — they
     // already transition to idle via the linger path with sessionActive=false.
-    if ((lastStopped || editorDead) && !RESCUE_EXCLUDE.has(face.state)) {
+    if (needsRescue(face, lastStopped, editorDead)) {
       face.forceState('responding', 'wrapping up', 3000); // respect responding's 3s min display time
     }
 
@@ -657,7 +807,13 @@ function runUnifiedMode() {
       });
     }
 
-    process.stdin.on('data', (key) => {
+    // One chunk can carry several keys (a held arrow, a fast double tap):
+    // dispatch each one on its own.
+    process.stdin.on('data', (chunk) => {
+      for (const key of splitKeys(chunk)) handleKey(key);
+    });
+
+    function handleKey(key) {
       if (key === 'q' || key === '\x03') { cleanup(); return; } // q or Ctrl+C
       if (minimal) {
         // Minimal mode: only pet and quit
@@ -699,14 +855,17 @@ function runUnifiedMode() {
       else if (key === 'o') { face.toggleOrbitals(); persistPrefs(); }
       else if (key === 'l') face.toggleSessionList();
       else if (key === 'h' || key === '?') face.toggleHelp();
-    });
+    }
   }
 
   let prevFrame = null;  // last frame written; loop() skips identical frames
   process.stdout.on('resize', () => {
-    // Force-complete swap on resize to avoid ghost artifacts
+    // Force-complete swap on resize to avoid ghost artifacts. The swap itself
+    // runs only if its frame has not fired yet -- during materialize it has,
+    // and a second _executeSwap re-ran adoptMain, forceState, the particles
+    // and a synchronous session reload.
     if (swapTransition.active) {
-      _executeSwap();
+      if (swapTransition.swapPending()) _executeSwap();
       swapTransition.cancel();
     }
     face.particles.fadeAll(5);
@@ -791,8 +950,10 @@ function runUnifiedMode() {
 
     if (face.frame % Math.floor(FPS / 2) === 0) checkState();
 
-    // Tell face how many subagents are active (for status line)
-    face.subagentCount = orbital.getSortedFaces().length;
+    // Tell face how many subagents are active (for status line). Only the
+    // main session's own live children: the ring also holds parallel windows,
+    // other sessions' children and lingering stopped faces.
+    face.subagentCount = minimal ? 0 : orbital.liveChildCount();
 
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
@@ -895,7 +1056,7 @@ function runTmuxMode() {
   function writeTmuxStatus() {
     try {
       const data = readState();
-      const state = data.state || 'idle';
+      const state = tmuxDisplayState(data, Date.now());
       const theme = defaultThemes[state] || defaultThemes.idle;
       const emoji = theme.emoji || '';
       const status = theme.status || state;
@@ -977,6 +1138,8 @@ if (require.main === module) {
     PALETTES, PALETTE_NAMES,
     readState, ACTIVE_WORK_STATES, COMPLETION_STATES, FRESH_READ_STATES,
     idleCascade, buildTitle, noteNewWrite, pickMainSession,
+    RESCUE_EXCLUDE, needsRescue, policySessions, splitKeys, tmuxDisplayState,
+    startupGate,
     IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
     LONG_TOOL_HOLD_MS, WAIT_HOLD_STALE_MS,
   };

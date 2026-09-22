@@ -60,7 +60,13 @@ function cleanupSessions() {
   removeSession(mainId);
 }
 
-process.on('SIGINT', () => { cleanupSessions(); process.exit(0); });
+// Every way a terminal ends a demo, not just Ctrl+C: closing the window sends
+// SIGHUP (Node emulates it on win32 when the console closes) and a kill sends
+// SIGTERM. Missing either left demo-main behind with a fresh lastPromptAt,
+// holding the center over the user's real session until it went stale.
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => { cleanupSessions(); process.exit(0); });
+}
 
 // Simulate a session with incrementing tool calls and streak
 let toolCalls = 0;

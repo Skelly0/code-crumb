@@ -15,7 +15,7 @@
 // +======================================================================+
 
 const { spawn } = require('child_process');
-const { writeSessionState } = require('./base-adapter');
+const { writeSessionState, signalExitCode } = require('./base-adapter');
 
 const SESSION_ID = `engmux-${process.pid}-${Date.now()}`;
 const PARENT_SESSION = process.env.CLAUDE_SESSION_ID || String(process.ppid);
@@ -86,9 +86,21 @@ function main() {
     writeState(SUB_STATES[cycleIndex], args.join(' ').slice(0, 40));
   }, CYCLE_MS);
 
+  // The orbital is retired exactly once, by whichever of close / error / a
+  // caught signal gets there first.
+  let finished = false;
+
   // 4. On completion — parse result, write final state
-  child.on('close', (code) => {
+  child.on('close', (code, signal) => {
     clearInterval(cycleTimer);
+    if (finished) return;
+    finished = true;
+    // Killed by a signal: code is null, and `code || 0` used to report success.
+    if (signal) {
+      process.stdout.write(stdout);
+      writeState('error', `killed (${signal})`, true);
+      process.exit(signalExitCode(signal));
+    }
 
     let success = false;
     let detail = '';
@@ -112,14 +124,27 @@ function main() {
 
   child.on('error', (err) => {
     clearInterval(cycleTimer);
+    if (finished) return;
+    finished = true;
     writeState('error', err.message.slice(0, 40), true);
     process.stderr.write(`engmux-adapter: ${err.message}\n`);
     process.exit(1);
   });
 
-  // Clean up timer on signals to prevent process hanging
+  // Ctrl+C or a kill: retire the orbital before going, or it stands on its
+  // last cycled work state until it goes stale. The child is told too (a
+  // SIGTERM aimed at this process alone would otherwise orphan it), and the
+  // exit code says which signal ended the dispatch (130 / 143).
   for (const sig of ['SIGINT', 'SIGTERM']) {
-    process.on(sig, () => { clearInterval(cycleTimer); process.exit(0); });
+    process.on(sig, () => {
+      clearInterval(cycleTimer);
+      if (!finished) {
+        finished = true;
+        writeState('error', 'interrupted', true);
+      }
+      try { child.kill(sig); } catch {}
+      process.exit(signalExitCode(sig));
+    });
   }
 }
 

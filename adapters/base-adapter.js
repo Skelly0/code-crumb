@@ -12,12 +12,14 @@
 // |    - handleToolStart / handleToolEnd  (common tool event logic)|
 // |    - processStdinEvent                (stdin JSON reader loop) |
 // |    - trackEditedFile                  (file tracking helper)   |
+// |    - signalExitCode                   (128 + signal number)    |
 // |                                                                |
 // |  Each adapter imports these helpers and supplies its own       |
 // |  event normalisation + mapping logic.                          |
 // +================================================================+
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const {
   STATE_FILE, SESSIONS_DIR, STATS_FILE, STATS_LOCK_FILE,
@@ -74,8 +76,15 @@ function writeStats(stats) {
 
 // -- Session-guarded global state write --------------------------------
 // Only writes the global state file if no other active session owns it.
+//
+// opts.toolEnd: this write is a tool END (tool_end / PostToolUse). Only
+// such a write can straggle in after the turn it belongs to has ended, so it
+// is the only one that keeps the global file's `stopped` -- the same rule as
+// update-state.js. Every other event is the session doing something new, and
+// carrying `stopped` onto it left tmux reporting a working session as done
+// for the whole of the next turn.
 
-function guardedWriteState(sessionId, state, detail, extra) {
+function guardedWriteState(sessionId, state, detail, extra, opts = {}) {
   let writeExtra = extra;
   try {
     const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
@@ -83,8 +92,9 @@ function guardedWriteState(sessionId, state, detail, extra) {
         !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
       return; // Another session owns the state file
     }
-    // Preserve stopped flag — late PostToolUse must not erase a prior Stop
-    if (existing.stopped && existing.sessionId === sessionId && !writeExtra?.stopped) {
+    // Preserve stopped flag -- a late tool end must not erase a prior Stop
+    if (opts.toolEnd && existing.stopped && existing.sessionId === sessionId &&
+        !writeExtra?.stopped) {
       writeExtra = { ...writeExtra, stopped: true };
     }
     // Preserve model name established by the session owner. See also: update-state.js guard
@@ -186,6 +196,17 @@ function handleToolEnd(stats, toolName, toolInput, toolResponse, isError) {
   const result = classifyToolResult(toolName, toolInput, toolResponse, isError);
   updateStreak(stats, result.state === 'error');
   return result;
+}
+
+// -- Signal exit codes -------------------------------------------------
+// The shell convention for "died of signal N" is 128 + N (SIGINT 130,
+// SIGTERM 143). Long-lived wrappers exit with it both when they catch a signal
+// themselves and when the child they wrapped was killed by one -- a killed
+// child reports code null, and `code || 0` used to turn that into success.
+
+function signalExitCode(signal) {
+  const n = (signal && os.constants.signals[signal]) || 0;
+  return n ? 128 + n : 1;
 }
 
 // -- Stdin JSON reader -------------------------------------------------
@@ -337,11 +358,21 @@ function runStdinAdapter(options) {
       // restarts holds no model until its next message: carry it forward.
       if (prevSession && prevSession.model && !extra.model) extra.model = prevSession.model;
       const endsTurn = event === 'turn_end' || event === 'Stop' || event === 'session_end' || event === 'error';
+      // A tool end can straggle in after the turn (or session) it belongs to
+      // has ended. It is not a new turn: it must neither re-stamp attention
+      // (that stole the center for a session the user had finished with) nor
+      // erase the turn end. update-state.js treats a late PostToolUse the same.
+      const isToolEnd = event === 'tool_end' || event === 'PostToolUse';
+      const lateToolEnd = isToolEnd && !!prevSession && !!(prevSession.stopped || prevSession.turnEnded);
       // A live file with no stamp self-heals rather than staying blind for the
       // whole turn: an `error` can be the first event a session ever writes,
       // and an upgrade can land mid-turn over a pre-feature session file.
-      if (!endsTurn && (!prevSession || prevSession.stopped || prevSession.turnEnded || !prevSession.lastPromptAt)) extra.lastPromptAt = Date.now();
-      else if (prevSession && prevSession.lastPromptAt) extra.lastPromptAt = prevSession.lastPromptAt;
+      if (!endsTurn && !lateToolEnd &&
+          (!prevSession || prevSession.stopped || prevSession.turnEnded || !prevSession.lastPromptAt)) {
+        extra.lastPromptAt = Date.now();
+      } else if (prevSession && prevSession.lastPromptAt) {
+        extra.lastPromptAt = prevSession.lastPromptAt;
+      }
 
       let state = 'thinking';
       let detail = '';
@@ -389,7 +420,7 @@ function runStdinAdapter(options) {
       extra.filesEdited = stats.session.filesEdited.length;
       if (stopped) extra.stopped = true;
 
-      guardedWriteState(sessionId, state, detail, extra);
+      guardedWriteState(sessionId, state, detail, extra, { toolEnd: isToolEnd });
       // A turn end is not a session end. On the session file `stopped` is
       // reserved for session_end (the update-state.js contract): the orbital
       // loader latches it and the main policy drops a stopped session, so a
@@ -398,7 +429,14 @@ function runStdinAdapter(options) {
       const turnOnly = stopped && event !== 'session_end';
       const sessionExtra = { ...extra };
       if (turnOnly) { delete sessionExtra.stopped; sessionExtra.turnEnded = true; }
-      writeSessionState(sessionId, state, detail, stopped && !turnOnly, sessionExtra);
+      let sessionStopped = stopped && !turnOnly;
+      // A late tool end keeps whatever end its session file already records:
+      // `stopped` after a session_end, `turnEnded` after a turn end.
+      if (lateToolEnd && !stopped) {
+        if (prevSession.stopped) sessionStopped = true;
+        else sessionExtra.turnEnded = true;
+      }
+      writeSessionState(sessionId, state, detail, sessionStopped, sessionExtra);
       pruneFrequentFiles(stats.frequentFiles);
       writeStats(stats);
     } finally {
@@ -427,4 +465,5 @@ module.exports = {
   processStdinEvent,
   processJsonlStream,
   runStdinAdapter,
+  signalExitCode,
 };

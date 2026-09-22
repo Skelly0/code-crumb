@@ -86,6 +86,17 @@ class SwapTransition {
     return DIM_MAX;
   }
 
+  /**
+   * True while the transition is running but its swap frame has not happened
+   * yet (still dissolving). A caller that force-completes the transition --
+   * the renderer's resize handler -- must run the swap only in that window:
+   * once the swap frame has fired, running it again would adopt the new main a
+   * second time (tracker reset, forceState, particles, a sync reload).
+   */
+  swapPending() {
+    return this.active && this.phase === 'dissolve';
+  }
+
   cancel() {
     this.active = false;
     this.phase = 'idle';
