@@ -67,11 +67,36 @@ function main() {
     process.exit(1);
   }
 
+  // The orbital is retired exactly once, by whichever of close / error / a
+  // caught signal gets there first.
+  let finished = false;
+  let child = null;
+  let cycleTimer = null;
+
+  // Ctrl+C or a kill: retire the orbital before going, or it stands on its
+  // last cycled work state until it goes stale. The child is told too (a
+  // SIGTERM aimed at this process alone would otherwise orphan it), and the
+  // exit code says which signal ended the dispatch (130 / 143).
+  // Registered BEFORE the first write: until process.on runs, a signal gets
+  // the default disposition and kills the process outright, and spawn() below
+  // is slow enough on a loaded machine for a kill to land in that window.
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, () => {
+      if (cycleTimer) clearInterval(cycleTimer);
+      if (!finished) {
+        finished = true;
+        writeState('error', 'interrupted', true);
+      }
+      try { if (child) child.kill(sig); } catch {}
+      process.exit(signalExitCode(sig));
+    });
+  }
+
   // 1. Write initial spawning state
   writeState('spawning', args.join(' ').slice(0, 40));
 
   // 2. Spawn engmux
-  const child = spawn(PYTHON, ['-m', 'engmux', ...args], {
+  child = spawn(PYTHON, ['-m', 'engmux', ...args], {
     stdio: ['inherit', 'pipe', 'inherit'],
     env: { ...process.env, CLAUDE_SESSION_ID: SESSION_ID },
   });
@@ -81,14 +106,10 @@ function main() {
 
   // 3. Cycle states while running
   let cycleIndex = 0;
-  const cycleTimer = setInterval(() => {
+  cycleTimer = setInterval(() => {
     cycleIndex = (cycleIndex + 1) % SUB_STATES.length;
     writeState(SUB_STATES[cycleIndex], args.join(' ').slice(0, 40));
   }, CYCLE_MS);
-
-  // The orbital is retired exactly once, by whichever of close / error / a
-  // caught signal gets there first.
-  let finished = false;
 
   // 4. On completion — parse result, write final state
   child.on('close', (code, signal) => {
@@ -130,22 +151,6 @@ function main() {
     process.stderr.write(`engmux-adapter: ${err.message}\n`);
     process.exit(1);
   });
-
-  // Ctrl+C or a kill: retire the orbital before going, or it stands on its
-  // last cycled work state until it goes stale. The child is told too (a
-  // SIGTERM aimed at this process alone would otherwise orphan it), and the
-  // exit code says which signal ended the dispatch (130 / 143).
-  for (const sig of ['SIGINT', 'SIGTERM']) {
-    process.on(sig, () => {
-      clearInterval(cycleTimer);
-      if (!finished) {
-        finished = true;
-        writeState('error', 'interrupted', true);
-      }
-      try { child.kill(sig); } catch {}
-      process.exit(signalExitCode(sig));
-    });
-  }
 }
 
 if (require.main === module) {
