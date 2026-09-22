@@ -333,11 +333,14 @@ function runStdinAdapter(options) {
         prevSession = JSON.parse(fs.readFileSync(
           path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
       } catch {}
+      // The session file is the only memory an adapter has, and a plugin that
+      // restarts holds no model until its next message: carry it forward.
+      if (prevSession && prevSession.model && !extra.model) extra.model = prevSession.model;
       const endsTurn = event === 'turn_end' || event === 'Stop' || event === 'session_end' || event === 'error';
       // A live file with no stamp self-heals rather than staying blind for the
       // whole turn: an `error` can be the first event a session ever writes,
       // and an upgrade can land mid-turn over a pre-feature session file.
-      if (!endsTurn && (!prevSession || prevSession.stopped || !prevSession.lastPromptAt)) extra.lastPromptAt = Date.now();
+      if (!endsTurn && (!prevSession || prevSession.stopped || prevSession.turnEnded || !prevSession.lastPromptAt)) extra.lastPromptAt = Date.now();
       else if (prevSession && prevSession.lastPromptAt) extra.lastPromptAt = prevSession.lastPromptAt;
 
       let state = 'thinking';
@@ -387,7 +390,15 @@ function runStdinAdapter(options) {
       if (stopped) extra.stopped = true;
 
       guardedWriteState(sessionId, state, detail, extra);
-      writeSessionState(sessionId, state, detail, stopped, extra);
+      // A turn end is not a session end. On the session file `stopped` is
+      // reserved for session_end (the update-state.js contract): the orbital
+      // loader latches it and the main policy drops a stopped session, so a
+      // turn-end `stopped` bounced the center away and back every turn and
+      // released any pin on it. The global file keeps `stopped` for tmux.
+      const turnOnly = stopped && event !== 'session_end';
+      const sessionExtra = { ...extra };
+      if (turnOnly) { delete sessionExtra.stopped; sessionExtra.turnEnded = true; }
+      writeSessionState(sessionId, state, detail, stopped && !turnOnly, sessionExtra);
       pruneFrequentFiles(stats.frequentFiles);
       writeStats(stats);
     } finally {

@@ -843,12 +843,16 @@ describe('emotions -- the write clock behind the waiting bound', () => {
     // creep back in; a reset to 0 cannot fake freshness, it can only forget.
     // `\s*=[^=]` so that a whitespace-free `lastNewWriteAt= Date.now()` cannot
     // sneak past, and so a comparison (`==`/`===`) is not miscounted.
+    // The one other site is _executeSwap seeding the clock from the adopted
+    // write's own JSON timestamp -- the write's age, not a read marker.
     const assignments = src.match(/lastNewWriteAt\s*=[^=]/g) || [];
-    assert.strictEqual(assignments.length, 3,
-      'lastNewWriteAt: declaration, the adoptMain reset, and one assignment site');
+    assert.strictEqual(assignments.length, 4,
+      'lastNewWriteAt: declaration, the adoptMain reset, noteNewWrite, and the swap seed');
     const resets = src.match(/lastNewWriteAt\s*=\s*0\s*;/g) || [];
     assert.strictEqual(resets.length, 2, 'the declaration and the adoptMain reset');
-    assert.strictEqual(assignments.length - resets.length, 1,
+    const seeds = src.match(/lastNewWriteAt\s*=\s*ts\s*;/g) || [];
+    assert.strictEqual(seeds.length, 1, 'the swap seeds from the write timestamp');
+    assert.strictEqual(assignments.length - resets.length - seeds.length, 1,
       'only noteNewWrite may move the write clock forward');
   });
 });

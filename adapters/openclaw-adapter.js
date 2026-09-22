@@ -50,6 +50,7 @@ function normalisePiEvent(raw) {
     case 'tool_result':
       return 'tool_end';
     case 'session_end':
+      return 'session_end';
     case 'turn_end':
     case 'Stop':
       return 'turn_end';

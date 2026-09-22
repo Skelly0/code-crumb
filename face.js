@@ -1170,7 +1170,12 @@ class ClaudeFace {
     // verbatim: a codex `-m gpt-5.1-codex-max` or a local OpenCode model can
     // run to 30+ chars, which at the 38-column minimum wraps the status line
     // into the detail row and garbles the frame.
-    const who = (this.model || this.modelName).slice(0, MAX_STATUS_NAME);
+    // The fixed cap alone is not enough: "is running command" plus a suffix
+    // still overflows a narrow window, so the name also yields to whatever
+    // room the rest of the line leaves before the right edge (never below 3).
+    const statusRest = `${emoji}   is ${theme.status}${statusSuffix}  ${emoji}`.length;
+    const statusRoom = Math.max(3, cols - startCol + 1 - statusRest);
+    const who = (this.model || this.modelName).slice(0, Math.min(MAX_STATUS_NAME, statusRoom));
     const statusText = `${emoji}  ${who} is ${theme.status}${statusSuffix}  ${emoji}`;
     const statusPad = Math.floor((faceW - statusText.length) / 2);
     // A long unanswered wait pulses the status line (~0.5s each way at 15 FPS).

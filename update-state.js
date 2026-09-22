@@ -210,7 +210,9 @@ function _readTranscriptModel(filePath) {
         // `message.model` specifically: a bare "model" also appears inside
         // attachment entries, which are not what we are after.
         const m = entry && entry.message && entry.message.model;
-        if (typeof m === 'string' && m) return m;
+        // `<synthetic>` marks an entry no model produced (a usage-limit
+        // notice, "No response requested.") -- keep looking past it.
+        if (typeof m === 'string' && m && m[0] !== '<') return m;
       } catch {}
     }
   } catch {
@@ -637,17 +639,25 @@ process.stdin.on('end', () => {
       const taskSubject = data.task_subject || '';
       state = stats.streak >= 10 ? 'proud' : stats.streak >= 3 ? 'satisfied' : 'happy';
       detail = taskSubject ? taskSubject.slice(0, 40) : 'task done';
-      const teamExtra = {
-        teamName: data.team_name || '',
-        teammateName: data.teammate_name || '',
-        taskSubject,
-        isTeammate: true,
-      };
-      writeSessionState(sessionId, state, detail, false, { ...teamExtra, sessionId });
-      writeStats(stats);
-      // process.exit skips finally -- release the stats lock by hand.
-      if (releaseStats) releaseStats();
-      process.exit(0);
+      // TaskCompleted is NOT team-only: Claude Code's TaskUpdate fires it for
+      // any task marked completed, solo sessions included (teammate_name is
+      // empty there). Only a real teammate takes the from-scratch write below;
+      // anyone else falls through to the normal path, which routes agent
+      // events to their own orbital and carries the sticky fields. Tagging a
+      // solo session isTeammate made the main policy skip it for good.
+      if (data.team_name || data.teammate_name) {
+        const teamExtra = {
+          teamName: data.team_name || '',
+          teammateName: data.teammate_name || '',
+          taskSubject,
+          isTeammate: true,
+        };
+        writeSessionState(sessionId, state, detail, false, { ...teamExtra, sessionId });
+        writeStats(stats);
+        // process.exit skips finally -- release the stats lock by hand.
+        if (releaseStats) releaseStats();
+        process.exit(0);
+      }
     }
     else if (hookEvent === 'SubagentStart') {
       // Native subagent lifecycle event -- create the agent's orbital session.
@@ -692,16 +702,39 @@ process.stdin.on('end', () => {
       } else if (subs.length > 0) {
         idx = 0;
       }
+      // The retirement write rebuilds the file, so the one sticky field it
+      // cannot rebuild from the stats entry -- the resolved model -- comes
+      // from the file itself.
+      const readSub = (id) => {
+        try { return JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, safeFilename(id) + '.json'), 'utf8')); }
+        catch { return null; }
+      };
       // An id we don't know may belong to another session -- retire nothing.
       if (idx >= 0) {
         const finished = subs.splice(idx, 1)[0];
+        const prev = readSub(finished.id);
         writeSessionState(finished.id, 'happy', 'done', true, {
           sessionId: finished.id, stopped: true, cwd: process.cwd(),
           gitBranch: getGitBranch(process.cwd()), isWorktree: getIsWorktree(process.cwd()),
           parentSession: sessionId, taskDescription: finished.taskDescription || finished.description,
           modelName: finished.model || 'haiku', editor: finished.editor || EDITOR,
           ...((finished.agentType || agentType) ? { agentType: finished.agentType || agentType } : {}),
+          ...(prev && prev.model ? { model: prev.model } : {}),
         });
+      } else if (agentId) {
+        // The agent's file name is deterministic, so it can be retired even
+        // when activeSubagents lost track of it -- a lifecycle event from a
+        // parallel window resets stats.session and empties that list. Without
+        // this, an agent last seen at error/waiting stayed "live" for the
+        // whole CHILD_ORPHAN_TIMEOUT and held its parent at "conducting".
+        const orphanId = subagentSessionId(sessionId, agentId);
+        const prev = readSub(orphanId);
+        if (prev && !prev.stopped) {
+          // Keep the sticky fields, never the old state/detail/timestamp: a
+          // stale timestamp would make the renderer ignore the retirement.
+          const { state: _s, detail: _d, timestamp: _t, ...keep } = prev;
+          writeSessionState(orphanId, 'happy', 'done', true, { ...keep, sessionId: orphanId, stopped: true });
+        }
       }
       if (stats.session.activeSubagents.length > 0) {
         state = 'subagent';

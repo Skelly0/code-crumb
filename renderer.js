@@ -339,6 +339,11 @@ function runUnifiedMode() {
     // Cleared, not just overwritten: the incoming session may have no model at
     // all, and the outgoing one's must not linger on its face.
     face.model = '';
+    // Same for the git context: setStats only assigns these when the incoming
+    // value is truthy, so a session outside a repo would keep the old branch.
+    face.cwd = null;
+    face.gitBranch = null;
+    face.frequentFiles = {};
     const mf = orbital.faces.get(newId);
     if (mf) {
       if (mf.modelName && !process.env.CODE_CRUMB_MODEL) face.modelName = mf.modelName;
@@ -722,6 +727,11 @@ function runUnifiedMode() {
       const ts = newData.timestamp || 0;
       if (ts > 0) {
         lastAppliedTimestamp = ts;
+        // Seed the write clock from the write itself. adoptMain zeroed it, and
+        // later reads of this same write are not "new", so without this the
+        // WAIT_HOLD_STALE_MS bound could never fire on a face swapped in while
+        // already waiting.
+        lastNewWriteAt = ts;
         lastAppliedState = newData.state;
         lastStopped = !!newData.stopped;
         // forceState, not setState: a materialized face must show its own

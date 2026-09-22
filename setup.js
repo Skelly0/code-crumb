@@ -473,7 +473,15 @@ function setupCodexNotify() {
     configText = fs.readFileSync(CODEX_CONFIG, 'utf8');
     hasNotify = /^\s*notify\s*=/m.test(configText);
     console.log('  [ok] Found existing Codex config');
-  } catch {
+  } catch (err) {
+    // Only a missing file means "no config". Anything else (a OneDrive or
+    // antivirus lock, EACCES) would leave configText empty and the write
+    // below would replace the user's whole config.toml with one line.
+    if (err && err.code !== 'ENOENT') {
+      console.log(`  [!!] Could not read ${CODEX_CONFIG} (${err.code || err.message}) -- leaving it untouched.`);
+      console.log(`  Add this line yourself: notify = ["node", "${notifyPath}"]`);
+      return;
+    }
     console.log('  [..] No existing config found');
   }
 
@@ -493,8 +501,14 @@ function setupCodexNotify() {
     if (!fs.existsSync(codexDir)) {
       fs.mkdirSync(codexDir, { recursive: true });
     }
+    if (configText) {
+      try { fs.writeFileSync(CODEX_CONFIG + '.bak', configText, 'utf8'); } catch {}
+    }
     // Insert at top so the key is at global scope (not under a [section])
-    fs.writeFileSync(CODEX_CONFIG, notifyLine + configText, 'utf8');
+    if (!writeJsonAtomic(CODEX_CONFIG, notifyLine + configText)) {
+      console.log(`  [!!] Could not write ${CODEX_CONFIG}`);
+      return;
+    }
     console.log(`  + Added notify handler to ${CODEX_CONFIG}`);
   }
 

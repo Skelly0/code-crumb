@@ -373,7 +373,9 @@ describe('adapters -- lastPromptAt', () => {
       runAdapter(OPENCODE_ADAPTER, { type: 'session.created', sessionId: 'ses_b' }, t.env);
       const first = readJSON(sessionFile(t.sessionsDir, 'ses_b')).lastPromptAt;
       runAdapter(OPENCODE_ADAPTER, { type: 'session.idle', sessionId: 'ses_b' }, t.env);
-      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'ses_b')).stopped, true, 'turn end still marks the file stopped');
+      const ended = readJSON(sessionFile(t.sessionsDir, 'ses_b'));
+      assert.strictEqual(ended.turnEnded, true, 'turn end marks the file turnEnded');
+      assert.ok(!ended.stopped, 'a turn end must not retire the session (stopped is for session_end)');
       const spin = Date.now() + 3; while (Date.now() < spin) { /* 3ms */ }
       runAdapter(OPENCODE_ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_b', tool: 'read', toolInput: { filePath: 'a.js' } }, t.env);
       const s = readJSON(sessionFile(t.sessionsDir, 'ses_b'));
@@ -1018,6 +1020,171 @@ describe('update-state -- main session model', () => {
       assert.strictEqual(s.state, 'thinking');
       assert.strictEqual(s.detail, 'model switched');
     } finally { cleanup(t.tmp); }
+  });
+});
+
+// -- Review fixes (Sep 2026) ----------------------------------------------
+
+describe('review fixes -- hooks', () => {
+  // Claude Code writes `"model":"<synthetic>"` on entries no model produced
+  // (usage-limit notices, "No response requested."), often as the newest line.
+  test('the transcript reader skips <synthetic> and finds the real model', () => {
+    const t = makeTempEnv('fix-syn');
+    try {
+      const dir = path.join(t.tmp, 'projects', 'proj');
+      fs.mkdirSync(dir, { recursive: true });
+      const tp = path.join(dir, 'fix-syn.jsonl');
+      fs.writeFileSync(tp, [
+        JSON.stringify({ type: 'assistant', message: { role: 'assistant', model: 'claude-opus-5' } }),
+        JSON.stringify({ type: 'assistant', message: { role: 'assistant', model: '<synthetic>' } }),
+      ].join('\n') + '\n');
+      runUpdateState('SessionStart', { session_id: 'fix-syn', source: 'startup' }, t.env);
+      runUpdateState('Stop', { session_id: 'fix-syn', transcript_path: tp }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'fix-syn')).model, 'Opus');
+    } finally { cleanup(t.tmp); }
+  });
+
+  // TaskUpdate fires TaskCompleted in solo sessions too (no team check in
+  // Claude Code), so it must not tag the session a teammate.
+  test('a solo TaskCompleted keeps the session a top-level candidate', () => {
+    const t = makeTempEnv('fix-task');
+    try {
+      runUpdateState('SessionStart', { session_id: 'fix-task', source: 'startup', model: 'claude-opus-5' }, t.env);
+      const before = readJSON(sessionFile(t.sessionsDir, 'fix-task'));
+      runUpdateState('TaskCompleted', { session_id: 'fix-task', task_subject: 'write tests' }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'fix-task'));
+      assert.ok(!s.isTeammate, 'a solo session is not a teammate');
+      assert.strictEqual(s.lastPromptAt, before.lastPromptAt, 'attention survives');
+      assert.strictEqual(s.model, 'Opus', 'the model survives');
+      assert.strictEqual(s.detail, 'write tests');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a teammate TaskCompleted still writes the team fields', () => {
+    const t = makeTempEnv('fix-team');
+    try {
+      runUpdateState('TaskCompleted', {
+        session_id: 'fix-team', task_subject: 'x', team_name: 'blue', teammate_name: 'ana',
+      }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'fix-team'));
+      assert.strictEqual(s.isTeammate, true);
+      assert.strictEqual(s.teamName, 'blue');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('SubagentStop carries the agent model onto the retired file', () => {
+    const t = makeTempEnv('fix-ss');
+    try {
+      runUpdateState('SessionStart', { session_id: 'fix-ss', source: 'startup' }, t.env);
+      runUpdateState('SubagentStart', { session_id: 'fix-ss', agent_id: 'a1', agent_type: 'Explore' }, t.env);
+      const f = sessionFile(t.sessionsDir, 'fix-ss-agent-a1');
+      const cur = readJSON(f);
+      fs.writeFileSync(f, JSON.stringify({ ...cur, model: 'Haiku' }));
+      runUpdateState('SubagentStop', { session_id: 'fix-ss', agent_id: 'a1', agent_type: 'Explore' }, t.env);
+      const s = readJSON(f);
+      assert.strictEqual(s.stopped, true);
+      assert.strictEqual(s.model, 'Haiku');
+    } finally { cleanup(t.tmp); }
+  });
+
+  // A parallel window's lifecycle event resets stats.session and empties
+  // activeSubagents; the agent's file name is deterministic, so retire it anyway.
+  test('SubagentStop retires an agent file that activeSubagents lost track of', () => {
+    const t = makeTempEnv('fix-orph');
+    try {
+      fs.mkdirSync(t.sessionsDir, { recursive: true });
+      const f = sessionFile(t.sessionsDir, 'fix-orph-agent-a9');
+      const old = Date.now() - 5000;
+      fs.writeFileSync(f, JSON.stringify({
+        session_id: 'fix-orph-agent-a9', state: 'error', detail: 'boom', timestamp: old,
+        stopped: false, parentSession: 'fix-orph', agentType: 'Plan', model: 'Opus',
+      }));
+      runUpdateState('SubagentStop', { session_id: 'fix-orph', agent_id: 'a9', agent_type: 'Plan' }, t.env);
+      const s = readJSON(f);
+      assert.strictEqual(s.stopped, true);
+      assert.strictEqual(s.state, 'happy');
+      assert.ok(s.timestamp > old, 'a fresh timestamp, or the renderer ignores it');
+      assert.strictEqual(s.parentSession, 'fix-orph');
+      assert.strictEqual(s.model, 'Opus');
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('review fixes -- adapters', () => {
+  test('an adapter session_end still marks the session file stopped', () => {
+    const t = makeTempEnv();
+    try {
+      runAdapter(OPENCODE_ADAPTER, { type: 'session.created', sessionId: 'ses_end' }, t.env);
+      runAdapter(OPENCODE_ADAPTER, { type: 'session_end', sessionId: 'ses_end' }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'ses_end'));
+      assert.strictEqual(s.stopped, true);
+      assert.ok(!s.turnEnded);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('an adapter turn end keeps stopped on the global file for tmux', () => {
+    const t = makeTempEnv();
+    try {
+      runAdapter(OPENCODE_ADAPTER, { type: 'session.created', sessionId: 'ses_tmux' }, t.env);
+      runAdapter(OPENCODE_ADAPTER, { type: 'session.idle', sessionId: 'ses_tmux' }, t.env);
+      assert.strictEqual(readJSON(t.stateFile).stopped, true);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('an adapter carries the model forward from its own session file', () => {
+    const t = makeTempEnv();
+    try {
+      runAdapter(OPENCODE_ADAPTER, { type: 'session.created', sessionId: 'ses_mdl' }, t.env);
+      const f = sessionFile(t.sessionsDir, 'ses_mdl');
+      fs.writeFileSync(f, JSON.stringify({ ...readJSON(f), model: 'gpt-5' }));
+      // Another session owns the global file, so guardedWriteState cannot help.
+      fs.writeFileSync(t.stateFile, JSON.stringify({
+        sessionId: 'someone-else', state: 'coding', timestamp: Date.now(), stopped: false,
+      }));
+      runAdapter(OPENCODE_ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_mdl', tool: 'read', toolInput: { filePath: 'a.js' } }, t.env);
+      assert.strictEqual(readJSON(f).model, 'gpt-5');
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('review fixes -- renderer and face', () => {
+  test('a swap resets the git context and seeds the write clock', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    const adopt = src.slice(src.indexOf('function adoptMain('), src.indexOf('function adoptMain(') + 1500);
+    assert.ok(/face\.cwd = null;/.test(adopt) && /face\.gitBranch = null;/.test(adopt),
+      'adoptMain must clear the outgoing branch/cwd');
+    const swap = src.slice(src.indexOf('function _executeSwap('), src.indexOf('function _executeSwap(') + 1500);
+    assert.ok(/lastNewWriteAt = ts;/.test(swap), 'the waiting bound needs a real write clock after a swap');
+  });
+
+  test('the status line never runs past the right edge', () => {
+    const { ClaudeFace } = require('../face');
+    const origCols = process.stdout.columns, origRows = process.stdout.rows;
+    try {
+      for (const cols of [38, 40, 50, 60]) {
+        process.stdout.columns = cols; process.stdout.rows = 40;
+        const face = new ClaudeFace();
+        face.model = 'gpt-5.1-codex-max-preview-long';
+        face.setState('subagent', 'x');
+        face.state = 'subagent';
+        face.subagentCount = 3;
+        const out = face.render();
+        // Find the segment drawn at the status row and measure its end column.
+        const re = /\x1b\[(\d+);(\d+)H([^\x1b]*(?:\x1b\[[0-9;]*m[^\x1b]*)*)/g;
+        let m, found = false;
+        while ((m = re.exec(out))) {
+          const text = m[3].replace(/\x1b\[[0-9;]*m/g, '');
+          if (text.includes(' is ')) {
+            found = true;
+            const end = Number(m[2]) + text.length - 1;
+            assert.ok(end <= cols, `status ends at ${end} in a ${cols}-col terminal`);
+          }
+        }
+        assert.ok(found, 'status line drawn');
+      }
+    } finally {
+      process.stdout.columns = origCols; process.stdout.rows = origRows;
+    }
   });
 });
 

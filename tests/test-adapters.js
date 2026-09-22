@@ -792,7 +792,10 @@ describe('adapters -- opencode-plugin translate()', () => {
     assert.ok(fs.existsSync(file), 'turn-end write must not be left in flight');
     const s = readJSON(file);
     assert.strictEqual(s.state, 'happy');
-    assert.strictEqual(s.stopped, true);
+    // A turn end, not a session end: the session file says turnEnded and
+    // keeps `stopped` for a real session end (see base-adapter.js).
+    assert.strictEqual(s.turnEnded, true);
+    assert.strictEqual(s.stopped, false);
   });
 });
 
