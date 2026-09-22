@@ -51,6 +51,117 @@ const AGENT_EXCLUDED_EVENTS = new Set([
   'InstructionsLoaded', 'StopFailure', 'PostModelSwitch',
 ]);
 
+// Events that are live activity: they never inherit a finished turn, so a
+// session file's `turnEnded` is dropped by them. Every OTHER event that lands
+// after a Stop (a late PostToolUse, a background agent's SubagentStop, a
+// TaskCompleted, a PostCompact...) is an echo of the turn that already ended
+// and carries `turnEnded` forward -- otherwise it reopened the turn and the
+// renderer sat on an active face for the 45s thinking timeout. Stop,
+// StopFailure and SessionEnd decide their own flags.
+const TURN_OPENING_EVENTS = new Set([
+  'PreToolUse', 'UserPromptSubmit', 'SessionStart', 'SubagentStart',
+  'PreCompact', 'Setup', 'PostModelSwitch',
+]);
+const TURN_CLOSING_EVENTS = new Set(['Stop', 'StopFailure', 'SessionEnd']);
+
+// Session files that may inherit a finished turn from their predecessor.
+// `waiting` is the exception: the renderer folds `turnEnded` into `stopped`
+// and then force-rescues any non-reward face to "wrapping up", so a wait
+// written with `turnEnded` would never be seen. It carries `turnOver`
+// instead -- the same fact, invisible to the renderer -- so the NEXT echo
+// (a background SubagentStop after an idle_prompt) still knows the turn is over.
+function carriesTurnEnd(event) {
+  return !TURN_OPENING_EVENTS.has(event) && !TURN_CLOSING_EVENTS.has(event);
+}
+
+// Sticky session-file fields: set once, preserved across every later write.
+const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'editor', 'lastPromptAt', 'model'];
+
+// Per-session counters. The shared stats file has ONE `session` owner, and two
+// top-level windows alternating hooks used to reset it on every switch: each
+// window's file reported the other's toolCalls, and daily.sessionCount grew by
+// one per alternation. Each session now keeps its own counters, keyed by id,
+// and the session file reports those. Bounded: idle entries age out after a
+// day and the map keeps the 50 most recently seen.
+const COUNTER_MAX_AGE_MS = 24 * 3600000;
+const COUNTER_MAX_ENTRIES = 50;
+const COUNTER_MAX_FILES = 200;
+
+function _freshCounter(now) {
+  return { toolCalls: 0, filesEdited: [], start: now, commitCount: 0, creditedMs: 0, lastSeen: now, counted: false };
+}
+
+// Repair one entry in place (a hand-edited or older stats file must never
+// throw below). Returns null for anything that is not an entry at all.
+function _normalizeCounter(c, now) {
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
+  const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+  c.toolCalls = num(c.toolCalls, 0);
+  c.start = num(c.start, now) || now;
+  c.commitCount = num(c.commitCount, 0);
+  c.creditedMs = num(c.creditedMs, 0);
+  c.lastSeen = num(c.lastSeen, now);
+  c.counted = !!c.counted;
+  c.filesEdited = Array.isArray(c.filesEdited)
+    ? c.filesEdited.filter(f => typeof f === 'string').slice(0, COUNTER_MAX_FILES) : [];
+  return c;
+}
+
+function _pruneCounters(map, keepId, now) {
+  for (const id of Object.keys(map)) {
+    const c = map[id];
+    if (!c || typeof c !== 'object') { delete map[id]; continue; }
+    if (id !== keepId && now - (c.lastSeen || 0) > COUNTER_MAX_AGE_MS) delete map[id];
+  }
+  const ids = Object.keys(map);
+  if (ids.length <= COUNTER_MAX_ENTRIES) return;
+  ids.sort((a, b) => (map[b].lastSeen || 0) - (map[a].lastSeen || 0));
+  for (const id of ids.slice(COUNTER_MAX_ENTRIES)) {
+    if (id !== keepId) delete map[id];
+  }
+}
+
+// Fold a session's elapsed time into the records and today's cumulative
+// total. `creditedMs` remembers how much was already added, so crediting the
+// same session at every turn end and every ownership switch never counts a
+// millisecond twice.
+function _creditSession(stats, c, now) {
+  if (!c || !c.start) return;
+  const dur = now - c.start;
+  if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
+  if (c.filesEdited.length > (stats.records.mostFilesEdited || 0)) {
+    stats.records.mostFilesEdited = c.filesEdited.length;
+  }
+  const delta = dur - (c.creditedMs || 0);
+  if (delta > 0) {
+    stats.daily.cumulativeMs += delta;
+    c.creditedMs = dur;
+  }
+}
+
+// Read a session file, or null.
+function _readSessionFile(id) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, safeFilename(id) + '.json'), 'utf8'));
+  } catch { return null; }
+}
+
+// Top-level string fields out of a payload too large to parse (>1 MB --
+// nearly always a PostToolUse carrying a huge tool_response). Claude Code
+// serializes the envelope fields before tool_input/tool_response, so the
+// first match is the real one. Values with escapes are skipped rather than
+// half-decoded; ids never contain any.
+const RAW_FIELD_RES = {
+  session_id: /"session_id"\s*:\s*"([^"\\]{1,256})"/,
+  agent_id: /"agent_id"\s*:\s*"([^"\\]{1,256})"/,
+  agent_type: /"agent_type"\s*:\s*"([^"\\]{1,256})"/,
+  hook_event_name: /"hook_event_name"\s*:\s*"([^"\\]{1,64})"/,
+};
+function _rawField(raw, key) {
+  const m = RAW_FIELD_RES[key].exec(raw);
+  return m ? m[1] : '';
+}
+
 // Argv: `[--editor <name>] <Event>` (cross-platform -- no env var tricks).
 // Codex's native hooks and Claude Code's share this script, so the installer
 // tags each command with the editor it serves. Unknown flags are ignored so a
@@ -287,6 +398,200 @@ function ensureRendererRunning() {
   } catch {} // Never throw from a hook
 }
 
+// -- Degraded path ---------------------------------------------------
+
+// Writes for a hook whose payload could not be used whole: empty or
+// non-JSON stdin, a payload too large to parse (ids regex-extracted), or one
+// that parsed and then threw. `ids` holds whatever envelope ids survived
+// ({ sessionId, agentId, agentType }, any of them empty); `override` is a
+// { state, detail } classification that replaces the event map below.
+function writeFallback(ids, override) {
+  // JSON parse may fail for events with empty or non-JSON stdin
+  // (e.g., Stop, Notification, lifecycle events) -- still write the
+  // correct state for the hook event.
+  // When the payload named its session, that id is the truth. Otherwise try
+  // to reuse the session ID from the global state file so we don't create an
+  // orphan session file that appears as a phantom orbital.
+  const knownSid = (ids && ids.sessionId) || '';
+  const agentId = (ids && ids.agentId) || '';
+  const agentType = (ids && ids.agentType) || '';
+  // Same routing as the main path: an agent's event is its own orbital's.
+  const isAgent = !!agentId && !AGENT_EXCLUDED_EVENTS.has(hookEvent);
+  const originalFallbackId = knownSid || process.env.CLAUDE_SESSION_ID || FALLBACK_SESSION_ID;
+  let fallbackSessionId = originalFallbackId;
+  let shouldWriteGlobal = true;
+  let globalWasOurStop = false;
+  try {
+    const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if (existing.sessionId && !knownSid) {
+      fallbackSessionId = existing.sessionId;
+    }
+    if (existing.sessionId && existing.sessionId !== originalFallbackId &&
+        !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
+      shouldWriteGlobal = false;
+    }
+    globalWasOurStop = !!existing.stopped && existing.sessionId === fallbackSessionId;
+  } catch {}
+
+  // Same parentSession guard as the try block above — subagents must not write global state.
+  // Uses originalFallbackId (the caller's identity), not fallbackSessionId
+  // (which may be the adopted main session's ID from the state file).
+  if (shouldWriteGlobal) {
+    try {
+      const mySession = JSON.parse(fs.readFileSync(
+        path.join(SESSIONS_DIR, safeFilename(originalFallbackId) + '.json'), 'utf8'));
+      if (mySession.parentSession) shouldWriteGlobal = false;
+    } catch {}
+  }
+
+  // SessionStart always takes over global state — explicit new-session signal
+  if (hookEvent === 'SessionStart') shouldWriteGlobal = true;
+  // An agent event is an orbital by definition, never the global owner.
+  if (isAgent) shouldWriteGlobal = false;
+
+  const fallbackExtra = { sessionId: fallbackSessionId, modelName: process.env.CODE_CRUMB_MODEL || DEFAULT_MODEL_NAME, editor: EDITOR };
+
+  let fallbackState = 'thinking';
+  let fallbackDetail = '';
+  if (hookEvent === 'SessionEnd') {
+    fallbackState = 'responding';
+    fallbackDetail = 'session ending';
+    fallbackExtra.stopped = true;
+  } else if (hookEvent === 'Stop') {
+    fallbackState = 'responding';
+    fallbackDetail = 'wrapping up';
+    fallbackExtra.stopped = true; // for global state only
+  } else if (hookEvent === 'Notification') {
+    fallbackState = 'waiting';
+    fallbackDetail = 'needs attention';
+  } else if (hookEvent === 'UserPromptSubmit') {
+    fallbackState = 'thinking';
+    fallbackDetail = 'reading your message';
+    fallbackExtra.lastPromptAt = Date.now();
+  } else if (hookEvent === 'TeammateIdle') {
+    fallbackState = 'waiting';
+    fallbackDetail = 'teammate idle';
+  } else if (hookEvent === 'TaskCompleted') {
+    fallbackState = 'happy';
+    fallbackDetail = 'task done';
+  } else if (hookEvent === 'SessionStart') {
+    fallbackState = 'idle';
+    fallbackDetail = 'session starting';
+    fallbackExtra.isSessionStart = true;
+    // No payload here, so no `source` to check: a fallback SessionStart
+    // always counts as attention (see the main path's compaction guard).
+    fallbackExtra.lastPromptAt = Date.now();
+    // Clean up any stale session file from previous session with same ID
+    const staleSessionFile = path.join(SESSIONS_DIR, safeFilename(fallbackSessionId) + '.json');
+    try { fs.unlinkSync(staleSessionFile); } catch {}
+  } else if (hookEvent === 'SubagentStart') {
+    fallbackState = 'subagent';
+    fallbackDetail = 'spawning subagent';
+    // Create subagent orbital file even in fallback path
+    const subId = `${fallbackSessionId}-sub-${Date.now()}`;
+    writeSessionState(subId, 'spawning', 'subagent', false, {
+      sessionId: subId, parentSession: fallbackSessionId,
+      modelName: 'haiku', editor: EDITOR, taskDescription: 'subagent',
+    });
+  } else if (hookEvent === 'SubagentStop') {
+    fallbackState = 'happy';
+    fallbackDetail = 'subagent done';
+  } else if (hookEvent === 'PostToolUseFailure') {
+    fallbackState = 'error';
+    fallbackDetail = 'tool failed';
+  } else if (hookEvent === 'PreCompact') {
+    fallbackState = 'thinking';
+    fallbackDetail = 'compacting memory';
+  } else if (hookEvent === 'PostCompact') {
+    fallbackState = 'satisfied';
+    fallbackDetail = 'memory compacted';
+  } else if (hookEvent === 'PermissionRequest') {
+    fallbackState = 'waiting';
+    fallbackDetail = 'needs permission';
+  } else if (hookEvent === 'Setup') {
+    fallbackState = 'starting';
+    fallbackDetail = 'setting up';
+  } else if (hookEvent === 'Elicitation') {
+    fallbackState = 'waiting';
+    fallbackDetail = 'needs input';
+  } else if (hookEvent === 'ElicitationResult') {
+    fallbackState = 'satisfied';
+    fallbackDetail = 'input received';
+  } else if (hookEvent === 'ConfigChange') {
+    fallbackState = 'reading';
+    fallbackDetail = 'config updated';
+  } else if (hookEvent === 'InstructionsLoaded') {
+    fallbackState = 'reading';
+    fallbackDetail = 'loading instructions';
+  } else if (hookEvent === 'PostModelSwitch') {
+    // No payload here, so no to_model to name.
+    fallbackState = 'thinking';
+    fallbackDetail = 'model switched';
+  } else if (hookEvent === 'StopFailure') {
+    fallbackState = 'error';
+    fallbackDetail = 'API error';
+    // The failed turn is over: global `stopped`, session-file `turnEnded`.
+    if (!isAgent) fallbackExtra.stopped = true;
+  }
+  // A classification from the raw (truncated) payload beats the event map.
+  if (override && override.state) {
+    fallbackState = override.state;
+    fallbackDetail = override.detail || '';
+  }
+  // An agent's Stop is its own turn ending -- not the parent's, not the session's.
+  if (isAgent) delete fallbackExtra.stopped;
+
+  // Always write per-session file so parallel sessions appear as orbitals.
+  // The adopted owner id is only right when we ARE the owner (shouldWriteGlobal);
+  // otherwise this hook belongs to some other session and must write its own
+  // orbital file, not overwrite the owner's.
+  const sessionFileId = isAgent
+    ? subagentSessionId(originalFallbackId, agentId)
+    : (shouldWriteGlobal ? fallbackSessionId : originalFallbackId);
+  const sessionExtra = { ...fallbackExtra, sessionId: sessionFileId };
+  if (isAgent) {
+    sessionExtra.parentSession = originalFallbackId;
+    if (agentType) { sessionExtra.agentType = agentType; sessionExtra.modelName = agentType; }
+  }
+  // Keep the session file's sticky fields -- above all lastPromptAt, whose
+  // loss drops the window to attention 0 and moves the center away -- and
+  // honour the same turn-boundary carry as the main path. A fresh
+  // SessionStart reads nothing (its predecessor was just unlinked).
+  let prevSession = null;
+  if (hookEvent !== 'SessionStart') prevSession = _readSessionFile(sessionFileId);
+  if (prevSession) {
+    for (const field of STICKY_FIELDS) {
+      if (prevSession[field] && !sessionExtra[field]) sessionExtra[field] = prevSession[field];
+    }
+    if ((prevSession.turnEnded || prevSession.turnOver) && carriesTurnEnd(hookEvent)) {
+      if (fallbackState === 'waiting') sessionExtra.turnOver = true;
+      else sessionExtra.turnEnded = true;
+    }
+  }
+  const globalExtra = (!fallbackExtra.stopped && globalWasOurStop
+    && carriesTurnEnd(hookEvent) && fallbackState !== 'waiting')
+    ? { ...fallbackExtra, stopped: true } : fallbackExtra;
+  if (shouldWriteGlobal) writeState(fallbackState, fallbackDetail, globalExtra);
+
+  if (hookEvent === 'Stop' && !isAgent) {
+    const idleFallbackExtra = { ...sessionExtra, turnEnded: true };
+    delete idleFallbackExtra.stopped;
+    delete idleFallbackExtra.turnOver;
+    writeSessionState(sessionFileId, 'idle', 'between turns', false, idleFallbackExtra);
+  } else {
+    if (hookEvent === 'StopFailure' && !isAgent) {
+      sessionExtra.turnEnded = true;
+      delete sessionExtra.turnOver;
+    }
+    // On a session file `stopped` is reserved for SessionEnd.
+    if (hookEvent !== 'SessionEnd') delete sessionExtra.stopped;
+    writeSessionState(sessionFileId, fallbackState, fallbackDetail,
+      hookEvent === 'SessionEnd', sessionExtra);
+  }
+  // Family heartbeat, as on the main path.
+  if (isAgent) _touchSessionFile(originalFallbackId);
+}
+
 // -- Main handler ----------------------------------------------------
 
 // Read stdin
@@ -301,8 +606,20 @@ process.stdin.on('data', chunk => {
 process.stdin.on('end', () => {
   ensureRendererRunning();
   if (inputTruncated) {
-    const truncResult = classifyTruncatedInput(hookEvent, input);
-    writeState(truncResult.state, truncResult.detail);
+    // Too large to parse. The envelope ids are still recoverable from the raw
+    // text, and they must be: this used to write ONLY the global file, with
+    // no sessionId, ignoring ownership and agent_id -- so the unified renderer
+    // (which follows session files) never saw the event, and a foreign
+    // session clobbered the global owner's state.
+    try {
+      if (!hookEvent) hookEvent = _rawField(input, 'hook_event_name');
+      const truncResult = classifyTruncatedInput(hookEvent, input);
+      writeFallback({
+        sessionId: _rawField(input, 'session_id'),
+        agentId: _rawField(input, 'agent_id'),
+        agentType: _rawField(input, 'agent_type'),
+      }, truncResult);
+    } catch {}
     process.exit(0);
   }
   let state = 'thinking';
@@ -314,17 +631,30 @@ process.stdin.on('end', () => {
   // A compaction restart normally carries lastPromptAt forward off its own
   // session file. Set when that file is gone, so there is nothing to carry.
   let compactWithoutPredecessor = false;
+  // Set by a StopFailure: the failed turn is over (see its handler).
+  let failureEndsTurn = false;
+  // The ids of a payload that parsed but then threw further down. The catch
+  // path reuses them instead of minting `<editor>-<ppid>` -- a fresh phantom
+  // orbital per hook on win32, with the real event lost.
+  let parsedIds = null;
 
   try {
     const data = JSON.parse(input);
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      parsedIds = {
+        sessionId: toText(data.session_id),
+        agentId: toText(data.agent_id),
+        agentType: toText(data.agent_type),
+      };
+    }
     // Codex (and any host that omits the argv event) names it in the payload
-    if (!hookEvent) hookEvent = data.hook_event_name || '';
-    const toolName = data.tool_name || '';
-    const toolInput = data.tool_input || {};
+    if (!hookEvent) hookEvent = toText(data.hook_event_name);
+    const toolName = toText(data.tool_name);
+    const toolInput = (data.tool_input && typeof data.tool_input === 'object') ? data.tool_input : {};
     const toolResponse = normalizeToolResponse(data);
 
     // Extract session ID: try hook data, env, then fall back to editor-prefixed PPID
-    const sessionId = data.session_id
+    const sessionId = toText(data.session_id)
       || process.env.CLAUDE_SESSION_ID
       || FALLBACK_SESSION_ID;
 
@@ -359,6 +689,17 @@ process.stdin.on('end', () => {
     // which real subagents never fire. Used to tell parallel editor windows
     // apart from subagents when their hooks interleave.
     if (!stats.topLevelSessions) stats.topLevelSessions = {};
+    // A user prompt is proof of a top-level session, and so is a Stop that
+    // carries no agent_id (a subagent's turn ends in SubagentStop, or in a
+    // Stop WITH agent_id). Registering here, before classification, rescues a
+    // window that never fired SessionStart through these hooks -- opened
+    // before they were installed -- from being filed as the conducting
+    // owner's subagent: its prompt stamped parentSession, so the main policy
+    // could never pick it, and its first tool call retired a live agent orbital.
+    if (!agentId && (hookEvent === 'UserPromptSubmit' || hookEvent === 'Stop')) {
+      stats.topLevelSessions[sessionId] = Date.now();
+      pruneTopLevelSessions(stats.topLevelSessions, Date.now());
+    }
 
     // Detect subagent sessions: different session_id while parent has active subagents.
     // Subagent hooks fire with their own session_id, not the parent's.
@@ -420,23 +761,49 @@ process.stdin.on('end', () => {
     // wipe the owner's activeSubagents -- orphaning the owner's live orbitals
     // and losing its session records, once per ping-pong between the two.
     // A subagent's tool call is never a top-level turn boundary.
-    if (stats.session.id !== sessionId && !isAgentEvent && !isKnownSubagent && !isParallelSession) {
-      // Save records from previous session before resetting
-      if (stats.session.id && stats.session.start) {
-        const dur = Date.now() - stats.session.start;
-        if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
-        if ((stats.session.filesEdited?.length || 0) > (stats.records.mostFilesEdited || 0)) {
-          stats.records.mostFilesEdited = stats.session.filesEdited.length;
-        }
-        if ((stats.session.subagentCount || 0) > (stats.records.mostSubagents || 0)) {
-          stats.records.mostSubagents = stats.session.subagentCount;
-        }
-        stats.daily.cumulativeMs += dur;
-      }
+    // Per-session counters (see COUNTER_MAX_AGE_MS). An agent event counts
+    // toward its parent (sessionId IS the parent there); a legacy subagent
+    // reporting under its own id counts toward its own entry, never the owner's.
+    const now = Date.now();
+    if (!stats.sessionCounters || typeof stats.sessionCounters !== 'object'
+        || Array.isArray(stats.sessionCounters)) {
+      stats.sessionCounters = {};
+    }
+    const counters = stats.sessionCounters;
+    // Seed the owner's entry from stats.session when it has none (a stats
+    // file from before this map, or an owner adopted by an adapter). It was
+    // already counted as a session when it was adopted.
+    if (stats.session.id && !_normalizeCounter(counters[stats.session.id], now)) {
+      counters[stats.session.id] = {
+        toolCalls: stats.session.toolCalls || 0,
+        filesEdited: (stats.session.filesEdited || []).filter(f => typeof f === 'string').slice(0, COUNTER_MAX_FILES),
+        start: stats.session.start || now, commitCount: stats.session.commitCount || 0,
+        creditedMs: 0, lastSeen: now, counted: true,
+      };
+    }
+    let counter = _normalizeCounter(counters[sessionId], now);
+    if (!counter) counter = counters[sessionId] = _freshCounter(now);
+    counter.lastSeen = now;
+    // daily.sessionCount counts sessions, once per id -- not once per switch
+    // of stats.session ownership, which two alternating windows did on every
+    // hook. An agent event does not count its parent (the parent's own events
+    // will), nor does a legacy subagent count itself.
+    if (!counter.counted && !isAgentEvent && !isKnownSubagent) {
       stats.daily.sessionCount++;
+      counter.counted = true;
+    }
+
+    if (stats.session.id !== sessionId && !isAgentEvent && !isKnownSubagent && !isParallelSession) {
+      // Credit the outgoing owner's records, then adopt this session with its
+      // OWN counters -- a switch is not a new session.
+      if (stats.session.id) _creditSession(stats, counters[stats.session.id], now);
+      if ((stats.session.subagentCount || 0) > (stats.records.mostSubagents || 0)) {
+        stats.records.mostSubagents = stats.session.subagentCount;
+      }
       stats.session = {
-        id: sessionId, start: Date.now(),
-        toolCalls: 0, filesEdited: [], subagentCount: 0, commitCount: 0,
+        id: sessionId, start: counter.start,
+        toolCalls: counter.toolCalls, filesEdited: counter.filesEdited.slice(),
+        subagentCount: 0, commitCount: counter.commitCount,
       };
     }
 
@@ -498,41 +865,41 @@ process.stdin.on('end', () => {
     if (hookEvent === 'PreToolUse') {
       ({ state, detail } = toolToState(toolName, toolInput));
 
-      // Only count stats for the owning session -- subagent and parallel-window
-      // tool calls must not inflate the owner's counters or file tracking.
+      // Every session counts its own tool calls (see COUNTER_MAX_AGE_MS). The
+      // global lifetime totals stay owner-only, as before: subagent and
+      // parallel-window calls must not inflate them twice over.
+      counter.toolCalls++;
+      const fp = EDIT_TOOLS.test(toolName)
+        ? toText(toolInput.file_path || toolInput.path || toolInput.target_file) : '';
+      const base = fp ? path.basename(fp) : '';
+      if (base && !counter.filesEdited.includes(base) && counter.filesEdited.length < COUNTER_MAX_FILES) {
+        counter.filesEdited.push(base);
+      }
       if (!isKnownSubagent && !isParallelSession) {
-        stats.session.toolCalls++;
         stats.totalToolCalls = (stats.totalToolCalls || 0) + 1;
-
-        // Track files edited (multi-editor: Claude Code, Codex, OpenCode)
-        if (EDIT_TOOLS.test(toolName)) {
-          const fp = toolInput?.file_path || toolInput?.path || toolInput?.target_file || '';
-          const base = fp ? path.basename(fp) : '';
-          if (base && !stats.session.filesEdited.includes(base)) {
-            stats.session.filesEdited.push(base);
-          }
-          if (base) {
-            stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
-          }
-        }
+        if (base) stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
       }
 
-      // Propagate tool state to the most recently started subagent orbital.
-      // Only the latest gets live tool state -- earlier subagents keep their last
-      // known state. This is correct because the parent's tool calls are sequential
-      // and logically belong to the most recent subagent context.
-      // Skip propagation for known subagents (they write their own session files
-      // directly), parallel windows (their tools belong to no subagent here),
+      // Propagate tool state to the most recently started LEGACY subagent
+      // orbital (an entry with no agentId: it has no writer of its own, so
+      // the parent's sequential tool calls are the best picture of its work).
+      // Only then does the parent show "conducting" -- the tool state went to
+      // the orbital. An agent-owned entry writes its own orbital, so the
+      // parent's real work passes straight through: overriding it hid every
+      // parent Edit/Bash behind "conducting N" for as long as an agent ran.
+      // The renderer's liveChildren conducting hold covers the idle gaps.
+      // Skip entirely for known subagents (they write their own session
+      // files), parallel windows (their tools belong to no subagent here),
       // and agent events (already routed to their own orbital).
       if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName)
           && !isKnownSubagent && !isParallelSession && !isAgentEvent) {
         const latest = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
-        // An agent that reports its own hooks (agentId) owns its orbital's
-        // state -- the parent's tool calls must not paint over it.
-        if (!latest.agentId) _writeSubagentToolState(latest, state, detail, sessionId);
         _touchActiveSubagents(stats.session.activeSubagents);
-        state = 'subagent';
-        detail = `conducting ${stats.session.activeSubagents.length}`;
+        if (!latest.agentId) {
+          _writeSubagentToolState(latest, state, detail, sessionId);
+          state = 'subagent';
+          detail = `conducting ${stats.session.activeSubagents.length}`;
+        }
       }
     }
     else if (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure') {
@@ -557,24 +924,30 @@ process.stdin.on('end', () => {
       // Track git commits and streaks (skip for known subagents -- their
       // results should not affect the parent session's counters or streak).
       if (!isKnownSubagent) {
-        // commitCount lives on the owner's session — parallel windows must not
-        // bump it. The streak is global gamification, so they still contribute.
-        if (result.state === 'proud' && result.detail === 'committed' && !isParallelSession) {
-          stats.session.commitCount = (stats.session.commitCount || 0) + 1;
+        // commitCount is per session (each window's own counter). The streak
+        // is global gamification, so parallel windows still contribute.
+        if (result.state === 'proud' && result.detail === 'committed') {
+          counter.commitCount++;
         }
         updateStreak(stats, state === 'error');
       }
 
-      // Propagate tool result state to the most recently started subagent (see PreToolUse comment)
+      // Propagate tool result state to the most recently started legacy
+      // subagent (see PreToolUse). An error is never masked: the parent's
+      // streak just broke, and "conducting" would hide why.
       if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName)
           && !isKnownSubagent && !isParallelSession && !isAgentEvent) {
         const latest = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
-        if (!latest.agentId) _writeSubagentToolState(latest, state, detail, sessionId);
         _touchActiveSubagents(stats.session.activeSubagents);
-        state = 'subagent';
-        detail = `conducting ${stats.session.activeSubagents.length}`;
-        workState = null;  // conducting state is not a completion -- no piggyback needed
-        workDetail = null;
+        if (!latest.agentId) {
+          _writeSubagentToolState(latest, state, detail, sessionId);
+          if (state !== 'error') {
+            state = 'subagent';
+            detail = `conducting ${stats.session.activeSubagents.length}`;
+            workState = null;  // conducting state is not a completion -- no piggyback needed
+            workDetail = null;
+          }
+        }
       }
     }
     else if (hookEvent === 'Stop') {
@@ -585,17 +958,10 @@ process.stdin.on('end', () => {
       // (SubagentStop does that), or close the parent's session records.
       stopped = !isAgentEvent;
 
-      // Update session records (skip for known subagents and parallel windows --
-      // their Stop must not zero the owner's session.start or inflate counters).
-      if (stopped && stats.session.start && !isKnownSubagent && !isParallelSession) {
-        const dur = Date.now() - stats.session.start;
-        if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
-        stats.daily.cumulativeMs += dur;
-        stats.session.start = 0; // Prevent double-counting on next session change
-      }
-      if (stopped && !isKnownSubagent && !isParallelSession && (stats.session.filesEdited?.length || 0) > (stats.records.mostFilesEdited || 0)) {
-        stats.records.mostFilesEdited = stats.session.filesEdited.length;
-      }
+      // Update session records from THIS session's own counter (a parallel
+      // window credits its own, never the owner's). creditedMs keeps a second
+      // Stop, or a later ownership switch, from counting the time again.
+      if (stopped && !isKnownSubagent) _creditSession(stats, counter, now);
 
       // Don't clean up synthetic subagent sessions here — background subagents
       // may still be running after the parent's turn ends. SessionEnd handles
@@ -603,7 +969,7 @@ process.stdin.on('end', () => {
     }
     else if (hookEvent === 'Notification') {
       // notification_type: permission_prompt | idle_prompt | elicitation_dialog | auth_success
-      const kind = data.notification_type || '';
+      const kind = toText(data.notification_type);
       if (kind === 'auth_success') {
         state = 'satisfied';
         detail = 'signed in';
@@ -623,10 +989,11 @@ process.stdin.on('end', () => {
     }
     else if (hookEvent === 'TeammateIdle') {
       state = 'waiting';
-      detail = data.teammate_name ? `${data.teammate_name} idle` : 'idle';
+      const mate = toText(data.teammate_name);
+      detail = mate ? `${mate} idle` : 'idle';
       const teamExtra = {
-        teamName: data.team_name || '',
-        teammateName: data.teammate_name || '',
+        teamName: toText(data.team_name),
+        teammateName: mate,
         isTeammate: true,
       };
       writeSessionState(sessionId, state, detail, false, { ...teamExtra, sessionId });
@@ -636,7 +1003,7 @@ process.stdin.on('end', () => {
       process.exit(0);
     }
     else if (hookEvent === 'TaskCompleted') {
-      const taskSubject = data.task_subject || '';
+      const taskSubject = toText(data.task_subject);
       state = stats.streak >= 10 ? 'proud' : stats.streak >= 3 ? 'satisfied' : 'happy';
       detail = taskSubject ? taskSubject.slice(0, 40) : 'task done';
       // TaskCompleted is NOT team-only: Claude Code's TaskUpdate fires it for
@@ -645,10 +1012,10 @@ process.stdin.on('end', () => {
       // anyone else falls through to the normal path, which routes agent
       // events to their own orbital and carries the sticky fields. Tagging a
       // solo session isTeammate made the main policy skip it for good.
-      if (data.team_name || data.teammate_name) {
+      if (toText(data.team_name) || toText(data.teammate_name)) {
         const teamExtra = {
-          teamName: data.team_name || '',
-          teammateName: data.teammate_name || '',
+          teamName: toText(data.team_name),
+          teammateName: toText(data.teammate_name),
           taskSubject,
           isTeammate: true,
         };
@@ -666,10 +1033,10 @@ process.stdin.on('end', () => {
       state = 'subagent';
       const desc = subagentLabel(data);
       detail = desc;
-      const subModel = agentType || data.model || 'haiku';
+      const subModel = agentType || toText(data.model) || 'haiku';
       const subId = agentId
         ? subagentSessionId(sessionId, agentId)
-        : (data.subagent_id || `${sessionId}-sub-${Date.now()}`);
+        : (toText(data.subagent_id) || `${sessionId}-sub-${Date.now()}`);
       stats.session.subagentCount = (stats.session.subagentCount || 0) + 1;
       if (stats.session.subagentCount > (stats.records.mostSubagents || 0)) {
         stats.records.mostSubagents = stats.session.subagentCount;
@@ -692,7 +1059,7 @@ process.stdin.on('end', () => {
       // Code), then the legacy subagent_id. Only when the payload names nobody
       // do we fall back to retiring the oldest entry (FIFO).
       const subs = stats.session.activeSubagents;
-      const legacyId = data.subagent_id || '';
+      const legacyId = toText(data.subagent_id);
       let idx = -1;
       if (agentId) {
         const wantId = subagentSessionId(sessionId, agentId);
@@ -771,26 +1138,25 @@ process.stdin.on('end', () => {
           fs.accessSync(path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'));
         } catch { compactWithoutPredecessor = true; }
       }
-      stats.session = {
-        id: sessionId, start: Date.now(),
-        toolCalls: 0, filesEdited: [], subagentCount: 0, commitCount: 0,
-        activeSubagents: [],
-      };
+      // A compaction is the same live session: its tool calls, files, clock
+      // and -- above all -- its running agents survive. Resetting here wiped
+      // activeSubagents mid-dispatch, so every SubagentStop after an
+      // auto-compact matched nothing. Any other source is a fresh session.
+      if (data.source !== 'compact') {
+        counter = counters[sessionId] = { ..._freshCounter(now), counted: counter.counted };
+        stats.session = {
+          id: sessionId, start: now,
+          toolCalls: 0, filesEdited: [], subagentCount: 0, commitCount: 0,
+          activeSubagents: [],
+        };
+      }
     }
     else if (hookEvent === 'SessionEnd') {
       state = 'responding';
       detail = 'session ending';
       stopped = true;
       // Finalize session records
-      if (stats.session.start) {
-        const dur = Date.now() - stats.session.start;
-        if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
-        stats.daily.cumulativeMs += dur;
-        stats.session.start = 0;
-      }
-      if ((stats.session.filesEdited?.length || 0) > (stats.records.mostFilesEdited || 0)) {
-        stats.records.mostFilesEdited = stats.session.filesEdited.length;
-      }
+      _creditSession(stats, counter, now);
       // Clean up any remaining synthetic subagent sessions
       for (const sub of stats.session.activeSubagents) {
         writeSessionState(sub.id, 'happy', 'done', true, {
@@ -803,7 +1169,7 @@ process.stdin.on('end', () => {
     }
     else if (hookEvent === 'PreCompact') {
       state = 'thinking';
-      const trigger = data.trigger || 'auto';
+      const trigger = toText(data.trigger) || 'auto';
       detail = trigger === 'manual' ? 'compacting memory' : 'auto-compacting';
     }
     else if (hookEvent === 'PostCompact') {
@@ -812,21 +1178,20 @@ process.stdin.on('end', () => {
     }
     else if (hookEvent === 'PermissionRequest') {
       state = 'waiting';
-      const tool = data.tool_name || '';
-      detail = tool ? `allow ${tool}?` : 'needs permission';
+      detail = toolName ? `allow ${toolName}?` : 'needs permission';
     }
     else if (hookEvent === 'Setup') {
       state = 'starting';
-      const trigger = data.trigger || 'init';
+      const trigger = toText(data.trigger) || 'init';
       detail = trigger === 'maintenance' ? 'maintenance' : 'setting up';
     }
     else if (hookEvent === 'Elicitation') {
       state = 'waiting';
-      const server = (data.mcp_server_name || 'MCP').slice(0, 20);
+      const server = (toText(data.mcp_server_name) || 'MCP').slice(0, 20);
       detail = `${server}: needs input`;
     }
     else if (hookEvent === 'ElicitationResult') {
-      const action = data.action || 'accept';
+      const action = toText(data.action) || 'accept';
       if (action === 'accept') {
         state = 'satisfied';
         detail = 'input received';
@@ -837,13 +1202,13 @@ process.stdin.on('end', () => {
     }
     else if (hookEvent === 'ConfigChange') {
       state = 'reading';
-      const fp = data.file_path || '';
+      const fp = toText(data.file_path);
       const base = fp ? path.basename(fp) : '';
       detail = base ? `config: ${base}` : 'config updated';
     }
     else if (hookEvent === 'InstructionsLoaded') {
       state = 'reading';
-      const fp = data.file_path || '';
+      const fp = toText(data.file_path);
       detail = fp ? path.basename(fp) : 'loading instructions';
     }
     else if (hookEvent === 'PostModelSwitch') {
@@ -854,7 +1219,7 @@ process.stdin.on('end', () => {
     }
     else if (hookEvent === 'StopFailure') {
       state = 'error';
-      const errorType = data.error || data.error_type || '';
+      const errorType = toText(data.error) || toText(data.error_type);
       if (errorType === 'rate_limit') detail = 'rate limited!';
       else if (errorType === 'server_error') detail = 'server error';
       else if (errorType === 'max_output_tokens') detail = 'output too long';
@@ -864,6 +1229,14 @@ process.stdin.on('end', () => {
       // Track in stats -- API failures break the streak
       if (!isKnownSubagent) {
         updateStreak(stats, true);
+      }
+      // StopFailure fires INSTEAD of Stop, so it is the turn's end too: the
+      // session file gets `turnEnded` (never `stopped` -- that is SessionEnd)
+      // and the global file `stopped`, exactly like Stop. Without it the
+      // renderer treated the session as mid-turn and sat on thinking for 45s.
+      if (!agentId) {
+        failureEndsTurn = true;
+        if (!isKnownSubagent) _creditSession(stats, counter, now);
       }
     }
     else {
@@ -875,23 +1248,32 @@ process.stdin.on('end', () => {
     // Model name: from event data, env var, or the editor this hook serves.
     // Despite the name this is the EDITOR tag in every production path
     // (DEFAULT_MODEL_NAME = EDITOR) -- real model identity is `model`, below.
-    const modelName = data.model_name || process.env.CODE_CRUMB_MODEL || DEFAULT_MODEL_NAME;
+    const modelName = toText(data.model_name) || process.env.CODE_CRUMB_MODEL || DEFAULT_MODEL_NAME;
 
-    // Build extra data for state files
-    const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
+    // stats.session mirrors its owner's own counter, so every reader of the
+    // stats file (the adapters included) sees the same numbers.
+    if (stats.session.id === sessionId) {
+      stats.session.start = counter.start;
+      stats.session.toolCalls = counter.toolCalls;
+      stats.session.filesEdited = counter.filesEdited.slice();
+      stats.session.commitCount = counter.commitCount;
+    }
+
+    // Build extra data for state files -- this session's OWN counters.
+    const currentSessionMs = Math.max(0, now - counter.start - counter.creditedMs);
     const extra = {
       sessionId,
       modelName,
       ...(model ? { model } : {}),
       editor: EDITOR,
-      toolCalls: stats.session.toolCalls,
-      filesEdited: stats.session.filesEdited?.length || 0,
-      sessionStart: stats.session.start,
+      toolCalls: counter.toolCalls,
+      filesEdited: counter.filesEdited.length,
+      sessionStart: counter.start,
       streak: stats.streak,
       cwd: process.cwd(),
       isWorktree: getIsWorktree(process.cwd()),
       gitBranch: getGitBranch(process.cwd()),
-      commitCount: stats.session.commitCount || 0,
+      commitCount: counter.commitCount,
       bestStreak: stats.bestStreak,
       brokenStreak: stats.brokenStreak,
       brokenStreakAt: stats.brokenStreakAt,
@@ -943,6 +1325,11 @@ process.stdin.on('end', () => {
         // Iterate forward: oldest non-stopped synthetic is most likely to match
         // the first real subagent hook when multiple subagents are concurrent.
         for (let i = 0; i < subs.length; i++) {
+          // An agent-owned entry is not a synthetic: it writes its own orbital
+          // and retires through its own SubagentStop. Retiring it here -- on
+          // the word of a foreign session that may be an unregistered
+          // parallel window -- stamped a LIVE agent `stopped` for good.
+          if (subs[i].agentId) continue;
           try {
             const synthFp = path.join(SESSIONS_DIR, safeFilename(subs[i].id) + '.json');
             const synthData = JSON.parse(fs.readFileSync(synthFp, 'utf8'));
@@ -973,9 +1360,11 @@ process.stdin.on('end', () => {
       // session id but writes the agent's own file, so none of them apply --
       // without the !isAgentEvent guard a stopped parent would retire a live
       // agent orbital, and the parent's modelName would erase the agent type.
-      // Preserve the GLOBAL file's stopped flag — only a late
-      // PostToolUse/PostToolUseFailure can arrive after Stop, and it must not
-      // resurrect ownership. PreToolUse (a new turn) does clear the flag.
+      // Preserve the GLOBAL file's stopped flag — an echo of a finished turn
+      // (a late PostToolUse, a background agent's SubagentStop, anything but
+      // a turn-opening event: see carriesTurnEnd) must not resurrect
+      // ownership. PreToolUse (a new turn) does clear the flag, and so does a
+      // wait, which tmux mode would otherwise rescue straight to "wrapping up".
       // This re-stamp is deliberately scoped to the global write: on a session
       // file `stopped` means SESSION ENDED (SessionEnd), and leaking it here
       // used to make the orbital loader retire a live window -- the policy then
@@ -983,7 +1372,7 @@ process.stdin.on('end', () => {
       // two swap animations. The session-file block below decides for itself
       // from the session file's own fields (`stopped`, else `turnEnded`).
       if (!isAgentEvent && existing.stopped && existing.sessionId === sessionId && !stopped &&
-          (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')) {
+          carriesTurnEnd(hookEvent) && state !== 'waiting') {
         globalStopped = true;
       }
       // Preserve model name — subagents sharing session ID must not overwrite the owner's name.
@@ -1023,7 +1412,9 @@ process.stdin.on('end', () => {
     // SessionStart always takes over global state — explicit new-session signal
     if (hookEvent === 'SessionStart') shouldWriteGlobal = true;
 
-    if (shouldWriteGlobal) writeState(state, detail, globalStopped ? { ...extra, stopped: true } : extra);
+    if (shouldWriteGlobal) {
+      writeState(state, detail, (globalStopped || failureEndsTurn) ? { ...extra, stopped: true } : extra);
+    }
     // Always write the per-session file: it is what the renderer's main face
     // follows and what parallel sessions appear as. SessionStart writes one
     // too (the unlink above is skipped for `source === 'compact'`, which is
@@ -1035,8 +1426,7 @@ process.stdin.on('end', () => {
       // `model` is live here (unlike the dead 'editor' entry): extra.model is
       // set only when acquisition actually produced something, so the
       // `!extra[field]` guard both carries it forward and lets a real
-      // PostModelSwitch override it.
-      const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'editor', 'lastPromptAt', 'model'];
+      // PostModelSwitch override it. (STICKY_FIELDS is defined at the top.)
       // A fresh session starts with fresh fields, so it reads nothing: the
       // unlink above normally leaves no file, but a failed unlink (a locked
       // file on Windows) would otherwise resurrect a dead session's agentType
@@ -1051,15 +1441,19 @@ process.stdin.on('end', () => {
             stopped = true;
             extra.stopped = true;
           }
-          // Same rule for the turn boundary: a late PostToolUse must not erase a
-          // Stop; a new turn's PreToolUse/UserPromptSubmit does not carry it.
-          // A finished turn reads as `stopped || turnEnded` on a session file
-          // and the renderer folds both -- but only SessionEnd sets `stopped`
-          // here, so the global owner and a parallel window take the same path:
-          // `turnEnded` carried forward.
-          if (!stopped && existingSession.turnEnded &&
-              (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')) {
-            extra.turnEnded = true;
+          // Same rule for the turn boundary: an echo of a finished turn (a late
+          // PostToolUse, a background agent's SubagentStop -- see
+          // carriesTurnEnd) must not erase a Stop; a turn-opening event
+          // (PreToolUse/UserPromptSubmit...) drops it. A finished turn reads as
+          // `stopped || turnEnded` on a session file and the renderer folds
+          // both -- but only SessionEnd sets `stopped` here, so the global
+          // owner and a parallel window take the same path: `turnEnded`
+          // carried forward. A wait carries it as `turnOver` instead (see
+          // carriesTurnEnd), and the next echo turns that back into turnEnded.
+          if (!stopped && (existingSession.turnEnded || existingSession.turnOver)
+              && carriesTurnEnd(hookEvent)) {
+            if (state === 'waiting') extra.turnOver = true;
+            else extra.turnEnded = true;
           }
           for (const field of STICKY_FIELDS) {
             if (existingSession[field] && !extra[field]) {
@@ -1085,6 +1479,7 @@ process.stdin.on('end', () => {
         delete idleExtra.stopped;
         writeSessionState(sessionId, 'idle', 'between turns', false, idleExtra);
       } else {
+        if (failureEndsTurn) { extra.turnEnded = true; delete extra.turnOver; }
         writeSessionState(writeSessionId, state, detail, stopped, extra);
       }
       // Family heartbeat: an agent working proves its parent is alive, and the
@@ -1092,140 +1487,13 @@ process.stdin.on('end', () => {
       if (isAgentEvent) _touchSessionFile(sessionId);
     }
     pruneFrequentFiles(stats.frequentFiles);
+    _pruneCounters(counters, stats.session.id, now);
     writeStats(stats);
     } finally { if (releaseStats) releaseStats(); }
   } catch {
-    // JSON parse may fail for events with empty or non-JSON stdin
-    // (e.g., Stop, Notification, lifecycle events) -- still write the
-    // correct state for the hook event.
-    // Try to reuse the session ID from the global state file so we don't
-    // create an orphan session file that appears as a phantom orbital.
-    const originalFallbackId = process.env.CLAUDE_SESSION_ID || FALLBACK_SESSION_ID;
-    let fallbackSessionId = originalFallbackId;
-    let shouldWriteGlobal = true;
-    try {
-      const existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      if (existing.sessionId) {
-        fallbackSessionId = existing.sessionId;
-      }
-      if (existing.sessionId && existing.sessionId !== originalFallbackId &&
-          !existing.stopped && Date.now() - (existing.timestamp || 0) < 120000) {
-        shouldWriteGlobal = false;
-      }
-    } catch {}
-
-    // Same parentSession guard as the try block above — subagents must not write global state.
-    // Uses originalFallbackId (the caller's identity), not fallbackSessionId
-    // (which may be the adopted main session's ID from the state file).
-    if (shouldWriteGlobal) {
-      try {
-        const mySession = JSON.parse(fs.readFileSync(
-          path.join(SESSIONS_DIR, safeFilename(originalFallbackId) + '.json'), 'utf8'));
-        if (mySession.parentSession) shouldWriteGlobal = false;
-      } catch {}
-    }
-
-    // SessionStart always takes over global state — explicit new-session signal
-    if (hookEvent === 'SessionStart') shouldWriteGlobal = true;
-
-    const fallbackExtra = { sessionId: fallbackSessionId, modelName: process.env.CODE_CRUMB_MODEL || DEFAULT_MODEL_NAME, editor: EDITOR };
-
-    let fallbackState = 'thinking';
-    let fallbackDetail = '';
-    if (hookEvent === 'SessionEnd') {
-      fallbackState = 'responding';
-      fallbackDetail = 'session ending';
-      fallbackExtra.stopped = true;
-    } else if (hookEvent === 'Stop') {
-      fallbackState = 'responding';
-      fallbackDetail = 'wrapping up';
-      fallbackExtra.stopped = true; // for global state only
-    } else if (hookEvent === 'Notification') {
-      fallbackState = 'waiting';
-      fallbackDetail = 'needs attention';
-    } else if (hookEvent === 'UserPromptSubmit') {
-      fallbackState = 'thinking';
-      fallbackDetail = 'reading your message';
-      fallbackExtra.lastPromptAt = Date.now();
-    } else if (hookEvent === 'TeammateIdle') {
-      fallbackState = 'waiting';
-      fallbackDetail = 'teammate idle';
-    } else if (hookEvent === 'TaskCompleted') {
-      fallbackState = 'happy';
-      fallbackDetail = 'task done';
-    } else if (hookEvent === 'SessionStart') {
-      fallbackState = 'idle';
-      fallbackDetail = 'session starting';
-      fallbackExtra.isSessionStart = true;
-      // No payload here, so no `source` to check: a fallback SessionStart
-      // always counts as attention (see the main path's compaction guard).
-      fallbackExtra.lastPromptAt = Date.now();
-      // Clean up any stale session file from previous session with same ID
-      const staleSessionFile = path.join(SESSIONS_DIR, safeFilename(fallbackSessionId) + '.json');
-      try { fs.unlinkSync(staleSessionFile); } catch {}
-    } else if (hookEvent === 'SubagentStart') {
-      fallbackState = 'subagent';
-      fallbackDetail = 'spawning subagent';
-      // Create subagent orbital file even in fallback path
-      const subId = `${fallbackSessionId}-sub-${Date.now()}`;
-      writeSessionState(subId, 'spawning', 'subagent', false, {
-        sessionId: subId, parentSession: fallbackSessionId,
-        modelName: 'haiku', editor: EDITOR, taskDescription: 'subagent',
-      });
-    } else if (hookEvent === 'SubagentStop') {
-      fallbackState = 'happy';
-      fallbackDetail = 'subagent done';
-    } else if (hookEvent === 'PostToolUseFailure') {
-      fallbackState = 'error';
-      fallbackDetail = 'tool failed';
-    } else if (hookEvent === 'PreCompact') {
-      fallbackState = 'thinking';
-      fallbackDetail = 'compacting memory';
-    } else if (hookEvent === 'PostCompact') {
-      fallbackState = 'satisfied';
-      fallbackDetail = 'memory compacted';
-    } else if (hookEvent === 'PermissionRequest') {
-      fallbackState = 'waiting';
-      fallbackDetail = 'needs permission';
-    } else if (hookEvent === 'Setup') {
-      fallbackState = 'starting';
-      fallbackDetail = 'setting up';
-    } else if (hookEvent === 'Elicitation') {
-      fallbackState = 'waiting';
-      fallbackDetail = 'needs input';
-    } else if (hookEvent === 'ElicitationResult') {
-      fallbackState = 'satisfied';
-      fallbackDetail = 'input received';
-    } else if (hookEvent === 'ConfigChange') {
-      fallbackState = 'reading';
-      fallbackDetail = 'config updated';
-    } else if (hookEvent === 'InstructionsLoaded') {
-      fallbackState = 'reading';
-      fallbackDetail = 'loading instructions';
-    } else if (hookEvent === 'PostModelSwitch') {
-      // No payload here, so no to_model to name.
-      fallbackState = 'thinking';
-      fallbackDetail = 'model switched';
-    } else if (hookEvent === 'StopFailure') {
-      fallbackState = 'error';
-      fallbackDetail = 'API error';
-    }
-
-    if (shouldWriteGlobal) writeState(fallbackState, fallbackDetail, fallbackExtra);
-    // Always write per-session file so parallel sessions appear as orbitals.
-    // The adopted owner id is only right when we ARE the owner (shouldWriteGlobal);
-    // otherwise this hook belongs to some other session and must write its own
-    // orbital file, not overwrite the owner's.
-    const sessionFileId = shouldWriteGlobal ? fallbackSessionId : originalFallbackId;
-    const sessionExtra = { ...fallbackExtra, sessionId: sessionFileId };
-    if (hookEvent === 'Stop') {
-      const idleFallbackExtra = { ...sessionExtra, turnEnded: true };
-      delete idleFallbackExtra.stopped;
-      writeSessionState(sessionFileId, 'idle', 'between turns', false, idleFallbackExtra);
-    } else {
-      writeSessionState(sessionFileId, fallbackState, fallbackDetail,
-        hookEvent === 'SessionEnd', sessionExtra);
-    }
+    // Parsing failed (empty or non-JSON stdin), or a parsed payload threw
+    // further down -- then parsedIds still names the real session.
+    try { writeFallback(parsedIds, null); } catch {}
   }
 
   process.exit(0);
