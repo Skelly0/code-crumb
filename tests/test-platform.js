@@ -48,9 +48,50 @@ describe('platform -- shell quoting helpers', () => {
   test('quoteArg wraps args with spaces in double quotes', () => {
     assert.strictEqual(shared.quoteArg('has space'), '"has space"');
   });
-  test('quoteArg escapes embedded double quotes', () => {
-    assert.strictEqual(shared.quoteArg('say "hi"'), '"say \\"hi\\""');
+  // Updated: this used to pin \" -- which cmd.exe does not honour, so an odd
+  // number of embedded quotes dropped the rest of the argument out of quotes.
+  test('quoteArg doubles embedded double quotes (cmd.exe and UCRT both read "" as one quote)', () => {
+    assert.strictEqual(shared.quoteArg('say "hi"'), '"say ""hi"""');
+    assert.strictEqual(shared.quoteArg('a"b & whoami'), '"a""b & whoami"');
   });
+  test('quoteArg quotes every cmd metacharacter, not just whitespace', () => {
+    for (const ch of ['&', '|', '<', '>', '^', '(', ')', '!', ',', ';', '=']) {
+      const arg = `fix${ch}whoami`;
+      assert.strictEqual(shared.quoteArg(arg), `"${arg}"`, `${ch} must force quoting`);
+    }
+    assert.strictEqual(shared.quoteArg('fix&whoami'), '"fix&whoami"');
+  });
+  test('quoteArg moves % outside the quotes as ^% so cmd cannot expand %VAR%', () => {
+    assert.strictEqual(shared.quoteArg('%PATH%'), '""^%"PATH"^%""');
+    assert.strictEqual(shared.quoteArg('50% off'), '"50"^%" off"');
+  });
+  test('quoteArg doubles backslashes that precede a quote or the closing quote', () => {
+    assert.strictEqual(shared.quoteArg('C:\\dir with space\\'), '"C:\\dir with space\\\\"');
+    assert.strictEqual(shared.quoteArg('q\\"x'), '"q\\\\""x"');
+    assert.strictEqual(shared.quoteArg('C:\\x y\\r.js'), '"C:\\x y\\r.js"', 'interior backslashes stay single');
+  });
+  test('quoteArg flattens line breaks (cmd ends the command at one) and keeps empty/plain args', () => {
+    assert.strictEqual(shared.quoteArg('a\r\nb\nc'), '"a b c"');
+    assert.strictEqual(shared.quoteArg(''), '""');
+    assert.strictEqual(shared.quoteArg('C:\\plain\\path.js'), 'C:\\plain\\path.js');
+    assert.strictEqual(shared.quoteArg('--minimal'), '--minimal');
+  });
+  if (process.platform === 'win32') {
+    // End to end: the args must survive cmd.exe and node's own argv parser.
+    test('win32: quoteArg round-trips hostile args through shell:true unharmed', () => {
+      const dir = tmpDir('crumb-quote-');
+      try {
+        const echo = path.join(dir, 'argv.js');
+        fs.writeFileSync(echo, 'process.stdout.write(JSON.stringify(process.argv.slice(2)));', 'utf8');
+        const hostile = ['fix&whoami', 'a"b & echo PWNED', 'say "hi"', 'x|y', '%PATH%', '50% off',
+          'hat^caret', '(p)', 'C:\\dir with space\\', 'q\\"x', ''];
+        const { spawnSync } = require('child_process');
+        const r = spawnSync('node', [shared.quoteArg(echo), ...hostile.map(shared.quoteArg)],
+          { shell: true, encoding: 'utf8' });
+        assert.deepStrictEqual(JSON.parse(r.stdout), hostile);
+      } finally { cleanup(dir); }
+    });
+  }
   test('shQuote single-quotes for POSIX shells and escapes embedded quotes', () => {
     assert.strictEqual(shared.shQuote('/p q/r.js'), "'/p q/r.js'");
     assert.strictEqual(shared.shQuote("it's"), "'it'\\''s'");
@@ -79,6 +120,24 @@ describe('platform -- buildRendererCommands lives in shared.js and quotes paths'
     assert.strictEqual(cmds.cmd.opts.windowsVerbatimArguments, true);
     assert.ok(!cmds.cmd.opts.shell, 'verbatim args, not shell');
   });
+  test('win32 wt and cmd quote a metacharacter-bearing path (was left bare: & ran a command)', () => {
+    const risky = ['C:\\R&D\\renderer.js', '--minimal'];
+    const cmds = shared.buildRendererCommands('win32', risky, title);
+    assert.ok(cmds.wt.args.includes('"C:\\R&D\\renderer.js"'), cmds.wt.args.join(' '));
+    assert.ok(cmds.wt.args.includes('--minimal'), 'plain flags stay bare');
+    assert.strictEqual(cmds.cmd.args[1], 'start "Code Crumb" node "C:\\R&D\\renderer.js" --minimal');
+  });
+  test('win32 cmd fallback keeps a %-bearing path out of cmd\'s variable expansion', () => {
+    const cmds = shared.buildRendererCommands('win32', ['C:\\100%\\renderer.js'], title);
+    assert.strictEqual(cmds.cmd.args[1], 'start "Code Crumb" node "C:\\100"^%"\\renderer.js"');
+  });
+  test('darwin and xfce4 (POSIX shQuote) are unchanged by the cmd.exe rules', () => {
+    const odd = ['/tmp/a&b "c" 50%/renderer.js'];
+    const mac = shared.buildRendererCommands('darwin', odd, title).osascript.args[1];
+    assert.ok(mac.includes(`node '/tmp/a&b \\"c\\" 50%/renderer.js'; exit`), mac);
+    const xf = shared.buildRendererCommands('linux', odd, title)['xfce4-terminal'].args;
+    assert.ok(xf.includes(`node '${odd[0]}'`), xf.join(' '));
+  });
   test('darwin single-quotes the renderer path inside the AppleScript', () => {
     const cmds = shared.buildRendererCommands('darwin', posixSpaced, title);
     const script = cmds.osascript.args[1];
@@ -98,6 +157,10 @@ describe('platform -- buildEditorSpawn (editor .cmd shims on Windows)', () => {
     assert.strictEqual(s.opts.shell, true);
     assert.deepStrictEqual(s.args, ['-p', '"fix the bug"']);
     assert.strictEqual(s.opts.stdio, 'inherit');
+  });
+  test('win32 claude: a prompt carrying cmd metacharacters is quoted, never run', () => {
+    const s = launch.buildEditorSpawn('win32', 'claude', ['-p', 'fix&whoami', 'say "hi" & more', '100%']);
+    assert.deepStrictEqual(s.args, ['-p', '"fix&whoami"', '"say ""hi"" & more"', '"100"^%""']);
   });
   test('win32 node (codex wrapper) needs no shell and keeps args verbatim', () => {
     const s = launch.buildEditorSpawn('win32', 'node', ['C:\\x y\\codex-wrapper.js', 'hello world']);
@@ -212,6 +275,54 @@ describe('shared.js -- acquireFileLock / withStatsLock', () => {
       const taken = shared.acquireFileLock(lock, { waitMs: 20, staleMs: 2000 });
       assert.strictEqual(typeof taken, 'function', 'stale lock is taken over');
       taken();
+    } finally { cleanup(dir); }
+  });
+
+  // The race: two waiters both stat the same stale lock; the faster one takes
+  // it over first. The slower one must then see a live lock and wait, not
+  // overwrite it (the old non-exclusive write gave both a release).
+  test('a waiter that saw the stale lock after someone else took it over does not also take it', () => {
+    const dir = tmpDir('crumb-flock-');
+    const realStat = fs.statSync;
+    try {
+      const lock = path.join(dir, 'stats.lock');
+      fs.writeFileSync(lock, 'crashed-owner', 'utf8');
+      const old = new Date(Date.now() - 10000);
+      fs.utimesSync(lock, old, old);
+      let raced = false;
+      fs.statSync = function (p, ...rest) {
+        const st = realStat.call(fs, p, ...rest);
+        if (!raced && p === lock) {
+          raced = true;
+          // The faster waiter: remove the stale lock and create its own.
+          fs.unlinkSync(lock);
+          fs.writeFileSync(lock, 'faster-waiter', { flag: 'wx' });
+        }
+        return st;                                   // we still saw it as stale
+      };
+      const slow = shared.acquireFileLock(lock, { waitMs: 30, staleMs: 2000 });
+      fs.statSync = realStat;
+      assert.ok(raced, 'the race was staged');
+      assert.strictEqual(slow, null, 'the slower waiter must not also hold the lock');
+      assert.strictEqual(fs.readFileSync(lock, 'utf8'), 'faster-waiter', 'the live lock is left intact');
+      assert.deepStrictEqual(fs.readdirSync(dir), ['stats.lock'], 'no aside file left behind');
+    } finally { fs.statSync = realStat; cleanup(dir); }
+  });
+
+  test('stale takeover goes through the exclusive create and leaves no aside file', () => {
+    const dir = tmpDir('crumb-flock-');
+    try {
+      const lock = path.join(dir, 'stats.lock');
+      fs.writeFileSync(lock, 'crashed-owner', 'utf8');
+      const old = new Date(Date.now() - 10000);
+      fs.utimesSync(lock, old, old);
+      const a = shared.acquireFileLock(lock, { waitMs: 20, staleMs: 2000 });
+      const b = shared.acquireFileLock(lock, { waitMs: 20, staleMs: 2000 });
+      assert.strictEqual(typeof a, 'function', 'the first waiter takes the stale lock');
+      assert.strictEqual(b, null, 'the second waiter sees a live lock');
+      assert.deepStrictEqual(fs.readdirSync(dir), ['stats.lock']);
+      a();
+      assert.deepStrictEqual(fs.readdirSync(dir), []);
     } finally { cleanup(dir); }
   });
 

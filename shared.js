@@ -137,6 +137,34 @@ function sleepSync(ms) {
 
 let lockSeq = 0;
 
+// Remove a lock file that looked stale, so the caller can retry its O_EXCL
+// create. Returns true when the caller should retry at once (the stale file
+// is gone, or someone else already removed it), false to wait normally.
+// The file is renamed to a name only this owner uses, which is atomic: of
+// several waiters exactly one moves any given file. What was moved is then
+// re-checked -- if it is fresh, a faster waiter had already replaced the
+// stale lock with its own, and that live lock is restored with an exclusive
+// create (never an overwrite; if a third party got in first, it is dropped
+// and its owner's release is already a no-op thanks to the token check).
+function breakStaleLock(lockFile, token, staleMs) {
+  const aside = `${lockFile}.${token}.stale`;
+  try {
+    fs.renameSync(lockFile, aside);
+  } catch (e) {
+    return !!e && e.code === 'ENOENT';
+  }
+  try {
+    if (Date.now() - fs.statSync(aside).mtimeMs <= staleMs) {
+      const live = fs.readFileSync(aside, 'utf8');
+      try { fs.writeFileSync(lockFile, live, { flag: 'wx', mode: 0o600 }); } catch {}
+      try { fs.unlinkSync(aside); } catch {}
+      return false;
+    }
+  } catch {}
+  try { fs.unlinkSync(aside); } catch {}
+  return true;
+}
+
 // Short-lived advisory lock around a read-modify-write of a shared file.
 // The lock is a file created with O_EXCL holding a per-owner token; a lock
 // older than staleMs belongs to a crashed writer and is taken over.
@@ -155,6 +183,7 @@ function acquireFileLock(lockFile, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE
     } catch {}
   };
   const deadline = Date.now() + waitMs;
+  let takeovers = 0;
   for (;;) {
     try {
       fs.writeFileSync(lockFile, token, { flag: 'wx', mode: 0o600 });
@@ -162,13 +191,24 @@ function acquireFileLock(lockFile, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE
     } catch (e) {
       // Anything but "already held" (no directory, permissions) -- proceed.
       if (!e || e.code !== 'EEXIST') return () => {};
+      let stale = false;
       try {
-        if (Date.now() - fs.statSync(lockFile).mtimeMs > staleMs) {
-          fs.writeFileSync(lockFile, token, { mode: 0o600 });
-          return release;
-        }
+        stale = Date.now() - fs.statSync(lockFile).mtimeMs > staleMs;
       } catch {
         // Vanished or unreadable between the two calls -- retry below.
+      }
+      // Stale takeover must go back through the O_EXCL create, so that of
+      // several waiters who all saw the same stale lock only one wins (a
+      // plain overwrite let every one of them "take" it). The stale file is
+      // moved aside rather than unlinked: between our stat and our move a
+      // faster waiter may already have replaced it with its own fresh lock,
+      // and a moved file can be checked -- if what we moved is fresh it is
+      // somebody's live lock, and it is put back without clobbering.
+      // The retry skips the sleep and the deadline, but only a few times --
+      // a filesystem that never lets the create succeed must not spin.
+      if (stale && takeovers < 3 && breakStaleLock(lockFile, token, staleMs)) {
+        takeovers++;
+        continue;
       }
     }
     if (Date.now() >= deadline) return null;
@@ -192,12 +232,35 @@ function withStatsLock(fn) {
 // -- Process spawning helpers -----------------------------------------
 
 // Quote one argument for a Windows command line built by hand (shell:true or
-// windowsVerbatimArguments). Node does no quoting in those modes.
+// windowsVerbatimArguments). Node does no quoting in those modes, and the
+// line is parsed twice: first by cmd.exe, then by the program's own argv
+// parser (MSVCRT/UCRT -- node, and every npm .cmd shim that ends in node).
+//
+//   - Any cmd metacharacter forces quoting, not just whitespace: an unquoted
+//     `fix&whoami` ran `whoami`. Inside double quotes & | < > ^ ( ) , ; = are
+//     literal to cmd.
+//   - An embedded " becomes "" -- cmd toggles its quote state on every ", so
+//     the pair keeps it inside the quoted region, and the UCRT parser reads ""
+//     inside quotes as one literal ". The old \" toggled cmd out of quotes and
+//     exposed the rest of the argument (`a"b & whoami` ran whoami).
+//   - Backslashes are literal to the argv parser except before a ", so a run
+//     of them before an embedded " or the closing quote is doubled.
+//   - cmd expands %VAR% even inside quotes and nothing escapes a % there, so
+//     each % is emitted outside the quotes as ^% ("50"^%" off"): the caret
+//     breaks the variable name before expansion and is removed afterwards.
+//   - cmd ends the command at a line break, silently dropping the rest of the
+//     line, so CR/LF become spaces -- a multi-line prompt arrives as one line.
+//   - Not covered: `!` is only special under delayed expansion, which cmd /c
+//     leaves off by default; a machine that enables it in the registry would
+//     still expand !VAR!.
+// Verified on Windows 11 through shell:true (direct and via a .cmd shim) and
+// through `cmd /c start` with windowsVerbatimArguments.
 function quoteArg(arg) {
-  const s = String(arg);
+  let s = String(arg).replace(/\r\n|[\r\n]/g, ' ');
   if (s === '') return '""';
-  if (!/[\s"]/.test(s)) return s;
-  return '"' + s.replace(/"/g, '\\"') + '"';
+  if (!/[\s"&|<>^()%!,;=]/.test(s)) return s;
+  s = s.replace(/(\\*)"/g, '$1$1""').replace(/(\\+)$/, '$1$1');
+  return '"' + s.replace(/%/g, '"^%"') + '"';
 }
 
 // Quote one argument for a POSIX shell: single quotes, with ' -> '\''.
