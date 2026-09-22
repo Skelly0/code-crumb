@@ -555,38 +555,17 @@ describe('face.js -- orbital toggle', () => {
 });
 
 describe('OrbitalSystem._renderSidePanel', () => {
-  test('right-col is placed past bubble when active bubble is on right side', () => {
+  test('a thought bubble appearing does not move the side-panel column', () => {
+    // It used to step the right column past the bubble, so the whole column
+    // jumped sideways every time a thought came or went. The main face now
+    // layers over the ring instead, and the column comes from the keep-out.
     const sys = new OrbitalSystem();
-    const mf = new MiniFace('test-session');
-    sys.faces.set('test-session', mf);
-
-    // mainPos.col=5 forces canLeft=false (leftCol = 5-8-2 = -5 < 1)
-    // bubble at col=27 (= 5+20+2), width=15
-    const mainPos = {
-      col: 5, w: 20, row: 5, h: 12,
-      centerX: 15, centerY: 11,
-      bubble: { col: 27, w: 15, row: 8, h: 3 }
-    };
-    const expectedMinCol = mainPos.bubble.col + mainPos.bubble.w + 2; // 27+15+2=44
-
-    const out = sys._renderSidePanel(100, 40, mainPos, null);
-    assert.ok(typeof out === 'string', 'output should be a string');
-
-    // Extract all cursor positions \x1b[row;colH from ANSI output
-    const re = /\x1b\[(\d+);(\d+)H/g;
-    let m;
-    const rightCols = [];
-    while ((m = re.exec(out)) !== null) {
-      const col = parseInt(m[2], 10);
-      if (col > mainPos.col + mainPos.w) rightCols.push(col);
-    }
-
-    assert.ok(rightCols.length > 0, 'should render some content to the right of main face');
-    const minRightCol = Math.min(...rightCols);
-    assert.ok(
-      minRightCol >= expectedMinCol,
-      `right-side mini-face col ${minRightCol} should be >= bubble right edge ${expectedMinCol}`
-    );
+    sys.faces.set('test-session', new MiniFace('test-session'));
+    const base = { col: 5, w: 20, row: 5, h: 12, centerX: 15, centerY: 11 };
+    const withBubble = { ...base, bubble: { col: 27, w: 15, row: 8, h: 3 } };
+    assert.strictEqual(
+      sys._renderSidePanel(100, 40, withBubble, null),
+      sys._renderSidePanel(100, 40, base, null));
   });
 
   test('right-col falls back to mainPos.w + SIDE_PAD when no bubble', () => {
@@ -2689,20 +2668,168 @@ describe('grid.js -- OrbitalSystem._resolveOverlaps', () => {
   });
 });
 
-describe('grid.js -- _calculateGroupedAngles pixel-aware spacing', () => {
-  test('pixel-aware minimum prevents sub-MINI_W gaps on small ellipses', () => {
+describe('grid.js -- _calculateGroupedAngles box-aware spacing', () => {
+  test('neighbours never sit closer than minGap, even inside a group', () => {
     const os = new OrbitalSystem();
     os.rotationAngle = 0;
-    const f1 = new MiniFace('a'); f1.parentSession = 'main';
-    const f2 = new MiniFace('b'); f2.parentSession = 'main';
-    const visible = [f1, f2];
-    // Small semi-major axis (14px) — without pixel fix, 0.35 rad * 14 ≈ 5px < MINI_W (8)
-    const angles = os._calculateGroupedAngles(visible, 14);
-    const a1 = angles.get(f1);
-    const a2 = angles.get(f2);
-    const angularDiff = Math.abs(a2 - a1);
-    const pixelDiff = angularDiff * 14; // approximate arc distance
-    assert.ok(pixelDiff >= 8, `pixel gap ${pixelDiff.toFixed(1)} should be >= MINI_W (8)`);
+    const faces = [];
+    for (let i = 0; i < 5; i++) {
+      const f = new MiniFace('s' + i); f.parentSession = 'main'; f.firstSeen = i;
+      faces.push(f);
+    }
+    const minGap = 1.0; // bigger than INTRA_GROUP_GAP: the cluster must widen
+    const vals = faces.map(f => os._calculateGroupedAngles(faces, minGap).get(f)).sort((x, y) => x - y);
+    for (let i = 1; i < vals.length; i++) assert.ok(vals[i] - vals[i - 1] >= minGap - 1e-9);
+    assert.ok(Math.PI * 2 - (vals[vals.length - 1] - vals[0]) >= minGap - 1e-9, 'wrap-around gap too');
+  });
+
+  test('an impossible minGap degrades to even spacing', () => {
+    const os = new OrbitalSystem();
+    const faces = [0, 1, 2].map(i => { const f = new MiniFace('s' + i); f.firstSeen = i; return f; });
+    const angles = os._calculateGroupedAngles(faces, 5);
+    const vals = faces.map(f => angles.get(f));
+    assert.ok(Math.abs((vals[1] - vals[0]) - Math.PI * 2 / 3) < 1e-9);
+  });
+});
+
+describe('grid.js -- layout invariants across terminal sizes', () => {
+  const { ClaudeFace, fitKeyHints } = require('../face');
+  const { computeOrbit, MINI_W, MINI_H } = require('../grid');
+  const overlap = (a, b) => a.col < b.col + b.w && b.col < a.col + a.w && a.row < b.row + b.h && b.row < a.row + a.h;
+  // Mini-face top-left corners, recognised by the box's top-left glyph.
+  const boxes = (out) => {
+    const re = /\x1b\[(\d+);(\d+)H(?:\x1b\[[^m]*m)*╭/g;
+    const found = [];
+    let m;
+    while ((m = re.exec(out))) found.push({ row: +m[1], col: +m[2], w: MINI_W, h: MINI_H });
+    return found;
+  };
+
+  function withSize(cols, rows, fn) {
+    const oc = process.stdout.columns, or = process.stdout.rows;
+    process.stdout.columns = cols; process.stdout.rows = rows;
+    try { return fn(); } finally { process.stdout.columns = oc; process.stdout.rows = or; }
+  }
+
+  function scene(n) {
+    const face = new ClaudeFace();
+    face.showStats = true; face.accessoriesEnabled = true;
+    const orb = new OrbitalSystem();
+    orb.setMainSession('main');
+    for (let i = 0; i < n; i++) {
+      const f = new MiniFace('s' + i);
+      f.updateFromFile({ state: 'coding', parentSession: i % 2 ? 'main' : undefined, detail: 'edit' });
+      f.firstSeen = i; f.spawning = false;
+      orb.faces.set('s' + i, f);
+    }
+    return { face, orb };
+  }
+
+  test('the orbit depends on the terminal, not on the state, accessory or bubble', () => {
+    for (const [cols, rows] of [[80, 40], [120, 45], [160, 60], [200, 50]]) {
+      withSize(cols, rows, () => {
+        const { face, orb } = scene(3);
+        const seen = new Set();
+        for (const st of ['idle', 'thinking', 'happy', 'error', 'proud', 'waiting']) {
+          face.forceState(st, 'x');
+          for (const bubble of ['', 'a thought that is fairly long']) {
+            face.thoughtText = bubble;
+            face.render();
+            const o = orb.calculateOrbit(cols, rows, face.lastPos);
+            seen.add([o.a, o.b, o.maxSlots, o.cx, o.cy].join());
+          }
+        }
+        assert.strictEqual(seen.size, 1, `${cols}x${rows}: orbit changed with state: ${[...seen].join(' | ')}`);
+      });
+    }
+  });
+
+  test('ring faces never overlap the main face, each other, or the hint row', () => {
+    for (let cols = 60; cols <= 220; cols += 20) {
+      for (let rows = 24; rows <= 64; rows += 8) {
+        withSize(cols, rows, () => {
+          for (const n of [3, 8]) {
+            const { face, orb } = scene(n);
+            face.thoughtText = 'hmm';
+            for (let fr = 0; fr < 120; fr += 1) {
+              face.update(66); orb.update(66);
+              face.render();
+              const lp = face.lastPos;
+              if (orb.calculateOrbit(cols, rows, lp).maxSlots === 0) break; // side panel
+              const ko = lp.keepOut;
+              const main = { row: ko.top, col: ko.left, w: ko.right - ko.left + 1, h: ko.bottom - ko.top + 1 };
+              const pos = boxes(orb.render(cols, rows, lp, null));
+              for (const p of pos) {
+                assert.ok(!overlap(p, main), `${cols}x${rows} n${n} f${fr}: face at ${p.row},${p.col} over main`);
+                assert.ok(p.row + MINI_H - 1 <= rows - 1, `${cols}x${rows}: face on the hint row`);
+                assert.ok(p.col >= 1 && p.col + MINI_W - 1 <= cols, `${cols}x${rows}: face off-screen`);
+              }
+              for (let i = 0; i < pos.length; i++) for (let j = i + 1; j < pos.length; j++) {
+                assert.ok(!overlap(pos[i], pos[j]), `${cols}x${rows} n${n} f${fr}: faces ${i},${j} overlap`);
+              }
+            }
+          }
+        });
+      }
+    }
+  });
+
+  test('ring faces move smoothly: no frame-to-frame teleport while a bubble comes and goes', () => {
+    withSize(140, 50, () => {
+      const { face, orb } = scene(5);
+      let prev = null;
+      for (let fr = 0; fr < 200; fr++) {
+        face.thoughtText = (fr % 20) < 10 ? 'thinking about it' : '';
+        if (fr % 25 === 0) face.forceState(['idle', 'happy', 'error', 'proud'][(fr / 25) % 4], 'x');
+        face.update(66); orb.update(66);
+        face.render();
+        const pos = boxes(orb.render(140, 50, face.lastPos, null));
+        if (prev && prev.length === pos.length) {
+          for (let i = 0; i < pos.length; i++) {
+            const d = Math.abs(pos[i].row - prev[i].row) + Math.abs(pos[i].col - prev[i].col);
+            assert.ok(d <= 3, `frame ${fr}: face ${i} jumped ${d} cells`);
+          }
+        }
+        prev = pos;
+      }
+    });
+  });
+
+  test('computeOrbit refuses a terminal the ring cannot fit around the keep-out', () => {
+    const ko = { top: 3, bottom: 19, left: 4, right: 40 };
+    assert.strictEqual(computeOrbit(50, 24, ko).maxSlots, 0);
+  });
+
+  test('fitKeyHints never exceeds its width and keeps help/quit longest', () => {
+    const full = fitKeyHints(200).map(h => h[0]);
+    assert.deepStrictEqual(full, ['space', 't', 's', 'a', 'o', 'l', 'h', 'q'], 'display order at full width');
+    for (let w = 0; w <= 90; w++) {
+      const kept = fitKeyHints(w);
+      const width = kept.reduce((s, h) => s + h[0].length + 1 + h[1].length, 0) + Math.max(0, kept.length - 1) * 3;
+      assert.ok(width <= w, `width ${w}: hints take ${width}`);
+      if (kept.length) assert.ok(kept.some(h => h[0] === 'h'), `width ${w}: help must be the last to go`);
+    }
+  });
+
+  test('the main face never writes past the last column of the last row', () => {
+    // drawnCells stops at the first colour change; the hint bar changes colour
+    // per key, so walk the whole stream: a cursor move sets the position,
+    // colour codes are skipped, and every other character advances a column.
+    const lastCol = (out, row) => {
+      let r = 0, c = 0, max = 0;
+      const re = /\x1b\[(\d+);(\d+)H|\x1b\[[0-9;?]*[A-Za-z]|([^\x1b])/g;
+      let m;
+      while ((m = re.exec(out))) {
+        if (m[1]) { r = +m[1]; c = +m[2]; } else if (m[3] !== undefined) { if (r === row) max = Math.max(max, c); c++; }
+      }
+      return max;
+    };
+    for (let cols = 38; cols <= 100; cols++) {
+      withSize(cols, 24, () => {
+        const last = lastCol(new ClaudeFace().render(), 24);
+        assert.ok(last <= cols - 1, `${cols} cols: bottom-row write at col ${last} wraps and scrolls the screen`);
+      });
+    }
   });
 });
 

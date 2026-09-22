@@ -2120,28 +2120,22 @@ describe('bug fix regressions', () => {
     assert.ok(src.includes('process.stdout.columns || 80'));
   });
 
-  test('grid.js verticalPadAbove uses dynamic accH when accessories active', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'grid.js'), 'utf8');
-    assert.ok(src.includes('accessoriesActive ? (accH + 7)'));
-  });
-
-  test('grid.js connection exclusion uses mainTop - 8', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'grid.js'), 'utf8');
-    assert.ok(src.includes('mainTop - 8'));
-  });
-
   test('grid.js spawn scale starts at 0.3 minimum', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'grid.js'), 'utf8');
     assert.ok(src.includes('Math.max(0.3,'));
   });
 
-  test('renderer.js wraps face.render() in try-catch', () => {
+  test('source: renderer.js wraps face.render() in try-catch and layers it over the ring', () => {
+    // The render loop is a closure inside main(); there is no seam to drive it.
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-    // Should have try { out = face.render() } catch
-    assert.ok(src.includes('out += face.render()'));
-    const renderIdx = src.indexOf('out += face.render()');
+    const renderIdx = src.indexOf('faceOut = face.render()');
+    assert.ok(renderIdx > 0, 'face output is captured on its own');
     const preceding = src.slice(Math.max(0, renderIdx - 30), renderIdx);
     assert.ok(preceding.includes('try'), 'face.render() should be inside a try block');
+    // The main face is appended AFTER the orbitals, so it draws on top of them.
+    const orbIdx = src.indexOf('out += orbital.render(', renderIdx);
+    const appendIdx = src.indexOf('out += faceOut', renderIdx);
+    assert.ok(orbIdx > 0 && appendIdx > orbIdx, 'face output must follow the orbital output');
   });
 
   test('update-state.js SessionStart writes idle (not waiting)', () => {

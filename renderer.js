@@ -787,16 +787,21 @@ function runUnifiedMode() {
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
 
-    let out = '';
+    // The ring is drawn first so the main face layers over it: an orbital
+    // drifting behind a thought bubble is occluded instead of being shoved
+    // out of the way (that shove was a visible teleport every time).
+    let faceOut = '';
     try {
-      out += face.render();
+      faceOut = face.render();
     } catch {}
+    let out = '';
     if (!minimal && face.showOrbitals && face.lastPos) {
       const paletteThemes = (PALETTES[face.paletteIndex] || PALETTES[0]).themes;
       try {
         out += orbital.render(cols, rows, face.lastPos, paletteThemes);
       } catch {}
     }
+    out += faceOut;
 
     // Apply transition dim to face output
     if (swapTransition.active) {

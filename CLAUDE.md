@@ -48,7 +48,7 @@ state-machine.js Pure logic — tool→state mapping (multi-editor), error detec
 shared.js        Shared constants — paths, face state sets, prefs, atomic JSON writes, spawn lock, stats lock, shell quoting, buildRendererCommands
 launch.js        Platform-specific launcher — opens renderer + starts editor (--editor flag)
 setup.js         Multi-editor setup — installs hooks (setup.js [claude|codex|codex-notify|opencode|openclaw|uninstall] [--autolaunch]; opencode also takes --install/--uninstall). `uninstall` removes both the Claude Code hooks and the Codex hooks file. setupClaude/uninstallClaude, setupCodex/uninstallCodex/buildCodexHooks, setupOpenCode/uninstallOpenCode and buildFaceHooks are importable
-test.js          Test runner — isolates HOME, loads 16 test files from tests/ (2101 tests); --quiet, name filters
+test.js          Test runner — isolates HOME, loads 16 test files from tests/ (2106 tests); --quiet, name filters
 demo.js          Demo script — cycles through all face states in single-face mode; writes a `demo-main` session file (with `lastPromptAt`) so the renderer's main-session policy picks it, and unlinks it on exit and SIGINT
 grid-demo.js     Orbital demo — simulates subagent sessions orbiting the main face; same `demo-main` session file plus its children
 code-crumb.sh   Unix shell wrapper for launch.js
@@ -253,10 +253,23 @@ The footer says `⏎ pin` / `⏎ unpin` on the main row (by its pin state) and `
 
 Orbital faces that share a group key (`teamName || parentSession || sessionId`) are visually clustered through four layers:
 
-1. **Cluster positioning** — group members occupy adjacent angular sectors on the ellipse (`INTRA_GROUP_GAP = 0.35 rad`) with larger gaps between groups (`INTER_GROUP_GAP = 0.15 rad`). Pixel-aware minimum spacing ensures faces don't overlap even on small ellipses.
+1. **Cluster positioning** — group members sit `INTRA_GROUP_GAP` (0.35) apart and the groups share the rest of the circle evenly (all-singletons is exactly even). Every angle is a **box-arc angle**, not a geometric one: see Orbit Geometry below. No neighbour pair is ever closer than the orbit's `minGap`, and if `minGap` cannot be honoured the spacing degrades to even.
 2. **Group tethers** — dim dashed `·` lines chain sequential siblings (A→B, B→C) at `TETHER_BRIGHTNESS = 0.15`; team groups use the team accent color. Tether dots skip ALL face bounding boxes (not just endpoints). Spawning faces are excluded from tether segments.
 3. **Floating group labels** — short label text positioned below each multi-member cluster at `GROUP_LABEL_BRIGHTNESS = 0.45`. Team groups show the team name; non-team groups select via priority chain: shared git branch > shared cwd basename > first member's taskDescription > first member's face label (see Orbital Label Priority). Spawning faces are excluded from label extent calculation. Labels skip the main face exclusion zone.
-4. **Overlap resolver** — post-position iterative nudge pass (max 3 iterations) that detects bounding box collisions between orbital faces and pushes them apart, re-clamping to terminal bounds.
+4. **Overlap resolver** — post-position iterative nudge pass (max 3 iterations) that detects bounding box collisions between orbital faces and pushes them apart, re-clamping to terminal bounds. With box-aware spacing it is a safety net that should never fire; when it did fire every frame it was the source of the ring's jitter.
+
+#### Orbit Geometry
+
+The layout used to "glitch around" at many window sizes. A layout probe (virtual terminal, 600 sizes × 3 face counts × 240 frames) found four independent causes, all fixed:
+
+- **The key-hint bar overflowed the last row.** At ~72 columns it wrapped on any narrower window, and a wrap on the bottom row scrolls the whole screen up a line on every changed frame. `fitKeyHints(width)` (face.js, pure) now fits it to `cols - 1`, dropping hints lowest-priority first (`t` theme goes first, `h` help last).
+- **The orbit was sized from the current accessory.** Every state change could flip the same window between the orbit and the side panel. ClaudeFace now publishes `lastPos.keepOut`, a **worst-case** footprint (tallest accessory via `MAX_ACCESSORY_H`, the bubble's 4 rows above, `MAX_DETAIL_W` 36 columns, the stats rows below) that changes only with the terminal size or the `a`/`s` toggles. `keepOutOf(mainPos)` derives one from a bare box for older callers.
+- **The thought-bubble nudge teleported faces.** It is gone. The renderer now draws the ring **first** and the main face over it, so an orbital drifting behind a bubble is occluded instead of shoved (and the help overlay now covers the ring, which it did not before). The side panel's right column comes from the keep-out, not the bubble, for the same reason.
+- **Faces were spaced by angle, not by box size.** An 8×7 box needs 9 columns of travel along the top but only 8 rows along the sides, so even angles collided near 0 and π and the overlap resolver fought it every frame.
+
+`computeOrbit(cols, rows, keepOut)` (grid.js, pure; `calculateOrbit` caches it per size + keep-out) centres the ellipse on the keep-out and requires the expanded rectangle's corner to lie inside it, which guarantees that no box on the ellipse touches the keep-out. It reserves the last row for the hint bar. It then builds a 720-step lookup of cumulative **box-arc length** (each step costs `max(|dx|/(MINI_W+1), |dy|/(MINI_H+1))`), from which it gets `maxSlots = floor(perimeter / ORBIT_SPACING)` (capped at `MAX_ORBITALS`), `minGap`, and `thetaAt(u)`. Rotation and every orbital offset live in that uniform `u`, so a gap of `minGap` is a real on-screen gap at every rotation.
+
+The trade-off is that the ring now needs space to genuinely fit: roughly 80×60 or 114×50 with accessories on, and 78×60 or 104×50 with them off. Smaller windows get the side panel, which is stable. The old code "fit" at 60×45 because it let orbitals sit on the stats rows and accessories. `tests/test-grid.js › layout invariants` sweeps sizes and asserts no overlap with the keep-out, with each other, or with the hint row. It also checks that no frame-to-frame jump exceeds 3 cells, that the orbit is independent of state, accessory and bubble, and that nothing is written to the last cell of the last row.
 
 Singleton groups (one member) get no tethers or labels. When all faces are ungrouped, spacing degrades gracefully to near-even distribution identical to pre-grouping behavior.
 
@@ -374,6 +387,8 @@ To develop: run `npm run demo` in one terminal and `npm start` in another. For o
 | `ORPHAN_TIMEOUT` | 90000ms | grid.js (fallback staleness for sessions without PID) |
 | `CHILD_ORPHAN_TIMEOUT` | 900000ms (15 min) | grid.js (staleness for a live child orbital — a subagent emits no hooks during a model turn; earned only while the parent's file is fresh) |
 | `MAX_ORBITALS` | 8 | grid.js (max visible orbital faces) |
+| `ORBIT_SPACING` | 1.2 | grid.js (neighbour gap in box-lengths; margin for chord < arc) |
+| `MAX_DETAIL_W` | 36 | face.js (widest detail line; right edge of the keep-out) |
 | `MIN_SESSION_LIST_ROWS` | 12 | grid.js (below this the session list overlay draws nothing) |
 | `SESSION_LIST_ENTRY_ROWS` | 4 | grid.js (state row, path row, detail row, info row) |
 | `rotationSpeed` (instance field) | 0.007 rad/frame | grid.js `OrbitalSystem` constructor (~1 revolution per 60s) |
@@ -409,7 +424,7 @@ Renderer CLI flags: `--minimal` (face + status only, no chrome, only `space`/`q`
 
 Run `npm test` (or `node test.js [--quiet] [filter...]`, e.g. `node test.js grid face`). Before loading anything the runner redirects `HOME`, `USERPROFILE`, and `CODE_CRUMB_STATE` to a throwaway directory (removed on exit), so the suite never touches the real `~/.code-crumb*` files or fights a running renderer — subprocess tests inherit the same env. Each test file gets its own counters from `tests/_harness.js` (`createSuite()`); `test.async` (or a test that returns a promise) is awaited before the file is counted, so async assertions can actually fail. The runner prints per-file counts and total duration and keeps going if one file fails to load. CI (`.github/workflows/test.yml`) runs `node --check` over `*.js` and `*.mjs`, the trailing-whitespace gate, and the suite on ubuntu/windows/macos × node 18/20/22.
 
-The suite is **2101 tests across 16 files**: test-shared 42, test-state-machine 535, test-themes 72, test-animations 42, test-particles 49, test-face 274, test-grid 317, test-accessories 24, test-teams 39, test-launch 45, test-adapters 249, test-transition 28, test-emotions 143, test-platform 97, test-subagents 67, test-attention 78. A few per-file counts shift by one or two across platforms (some tests are platform-conditional), so treat the total as the figure to check. One test, `test-shared.js › getIsWorktree`, fails inside a git worktree by construction — `.git` is a file there — which is environmental, not a regression. **`test-adapters.js` dominates wall time** — it spawns real `update-state.js` and adapter subprocesses, so a full run is mostly waiting on node cold starts; use `node test.js <filter>` while iterating on anything else. Treat the count as tests, not as coverage: a round of behavioural conversion collapsed many one-line source greps into fewer, multi-assertion tests, which lowers the number while raising the assertions behind it.
+The suite is **2106 tests across 16 files**: test-shared 42, test-state-machine 535, test-themes 72, test-animations 42, test-particles 49, test-face 274, test-grid 324, test-accessories 24, test-teams 39, test-launch 45, test-adapters 247, test-transition 28, test-emotions 143, test-platform 97, test-subagents 67, test-attention 78. A few per-file counts shift by one or two across platforms (some tests are platform-conditional), so treat the total as the figure to check. One test, `test-shared.js › getIsWorktree`, fails inside a git worktree by construction — `.git` is a file there — which is environmental, not a regression. **`test-adapters.js` dominates wall time** — it spawns real `update-state.js` and adapter subprocesses, so a full run is mostly waiting on node cold starts; use `node test.js <filter>` while iterating on anything else. Treat the count as tests, not as coverage: a round of behavioural conversion collapsed many one-line source greps into fewer, multi-assertion tests, which lowers the number while raising the assertions behind it.
 
 Coverage by file:
 
@@ -447,7 +462,7 @@ Both demos write a `demo-main` **session** file (stamped with `lastPromptAt`), b
 
 - **Hook performance**: update-state.js must complete in ~50ms — it runs synchronously in the editor hook pipeline. The stats lock costs ~0.3ms median uncontended against that budget, and a failed acquire proceeds unlocked rather than waiting.
 - **State file size**: a realistic state write is ~750–950 bytes (`frequentFiles`, `cwd`, `gitBranch` and the stats fields account for most of it); keep it around 1 KB and never embed tool output
-- **Terminal minimum size**: Main face requires 38x20 chars (`MIN_COLS_SINGLE`/`MIN_ROWS_SINGLE` in face.js; below that a "resize me" fallback is drawn and `lastPos` is cleared). Orbitals have no fixed minimum: `calculateOrbit` in grid.js derives the ellipse from the space around the main face and yields `maxSlots: 0` when nothing fits, so they degrade gracefully
+- **Terminal minimum size**: Main face requires 38x20 chars (`MIN_COLS_SINGLE`/`MIN_ROWS_SINGLE` in face.js; below that a "resize me" fallback is drawn and `lastPos` is cleared). Orbitals have no fixed minimum: `computeOrbit` in grid.js derives the ellipse from the space around the main face's worst-case keep-out and yields `maxSlots: 0` when nothing fits, which falls back to the side panel (see Orbit Geometry). Nothing may be written to the last cell of the last row — a wrap there scrolls the screen
 - **No network**: All IPC is file-based, no sockets or HTTP
 - **Graceful degradation**: Renderer handles terminal resize, missing state files, and stale sessions without crashing
 

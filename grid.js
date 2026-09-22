@@ -739,6 +739,87 @@ class MiniFace {
 const MINI_W = BOX_W;       // 8 cols visible width of mini face
 const MINI_H = CELL_H;      // 7 rows (box + label + status)
 const MAX_ORBITALS = 8;      // Beyond this, labels become unreadable
+const ORBIT_SPACING = 1.2;   // neighbour gap in box-lengths (margin for chord < arc)
+const ORBIT_LUT_STEPS = 720;
+const TAU = Math.PI * 2;
+
+// The rectangle the ring must stay clear of. ClaudeFace publishes a worst-case
+// `keepOut`; a bare mainPos (older callers, tests) gets one derived from the box.
+function keepOutOf(mainPos) {
+  if (mainPos.keepOut) return mainPos.keepOut;
+  const above = mainPos.accessoriesActive ? (mainPos.accessoryHeight || 0) : 0;
+  return {
+    top: mainPos.row - Math.max(4, above),
+    bottom: mainPos.row + mainPos.h + 4,
+    left: mainPos.col - 1,
+    right: mainPos.col + mainPos.w,
+  };
+}
+
+// Pure: the orbit ellipse for a terminal and a keep-out rectangle.
+//
+// The ellipse is centred on the keep-out and sized so that a mini-face's box
+// can sit anywhere on it without touching the keep-out: every box centre must
+// satisfy |dx| >= ex or |dy| >= ey, which holds on the whole ellipse exactly
+// when the expanded rectangle's corner lies inside it. The bottom row is left
+// to the key-hint bar.
+//
+// Faces are spaced along the ellipse by BOX length, not by angle: an 8x7 box
+// needs 9 columns of travel along the top but only 8 rows along the sides, so
+// even angular spacing let neighbours collide near 0 and PI, and the overlap
+// resolver then shoved them around frame to frame. `thetaAt(u)` maps a
+// uniform "box-arc angle" u onto the ellipse's own angle; rotation and every
+// offset live in u, so a gap of `minGap` in u is a real gap on screen at any
+// rotation.
+function computeOrbit(cols, rows, ko) {
+  const none = { a: 0, b: 0, maxSlots: 0, cx: 0, cy: 0, minGap: 0, perimeter: 0, thetaAt: u => u };
+  const cx = (ko.left + ko.right) / 2;
+  const cy = (ko.top + ko.bottom) / 2;
+  const ex = (ko.right - ko.left) / 2 + MINI_W / 2 + 1;
+  const ey = (ko.bottom - ko.top) / 2 + MINI_H / 2 + 1;
+  const maxA = Math.floor(Math.min(cx - MINI_W / 2 - 1, cols - cx - MINI_W / 2));
+  const maxB = Math.floor(Math.min(cy - MINI_H / 2 - 1, rows - 1 - cy - MINI_H / 2));
+  if (maxA <= ex || maxB <= ey) return none;
+
+  let a = 0, b = 0;
+  const prefA = Math.max(Math.ceil(ex) + 1, Math.floor(cols * 0.35));
+  for (let tryA = Math.min(maxA, prefA); tryA <= maxA; tryA++) {
+    if (tryA <= ex) continue;
+    const needB = ey / Math.sqrt(1 - (ex / tryA) ** 2);
+    if (needB <= maxB) {
+      a = tryA;
+      b = Math.min(maxB, Math.max(Math.ceil(needB), Math.floor(rows * 0.3)));
+      break;
+    }
+  }
+  if (!a) return none;
+
+  // Cumulative box-arc length: a step's cost is how far it moves in box
+  // widths or box heights, whichever is larger (boxes clear on either axis).
+  const cum = new Float64Array(ORBIT_LUT_STEPS + 1);
+  const dt = TAU / ORBIT_LUT_STEPS;
+  for (let i = 0; i < ORBIT_LUT_STEPS; i++) {
+    const t = (i + 0.5) * dt;
+    cum[i + 1] = cum[i] + Math.max(
+      Math.abs(a * Math.sin(t)) / (MINI_W + 1),
+      Math.abs(b * Math.cos(t)) / (MINI_H + 1)) * dt;
+  }
+  const perimeter = cum[ORBIT_LUT_STEPS];
+  const maxSlots = Math.min(MAX_ORBITALS, Math.floor(perimeter / ORBIT_SPACING));
+  if (maxSlots < 1) return none;
+
+  const thetaAt = (u) => {
+    const s = ((u % TAU) + TAU) % TAU / TAU * perimeter;
+    let lo = 0, hi = ORBIT_LUT_STEPS;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (cum[mid] <= s) lo = mid; else hi = mid;
+    }
+    const span = cum[lo + 1] - cum[lo];
+    return (lo + (span > 0 ? (s - cum[lo]) / span : 0)) * dt;
+  };
+  return { a, b, maxSlots, cx, cy, minGap: TAU * ORBIT_SPACING / perimeter, perimeter, thetaAt };
+}
 
 class OrbitalSystem {
   constructor() {
@@ -1179,38 +1260,35 @@ class OrbitalSystem {
     return groups;
   }
 
-  _calculateGroupedAngles(visible, semiMajorA) {
+  // Offsets in the orbit's box-arc angle (see computeOrbit). `minGap` is the
+  // smallest separation that keeps two neighbouring boxes apart; members of a
+  // group sit INTRA_GROUP_GAP apart (never closer than minGap) and the groups
+  // share what is left of the circle evenly, so all-singletons is exactly even.
+  _calculateGroupedAngles(visible, minGap = INTER_GROUP_GAP) {
     const n = visible.length;
     if (n === 0) return new Map();
     if (n === 1) return new Map([[visible[0], this.rotationAngle]]);
 
     const groups = this._buildGroups(visible);
-
-    // Weight per group: multi-member groups get more angular space but cluster tighter
-    let totalWeight = 0;
-    for (const g of groups) {
-      g.weight = 1.0 + 0.4 * Math.max(0, g.members.length - 1);
-      totalWeight += g.weight;
+    const k = groups.length;
+    const inner = n - k; // neighbour pairs inside a group
+    let intra = Math.max(minGap, INTRA_GROUP_GAP);
+    let inter;
+    if (n * minGap >= TAU) {
+      intra = inter = TAU / n; // cannot honour minGap: best effort is even
+    } else {
+      // Squeeze clusters first; never below minGap, never starving the gaps.
+      if (inner > 0 && inner * intra + k * minGap > TAU) {
+        intra = Math.max(minGap, (TAU - k * minGap) / inner);
+      }
+      inter = (TAU - inner * intra) / k;
     }
-
-    const totalGaps = groups.length * INTER_GROUP_GAP;
-    const usable = Math.PI * 2 - totalGaps;
-
-    // Pixel-aware minimum: ensure faces don't overlap even on small ellipses
-    const minPixelGap = semiMajorA > 0 ? (MINI_W + 1) / semiMajorA : INTRA_GROUP_GAP;
 
     const angles = new Map();
     let cur = this.rotationAngle;
-
     for (const g of groups) {
-      const sector = (g.weight / totalWeight) * usable;
-      const spacing = Math.max(minPixelGap, Math.min(INTRA_GROUP_GAP, sector / g.members.length));
-      const start = cur + (sector - spacing * (g.members.length - 1)) / 2;
-
-      for (let i = 0; i < g.members.length; i++) {
-        angles.set(g.members[i], start + i * spacing);
-      }
-      cur += sector + INTER_GROUP_GAP;
+      for (let i = 0; i < g.members.length; i++) angles.set(g.members[i], cur + i * intra);
+      cur += (g.members.length - 1) * intra + inter;
     }
     return angles;
   }
@@ -1257,43 +1335,24 @@ class OrbitalSystem {
     }
   }
 
+  // Cached per (terminal size, keep-out): the keep-out only moves on a resize
+  // or a toggle, so this is computed a handful of times per session.
   calculateOrbit(cols, rows, mainPos) {
-    // Minimum ellipse semi-axes: must clear the main face box + decorations
-    // Vertical padding above: accessories/thought bubble need more clearance than bare face
-    const accH = mainPos.accessoryHeight || 0;
-    const verticalPadAbove = mainPos.accessoriesActive ? (accH + 7) : (mainPos.bubble ? 4 : 2);
-    // Vertical padding below: stats area extends well past the face box bottom
-    // (indicators +8, status +9, detail +10, project ctx +11, streak +12, timeline +13, sparkline +14)
-    const STATS_ROWS_BELOW = 7;
-    const verticalPad = Math.max(verticalPadAbove, STATS_ROWS_BELOW);
-    const minA = Math.floor(mainPos.w / 2) + Math.floor(MINI_W / 2) + 3;
-    const minB = Math.floor(mainPos.h / 2) + Math.floor(MINI_H / 2) + verticalPad;
+    const ko = keepOutOf(mainPos);
+    const key = `${cols},${rows},${ko.top},${ko.bottom},${ko.left},${ko.right}`;
+    if (this._orbitCache && this._orbitCache.key === key) return this._orbitCache.orbit;
+    const orbit = computeOrbit(cols, rows, ko);
+    this._orbitCache = { key, orbit };
+    return orbit;
+  }
 
-    // Maximum: constrained by terminal edges from main face center
-    const maxA = Math.min(
-      mainPos.centerX - Math.floor(MINI_W / 2) - 1,
-      cols - mainPos.centerX - Math.floor(MINI_W / 2)
-    );
-    const maxB = Math.min(
-      mainPos.centerY - Math.floor(MINI_H / 2) - 1,
-      rows - mainPos.centerY - Math.floor(MINI_H / 2) - 1
-    );
-
-    // Terminal too small for orbitals (math-based check only)
-    if (maxA < minA || maxB < minB) {
-      return { a: 0, b: 0, maxSlots: 0 };
-    }
-
-    // Use the larger available space, clamped to minimums
-    const a = Math.min(maxA, Math.max(minA, Math.floor(cols * 0.35)));
-    const b = Math.min(maxB, Math.max(minB, Math.floor(rows * 0.3)));
-
-    // Max faces that fit without overlapping: approximate by angular spacing
-    // Each face needs ~MINI_W cols of clearance at the widest point of the ellipse
-    const circumference = Math.PI * (3 * (a + b) - Math.sqrt((3 * a + b) * (a + 3 * b)));
-    const maxSlots = Math.min(MAX_ORBITALS, Math.max(1, Math.floor(circumference / (MINI_W + 2))));
-
-    return { a, b, maxSlots };
+  // Is (row, col) inside the main face's footprint (or its current bubble)?
+  // Connection dots, tethers and group labels all skip it.
+  _inMainZone(mainPos, row, col) {
+    const ko = keepOutOf(mainPos);
+    if (col >= ko.left - 1 && col <= ko.right + 1 && row >= ko.top - 1 && row <= ko.bottom + 1) return true;
+    const bub = mainPos.bubble;
+    return !!bub && col >= bub.col - 1 && col <= bub.col + bub.w + 1 && row >= bub.row - 1 && row <= bub.row + bub.h;
   }
 
   _renderConnections(mainPos, positions, accentColor) {
@@ -1315,24 +1374,13 @@ class OrbitalSystem {
       const steps = Math.max(Math.abs(dx), Math.abs(dy));
       if (steps < 4) continue;
 
-      // Skip points inside main face box or inside orbital box
-      const mainLeft = mainPos.col;
-      const mainRight = mainPos.col + mainPos.w;
-      const mainTop = mainPos.row;
-      const mainBot = mainPos.row + mainPos.h;
-
       for (let s = 1; s < steps - 1; s++) {
         const t = s / steps;
         const col = Math.round(mainPos.centerX + dx * t);
         const row = Math.round(mainPos.centerY + dy * t);
 
-        // Skip if inside main face area (extended for thought bubbles,
-        // accessories above, and stats/indicators below — stats extend ~7 rows past face box)
-        const rightExclude = mainPos.bubble
-            ? mainPos.bubble.col + mainPos.bubble.w + 2
-            : mainRight + 2;
-        if (col >= mainLeft - 2 && col <= rightExclude &&
-            row >= mainTop - 8 && row <= mainBot + 7) continue;
+        // Skip the main face's footprint (accessories, bubble, stats rows)
+        if (this._inMainZone(mainPos, row, col)) continue;
 
         // Skip if inside ANY orbital face box
         let hitFace = false;
@@ -1418,15 +1466,7 @@ class OrbitalSystem {
           if (insideFace) continue;
 
           // Skip if inside main face area
-          const mainLeft = mainPos.col;
-          const mainRight = mainPos.col + mainPos.w;
-          const mainTop = mainPos.row;
-          const mainBot = mainPos.row + mainPos.h;
-          const rightExclude = mainPos.bubble
-            ? mainPos.bubble.col + mainPos.bubble.w + 2
-            : mainRight + 2;
-          if (col >= mainLeft - 2 && col <= rightExclude &&
-              row >= mainTop - 8 && row <= mainBot + 7) continue;
+          if (this._inMainZone(mainPos, row, col)) continue;
 
           out += `\x1b[${row};${col}H${tetherColor}\u00b7${r}`;
         }
@@ -1480,12 +1520,6 @@ class OrbitalSystem {
       groupMap.get(key).push(pos);
     }
 
-    // Main face exclusion zone (same as tethers)
-    const mainRight = mainPos ? mainPos.col + mainPos.w : 0;
-    const rightExclude = (mainPos && mainPos.bubble)
-      ? mainPos.bubble.col + mainPos.bubble.w + 2
-      : mainRight + 2;
-
     for (const [key, members] of groupMap) {
       if (members.length < 2) continue; // No label for singletons
 
@@ -1514,9 +1548,9 @@ class OrbitalSystem {
 
       // Skip if label overlaps main face area
       if (mainPos) {
-        const labelRight = labelCol + label.length;
-        if (labelCol <= rightExclude && labelRight >= mainPos.col - 2 &&
-            labelRow >= mainPos.row - 8 && labelRow <= mainPos.row + mainPos.h + 7) continue;
+        let hit = false;
+        for (let c = labelCol; c < labelCol + label.length && !hit; c++) hit = this._inMainZone(mainPos, labelRow, c);
+        if (hit) continue;
       }
 
       // Render with dimmed color
@@ -1541,11 +1575,12 @@ class OrbitalSystem {
     const sorted = this.getSortedFaces();
     if (sorted.length === 0) return '';
 
+    // Columns come from the stable keep-out, never the transient bubble: a
+    // column that stepped sideways whenever a thought appeared was a glitch.
     const SIDE_PAD = 2;
-    const leftCol = mainPos.col - MINI_W - SIDE_PAD;
-    const faceRight = mainPos.col + mainPos.w;
-    const bubbleRight = mainPos.bubble ? mainPos.bubble.col + mainPos.bubble.w : faceRight;
-    const rightCol = Math.max(faceRight, bubbleRight) + SIDE_PAD;
+    const ko = keepOutOf(mainPos);
+    const leftCol = ko.left + 1 - MINI_W - SIDE_PAD;
+    const rightCol = ko.right + SIDE_PAD;
     const canLeft = leftCol >= 1;
     const canRight = rightCol + MINI_W <= cols;
 
@@ -1614,7 +1649,8 @@ class OrbitalSystem {
 
     if (this.faces.size === 0) return buf;
 
-    const { a, b, maxSlots } = this.calculateOrbit(cols, rows, mainPos);
+    const orbit = this.calculateOrbit(cols, rows, mainPos);
+    const { a, b, maxSlots } = orbit;
 
     // Terminal too small for orbits — use side panel layout
     if (maxSlots === 0) {
@@ -1628,7 +1664,7 @@ class OrbitalSystem {
     const n = visible.length;
 
     // Calculate grouped orbital positions (clustered by team/parent)
-    const angleMap = this._calculateGroupedAngles(visible, a);
+    const angleMap = this._calculateGroupedAngles(visible, orbit.minGap);
     // Feed target offsets for smooth lerping
     for (const [face, absAngle] of angleMap) {
       face.setTargetOffset(absAngle - this.rotationAngle);
@@ -1636,40 +1672,21 @@ class OrbitalSystem {
     const positions = [];
     for (let i = 0; i < n; i++) {
       const face = visible[i];
-      const angle = (face.orbitalOffset !== null)
+      const u = (face.orbitalOffset !== null)
         ? this.rotationAngle + face.orbitalOffset
-        : (angleMap.get(face) || (Math.PI * 2 * i / n) + this.rotationAngle);
+        : (angleMap.get(face) || (TAU * i / n) + this.rotationAngle);
+      const angle = orbit.thetaAt(u);
       // Startup spawn scale for this face (0 -> 1)
       const scale = (face.spawning ? Math.max(0.3, face.spawnProgress / face.SPAWN_MS) : 1);
-      const col = Math.round(mainPos.centerX + Math.cos(angle) * a * scale - MINI_W / 2);
-      // Shift orbit center down to account for stats/indicator rows below the face box,
-      // plus extra when accessories are active above the face
-      const statsShift = 3;  // half of stats area height (~7 rows / 2, rounded)
-      const verticalShift = statsShift + (mainPos.accessoriesActive ? 2 : 0);
-      const row = Math.round((mainPos.centerY + verticalShift) + Math.sin(angle) * b * scale - MINI_H / 2);
+      const col = Math.round(orbit.cx + Math.cos(angle) * a * scale - MINI_W / 2);
+      const row = Math.round(orbit.cy + Math.sin(angle) * b * scale - MINI_H / 2);
 
-      // Clamp to terminal bounds
-      let clampedCol = Math.max(1, Math.min(cols - MINI_W, col));
-      let clampedRow = Math.max(1, Math.min(rows - MINI_H, row));
-
-      // Nudge away from thought bubble if overlapping
-      if (mainPos.bubble) {
-        const bub = mainPos.bubble;
-        const pad = 1;
-        const bubHit = () =>
-          clampedCol < bub.col + bub.w + pad && clampedCol + MINI_W > bub.col - pad &&
-          clampedRow < bub.row + bub.h + pad && clampedRow + MINI_H > bub.row - pad;
-        if (bubHit()) {
-          const nCol = Math.round(mainPos.centerX + Math.cos(angle) * (a + 6) - MINI_W / 2);
-          const nRow = Math.round((mainPos.centerY + verticalShift) + Math.sin(angle) * (b + 3) - MINI_H / 2);
-          clampedCol = Math.max(1, Math.min(cols - MINI_W, nCol));
-          clampedRow = Math.max(1, Math.min(rows - MINI_H, nRow));
-          // If still overlapping (wide bubble + narrow terminal), push below the bubble
-          if (bubHit()) {
-            clampedRow = Math.min(rows - MINI_H, bub.row + bub.h + pad + 1);
-          }
-        }
-      }
+      // Clamp to terminal bounds (the last row is the key-hint bar's). No
+      // thought-bubble nudge: the ellipse already clears the rows a bubble
+      // can use, and the renderer draws the main face on top of the ring, so
+      // a face drifting behind the bubble's tail is layered, not teleported.
+      const clampedCol = Math.max(1, Math.min(cols - MINI_W, col));
+      const clampedRow = Math.max(1, Math.min(rows - MINI_H, row));
 
       positions.push({ col: clampedCol, row: clampedRow, face: visible[i] });
     }
@@ -1993,4 +2010,5 @@ module.exports = {
   STALE_MS, ORPHAN_TIMEOUT, CHILD_ORPHAN_TIMEOUT, REPOSITION_MS, SLACK_MS, PID_PROTECT_CAP_MS, PID_CACHE_TTL_MS,
   INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, GROUP_LABEL_BRIGHTNESS,
   CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS,
+  computeOrbit, keepOutOf, MINI_W, MINI_H, ORBIT_SPACING,
 };

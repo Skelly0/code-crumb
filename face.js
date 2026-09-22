@@ -16,7 +16,7 @@ const {
 const path = require('path');
 const { eyes, mouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
-const { getAccessory } = require('./accessories');
+const { getAccessory, ACCESSORIES } = require('./accessories');
 
 // Active tool states (real work happening NOW), completion (reward) states,
 // and the states work may interrupt -- shared with grid.js and renderer.js.
@@ -94,6 +94,41 @@ const MIN_ROWS_SINGLE = 20;
 // this only clips an unrecognised raw id, which prettyModelName passes
 // through verbatim by design.
 const MAX_STATUS_NAME = 16;
+
+// -- Layout ----------------------------------------------------------
+// The main face's footprint relative to (startRow, startCol). The orbital
+// layout avoids this whole rectangle, and it is deliberately the WORST case
+// -- the tallest accessory, a thought bubble above, the widest detail line --
+// so it depends only on the terminal size and the toggles, never on the
+// current state. Sizing the orbit from the current accessory made the ring
+// flip between orbit and side-panel layouts on every state change.
+const MAX_DETAIL_W = 36;
+const BUBBLE_ROWS_ABOVE = 4;
+const STATS_ROWS_BELOW = 14;   // sparkline row (+14); +11 (project row) without stats
+const MAX_ACCESSORY_H = Math.max(0, ...Object.values(ACCESSORIES).map(a => a.lines.length));
+
+// Key hints, highest priority first: on a narrow terminal the lowest drop.
+// Written past the last column of the LAST row, a hint wraps and scrolls the
+// whole screen up a line, so the bar is always fitted to cols - 1.
+const KEY_HINTS = [
+  ['h', 'help', 7], ['q', 'quit', 8], ['space', 'pet', 0], ['l', 'list', 6],
+  ['o', 'subs', 5], ['s', 'stats', 3], ['a', 'accs', 4], ['t', 'theme', 1],
+];
+
+// Pure: which hints fit in `width` visible columns, in display order.
+function fitKeyHints(width) {
+  const sepW = 3; // ' · '
+  const keep = [];
+  let used = 0;
+  for (const h of KEY_HINTS) {
+    const w = h[0].length + 1 + h[1].length + (keep.length ? sepW : 0);
+    if (used + w > width) break;
+    keep.push(h);
+    used += w;
+  }
+  return keep.sort((x, y) => x[2] - y[2]);
+}
+
 const PET_SPAM_WINDOW = 2000;      // 2s window to detect rapid petting
 const PET_SPAM_THRESHOLD = 8;      // pets in window to trigger easter egg
 const PET_SPAM_DURATION = 45;      // ~3s at 15fps
@@ -1043,6 +1078,14 @@ class ClaudeFace {
       bubble: null,
       accessoriesActive: !!activeAccessory,
       accessoryHeight: activeAccessory ? activeAccessory.lines.length : 0,
+      // Worst-case footprint (see Layout at the top): stable across states,
+      // so the orbit around it only changes when the terminal or a toggle does.
+      keepOut: {
+        top: Math.max(1, startRow - Math.max(BUBBLE_ROWS_ABOVE, this.accessoriesEnabled ? MAX_ACCESSORY_H : 0)),
+        bottom: Math.min(rows - 1, startRow + (this.showStats ? STATS_ROWS_BELOW : 11)),
+        left: startCol - 1,
+        right: startCol + MAX_DETAIL_W,
+      },
     };
 
     const fc = ansi.fg(...borderColor);
@@ -1139,7 +1182,7 @@ class ClaudeFace {
     buf += `${statusColor}${' '.repeat(Math.max(0, statusPad))}${statusText}${r}`;
 
     // Detail line (escalated for a tool that has been running a long time)
-    const maxDetailWidth = Math.min(Math.max(10, cols - startCol - 8), 36);
+    const maxDetailWidth = Math.min(Math.max(10, cols - startCol - 8), MAX_DETAIL_W);
     const detailText = this.displayDetail(maxDetailWidth);
     if (detailText) {
       const detailPad = Math.floor((faceW - detailText.length) / 2);
@@ -1346,12 +1389,13 @@ class ClaudeFace {
     if (!this.minimalMode) {
       const dc = ansi.fg(...dimColor(theme.label, 0.55));
       const kc = ansi.fg(...dimColor(theme.accent, 0.6));
-      const sep = `${dc}\u00b7${r}`;
-      const hint = `${kc}space${dc} pet ${sep} ${kc}t${dc} theme ${sep} ${kc}s${dc} stats ${sep} ${kc}a${dc} accs ${sep} ${kc}o${dc} subs ${sep} ${kc}l${dc} list ${sep} ${kc}h${dc} help ${sep} ${kc}q${dc} quit${r}`;
+      const sep = ` ${dc}\u00b7${r} `;
+      const fitted = fitKeyHints(cols - 1);
+      const hint = fitted.map(([k, label]) => `${kc}${k}${dc} ${label}`).join(sep) + r;
       // Strip ANSI to measure visible length
       const visible = hint.replace(/\x1b\[[^m]*m/g, '');
       const hintCol = Math.max(1, Math.floor((cols - visible.length) / 2) + 1);
-      buf += ansi.to(rows, hintCol) + hint;
+      if (fitted.length) buf += ansi.to(rows, hintCol) + hint;
     }
 
     // Help overlay (skipped in minimal mode)
@@ -1372,4 +1416,5 @@ module.exports = {
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   MIN_DISPLAY_MS, COMPLETION_MIN_SHOW_MS,
   LONG_TOOL_ESCALATE_MS, LONG_TOOL_SWEAT_MS, WAIT_ESCALATE_MS,
+  fitKeyHints, MAX_ACCESSORY_H,
 };
