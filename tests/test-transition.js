@@ -300,4 +300,38 @@ describe('transition.js -- dimFactor monotonicity during materialize', () => {
   });
 });
 
+describe('transition.js -- swapPending() (resize must not swap twice)', () => {
+  test('false before start and after cancel', () => {
+    const t = new SwapTransition();
+    assert.strictEqual(t.swapPending(), false);
+    t.start('a', 'b');
+    t.cancel();
+    assert.strictEqual(t.swapPending(), false);
+  });
+
+  test('true from start() through every dissolve frame', () => {
+    const t = new SwapTransition();
+    t.start('a', 'b');
+    assert.strictEqual(t.swapPending(), true, 'frame 0, before the first tick');
+    for (let i = 1; i <= DISSOLVE_FRAMES; i++) {
+      t.tick();
+      assert.strictEqual(t.swapPending(), true, `dissolve frame ${i}`);
+    }
+  });
+
+  test('false on the swap frame, through materialize, and once done', () => {
+    const t = new SwapTransition();
+    t.start('a', 'b');
+    for (let i = 0; i < DISSOLVE_FRAMES; i++) t.tick();
+    assert.strictEqual(t.tick().phase, 'swap');
+    assert.strictEqual(t.swapPending(), false, 'the swap frame already ran the swap');
+    for (let i = 0; i < MATERIALIZE_FRAMES; i++) {
+      t.tick();
+      assert.strictEqual(t.swapPending(), false, `materialize frame ${i + 1}`);
+    }
+    assert.strictEqual(t.tick().done, true);
+    assert.strictEqual(t.swapPending(), false);
+  });
+});
+
 module.exports = suite;

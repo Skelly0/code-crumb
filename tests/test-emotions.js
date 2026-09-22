@@ -882,4 +882,176 @@ describe('emotions -- the terminal title flashes for a long wait', () => {
   });
 });
 
+// -- Renderer fixes (Sep 2026 renderer review) ---------------------------
+
+const RENDERER_SRC = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8');
+
+describe('emotions -- an error face is never rescued away', () => {
+  const { needsRescue, RESCUE_EXCLUDE } = renderer;
+
+  test('error is excluded from the stopped/dead rescue', () => {
+    assert.ok(RESCUE_EXCLUDE.has('error'));
+    // The repro: a late PostToolUseFailure after Stop writes error + turnEnded.
+    assert.strictEqual(needsRescue({ state: 'error' }, true, false), false);
+    assert.strictEqual(needsRescue({ state: 'error' }, false, true), false);
+  });
+
+  test('the rescue still fires for work states and thinking once the turn is over', () => {
+    for (const s of ['coding', 'executing', 'thinking', 'waiting', 'subagent']) {
+      assert.strictEqual(needsRescue({ state: s }, true, false), true, `${s} after Stop`);
+      assert.strictEqual(needsRescue({ state: s }, false, true), true, `${s} after editor death`);
+    }
+    assert.strictEqual(needsRescue({ state: 'coding' }, false, false), false, 'a live turn is never rescued');
+  });
+
+  test('a non-active error decays to idle after IDLE_TIMEOUT, not before', () => {
+    assert.strictEqual(idleCascade({ state: 'error', sinceChangeMs: IDLE_TIMEOUT - 1, sessionActive: false, lingerMs: 0, fileState: 'error' }), null);
+    assert.strictEqual(idleCascade({ state: 'error', sinceChangeMs: IDLE_TIMEOUT + 1, sessionActive: false, lingerMs: 0, fileState: 'error' }), 'idle');
+  });
+});
+
+describe('emotions -- a dead editor stays dead after the center moves away', () => {
+  const { policySessions, pickMainSession } = renderer;
+  const mk = (id, ts, extra = {}) => ({
+    sessionId: id, parentSession: null, isTeammate: false, stopped: false,
+    isStale: () => false, lastPromptAt: 0, lastUpdate: ts, _lastDataTimestamp: ts, ...extra,
+  });
+
+  test('the main is projected stopped while editorDead is set', () => {
+    const s = policySessions([mk('A', 100)], { mainId: 'A', editorDead: true, deadSessions: new Map() });
+    assert.strictEqual(s[0].stopped, true);
+  });
+
+  test('after adoptMain cleared editorDead, the recorded death still projects stopped', () => {
+    const dead = new Map([['A', 100]]);
+    const faces = [mk('A', 100, { lastPromptAt: 50 }), mk('B', 90, { lastPromptAt: 10 })];
+    const sessions = policySessions(faces, { mainId: 'B', editorDead: false, deadSessions: dead });
+    assert.strictEqual(sessions.find(x => x.id === 'A').stopped, true);
+    // A has the higher attention; without the record it would win the center back.
+    assert.strictEqual(pickMainSession({ sessions, currentId: 'B', pinnedId: null }).mainId, 'B');
+    assert.ok(dead.has('A'), 'the record survives while no newer write arrives');
+  });
+
+  test('a newer write from the dead session (a resumed editor) revives it', () => {
+    const dead = new Map([['A', 100]]);
+    const faces = [mk('A', 101, { lastPromptAt: 50 }), mk('B', 90, { lastPromptAt: 10 })];
+    const sessions = policySessions(faces, { mainId: 'B', editorDead: false, deadSessions: dead });
+    assert.strictEqual(sessions.find(x => x.id === 'A').stopped, false);
+    assert.ok(!dead.has('A'), 'the death record is dropped');
+    assert.strictEqual(pickMainSession({ sessions, currentId: 'B', pinnedId: null }).mainId, 'A');
+  });
+
+  test('records for sessions whose file vanished are pruned', () => {
+    const dead = new Map([['gone', 5], ['A', 100]]);
+    policySessions([mk('A', 100)], { mainId: 'A', editorDead: false, deadSessions: dead });
+    assert.ok(!dead.has('gone'));
+    assert.ok(dead.has('A'));
+  });
+
+  test('other fields pass through unchanged', () => {
+    const s = policySessions([mk('C', 7, { parentSession: 'A', isTeammate: true, lastPromptAt: 3, stopped: true, isStale: () => true })],
+      { mainId: 'A', editorDead: false, deadSessions: new Map() });
+    assert.deepStrictEqual(s[0], { id: 'C', parentSession: 'A', isTeammate: true, stopped: true, stale: true, attentionAt: 3, lastUpdate: 7 });
+  });
+
+  // Source lint: the tracker lives inside runUnifiedMode's closure, which the
+  // suite cannot drive without spawning a TTY renderer.
+  test('source: death detection records the session, and a newer write clears it', () => {
+    assert.ok(/if \(!isProcessAlive\(lastEditorPid\)\) markMainDead\(\);/.test(RENDERER_SRC));
+    assert.ok(/deadSessions\.set\(mainSessionId, lastAppliedTimestamp\)/.test(RENDERER_SRC));
+    assert.ok(/policySessions\(orbital\.faces\.values\(\),/.test(RENDERER_SRC));
+  });
+});
+
+// Source lint: these three live in runUnifiedMode's closure and have no
+// runtime observable short of a spawned TTY renderer (the scratchpad repros
+// s1_startup / s5_resume cover them end to end).
+describe('emotions -- renderer closure fixes (source lint)', () => {
+  test('the startup stopped branch records the write as applied', () => {
+    assert.ok(/if \(stateData\.stopped\) \{\s*lastStopped = true;[\s\S]{0,600}?lastAppliedTimestamp = ts;\s*lastAppliedState = stateData\.state;[\s\S]{0,40}?\}\s*return;/.test(RENDERER_SRC));
+  });
+
+  test('a newer write under a new pid retires the armed pid and clears editorDead', () => {
+    assert.ok(/stateData\.pid && lastEditorPid && stateData\.pid !== lastEditorPid\s*&& ts > lastAppliedTimestamp\) \{\s*lastEditorPid = 0;\s*editorDead = false;/.test(RENDERER_SRC));
+  });
+
+  test('resize runs the swap only while it is still pending', () => {
+    assert.ok(/if \(swapTransition\.swapPending\(\)\) _executeSwap\(\);/.test(RENDERER_SRC));
+  });
+
+  test('the status-line subagent count is the main session’s live children', () => {
+    assert.ok(/face\.subagentCount = minimal \? 0 : orbital\.liveChildCount\(\);/.test(RENDERER_SRC));
+    assert.ok(!/face\.subagentCount = orbital\.getSortedFaces\(\)\.length/.test(RENDERER_SRC));
+  });
+
+  test('stdin chunks are split into keys before dispatch', () => {
+    assert.ok(/for \(const key of splitKeys\(chunk\)\) handleKey\(key\);/.test(RENDERER_SRC));
+  });
+});
+
+describe('emotions -- splitKeys tokenizes a stdin chunk', () => {
+  const { splitKeys } = renderer;
+  const ESC = '\u001b';
+
+  test('a held arrow key yields one token per press', () => {
+    assert.deepStrictEqual(splitKeys(`${ESC}[B${ESC}[B`), [`${ESC}[B`, `${ESC}[B`]);
+    assert.deepStrictEqual(splitKeys(`${ESC}[A${ESC}[A${ESC}[A`), [`${ESC}[A`, `${ESC}[A`, `${ESC}[A`]);
+  });
+
+  test('plain characters split one per key', () => {
+    assert.deepStrictEqual(splitKeys('qq'), ['q', 'q']);
+    assert.deepStrictEqual(splitKeys('jk\r'), ['j', 'k', '\r']);
+    assert.deepStrictEqual(splitKeys('\u0003'), ['\u0003']);
+  });
+
+  test('CSI with parameters stays whole, and its final byte is not a key', () => {
+    assert.deepStrictEqual(splitKeys(`${ESC}[1;5Aq`), [`${ESC}[1;5A`, 'q']);
+    assert.deepStrictEqual(splitKeys(`${ESC}[2~`), [`${ESC}[2~`]);
+  });
+
+  test('SS3 arrows stay whole', () => {
+    assert.deepStrictEqual(splitKeys(`${ESC}OB${ESC}OA`), [`${ESC}OB`, `${ESC}OA`]);
+  });
+
+  test('a lone or truncated escape does not swallow what follows', () => {
+    assert.deepStrictEqual(splitKeys(ESC), [ESC]);
+    assert.deepStrictEqual(splitKeys(`${ESC}[`), [`${ESC}[`]);
+    assert.deepStrictEqual(splitKeys(`${ESC}O`), [ESC, 'O']);
+  });
+
+  test('astral characters are one key, and junk input yields nothing', () => {
+    assert.deepStrictEqual(splitKeys('😀q'), ['😀', 'q']);
+    assert.deepStrictEqual(splitKeys(''), []);
+    assert.deepStrictEqual(splitKeys(null), []);
+  });
+});
+
+describe('emotions -- tmux mode decays like the face does', () => {
+  const { tmuxDisplayState, THINKING_TIMEOUT } = renderer;
+  const NOW = 10000000;
+  const at = (ageMs) => NOW - ageMs;
+  // [label, data, expected]
+  const table = [
+    ['fresh work shows', { state: 'coding', timestamp: at(1000) }, 'coding'],
+    ['a running tool is held past the thinking timeout', { state: 'executing', timestamp: at(THINKING_TIMEOUT + 1000) }, 'executing'],
+    ['a tool silent past LONG_TOOL_HOLD_MS rests', { state: 'executing', timestamp: at(LONG_TOOL_HOLD_MS + 1) }, 'idle'],
+    ['thinking silent past THINKING_TIMEOUT rests', { state: 'thinking', timestamp: at(THINKING_TIMEOUT + 1) }, 'idle'],
+    ['responding is not a tool', { state: 'responding', timestamp: at(THINKING_TIMEOUT + 1) }, 'idle'],
+    ['a finished turn keeps its face briefly', { state: 'responding', stopped: true, timestamp: at(2000) }, 'responding'],
+    ['a finished turn rests after IDLE_TIMEOUT', { state: 'responding', stopped: true, timestamp: at(IDLE_TIMEOUT + 1) }, 'idle'],
+    ['a stopped late completion rests too', { state: 'happy', stopped: true, timestamp: at(IDLE_TIMEOUT + 1) }, 'idle'],
+    ['waiting is held after Stop', { state: 'waiting', stopped: true, timestamp: at(600000) }, 'waiting'],
+    ['waiting ends at the silence bound', { state: 'waiting', timestamp: at(WAIT_HOLD_STALE_MS + 1) }, 'idle'],
+    ['no timestamp is treated as fresh', { state: 'coding' }, 'coding'],
+    ['no state reads as idle', {}, 'idle'],
+  ];
+  for (const [label, data, expected] of table) {
+    test(label, () => assert.strictEqual(tmuxDisplayState(data, NOW), expected));
+  }
+
+  test('tmux mode uses it', () => {
+    assert.ok(/const state = tmuxDisplayState\(data, Date\.now\(\)\);/.test(RENDERER_SRC));
+  });
+});
+
 module.exports = suite;
