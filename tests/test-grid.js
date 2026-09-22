@@ -290,14 +290,28 @@ describe('grid.js -- OrbitalSystem stale cleanup', () => {
     // quiet is finished and must not linger. The short cut is therefore a
     // child rule -- a top-level session is judged in the same load pass that
     // built it, before any tick() moves the reward state on, so applying it
-    // there killed live windows at a cold boot.
+    // there killed live windows at a cold boot. It is also an ORPHAN rule: a
+    // child of a live family is judged on its orphan timeout, or every agent
+    // whose last write was a reward died at renderer boot.
     const completionStates = ['happy', 'satisfied', 'proud', 'relieved'];
     for (const state of completionStates) {
       const face = new MiniFace(state);
       face.state = state;
       face.parentSession = 'parent';
+      face.parentAlive = false;
       face.lastUpdate = Date.now() - 15000; // Past STOPPED_LINGER_MS (10s)
       assert.ok(face.isStale(), `${state} should be stale after 10s`);
+    }
+  });
+
+  test('a completion-state child of a LIVE family is not cut at 10s', () => {
+    for (const state of ['happy', 'satisfied', 'proud', 'relieved']) {
+      const face = new MiniFace(state);
+      face.state = state;
+      face.parentSession = 'parent';
+      face.parentAlive = true;
+      face.lastUpdate = Date.now() - 15000;
+      assert.ok(!face.isStale(), `${state} child of a live parent was cut`);
     }
   });
 
@@ -915,7 +929,9 @@ describe('grid.js -- MiniFace isMainSession', () => {
 });
 
 describe('grid.js -- _assignLabels isMainSession', () => {
-  test('independent main session uses modelName as label', () => {
+  // Documented order: teammateName > taskDescription > cwd basename >
+  // modelName > sub-N. This test used to pin modelName beating the cwd.
+  test('independent main session prefers its cwd basename over modelName', () => {
     const os = new OrbitalSystem();
     const face = new MiniFace('ind-1');
     face.isMainSession = true;
@@ -923,8 +939,45 @@ describe('grid.js -- _assignLabels isMainSession', () => {
     face.cwd = '/home/user/project';
     os.faces.set('ind-1', face);
     os._assignLabels();
-    assert.strictEqual(face.label, 'opencode',
-      'isMainSession face should use modelName as label');
+    assert.strictEqual(face.label, 'project',
+      'cwd basename outranks modelName');
+  });
+
+  test('independent main session without a cwd falls back to modelName', () => {
+    const os = new OrbitalSystem();
+    const face = new MiniFace('ind-1b');
+    face.isMainSession = true;
+    face.modelName = 'opencode';
+    os.faces.set('ind-1b', face);
+    os._assignLabels();
+    assert.strictEqual(face.label, 'opencode');
+  });
+
+  test('two parallel windows in different folders are told apart by folder', () => {
+    const os = new OrbitalSystem();
+    const a = new MiniFace('win-a');
+    const b = new MiniFace('win-b');
+    for (const f of [a, b]) { f.isMainSession = true; f.modelName = 'claude'; }
+    a.cwd = '/home/user/frontend';
+    b.cwd = '/home/user/backend';
+    os.faces.set('win-a', a);
+    os.faces.set('win-b', b);
+    os._assignLabels();
+    assert.strictEqual(a.label, 'frontend');
+    assert.strictEqual(b.label, 'backend');
+  });
+
+  test('parallel windows sharing a folder name fall back to modelName', () => {
+    const os = new OrbitalSystem();
+    const a = new MiniFace('same-a');
+    const b = new MiniFace('same-b');
+    a.isMainSession = true; a.modelName = 'claude'; a.cwd = '/one/app';
+    b.isMainSession = true; b.modelName = 'codex'; b.cwd = '/two/app';
+    os.faces.set('same-a', a);
+    os.faces.set('same-b', b);
+    os._assignLabels();
+    assert.strictEqual(a.label, 'claude');
+    assert.strictEqual(b.label, 'codex');
   });
 
   test('taskDescription still takes priority over isMainSession modelName', () => {
@@ -1175,6 +1228,7 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
       face.state = state;
       face.stopped = false;
       face.parentSession = 'parent'; // the short completion cut is a child rule
+      face.parentAlive = false;      // ...for an orphaned family only
       face.pid = 0; // no pid — falls through to completion-state timeout
       face.lastUpdate = Date.now() - 15000; // 15s ago — past STOPPED_LINGER_MS (10s)
       assert.ok(face.isStale(),
@@ -1236,6 +1290,7 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
       face.state = state;
       face.stopped = false;
       face.parentSession = 'parent'; // the short completion cut is a child rule
+      face.parentAlive = false;      // ...for an orphaned family only
       face.pid = 999999; // dead process
       face.lastUpdate = Date.now() - 15000; // 15s ago — past STOPPED_LINGER_MS
       assert.ok(face.isStale(),
@@ -4060,6 +4115,158 @@ describe('grid.js -- model in the session list info row', () => {
     for (const line of rows) {
       const inner = line.slice(1, line.lastIndexOf('│'));
       assert.strictEqual(inner.length, 52, `row width drifted: "${inner}" (${inner.length})`);
+    }
+  });
+});
+
+// -- Review round 2 regressions -----------------------------------------
+
+describe('grid.js -- MiniFace same-state work write drops a stale completion', () => {
+  test('fast Bash -> relieved queued -> second Bash keeps showing executing', () => {
+    const face = new MiniFace('same-state');
+    const t0 = Date.now();
+    face.updateFromFile({ state: 'executing', detail: 'ls', timestamp: t0 });
+    face.updateFromFile({ state: 'relieved', detail: 'command succeeded', timestamp: t0 + 1 });
+    assert.strictEqual(face.pendingState, 'relieved', 'precondition: completion queued behind work');
+    face.updateFromFile({ state: 'executing', detail: 'npm run build', timestamp: t0 + 2 });
+    assert.strictEqual(face.pendingState, null, 'stale completion must be dropped');
+    assert.strictEqual(face.state, 'executing');
+    assert.strictEqual(face.detail, 'npm run build');
+    face.minDisplayUntil = 0;
+    face.tick(16);
+    assert.strictEqual(face.state, 'executing', 'relieved flushed over the running tool');
+  });
+
+  test('a same-state completion leaves a queued completion alone', () => {
+    const face = new MiniFace('same-completion');
+    const t0 = Date.now();
+    face.updateFromFile({ state: 'happy', detail: 'done', timestamp: t0 });
+    face.pendingState = 'proud';
+    face.updateFromFile({ state: 'happy', detail: 'done again', timestamp: t0 + 1 });
+    assert.strictEqual(face.pendingState, 'proud');
+  });
+});
+
+describe('grid.js -- activity cycling never paints over real state', () => {
+  function staleChild(id, state) {
+    const face = new MiniFace(id);
+    face.parentSession = 'parent-1';
+    face.state = state;
+    face.firstSeen = Date.now() - (3 * CYCLE_INTERVAL + 500); // cycle idx would be 'coding'
+    face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
+    face.minDisplayUntil = 0;
+    return face;
+  }
+
+  for (const state of ['waiting', 'error', 'responding', 'happy', 'proud', 'satisfied', 'relieved']) {
+    test(`a synthetic child in '${state}' is not cycled`, () => {
+      const face = staleChild('parent-1-sub-1', state);
+      face.tick(16);
+      assert.strictEqual(face.state, state);
+    });
+  }
+
+  test('a synthetic child in a neutral state still cycles', () => {
+    const face = staleChild('parent-1-sub-2', 'idle');
+    face.tick(16);
+    assert.strictEqual(face.state, 'coding');
+  });
+
+  test('a real agent_id orbital never cycles (it reports its own tools)', () => {
+    const face = staleChild('parent-1-agent-a1', 'idle');
+    face.tick(16);
+    assert.notStrictEqual(face.state, 'coding', 'real agent orbital was cycled');
+  });
+
+  test('a real agent_id orbital sitting on a permission prompt keeps waiting', () => {
+    const face = staleChild('parent-1-agent-a2', 'waiting');
+    face.detail = 'allow?';
+    face.tick(16);
+    assert.strictEqual(face.state, 'waiting');
+    assert.strictEqual(face.detail, 'allow?');
+  });
+});
+
+describe('grid.js -- a live child is not dropped at boot for last writing a reward', () => {
+  test('loadSessions keeps a child whose last write was happy 30s ago', () => {
+    const os_ = require('os');
+    const fs = require('fs');
+    const path = require('path');
+    const dir = fs.mkdtempSync(path.join(os_.tmpdir(), 'cc-boot-reward-'));
+    try {
+      const now = Date.now();
+      fs.writeFileSync(path.join(dir, 'M.json'), JSON.stringify(
+        { session_id: 'M', state: 'subagent', timestamp: now, lastPromptAt: now }));
+      const child = path.join(dir, 'M-agent-1.json');
+      fs.writeFileSync(child, JSON.stringify(
+        { session_id: 'M-agent-1', state: 'happy', detail: 'done', timestamp: now - 30000, parentSession: 'M' }));
+      const past = new Date(now - 30000);
+      fs.utimesSync(child, past, past);
+      const orb = new OrbitalSystem();
+      orb._sessionsDir = dir;
+      orb.loadSessions('M');
+      assert.ok(orb.faces.has('M-agent-1'), 'live child was dropped in the same pass it was built');
+      assert.strictEqual(orb.liveChildCount(), 1, 'main loses its conducting hold');
+      orb.loadSessions('M');
+      assert.ok(orb.faces.has('M-agent-1'), 'child churned on the second pass');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a top-level face in a reward state is not stale either', () => {
+    const face = new MiniFace('top-reward');
+    face.state = 'proud';
+    face.lastUpdate = Date.now() - 30000;
+    assert.strictEqual(face.isStale(), false);
+  });
+
+  test('a child still goes stale on its orphan timeout', () => {
+    const face = new MiniFace('P-agent-x');
+    face.parentSession = 'P';
+    face.parentAlive = false;
+    face.state = 'happy';
+    face.lastUpdate = Date.now() - ORPHAN_TIMEOUT - 1000;
+    assert.strictEqual(face.isStale(), true);
+  });
+});
+
+describe('grid.js -- PID start-time refresh runs once per TTL expiry', () => {
+  test('callers during an in-flight refresh do not queue a second batch', () => {
+    const calls = [];
+    const callbacks = [];
+    _setPidResolver((pids, cb) => { calls.push(pids.slice()); callbacks.push(cb); });
+    const pid = 424242;
+    const alive = () => true;
+    try {
+      _pidStartCache.set(pid, { value: 1000, resolvedAt: Date.now() - 61000 }); // TTL expired
+      requestPidStartTime(pid, alive);
+      requestPidStartTime(pid, alive);
+      requestPidStartTime(pid, alive);
+      assert.strictEqual(calls.length, 1, 'first refresh batch');
+      assert.strictEqual(_pidStartCache.get(pid).value, 1000, 'old value still serves the gate');
+      callbacks[0](new Map([[pid, 2000]]));
+      assert.strictEqual(calls.length, 1, 'a redundant second batch ran');
+      assert.strictEqual(_pidStartCache.get(pid).value, 2000);
+      assert.ok(!_pidStartCache.get(pid).refreshing, 'marker cleared by the result');
+    } finally {
+      _pidStartCache.delete(pid);
+      _setPidResolver(null);
+    }
+  });
+
+  test('resetting the resolver clears a stuck refresh marker', () => {
+    _setPidResolver(() => {}); // never calls back
+    const pid = 434343;
+    try {
+      _pidStartCache.set(pid, { value: 1000, resolvedAt: Date.now() - 61000 });
+      requestPidStartTime(pid, () => true);
+      assert.ok(_pidStartCache.get(pid).refreshing);
+      _setPidResolver(null);
+      assert.ok(!_pidStartCache.get(pid).refreshing);
+    } finally {
+      _pidStartCache.delete(pid);
+      _setPidResolver(null);
     }
   });
 });
