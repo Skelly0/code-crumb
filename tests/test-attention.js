@@ -440,13 +440,15 @@ describe('adapters -- lastPromptAt', () => {
     wrapper.handleEvent({ type: 'turn.completed', usage: {} });
     const last = readJSON(file);
     assert.strictEqual(last.lastPromptAt, b, 'still the turn stamp when the turn ends');
-    assert.strictEqual(last.stopped, true);
+    assert.strictEqual(last.turnEnded, true, 'a turn end writes turnEnded to the session file');
+    assert.strictEqual(last.stopped, false, 'stopped is reserved for the close handler');
   });
 
   test('codex-wrapper carries the stamp through a real spawned run', () => {
     // End to end over the real spawn path. The final file is the
-    // codex.on('close') commit rather than the turn.completed one (both mark
-    // it stopped), so this pins the stamp's survival to the end of the process.
+    // codex.on('close') commit rather than the turn.completed one (only the
+    // close marks it stopped), so this pins the stamp's survival to the end of
+    // the process.
     const t = runFakeCodex([
       { type: 'thread.started', thread_id: 't1' },
       { type: 'turn.started' },
