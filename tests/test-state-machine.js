@@ -683,8 +683,9 @@ describe('state-machine.js -- extractExitCode', () => {
     assert.strictEqual(extractExitCode('Process exited with 127'), 127);
   });
 
-  test('"returned 2" → 2', () => {
-    assert.strictEqual(extractExitCode('command returned 2'), 2);
+  // Updated: the bare "returned N" form was the bug ("Search returned 12 results")
+  test('"returned 2" is not an exit code', () => {
+    assert.strictEqual(extractExitCode('command returned 2'), null);
   });
 
   test('no match → null', () => {
@@ -1698,8 +1699,9 @@ describe('state-machine.js -- extractExitCode edge cases', () => {
     assert.strictEqual(extractExitCode('Process exited with 1'), 1);
   });
 
-  test('parses "returned 42"', () => {
-    assert.strictEqual(extractExitCode('Command returned 42'), 42);
+  // Updated: "returned N" is program output, not an exit status
+  test('does not parse "returned 42"', () => {
+    assert.strictEqual(extractExitCode('Command returned 42'), null);
   });
 
   test('parses "Exit code: 137"', () => {
@@ -1723,7 +1725,7 @@ describe('state-machine.js -- extractExitCode edge cases', () => {
     assert.strictEqual(result, 1);
   });
 
-  // Bug #11 — "return N" (source code) should not match; "returned N" still should
+  // Bug #11 — "return N" (source code) should not match; neither, now, does "returned N"
   test('"return 0" does NOT extract an exit code (source code false positive)', () => {
     assert.strictEqual(extractExitCode('return 0'), null);
   });
@@ -1732,8 +1734,9 @@ describe('state-machine.js -- extractExitCode edge cases', () => {
     assert.strictEqual(extractExitCode('return 42'), null);
   });
 
-  test('"returned 1" still extracts exit code 1', () => {
-    assert.strictEqual(extractExitCode('command returned 1'), 1);
+  // Updated: this pinned the "returned N" form that misread program output
+  test('"returned 1" no longer extracts an exit code', () => {
+    assert.strictEqual(extractExitCode('command returned 1'), null);
   });
 
   test('"exit status: 1" extracts exit code 1', () => {
@@ -2598,8 +2601,9 @@ describe('state-machine.js -- extractExitCode', () => {
     assert.strictEqual(extractExitCode('exit status: 2'), 2);
   });
 
-  test('returned 42 returns 42', () => {
-    assert.strictEqual(extractExitCode('returned 42'), 42);
+  // Updated: "returned N" was the bug, not a supported form
+  test('returned 42 returns null', () => {
+    assert.strictEqual(extractExitCode('returned 42'), null);
   });
 
   test('string with no exit code returns null', () => {
@@ -3463,6 +3467,189 @@ describe('state-machine.js -- buildSubagentSessionState model stickiness', () =>
   test('omits the key entirely when no model is known', () => {
     const out = buildSubagentSessionState({}, { id: 'sub-1' }, 'parent', '/cwd');
     assert.ok(!('model' in out), 'no empty model key in the ~1KB state file');
+  });
+});
+
+// -- Shell command intent: arguments are data, not intent -----------------
+
+describe('state-machine.js -- shell intent (pre-tool)', () => {
+  const pre = (command) => toolToState('Bash', { command });
+
+  test('a commit whose message names jest is committing, not testing', () => {
+    assert.strictEqual(pre('git commit -m "fix jest config"').state, 'committing');
+  });
+  test('a commit whose message names a spec / npm install is still committing', () => {
+    assert.strictEqual(pre("git commit -m 'Add spec for parser'").state, 'committing');
+    assert.strictEqual(pre('git add -A && git commit -m "npm install fixes"').state, 'committing');
+  });
+  test('a Claude-style heredoc commit message is removed whole', () => {
+    const cmd = 'git commit -m "$(cat <<\'EOF\'\nRun pytest in CI\n\nFix the build script\nEOF\n)"';
+    assert.strictEqual(pre(cmd).state, 'committing');
+  });
+  test('git commit wins over a test run in the same command line', () => {
+    assert.strictEqual(pre('npm test && git commit -m "x"').state, 'committing');
+  });
+  test('reading a test file is not a test run', () => {
+    for (const c of ['cat src/foo.test.js', 'head -50 src/foo.spec.ts', 'tail -f a.test.js',
+      'less x.test.js', 'grep -n describe src/foo.test.js', 'rg jest src/', 'git diff src/foo.test.js',
+      'git log -- src/foo.test.js', 'cat train.py']) {
+      assert.strictEqual(pre(c).state, 'executing', c);
+    }
+  });
+  test('a quoted pattern naming a test tool is not a test run', () => {
+    assert.strictEqual(pre('grep -rn "pytest" .').state, 'executing');
+    assert.strictEqual(pre('echo "run jest later"').state, 'executing');
+  });
+  test('real test runs still read as testing', () => {
+    for (const c of ['npm test', 'npx jest src/foo.test.js', 'node tests/foo.test.js', 'pytest -x',
+      'cd app && npm run test', 'npm test 2>&1 | tail -20', 'node --test', 'FOO=1 npx vitest run',
+      'find . -name "*.test.js" | xargs jest']) {
+      assert.strictEqual(pre(c).state, 'testing', c);
+    }
+  });
+  test('install / training / push / tag still classify', () => {
+    assert.strictEqual(pre('npm install lodash').state, 'installing');
+    assert.strictEqual(pre('python train.py --epochs 3').state, 'training');
+    assert.strictEqual(pre('git push origin main').state, 'committing');
+    assert.strictEqual(pre('git push origin main').detail, 'git push origin main');
+    assert.strictEqual(pre('git tag v1.0').state, 'committing');
+  });
+  test('the detail is still the raw command', () => {
+    assert.strictEqual(pre('git commit -m "fix jest"').detail, 'git commit -m "fix jest"');
+  });
+});
+
+describe('state-machine.js -- shell intent (post-tool)', () => {
+  const post = (command, stdout = '') => classifyToolResult('Bash', { command }, { stdout, stderr: '' }, false);
+
+  test('a commit whose message names the build is proud / committed', () => {
+    const r = post('git commit -m "Fix the build script"', '[main abc123] Fix the build script');
+    assert.strictEqual(r.state, 'proud');
+    assert.strictEqual(r.detail, 'committed');
+  });
+  test('a commit whose message names a spec or tests is proud / committed', () => {
+    assert.strictEqual(post('git commit -m "Add spec for parser"').detail, 'committed');
+    assert.strictEqual(post("git commit -m 'make tests pass'").detail, 'committed');
+    assert.strictEqual(post('npm test && git commit -m "x"').detail, 'committed');
+  });
+  test('a push whose message-free line names tests is still pushed', () => {
+    assert.strictEqual(post('npm test && git push').detail, 'pushed!');
+  });
+  test('a merge conflict is still an error even when the command also runs a build', () => {
+    const r = post('git merge feature && npm run build', 'CONFLICT (content): Merge conflict in a.js\nAutomatic merge failed');
+    assert.strictEqual(r.state, 'error');
+    assert.strictEqual(r.detail, 'merge conflict!');
+  });
+  test('reading a spec file is not "tests passed"', () => {
+    assert.strictEqual(post('cat src/parser.spec.ts', 'describe(...)').detail, 'command succeeded');
+  });
+  test('real test and build runs keep their details', () => {
+    assert.strictEqual(post('npm test', '12 tests passed').detail, '12 tests passed');
+    assert.strictEqual(post('npm run build').detail, 'build succeeded');
+    assert.strictEqual(post('git pull').detail, 'merged clean');
+    assert.strictEqual(post('git status').detail, 'git done');
+    assert.strictEqual(post('npm install').detail, 'installed');
+  });
+});
+
+describe('update-state.js -- commit counting survives a commit message naming the build', () => {
+  test('git commit -m "Fix the build script" increments commitCount', () => {
+    const { tmp, statsFile, env } = makeTempEnv('commit-count');
+    try {
+      runUpdateState('PostToolUse', {
+        session_id: 'commit-count', tool_name: 'Bash',
+        tool_input: { command: 'git commit -m "Fix the build script"' },
+        tool_response: { stdout: '[main abc123] Fix the build script', stderr: '' },
+      }, env);
+      assert.strictEqual(readJSON(statsFile).session.commitCount, 1);
+    } finally { cleanup(tmp); }
+  });
+});
+
+// -- Exit codes are only inferred from a shell's own output -----------------
+
+describe('state-machine.js -- exit code inference', () => {
+  test('an MCP result that "returned 12 results" is not an error', () => {
+    const r = classifyToolResult('mcp__search__query', {}, { stdout: 'Search returned 12 results', stderr: '' }, false);
+    assert.strictEqual(r.state, 'satisfied');
+  });
+  test('Bash stdout "fib(10) returned 55" is not exit 55', () => {
+    const r = classifyToolResult('Bash', { command: 'node fib.js' }, { stdout: 'fib(10) returned 55', stderr: '' }, false);
+    assert.strictEqual(r.state, 'relieved');
+  });
+  test('a non-shell tool mentioning "Exit code: 1" in its content is not an error', () => {
+    const r = classifyToolResult('Read', { file_path: 'notes.md' }, { stdout: 'The CI said Exit code: 1', stderr: '' }, false);
+    assert.strictEqual(r.state, 'satisfied');
+  });
+  test('Bash "Exit code 2" / "exited with code 3" / "exit status 4" are still errors', () => {
+    for (const [out, code] of [['boom\nExit code 2', 2], ['Process exited with code 3', 3], ['exit status 4', 4]]) {
+      assert.strictEqual(extractExitCode(out), code, out);
+      const r = classifyToolResult('Bash', { command: 'make' }, { stdout: out, stderr: '' }, false);
+      assert.strictEqual(r.state, 'error', out);
+    }
+  });
+  test('extractExitCode anchors: no match inside a word, at most three digits', () => {
+    assert.strictEqual(extractExitCode('myexit code: 1'), null);
+    assert.strictEqual(extractExitCode('exit code: 12345'), null);
+    assert.strictEqual(extractExitCode('Error: Command failed with exit code 1'), 1);
+  });
+  test('truncated input: a known non-shell tool never infers an exit code', () => {
+    const r = classifyTruncatedInput('PostToolUse', '{"tool_name":"mcp__x__search","tool_response":"...\\nexit code: 7 ...');
+    assert.notStrictEqual(r.state, 'error');
+  });
+});
+
+// -- False-positive guards are per line; read-only commands print content ---
+
+describe('state-machine.js -- per-line false-positive guards', () => {
+  test('pytest: a real failure is not cancelled by "Captured stderr call"', () => {
+    const out = '____ test_x ____\n----- Captured stderr call -----\nboom\n1 failed, 3 passed in 0.2s';
+    assert.strictEqual(looksLikeError(out, stdoutErrorPatterns), true);
+    const r = classifyToolResult('Bash', { command: 'pytest' }, { stdout: out, stderr: '' }, false);
+    assert.strictEqual(r.state, 'error');
+    assert.strictEqual(r.detail, 'tests failed');
+  });
+  test('jest: "1 failed" is not cancelled by "No errors found" on another line', () => {
+    const out = 'Tests: 1 failed, 9 passed\nLint: No errors found';
+    assert.strictEqual(looksLikeError(out, stdoutErrorPatterns), true);
+    assert.strictEqual(classifyToolResult('Bash', { command: 'npm test' }, { stdout: out, stderr: '' }, false).state, 'error');
+  });
+  test('a guard still cancels an error match on its own line', () => {
+    assert.strictEqual(looksLikeError('Tests: 0 failed, 9 passed', stdoutErrorPatterns), false);
+    assert.strictEqual(looksLikeError('build: no errors, 0 failed', stderrErrorPatterns), false);
+    assert.strictEqual(looksLikeError('src/error.js: saved', stderrErrorPatterns), false);
+  });
+  test('mixed "2 warnings, 1 error" on one line is still an error', () => {
+    assert.strictEqual(looksLikeError('2 warnings, 1 error', stderrErrorPatterns), true);
+    assert.strictEqual(looksLikeError('1 warning, 0 errors', stderrErrorPatterns), false);
+  });
+  test('a multi-line pattern (Node stack trace) is still detected', () => {
+    const out = 'at Object.<anonymous> (/x/a.js:1:1)\n    at Module._compile (node:internal)';
+    assert.strictEqual(looksLikeError(out, stdoutErrorPatterns), true);
+  });
+});
+
+describe('state-machine.js -- read-only commands print content, not verdicts', () => {
+  test('grep -rn ENOENT src/ is not a "missing file/path" error', () => {
+    const r = classifyToolResult('Bash', { command: 'grep -rn ENOENT src/' },
+      { stdout: "src/a.js:12:  if (e.code === 'ENOENT') return;", stderr: '' }, false);
+    assert.strictEqual(r.state, 'relieved');
+  });
+  test('cat / git log / piped read-only chains are not errors on scary stdout', () => {
+    for (const command of ['cat build.log', 'git log --oneline', 'grep -rn FATAL . | head -5', 'git -C sub show HEAD']) {
+      const r = classifyToolResult('Bash', { command }, { stdout: 'FATAL: build failed\n3 failed', stderr: '' }, false);
+      assert.notStrictEqual(r.state, 'error', command);
+    }
+  });
+  test('a chain with a real command still gets stdout checks', () => {
+    const r = classifyToolResult('Bash', { command: 'cat x && npm run build' }, { stdout: 'Build failed', stderr: '' }, false);
+    assert.strictEqual(r.state, 'error');
+  });
+  test('stderr and exit codes still apply to read-only commands', () => {
+    assert.strictEqual(classifyToolResult('Bash', { command: 'cat nope' },
+      { stdout: '', stderr: 'cat: /root/x: Permission denied' }, false).state, 'error');
+    assert.strictEqual(classifyToolResult('Bash', { command: 'grep x y' },
+      { stdout: 'Exit code 2', stderr: '' }, false).state, 'error');
   });
 });
 

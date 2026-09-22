@@ -90,6 +90,81 @@ function mcpVerbState(rawTool) {
   return 'executing';
 }
 
+// -- Shell Command Intent --------------------------------------------
+
+// A shell command's arguments are data, not intent: `git commit -m "fix jest
+// config"` is a commit, and `cat src/foo.test.js` is a read. Matching the
+// test/build/install tables against the raw command read both as test runs,
+// and a commit whose message named a build or a spec was reported as "build
+// succeeded" / "tests passed" -- so it never showed proud and never counted.
+
+// Commands that only look at things. Their segments carry no intent, and
+// their stdout is content (a grep for ENOENT prints ENOENT), not a verdict.
+const READ_ONLY_COMMANDS = /^(cat|less|more|head|tail|grep|egrep|fgrep|rg|ag|ack|find|fd|ls|dir|wc|bat|file|stat|echo|printf|which|where|type|diff|tree|du|df|pwd)$/i;
+const GIT_READ_ONLY_SUBCOMMANDS = /^(diff|log|show|grep|blame|status)$/i;
+
+// Replace every quoted string with an empty one. Left to right, so whichever
+// quote opens first owns the span: a double-quoted heredoc commit message
+// (`-m "$(cat <<'EOF' ... EOF)"`) is removed whole. An unterminated quote is
+// left alone.
+function stripQuotedArgs(cmd) {
+  return toText(cmd).replace(/"(?:[^"\\]|\\[\s\S])*"|'[^']*'/g, '""');
+}
+
+// First word of a segment and the rest, past env assignments and wrappers.
+function segmentWords(segment) {
+  let s = segment.trim().replace(/^[({]\s*/, '');
+  for (;;) {
+    const m = s.match(/^(?:[A-Za-z_]\w*=\S*|sudo|time|command|builtin|exec)\s+/);
+    if (!m) break;
+    s = s.slice(m[0].length);
+  }
+  return s.split(/\s+/).filter(Boolean);
+}
+
+function isReadOnlySegment(segment) {
+  const words = segmentWords(segment);
+  if (!words.length) return true;
+  const cmd = words[0].replace(/^.*[\\/]/, '').replace(/\.exe$/i, '');
+  if (READ_ONLY_COMMANDS.test(cmd)) return true;
+  if (/^git$/i.test(cmd)) {
+    // Skip global options (`git -C dir log`, `git --no-pager diff`).
+    let i = 1;
+    while (i < words.length && words[i].startsWith('-')) {
+      i += /^-[Cc]$/.test(words[i]) ? 2 : 1;
+    }
+    return GIT_READ_ONLY_SUBCOMMANDS.test(words[i] || '');
+  }
+  return false;
+}
+
+// { unquoted, intent, readOnly } for a shell command:
+//   unquoted  the command with quoted string arguments emptied
+//   intent    unquoted, minus the segments that only read (cat/grep/git log...)
+//   readOnly  true when every segment only reads
+// Segments split on && || ; | & and newlines.
+function shellIntent(cmd) {
+  const unquoted = stripQuotedArgs(cmd);
+  const segments = unquoted.split(/&&|\|\||[;|&\r\n]/).filter(s => s.trim());
+  const acting = segments.filter(s => !isReadOnlySegment(s));
+  return {
+    unquoted,
+    intent: acting.join(' ; '),
+    readOnly: segments.length > 0 && acting.length === 0,
+  };
+}
+
+const GIT_WRITE_RE = /\bgit\s+(commit|push|tag)\b/i;
+
+function isTestCommand(intent) {
+  return /\b(jest|pytest|vitest|mocha|cypress|playwright|rspec|\.test\.|\.spec\.)\b/i.test(intent) ||
+    /\b(npm|yarn|pnpm|bun|go|cargo|dotnet)\s+(run\s+)?(test|tests)\b/i.test(intent) ||
+    /\b(rake|npx|composer)\s+test\b/i.test(intent) ||
+    /\b(pytest|nosetests)\b/i.test(intent) ||
+    /\bnode\s+(--test|test)\b/i.test(intent) ||
+    /\b(make|gradle|mvn|php\s+artisan)\s+test\b/i.test(intent);
+}
+
 function toolToState(toolName, toolInput) {
   let result;
   const name = toText(toolName);
@@ -106,44 +181,42 @@ function toolToState(toolName, toolInput) {
   else if (BASH_TOOLS.test(name)) {
     const cmd = toText(input.command || input.cmd || input.input);
     const shortCmd = cmd.length > 40 ? cmd.slice(0, 37) + '...' : cmd;
+    // Classify on intent, never on arguments (see Shell Command Intent)
+    const { intent } = shellIntent(cmd);
+
+    // Detect git commit / push / tag operations first -- a commit message
+    // is free text and routinely names tests, builds and specs
+    if (GIT_WRITE_RE.test(intent)) {
+      const isPush = /\bgit\s+push\b/i.test(intent);
+      const isTag  = /\bgit\s+tag\b/i.test(intent);
+      const detail = isPush ? 'pushing to remote' : isTag ? 'tagging release' : 'committing changes';
+      result = { state: 'committing', detail: shortCmd || detail };
+    }
 
     // Detect test commands
-    if (/\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|\.spec\.)\b/i.test(cmd) ||
-        /\b(npm|yarn|pnpm|bun|go|cargo|dotnet)\s+(run\s+)?(test|tests)\b/i.test(cmd) ||
-        /\b(rake|npx|composer)\s+test\b/i.test(cmd) ||
-        /\b(pytest|nosetests)\b/i.test(cmd) ||
-        /\bnode\s+(--test|test)\b/i.test(cmd) ||
-        /\b(make|gradle|mvn|php\s+artisan)\s+test\b/i.test(cmd)) {
+    else if (isTestCommand(intent)) {
       result = { state: 'testing', detail: shortCmd || 'running tests' };
     }
 
     // Detect install commands
-    else if (/\b(npm|yarn|pnpm|bun)\s+(install|i|add)\b/i.test(cmd) ||
-        /\b(pip|pip3)\s+(install|-r)\b/i.test(cmd) ||
-        /\b(cargo\s+build|cargo\s+add)\b/i.test(cmd) ||
-        /\b(apt|apt-get|apk)\s+(install|add)\b/i.test(cmd) ||
-        /\b(brew\s+install|homebrew)\b/i.test(cmd) ||
-        /\b(go\s+get|go\s+install)\b/i.test(cmd) ||
-        /\b(composer\s+require|composer\s+install)\b/i.test(cmd) ||
-        /\b(dotnet\s+add|dotnet\s+restore)\b/i.test(cmd)) {
+    else if (/\b(npm|yarn|pnpm|bun)\s+(install|i|add)\b/i.test(intent) ||
+        /\b(pip|pip3)\s+(install|-r)\b/i.test(intent) ||
+        /\b(cargo\s+build|cargo\s+add)\b/i.test(intent) ||
+        /\b(apt|apt-get|apk)\s+(install|add)\b/i.test(intent) ||
+        /\b(brew\s+install|homebrew)\b/i.test(intent) ||
+        /\b(go\s+get|go\s+install)\b/i.test(intent) ||
+        /\b(composer\s+require|composer\s+install)\b/i.test(intent) ||
+        /\b(dotnet\s+add|dotnet\s+restore)\b/i.test(intent)) {
       result = { state: 'installing', detail: shortCmd || 'installing' };
     }
 
     // Detect ML training commands (must come after install detection)
-    else if (/\b(python|python3|torchrun|deepspeed|accelerate)\b.*\btrain\b/i.test(cmd) ||
-        /\bunsloth\b/i.test(cmd) ||
-        /\b(python|python3)\b.*\b(fine.?tune|finetune)\b/i.test(cmd) ||
-        /\b(python|python3)\b.*(--epochs?|--learning.?rate|--lr)\b/i.test(cmd) ||
-        /\bnohup\b.*\btrain\b/i.test(cmd)) {
+    else if (/\b(python|python3|torchrun|deepspeed|accelerate)\b.*\btrain\b/i.test(intent) ||
+        /\bunsloth\b/i.test(intent) ||
+        /\b(python|python3)\b.*\b(fine.?tune|finetune)\b/i.test(intent) ||
+        /\b(python|python3)\b.*(--epochs?|--learning.?rate|--lr)\b/i.test(intent) ||
+        /\bnohup\b.*\btrain\b/i.test(intent)) {
       result = { state: 'training', detail: shortCmd || 'training model' };
-    }
-
-    // Detect git commit / push / tag operations
-    else if (/\bgit\s+(commit|push|tag)\b/i.test(cmd)) {
-      const isPush = /\bgit\s+push\b/i.test(cmd);
-      const isTag  = /\bgit\s+tag\b/i.test(cmd);
-      const detail = isPush ? 'pushing to remote' : isTag ? 'tagging release' : 'committing changes';
-      result = { state: 'committing', detail: shortCmd || detail };
     }
 
     else {
@@ -279,7 +352,9 @@ const stderrErrorPatterns = [
   /\bpanic\b/i,
 ];
 
-// False positive guards: these look scary but aren't
+// False positive guards: these look scary but aren't. Each one only cancels
+// an error match on its own line (see lineIsGuarded).
+const WARNING_GUARD = /warning/i;                   // warnings aren't errors
 const falsePositives = [
   /0 errors?\b/i,
   /no errors?\b/i,
@@ -289,7 +364,7 @@ const falsePositives = [
   /stderr/i,                                        // Talking about stderr
   /\.error\s*[=(]/,                                 // Property/method named error
   /error_count.*0/i,
-  /warning/i,                                       // warnings aren't errors
+  WARNING_GUARD,
   /no conflicts?\b/i,                               // "no conflicts" isn't a conflict
   /Merge made by/i,                                 // git merge success ("Merge made by recursive strategy")
   /Already up.to.date/i,                            // git pull/merge when nothing to do
@@ -303,26 +378,32 @@ function stripAnsi(text) {
   return text ? text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '') : '';
 }
 
+// A false-positive guard only cancels an error match on the SAME line.
+// Applied to the whole output, one "No errors found" or "Captured stderr
+// call" anywhere cancelled a real "1 failed" elsewhere. A line whose only
+// guard is "warning" but which names an error outright ("2 warnings,
+// 1 error") is still an error.
+function lineIsGuarded(line) {
+  const guards = falsePositives.filter(p => p.test(line));
+  if (guards.length === 0) return false;
+  if (guards.length === 1 && guards[0] === WARNING_GUARD && /\berrors?\b/i.test(line)) return false;
+  return true;
+}
+
 function looksLikeError(text, patterns) {
   if (!text) return false;
-  const clean = stripAnsi(text);
-  const hit = patterns.some(p => p.test(clean));
-  if (!hit) return false;
-  // Check it's not a false positive
-  if (!falsePositives.some(p => p.test(clean))) return true;
-  // (a) If "warning" triggered the false positive, check if explicit error keywords
-  // also appear (mixed warning+error output like "2 warnings, 1 error" should detect)
-  if (/warning/i.test(clean) && /\berrors?\b/i.test(clean)
-      && !/0 errors?\b/i.test(clean) && !/no errors?\b/i.test(clean) && !/errors?:\s*0\b/i.test(clean)) {
-    return true;
-  }
-  // (b) Error pattern matches a line that doesn't contain "warning" --
-  // isolates e.g. "DeprecationWarning" (line A) from "tests failed" (line B)
-  if (/warning/i.test(clean)) {
-    const lines = clean.split('\n');
+  const clean = stripAnsi(toText(text));
+  const lines = clean.split(/\r?\n/);
+  for (const p of patterns) {
+    if (p.source.includes('\\n')) {
+      // A pattern that spans lines (the Node stack trace) is matched on the
+      // whole output and judged by the line it starts on.
+      const m = clean.match(p);
+      if (m && !lineIsGuarded(lines[clean.slice(0, m.index).split('\n').length - 1] || '')) return true;
+      continue;
+    }
     for (const line of lines) {
-      if (/warning/i.test(line)) continue;
-      if (patterns.some(p => p.test(line))) return true;
+      if (p.test(line) && !lineIsGuarded(line)) return true;
     }
   }
   return false;
@@ -331,9 +412,16 @@ function looksLikeError(text, patterns) {
 // Try to extract an exit code from stdout -- Claude Code often
 // appends "Exit code: N" to the output even though it doesn't
 // give us exit_code as a field.
+// Only phrases that are about an exit status count: "Exit code: N", "exit
+// code N", "exit status N", "exited with [code|status] N". The bare
+// "returned N" form was dropped -- "Search returned 12 results" and
+// "fib(10) returned 55" are program output, not statuses. The number is at
+// most three digits and must end on a word boundary. JSON-escaped line
+// breaks (`\n` as two characters, as in classifyTruncatedInput's raw text)
+// are read as whitespace so the leading word boundary still holds.
 function extractExitCode(stdout) {
-  const clean = stripAnsi(stdout);
-  const match = clean.match(/(?:exit code|exited with|exit status|returned)[:=\s]+(\d+)/i);
+  const clean = stripAnsi(toText(stdout)).replace(/\\[nrt]/g, ' ');
+  const match = clean.match(/\b(?:exit\s+(?:code|status)|exited\s+with(?:\s+(?:exit\s+)?(?:code|status))?)[:=\s]+(\d{1,3})\b/i);
   return match ? parseInt(match[1], 10) : null;
 }
 
@@ -451,7 +539,12 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
   const stdout = toText(toolResponse?.stdout);
   const stderr = toText(toolResponse?.stderr);
   const isError = isErrorFlag || toolResponse?.isError || false;
-  const inferredExit = extractExitCode(stdout);
+  const isShell = BASH_TOOLS.test(name);
+  const cmd = isShell ? toText(input.command || input.cmd || input.input) : '';
+  const { unquoted, intent, readOnly } = shellIntent(cmd);
+  // An exit code is only inferred from a shell's own output. Any other tool
+  // reporting "returned 12 results" is content, not a status.
+  const inferredExit = isShell ? extractExitCode(stdout) : null;
   const exitCode = typeof toolResponse?.exitCode === 'number' ? toolResponse.exitCode : null;
   const fp = toText(input.file_path || input.notebook_path || input.path || input.target_file);
 
@@ -470,8 +563,10 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
     state = 'error'; detail = exitDetail(stdout, stderr, inferredExit);
   } else if (!READ_TOOLS.test(name) && !SEARCH_TOOLS.test(name) && !WEB_TOOLS.test(name) && looksLikeError(stderr, stderrErrorPatterns)) {
     state = 'error'; detail = errorDetail(stdout, stderr);
-  } else if (BASH_TOOLS.test(name) && looksLikeError(stdout, stdoutErrorPatterns)) {
-    // Only check stdout patterns for shell commands -- other tools have structured output
+  } else if (isShell && !readOnly && looksLikeError(stdout, stdoutErrorPatterns)) {
+    // Only check stdout patterns for shell commands -- other tools have
+    // structured output -- and not for commands that only read: the stdout
+    // of `grep -rn ENOENT src/` or `cat build.log` is content, not a verdict
     state = 'error'; detail = errorDetail(stdout, stderr);
   } else if (EDIT_TOOLS.test(name)) {
     state = 'proud';
@@ -491,16 +586,24 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
     detail = 'search complete';
   } else if (BASH_TOOLS.test(name)) {
     state = 'relieved';
-    const cmd = toText(input.command || input.cmd || input.input);
-    const isTest = /\b(jest|pytest|vitest|mocha|cypress|playwright|\.test\.|spec)\b/i.test(cmd) ||
-                   /\bnpm\s+(run\s+)?test\b/i.test(cmd) ||
-                   /\bnode\s+(--test|test)\b/i.test(cmd) ||
-                   /\b(make|gradle|mvn|php\s+artisan)\s+test\b/i.test(cmd);
-    const isBuild = /\b(build|compile|tsc|webpack|vite|esbuild|rollup|make)\b/i.test(cmd);
-    const isGit = /\bgit\s/i.test(cmd);
-    const isInstall = /\b(npm\s+install|yarn|pip\s+install|cargo\s+build|pnpm|bun\s+(add|install))\b/i.test(cmd);
+    // Classify on intent, never on arguments (see Shell Command Intent).
+    // The git checks come first: a commit message is free text, and
+    // "Fix the build script" must still count as a commit.
+    const isTest = isTestCommand(intent);
+    const isBuild = /\b(build|compile|tsc|webpack|vite|esbuild|rollup|make)\b/i.test(intent);
+    const isGit = /\bgit\s/i.test(unquoted);
+    const isInstall = /\b(npm\s+install|yarn|pip\s+install|cargo\s+build|pnpm|bun\s+(add|install))\b/i.test(intent);
 
-    if (isTest) {
+    if (isGit && isMergeConflict(stdout, stderr)) {
+      state = 'error';
+      detail = 'merge conflict!';
+    } else if (/\bgit\s+push\b/i.test(intent)) {
+      state = 'proud';
+      detail = 'pushed!';
+    } else if (/\bgit\s+commit\b/i.test(intent)) {
+      state = 'proud';
+      detail = 'committed';
+    } else if (isTest) {
       // Try to pull test count from stdout
       const cleanStdout = stripAnsi(stdout);
       const testCount = cleanStdout.match(/(\d+)\s+(?:tests?|specs?)\s+passed/i)
@@ -509,16 +612,7 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
     } else if (isBuild) {
       detail = 'build succeeded';
     } else if (isGit) {
-      if (isMergeConflict(stdout, stderr)) {
-        state = 'error';
-        detail = 'merge conflict!';
-      } else if (/\bgit\s+push\b/i.test(cmd)) {
-        state = 'proud';
-        detail = 'pushed!';
-      } else if (/\bgit\s+commit\b/i.test(cmd)) {
-        state = 'proud';
-        detail = 'committed';
-      } else if (/\bgit\s+(merge|pull|rebase)\b/i.test(cmd)) {
+      if (/\bgit\s+(merge|pull|rebase)\b/i.test(intent)) {
         state = 'satisfied';
         detail = 'merged clean';
       } else {
@@ -597,14 +691,15 @@ function classifyTruncatedInput(hookEvent, rawInput) {
     if (/"isError"\s*:\s*true/.test(rawInput)) {
       return { state: 'error', detail: errorDetail(rawInput, '') || 'something went wrong' };
     }
-    // Tier 2: exit code embedded in stdout
-    const exitCode = extractExitCode(rawInput);
+    const toolMatch = rawInput.match(/"tool_name"\s*:\s*"([^"]+)"/);
+    const toolName = toolMatch ? toolMatch[1] : '';
+    // Tier 2: exit code embedded in stdout -- shell tools only. With the tool
+    // name cut off by the truncation it is still tried, as it always was.
+    const exitCode = (!toolName || BASH_TOOLS.test(toolName)) ? extractExitCode(rawInput) : null;
     if (exitCode !== null && exitCode !== 0) {
       return { state: 'error', detail: errorDetail(rawInput, '') || `exit ${exitCode}` };
     }
     // Tier 3: stdout error patterns for Bash tools
-    const toolMatch = rawInput.match(/"tool_name"\s*:\s*"([^"]+)"/);
-    const toolName = toolMatch ? toolMatch[1] : '';
     if (BASH_TOOLS.test(toolName) && looksLikeError(rawInput, stdoutErrorPatterns)) {
       return { state: 'error', detail: errorDetail(rawInput, '') || 'something went wrong' };
     }
