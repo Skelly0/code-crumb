@@ -1188,4 +1188,168 @@ describe('review fixes -- renderer and face', () => {
   });
 });
 
+// -- Review round 2 (Sep 2026) ----------------------------------------------
+
+describe('review round 2 -- session counters', () => {
+  test('a compaction keeps the session: counters, clock and running agents survive', () => {
+    const t = makeTempEnv('r2-cmp');
+    try {
+      runUpdateState('SessionStart', { session_id: 'r2-cmp', source: 'startup' }, t.env);
+      runUpdateState('PreToolUse', { session_id: 'r2-cmp', tool_name: 'Edit', tool_input: { file_path: 'a.js' } }, t.env);
+      runUpdateState('PreToolUse', { session_id: 'r2-cmp', tool_name: 'Read', tool_input: { file_path: 'b.js' } }, t.env);
+      runUpdateState('SubagentStart', { session_id: 'r2-cmp', agent_id: 'a1', agent_type: 'Explore' }, t.env);
+      const before = readJSON(t.statsFile).session;
+      runUpdateState('SessionStart', { session_id: 'r2-cmp', source: 'compact' }, t.env);
+      const after = readJSON(t.statsFile).session;
+      assert.strictEqual(after.toolCalls, 2);
+      assert.deepStrictEqual(after.filesEdited, ['a.js']);
+      assert.strictEqual(after.start, before.start, 'same session clock');
+      assert.strictEqual(after.activeSubagents.length, 1, 'the running agent is still tracked');
+      const s = readJSON(sessionFile(t.sessionsDir, 'r2-cmp'));
+      assert.strictEqual(s.toolCalls, 2);
+      assert.strictEqual(s.sessionStart, before.start);
+      // ...so its SubagentStop still finds it.
+      runUpdateState('SubagentStop', { session_id: 'r2-cmp', agent_id: 'a1', agent_type: 'Explore' }, t.env);
+      assert.strictEqual(readJSON(t.statsFile).session.activeSubagents.length, 0);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a non-compact SessionStart still starts the counters afresh', () => {
+    const t = makeTempEnv('r2-new');
+    try {
+      runUpdateState('SessionStart', { session_id: 'r2-new', source: 'startup' }, t.env);
+      runUpdateState('PreToolUse', { session_id: 'r2-new', tool_name: 'Read', tool_input: { file_path: 'b.js' } }, t.env);
+      runUpdateState('SessionStart', { session_id: 'r2-new', source: 'clear' }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'r2-new')).toolCalls, 0);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('two windows alternating hooks each report their own counters', () => {
+    const t = makeTempEnv('r2-A');
+    try {
+      runUpdateState('SessionStart', { session_id: 'r2-A', source: 'startup' }, t.env);
+      runUpdateState('SessionStart', { session_id: 'r2-B', source: 'startup' }, t.env);
+      const startA = readJSON(sessionFile(t.sessionsDir, 'r2-A')).sessionStart;
+      for (let i = 0; i < 3; i++) {
+        runUpdateState('PreToolUse', { session_id: 'r2-A', tool_name: 'Edit', tool_input: { file_path: 'a.js' } }, t.env);
+        runUpdateState('PreToolUse', { session_id: 'r2-B', tool_name: 'Bash', tool_input: { command: 'ls' } }, t.env);
+      }
+      const a = readJSON(sessionFile(t.sessionsDir, 'r2-A'));
+      const b = readJSON(sessionFile(t.sessionsDir, 'r2-B'));
+      assert.strictEqual(a.toolCalls, 3, `A counts its own calls, got ${a.toolCalls}`);
+      assert.strictEqual(a.filesEdited, 1);
+      assert.strictEqual(a.sessionStart, startA, 'a switch is not a new session');
+      assert.strictEqual(b.toolCalls, 3);
+      assert.strictEqual(b.filesEdited, 0);
+      assert.strictEqual(readJSON(t.statsFile).daily.sessionCount, 2,
+        'two sessions, however often they alternate');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test("a parallel window beside a conducting owner reports its own counts, not the owner's", () => {
+    const t = makeTempEnv('r2-own');
+    try {
+      runUpdateState('SessionStart', { session_id: 'r2-own', source: 'startup' }, t.env);
+      runUpdateState('SessionStart', { session_id: 'r2-par', source: 'startup' }, t.env);
+      runUpdateState('SessionStart', { session_id: 'r2-own', source: 'resume' }, t.env);
+      for (let i = 0; i < 4; i++) {
+        runUpdateState('PreToolUse', { session_id: 'r2-own', tool_name: 'Read', tool_input: { file_path: 'o.js' } }, t.env);
+      }
+      runUpdateState('SubagentStart', { session_id: 'r2-own', agent_id: 'a1', agent_type: 'Explore' }, t.env);
+      runUpdateState('PreToolUse', { session_id: 'r2-par', tool_name: 'Read', tool_input: { file_path: 'p.js' } }, t.env);
+      const p = readJSON(sessionFile(t.sessionsDir, 'r2-par'));
+      assert.strictEqual(p.toolCalls, 1, `got ${p.toolCalls}`);
+      assert.strictEqual(readJSON(t.statsFile).session.toolCalls, 4, "the owner's count is untouched");
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('review round 2 -- StopFailure ends the turn', () => {
+  test('the session file carries turnEnded (not stopped) and the global file stopped', () => {
+    const t = makeTempEnv('r2-sf');
+    try {
+      runUpdateState('SessionStart', { session_id: 'r2-sf', source: 'startup' }, t.env);
+      runUpdateState('PreToolUse', { session_id: 'r2-sf', tool_name: 'Read', tool_input: { file_path: 'a.js' } }, t.env);
+      runUpdateState('StopFailure', { session_id: 'r2-sf', error: 'rate_limit' }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'r2-sf'));
+      assert.strictEqual(s.state, 'error');
+      assert.strictEqual(s.detail, 'rate limited!');
+      assert.strictEqual(s.turnEnded, true);
+      assert.ok(!s.stopped, 'a failed turn is not a finished session');
+      assert.strictEqual(readJSON(t.stateFile).stopped, true);
+      assert.strictEqual(readJSON(t.statsFile).streak, 0);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('empty-stdin StopFailure takes the same contract', () => {
+    const t = makeTempEnv('r2-sf2');
+    try {
+      runUpdateState('StopFailure', '', t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'r2-sf2'));
+      assert.strictEqual(s.state, 'error');
+      assert.strictEqual(s.turnEnded, true);
+      assert.ok(!s.stopped);
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('review round 2 -- degraded payloads keep their session', () => {
+  const huge = 'x'.repeat(1100000);
+
+  test('a >1 MB payload writes its own session file and leaves a foreign owner alone', () => {
+    const t = makeTempEnv('r2-env');
+    try {
+      const { writeJsonAtomic } = require('../shared');
+      const owner = { state: 'coding', detail: 'x', timestamp: Date.now(), sessionId: 'r2-owner' };
+      writeJsonAtomic(t.stateFile, owner);
+      runUpdateState('UserPromptSubmit', { session_id: 'r2-big', prompt: 'hi' }, t.env);
+      const stamp = readJSON(sessionFile(t.sessionsDir, 'r2-big')).lastPromptAt;
+      writeJsonAtomic(t.stateFile, { ...owner, timestamp: Date.now() });
+      runUpdateState('PostToolUse', JSON.stringify({
+        session_id: 'r2-big', hook_event_name: 'PostToolUse', tool_name: 'Bash',
+        tool_input: { command: 'cat big' }, tool_response: { stdout: huge },
+      }), t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'r2-big'));
+      assert.strictEqual(s.sessionId, 'r2-big');
+      assert.ok(s.timestamp >= stamp);
+      assert.strictEqual(s.lastPromptAt, stamp, 'sticky attention survives the degraded write');
+      assert.strictEqual(readJSON(t.stateFile).sessionId, 'r2-owner', 'the global owner is not clobbered');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a >1 MB agent payload lands on the agent orbital, never the global file', () => {
+    const t = makeTempEnv('r2-bigA');
+    try {
+      runUpdateState('SessionStart', { session_id: 'r2-bigA', source: 'startup' }, t.env);
+      const globalBefore = fs.readFileSync(t.stateFile, 'utf8');
+      runUpdateState('PostToolUse', JSON.stringify({
+        session_id: 'r2-bigA', agent_id: 'ag7', agent_type: 'Explore', hook_event_name: 'PostToolUse',
+        tool_name: 'Read', tool_input: { file_path: 'x' }, tool_response: { stdout: huge },
+      }), t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'r2-bigA-agent-ag7'));
+      assert.strictEqual(s.parentSession, 'r2-bigA');
+      assert.strictEqual(s.agentType, 'Explore');
+      assert.strictEqual(fs.readFileSync(t.stateFile, 'utf8'), globalBefore);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('non-string payload fields never throw into a phantom <editor>-<ppid> session', () => {
+    const t = makeTempEnv('unused');
+    try {
+      const env = { ...t.env };
+      delete env.CLAUDE_SESSION_ID;
+      runUpdateState('Elicitation', { session_id: 'r2-mal', mcp_server_name: 42 }, env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'r2-mal')).detail, '42: needs input');
+      runUpdateState('TaskCompleted', { session_id: 'r2-mal', task_subject: 7 }, env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'r2-mal')).detail, '7');
+      runUpdateState('InstructionsLoaded', { session_id: 'r2-mal', file_path: ['a', 'b'] }, env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'r2-mal')).detail, 'loading instructions');
+      runUpdateState('ConfigChange', { session_id: 'r2-mal', file_path: { p: 1 } }, env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'r2-mal')).detail, 'config updated');
+      const files = fs.readdirSync(t.sessionsDir).filter(f => f.endsWith('.json'));
+      assert.deepStrictEqual(files, ['r2-mal.json'], `no phantom orbital, got ${files.join(', ')}`);
+    } finally { cleanup(t.tmp); }
+  });
+});
+
 module.exports = suite;

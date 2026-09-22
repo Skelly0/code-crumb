@@ -1039,4 +1039,141 @@ describe('update-state.js -- subagent model from its own transcript', () => {
   });
 });
 
+// -- Review round 2 (Sep 2026) ---------------------------------------------
+
+describe('update-state -- a parent with agents still shows its own work', () => {
+  // An agent-owned entry writes its own orbital, so it must not turn every
+  // parent tool call into "conducting N": that hid the parent's real work --
+  // and its errors -- for as long as any agent ran.
+  test('a parent Edit while an agent runs shows coding, not conducting', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('par-1');
+    try {
+      runUpdateState('SessionStart', { session_id: 'par-1', source: 'startup' }, env);
+      runUpdateState('SubagentStart', { session_id: 'par-1', agent_id: 'bg1', agent_type: 'Explore' }, env);
+      runUpdateState('PreToolUse', {
+        session_id: 'par-1', tool_name: 'Edit', tool_input: { file_path: 'src/a.js' },
+      }, env);
+      const s = readJSON(sessionFile(sessionsDir, 'par-1'));
+      assert.strictEqual(s.state, 'coding', `parent shows its own work, got ${s.state} / ${s.detail}`);
+      assert.notStrictEqual(s.detail, 'conducting 1');
+      assert.strictEqual(readJSON(sessionFile(sessionsDir, 'par-1-agent-bg1')).state, 'spawning',
+        "the parent's tool call does not paint the agent's orbital");
+    } finally { cleanup(tmp); }
+  });
+
+  test('a parent error while an agent runs shows error', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('par-2');
+    try {
+      runUpdateState('SessionStart', { session_id: 'par-2', source: 'startup' }, env);
+      runUpdateState('SubagentStart', { session_id: 'par-2', agent_id: 'bg1', agent_type: 'Explore' }, env);
+      runUpdateState('PostToolUse', {
+        session_id: 'par-2', tool_name: 'Bash', tool_input: { command: 'make' },
+        tool_response: { stdout: '', stderr: 'Error: boom', exitCode: 1 },
+      }, env);
+      const s = readJSON(sessionFile(sessionsDir, 'par-2'));
+      assert.strictEqual(s.state, 'error', `the error is visible, got ${s.state} / ${s.detail}`);
+      assert.strictEqual(readJSON(statsFile).streak, 0);
+    } finally { cleanup(tmp); }
+  });
+
+  test('a legacy synthetic still conducts on ordinary work but never masks an error', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('par-3');
+    try {
+      runUpdateState('SessionStart', { session_id: 'par-3', source: 'startup' }, env);
+      runUpdateState('SubagentStart', { session_id: 'par-3', description: 'legacy task' }, env);
+      runUpdateState('PreToolUse', {
+        session_id: 'par-3', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+      }, env);
+      assert.strictEqual(readJSON(sessionFile(sessionsDir, 'par-3')).state, 'subagent',
+        'the tool state went to the synthetic orbital, so the parent conducts');
+      runUpdateState('PostToolUse', {
+        session_id: 'par-3', tool_name: 'Bash', tool_input: { command: 'make' },
+        tool_response: { stdout: '', stderr: 'Error: boom', exitCode: 1 },
+      }, env);
+      assert.strictEqual(readJSON(sessionFile(sessionsDir, 'par-3')).state, 'error');
+    } finally { cleanup(tmp); }
+  });
+});
+
+describe('update-state -- an unregistered window is not a subagent', () => {
+  // A window opened before the hooks were installed never fired SessionStart
+  // through them, so it is missing from topLevelSessions.
+  test("its tool call does not retire the owner's live agent orbital", () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('own-A');
+    try {
+      runUpdateState('SessionStart', { session_id: 'own-A', source: 'startup' }, env);
+      runUpdateState('SubagentStart', { session_id: 'own-A', agent_id: 'x1', agent_type: 'Explore' }, env);
+      runUpdateState('PreToolUse', {
+        session_id: 'own-A', agent_id: 'x1', agent_type: 'Explore',
+        tool_name: 'Read', tool_input: { file_path: 'a.js' },
+      }, env);
+      runUpdateState('PreToolUse', {
+        session_id: 'stray-B', tool_name: 'Read', tool_input: { file_path: 'b.js' },
+      }, env);
+      const agent = readJSON(sessionFile(sessionsDir, 'own-A-agent-x1'));
+      assert.ok(!agent.stopped, 'a live agent is retired only by its own SubagentStop');
+      assert.strictEqual(agent.state, 'reading');
+    } finally { cleanup(tmp); }
+  });
+
+  test('its UserPromptSubmit registers it top-level, so it keeps no parentSession', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('own-C');
+    try {
+      runUpdateState('SessionStart', { session_id: 'own-C', source: 'startup' }, env);
+      runUpdateState('SubagentStart', { session_id: 'own-C', agent_id: 'x1', agent_type: 'Explore' }, env);
+      runUpdateState('UserPromptSubmit', { session_id: 'stray-D', prompt: 'hi' }, env);
+      const d = readJSON(sessionFile(sessionsDir, 'stray-D'));
+      assert.strictEqual(d.parentSession, undefined, 'a prompted window is top-level');
+      assert.ok(d.lastPromptAt > 0);
+      assert.ok(readJSON(statsFile).topLevelSessions['stray-D'] > 0, 'registered');
+      runUpdateState('PreToolUse', {
+        session_id: 'stray-D', tool_name: 'Read', tool_input: { file_path: 'd.js' },
+      }, env);
+      const d2 = readJSON(sessionFile(sessionsDir, 'stray-D'));
+      assert.strictEqual(d2.parentSession, undefined);
+      assert.strictEqual(d2.state, 'reading');
+      assert.strictEqual(readJSON(statsFile).session.activeSubagents.length, 1,
+        "the owner's agent tracking is untouched");
+    } finally { cleanup(tmp); }
+  });
+});
+
+describe('update-state -- echoes of a finished turn do not reopen it', () => {
+  test('a background SubagentStop after Stop keeps turnEnded and the global stopped', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('echo-1');
+    try {
+      runUpdateState('SessionStart', { session_id: 'echo-1', source: 'startup' }, env);
+      runUpdateState('SubagentStart', { session_id: 'echo-1', agent_id: 'bg1', agent_type: 'Explore' }, env);
+      runUpdateState('Stop', { session_id: 'echo-1' }, env);
+      runUpdateState('SubagentStop', { session_id: 'echo-1', agent_id: 'bg1', agent_type: 'Explore' }, env);
+      const s = readJSON(sessionFile(sessionsDir, 'echo-1'));
+      assert.strictEqual(s.turnEnded, true, 'the turn stays over');
+      assert.ok(!s.stopped, 'but the session is not');
+      assert.strictEqual(readJSON(stateFile).stopped, true, 'global ownership stays released');
+      assert.strictEqual(readJSON(sessionFile(sessionsDir, 'echo-1-agent-bg1')).stopped, true);
+    } finally { cleanup(tmp); }
+  });
+
+  test('a wait after Stop is shown (no turnEnded) but the next echo still knows the turn is over', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('echo-2');
+    try {
+      runUpdateState('SessionStart', { session_id: 'echo-2', source: 'startup' }, env);
+      runUpdateState('SubagentStart', { session_id: 'echo-2', agent_id: 'bg1', agent_type: 'Explore' }, env);
+      runUpdateState('Stop', { session_id: 'echo-2' }, env);
+      runUpdateState('Notification', { session_id: 'echo-2', notification_type: 'idle_prompt' }, env);
+      const w = readJSON(sessionFile(sessionsDir, 'echo-2'));
+      assert.strictEqual(w.state, 'waiting');
+      assert.ok(!w.turnEnded, 'a wait carrying turnEnded would be rescued to "wrapping up"');
+      assert.strictEqual(w.turnOver, true);
+      runUpdateState('SubagentStop', { session_id: 'echo-2', agent_id: 'bg1', agent_type: 'Explore' }, env);
+      assert.strictEqual(readJSON(sessionFile(sessionsDir, 'echo-2')).turnEnded, true);
+      runUpdateState('PreToolUse', {
+        session_id: 'echo-2', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+      }, env);
+      const fresh = readJSON(sessionFile(sessionsDir, 'echo-2'));
+      assert.ok(!fresh.turnEnded && !fresh.turnOver, 'a new turn clears both');
+    } finally { cleanup(tmp); }
+  });
+});
+
 module.exports = suite;
