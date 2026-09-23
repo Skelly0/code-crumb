@@ -30,6 +30,9 @@ const {
   subagentSessionId, subagentLabel,
   classifyForeignSession, pruneTopLevelSessions,
   prettyModelName, agentTranscriptPath,
+  COUNTER_MAX_FILES,
+  freshCounter: _freshCounter, normalizeCounter: _normalizeCounter,
+  parkAgents: _parkAgents, unparkAgents: _unparkAgents, pruneCounters: _pruneCounters,
 } = require('./state-machine');
 
 // Safety net for a missed SubagentStop: an activeSubagents entry older than
@@ -77,74 +80,8 @@ function carriesTurnEnd(event) {
 // Sticky session-file fields: set once, preserved across every later write.
 const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'editor', 'lastPromptAt', 'model'];
 
-// Per-session counters. The shared stats file has ONE `session` owner, and two
-// top-level windows alternating hooks used to reset it on every switch: each
-// window's file reported the other's toolCalls, and daily.sessionCount grew by
-// one per alternation. Each session now keeps its own counters, keyed by id,
-// and the session file reports those. Bounded: idle entries age out after a
-// day and the map keeps the 50 most recently seen.
-const COUNTER_MAX_AGE_MS = 24 * 3600000;
-const COUNTER_MAX_ENTRIES = 50;
-const COUNTER_MAX_FILES = 200;
-
-function _freshCounter(now) {
-  return { toolCalls: 0, filesEdited: [], start: now, commitCount: 0, creditedMs: 0, lastSeen: now, counted: false };
-}
-
-// Repair one entry in place (a hand-edited or older stats file must never
-// throw below). Returns null for anything that is not an entry at all.
-function _normalizeCounter(c, now) {
-  if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
-  const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
-  c.toolCalls = num(c.toolCalls, 0);
-  c.start = num(c.start, now) || now;
-  c.commitCount = num(c.commitCount, 0);
-  c.creditedMs = num(c.creditedMs, 0);
-  c.lastSeen = num(c.lastSeen, now);
-  c.counted = !!c.counted;
-  c.filesEdited = Array.isArray(c.filesEdited)
-    ? c.filesEdited.filter(f => typeof f === 'string').slice(0, COUNTER_MAX_FILES) : [];
-  return c;
-}
-
-// While a session does not own stats.session, its running agents (and its
-// subagent count) wait on its counter entry. Only stored when there is
-// something to keep, so an idle window's entry stays small.
-const COUNTER_MAX_AGENTS = 32;
-
-function _parkAgents(c, session) {
-  if (!c || !session) return;
-  const active = Array.isArray(session.activeSubagents)
-    ? session.activeSubagents.filter(s => s && typeof s === 'object').slice(0, COUNTER_MAX_AGENTS) : [];
-  if (active.length) c.activeSubagents = active; else delete c.activeSubagents;
-  if (session.subagentCount > 0) c.subagentCount = session.subagentCount; else delete c.subagentCount;
-}
-
-function _unparkAgents(c, session) {
-  if (!c || !session) return;
-  if (Array.isArray(c.activeSubagents)) {
-    session.activeSubagents = c.activeSubagents.filter(s => s && typeof s === 'object');
-  }
-  if (typeof c.subagentCount === 'number' && Number.isFinite(c.subagentCount)) {
-    session.subagentCount = c.subagentCount;
-  }
-  delete c.activeSubagents;
-  delete c.subagentCount;
-}
-
-function _pruneCounters(map, keepId, now) {
-  for (const id of Object.keys(map)) {
-    const c = map[id];
-    if (!c || typeof c !== 'object') { delete map[id]; continue; }
-    if (id !== keepId && now - (c.lastSeen || 0) > COUNTER_MAX_AGE_MS) delete map[id];
-  }
-  const ids = Object.keys(map);
-  if (ids.length <= COUNTER_MAX_ENTRIES) return;
-  ids.sort((a, b) => (map[b].lastSeen || 0) - (map[a].lastSeen || 0));
-  for (const id of ids.slice(COUNTER_MAX_ENTRIES)) {
-    if (id !== keepId) delete map[id];
-  }
-}
+// Per-session counters, and the parking of a non-owner's agents, live in
+// state-machine.js (see "Per-Session Counters") -- the adapters share them.
 
 // Fold a session's elapsed time into the records and today's cumulative
 // total. `creditedMs` remembers how much was already added, so crediting the
@@ -171,6 +108,27 @@ function _readSessionFile(id) {
   } catch { return null; }
 }
 
+// The teammate writes (TeammateIdle, a team TaskCompleted) build their file
+// from scratch, but they are still this session's writes: keep its display
+// name and provenance, and carry the sticky fields forward. They used to drop
+// editor, modelName, model and lastPromptAt -- and since every later write
+// carries sticky fields only from the previous file, those stayed lost.
+function _teammateSessionExtra(sessionId, teamExtra) {
+  const out = {
+    modelName: process.env.CODE_CRUMB_MODEL || DEFAULT_MODEL_NAME,
+    editor: EDITOR,
+    ...teamExtra,
+    sessionId,
+  };
+  const prev = _readSessionFile(sessionId);
+  if (prev) {
+    for (const field of STICKY_FIELDS) {
+      if (prev[field] && !out[field]) out[field] = prev[field];
+    }
+  }
+  return out;
+}
+
 // Top-level string fields out of a payload too large to parse (>1 MB --
 // nearly always a PostToolUse carrying a huge tool_response). Claude Code
 // serializes the envelope fields before tool_input/tool_response, so the
@@ -181,6 +139,7 @@ const RAW_FIELD_RES = {
   agent_id: /"agent_id"\s*:\s*"([^"\\]{1,256})"/,
   agent_type: /"agent_type"\s*:\s*"([^"\\]{1,256})"/,
   hook_event_name: /"hook_event_name"\s*:\s*"([^"\\]{1,64})"/,
+  source: /"source"\s*:\s*"([^"\\]{1,64})"/,
 };
 function _rawField(raw, key) {
   const m = RAW_FIELD_RES[key].exec(raw);
@@ -379,12 +338,19 @@ function writeStats(stats) {
 // alive) costs ~1-2ms, well within the 50ms hook budget. When the renderer
 // is down, parallel tool calls fire several hooks at once; the spawn lock
 // lets exactly one of them open a window per 5s.
-function ensureRendererRunning() {
+function ensureRendererRunning(editorStarting = false) {
   try {
     // Check pref — fast sync read, bail early if disabled
     if (!loadPrefs().autolaunch) return;
 
-    // Check quit flag — user intentionally quit, don't auto-relaunch
+    // Check quit flag — user intentionally quit, don't auto-relaunch. The
+    // renderer writes it on every exit and nothing else removed it, so one
+    // closed window disabled autolaunch for good. It now lasts until the
+    // editor starts again (a `startup` SessionStart), which is exactly the
+    // moment the setup prompt promises a launch.
+    if (editorStarting) {
+      try { fs.unlinkSync(QUIT_FLAG_FILE); } catch {}
+    }
     try { fs.accessSync(QUIT_FLAG_FILE); return; } catch {}
 
     // Check if renderer alive via PID file
@@ -629,7 +595,9 @@ process.stdin.on('data', chunk => {
   else inputTruncated = true;
 });
 process.stdin.on('end', () => {
-  ensureRendererRunning();
+  ensureRendererRunning(
+    (hookEvent || _rawField(input, 'hook_event_name')) === 'SessionStart'
+    && _rawField(input, 'source') === 'startup');
   if (inputTruncated) {
     // Too large to parse. The envelope ids are still recoverable from the raw
     // text, and they must be: this used to write ONLY the global file, with
@@ -904,7 +872,7 @@ process.stdin.on('end', () => {
       // parallel-window calls must not inflate them twice over.
       counter.toolCalls++;
       const fp = EDIT_TOOLS.test(toolName)
-        ? toText(toolInput.file_path || toolInput.path || toolInput.target_file) : '';
+        ? toText(toolInput.file_path || toolInput.notebook_path || toolInput.path || toolInput.target_file) : '';
       const base = fp ? path.basename(fp) : '';
       if (base && !counter.filesEdited.includes(base) && counter.filesEdited.length < COUNTER_MAX_FILES) {
         counter.filesEdited.push(base);
@@ -1030,7 +998,7 @@ process.stdin.on('end', () => {
         teammateName: mate,
         isTeammate: true,
       };
-      writeSessionState(sessionId, state, detail, false, { ...teamExtra, sessionId });
+      writeSessionState(sessionId, state, detail, false, _teammateSessionExtra(sessionId, teamExtra));
       writeStats(stats);
       // process.exit skips finally -- release the stats lock by hand.
       if (releaseStats) releaseStats();
@@ -1053,7 +1021,7 @@ process.stdin.on('end', () => {
           taskSubject,
           isTeammate: true,
         };
-        writeSessionState(sessionId, state, detail, false, { ...teamExtra, sessionId });
+        writeSessionState(sessionId, state, detail, false, _teammateSessionExtra(sessionId, teamExtra));
         writeStats(stats);
         // process.exit skips finally -- release the stats lock by hand.
         if (releaseStats) releaseStats();
@@ -1369,7 +1337,10 @@ process.stdin.on('end', () => {
             const synthData = JSON.parse(fs.readFileSync(synthFp, 'utf8'));
             if (!synthData.stopped) {
               if (synthData.taskDescription) extra.taskDescription = synthData.taskDescription;
-              writeJsonAtomic(synthFp, { ...synthData, stopped: true, state: 'happy', detail: 'done' }, 0o600);
+              // A fresh timestamp, as in the orphan SubagentStop path: the
+              // renderer skips a write whose timestamp it has already seen,
+              // so keeping the old one left the retired orbital live.
+              writeJsonAtomic(synthFp, { ...synthData, stopped: true, state: 'happy', detail: 'done', timestamp: Date.now() }, 0o600);
               break;
             }
           } catch {}

@@ -20,6 +20,7 @@
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { PID_FILE, buildRendererCommands, quoteArg } = require('./shared');
 
 const WINDOW_TITLE = 'Code Crumb';
@@ -167,7 +168,13 @@ if (require.main === module) {
     process.exit(1);
   });
 
-  child.on('exit', (code) => {
+  // A signal-killed editor is a failure, not exit 0: report it the shell way
+  // (128 + signal number), as the codex wrapper and engmux adapter do.
+  child.on('exit', (code, signal) => {
+    if (signal) {
+      const n = os.constants.signals[signal] || 0;
+      process.exit(n ? 128 + n : 1);
+    }
     process.exit(code || 0);
   });
 }

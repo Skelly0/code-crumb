@@ -3653,4 +3653,213 @@ describe('state-machine.js -- read-only commands print content, not verdicts', (
   });
 });
 
+// -- Third review pass (Sep 2026) --------------------------------------------
+// Each block below was reproduced against the pre-fix sources first.
+
+describe('state-machine -- third review pass: shell intent and classification', () => {
+  const ENOENT_OUT = 'src/a.js:3: if (e.code === "ENOENT") no such file or directory';
+  const post = (cmd, stdout) => classifyToolResult('Bash', { command: cmd }, { stdout, stderr: '' });
+
+  test('a 2>&1 redirect does not turn a read-only command into an acting one', () => {
+    assert.strictEqual(post('grep -rn ENOENT src/ 2>&1 | head -20', ENOENT_OUT).state, 'relieved');
+    assert.strictEqual(post('ls missing &>/dev/null; cat x', ENOENT_OUT).state, 'relieved');
+    assert.strictEqual(post('grep x >&2', ENOENT_OUT).state, 'relieved');
+  });
+
+  test('a real background & still splits, and an acting command is still judged', () => {
+    assert.strictEqual(post('make & grep x', ENOENT_OUT).state, 'error');
+    assert.strictEqual(post('npm run build 2>&1', ENOENT_OUT).state, 'error');
+  });
+
+  test('cd / pushd / popd only move: `cd repo && git log` is a read', () => {
+    const r = post('cd /repo && git log --oneline -5', ENOENT_OUT);
+    assert.strictEqual(r.state, 'relieved');
+    assert.strictEqual(post('pushd x && grep ENOENT -r . ; popd', ENOENT_OUT).state, 'relieved');
+  });
+
+  test('install detection is one table on both sides of a tool call', () => {
+    for (const cmd of ['yarn lint', 'pnpm dev', 'pnpm run format', 'yarn']) {
+      assert.notStrictEqual(toolToState('Bash', { command: cmd }).state, 'installing', cmd);
+      assert.notStrictEqual(post(cmd, '').detail, 'installed', cmd);
+    }
+    for (const cmd of ['npm i lodash', 'pip3 install x', 'yarn add react', 'go get x', 'brew install jq']) {
+      assert.strictEqual(toolToState('Bash', { command: cmd }).state, 'installing', cmd);
+      assert.strictEqual(post(cmd, '').detail, 'installed', cmd);
+    }
+  });
+
+  test('"0 errors" guards do not swallow "10 errors" or "error_count: 10"', () => {
+    assert.strictEqual(looksLikeError('== 2 failed, 5 passed, 10 errors in 1.2s ==', stdoutErrorPatterns), true);
+    assert.strictEqual(looksLikeError('== 2 failed, 5 passed, 3 errors in 1.2s ==', stdoutErrorPatterns), true);
+    assert.strictEqual(looksLikeError('Found 0 errors. Watching for file changes.', stdoutErrorPatterns), false);
+    assert.strictEqual(looksLikeError('error_count: 0', stdoutErrorPatterns), false);
+  });
+
+  test('MCP verbs are read from kebab-case and camelCase tool names too', () => {
+    assert.strictEqual(toolToState('mcp__Todoist__find-tasks', {}).state, 'searching');
+    assert.strictEqual(toolToState('mcp__Todoist__add-tasks', {}).state, 'coding');
+    assert.strictEqual(toolToState('mcp__Todoist__fetch-object', {}).state, 'reading');
+    assert.strictEqual(toolToState('mcp__linear__getIssue', {}).state, 'reading');
+    assert.strictEqual(toolToState('mcp__x__searchCode', {}).state, 'searching');
+    assert.strictEqual(toolToState('mcp__Todoist__find-tasks', {}).detail, 'Todoist: find tasks');
+    // A verb must be a whole word: `getaway` and `settings` are not get/set.
+    assert.strictEqual(toolToState('mcp__x__getaway', {}).state, 'executing');
+    assert.strictEqual(toolToState('mcp__x__settings', {}).state, 'executing');
+  });
+});
+
+describe('state-machine -- third review pass: PostToolUseFailure payload', () => {
+  // Claude Code 2.1.281 sends {tool_name, tool_input, tool_use_id, error,
+  // is_interrupt, duration_ms} -- no tool_response at all.
+  test('the `error` string is read as the tool output', () => {
+    const r = normalizeToolResponse({ error: 'Exit code 127\n/bin/bash: frobnicate: command not found', is_interrupt: false });
+    assert.strictEqual(r.stderr.includes('command not found'), true);
+    assert.strictEqual(r.interrupted, false);
+    const c = classifyToolResult('Bash', { command: 'frobnicate' }, r, true);
+    assert.strictEqual(c.state, 'error');
+    assert.strictEqual(c.detail, 'command not found');
+  });
+
+  test('is_interrupt shows "interrupted" even though the failure flag is set', () => {
+    const r = normalizeToolResponse({ error: 'Interrupted by user', is_interrupt: true });
+    const c = classifyToolResult('Bash', { command: 'sleep 100' }, r, true);
+    assert.deepStrictEqual([c.state, c.detail], ['error', 'interrupted']);
+  });
+
+  test('a payload with tool_response is untouched by the new branch', () => {
+    const r = normalizeToolResponse({ tool_response: { stdout: 'ok', stderr: '' }, error: 'ignored' });
+    assert.strictEqual(r.stdout, 'ok');
+    assert.strictEqual(r.stderr, '');
+  });
+
+  test('end to end: a failing Bash reports its real cause', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('ptuf-1');
+    try {
+      runUpdateState('PostToolUseFailure', {
+        session_id: 'ptuf-1', tool_name: 'Bash', tool_input: { command: 'frobnicate' },
+        tool_use_id: 't1', error: 'Exit code 127\n/bin/bash: frobnicate: command not found',
+        is_interrupt: false,
+      }, env);
+      const s = readJSON(pathMod.join(sessionsDir, 'ptuf-1.json'));
+      assert.deepStrictEqual([s.state, s.detail], ['error', 'command not found']);
+    } finally { cleanup(tmp); }
+  });
+});
+
+describe('update-state -- third review pass: hook bookkeeping', () => {
+  test('NotebookEdit counts its notebook as an edited file', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('nb-1');
+    try {
+      runUpdateState('PreToolUse', {
+        session_id: 'nb-1', tool_name: 'NotebookEdit',
+        tool_input: { notebook_path: '/repo/analysis.ipynb', new_source: 'x = 1' },
+      }, env);
+      const s = readJSON(pathMod.join(sessionsDir, 'nb-1.json'));
+      assert.strictEqual(s.filesEdited, 1);
+    } finally { cleanup(tmp); }
+  });
+
+  test('retiring a legacy synthetic stamps a fresh timestamp', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('sub-T');
+    try {
+      const old = Date.now() - 60000;
+      seedSyntheticOrbital(sessionsDir, 'ownerT-sub-1', 'ownerT', { timestamp: old });
+      fsMod.writeFileSync(statsFile, JSON.stringify(
+        conductingStats('ownerT', 'ownerT-sub-1', Date.now() - 1000)), 'utf8');
+      runUpdateState('PreToolUse', {
+        session_id: 'sub-T', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+      }, env);
+      const synth = readJSON(pathMod.join(sessionsDir, 'ownerT-sub-1.json'));
+      assert.strictEqual(synth.stopped, true);
+      assert.ok(synth.timestamp > old,
+        'the renderer skips a write whose timestamp it has seen, so the retirement needs a new one');
+    } finally { cleanup(tmp); }
+  });
+
+  for (const [event, payload] of [
+    ['TeammateIdle', { teammate_name: 'researcher', team_name: 'core' }],
+    ['TaskCompleted', { teammate_name: 'researcher', team_name: 'core', task_subject: 'done it' }],
+  ]) {
+    test(`${event} keeps editor, modelName and the sticky fields`, () => {
+      const { tmp, sessionsDir, env } = makeTempEnv('mate-1');
+      try {
+        fsMod.mkdirSync(sessionsDir, { recursive: true });
+        fsMod.writeFileSync(pathMod.join(sessionsDir, 'mate-1.json'), JSON.stringify({
+          session_id: 'mate-1', state: 'coding', timestamp: Date.now() - 1000,
+          editor: 'claude', modelName: 'claude', model: 'Opus', lastPromptAt: 12345,
+        }), 'utf8');
+        runUpdateState(event, { session_id: 'mate-1', ...payload }, env);
+        const s = readJSON(pathMod.join(sessionsDir, 'mate-1.json'));
+        assert.strictEqual(s.isTeammate, true);
+        assert.strictEqual(s.teammateName, 'researcher');
+        assert.strictEqual(s.editor, 'claude');
+        assert.strictEqual(s.modelName, 'claude');
+        assert.strictEqual(s.model, 'Opus');
+        assert.strictEqual(s.lastPromptAt, 12345);
+      } finally { cleanup(tmp); }
+    });
+  }
+
+  test('the counter helpers are shared from state-machine.js', () => {
+    const sm = require('../state-machine');
+    for (const k of ['freshCounter', 'normalizeCounter', 'parkAgents', 'unparkAgents', 'pruneCounters']) {
+      assert.strictEqual(typeof sm[k], 'function', k);
+    }
+    const c = sm.freshCounter(5);
+    const session = { activeSubagents: [{ id: 'a' }], subagentCount: 1 };
+    sm.parkAgents(c, session);
+    assert.deepStrictEqual(c.activeSubagents, [{ id: 'a' }]);
+    const back = { activeSubagents: [] };
+    sm.unparkAgents(c, back);
+    assert.deepStrictEqual(back.activeSubagents, [{ id: 'a' }]);
+    assert.strictEqual(c.activeSubagents, undefined);
+  });
+});
+
+describe('update-state -- third review pass: autolaunch quit flag', () => {
+  // The renderer writes ~/.code-crumb-quit on every exit and nothing removed
+  // it, so after the first closed window no hook ever launched a renderer
+  // again. It now lasts until the editor starts a new session.
+  // Autolaunch is ON, but the PID file names this (live) test process, so the
+  // hook sees a running renderer and never spawns a terminal -- while still
+  // passing through the quit-flag handling first.
+  function withQuitFlag(fn) {
+    const { tmp, env } = makeTempEnv('quit-1');
+    try {
+      const flag = pathMod.join(tmp, '.code-crumb-quit');
+      fsMod.writeFileSync(flag, String(Date.now()), 'utf8');
+      fsMod.writeFileSync(pathMod.join(tmp, '.code-crumb-prefs.json'), '{"autolaunch":true}', 'utf8');
+      fsMod.writeFileSync(pathMod.join(tmp, '.code-crumb.pid'), String(process.pid), 'utf8');
+      fn(env, flag);
+    } finally { cleanup(tmp); }
+  }
+
+  test('a startup SessionStart clears the flag', () => {
+    withQuitFlag((env, flag) => {
+      runUpdateState('SessionStart', { session_id: 'quit-1', source: 'startup' }, env);
+      assert.strictEqual(fsMod.existsSync(flag), false);
+    });
+  });
+
+  test('a compaction or an ordinary hook leaves it alone', () => {
+    withQuitFlag((env, flag) => {
+      runUpdateState('SessionStart', { session_id: 'quit-1', source: 'compact' }, env);
+      runUpdateState('PreToolUse', { session_id: 'quit-1', tool_name: 'Read', tool_input: {} }, env);
+      assert.strictEqual(fsMod.existsSync(flag), true);
+    });
+  });
+
+  test('source: the flag is cleared on a startup SessionStart, before the check', () => {
+    const src = fsMod.readFileSync(UPDATE_STATE, 'utf8');
+    const i = src.indexOf('function ensureRendererRunning(editorStarting');
+    assert.ok(i > 0);
+    const body = src.slice(i, i + 1400);
+    assert.ok(body.indexOf('fs.unlinkSync(QUIT_FLAG_FILE)') > 0);
+    assert.ok(body.indexOf('fs.unlinkSync(QUIT_FLAG_FILE)') < body.indexOf('fs.accessSync(QUIT_FLAG_FILE)'),
+      'the unlink must come before the access check');
+    assert.ok(/_rawField\(input, 'source'\) === 'startup'/.test(src),
+      'only a startup SessionStart clears it: compact/resume/clear are the same editor run');
+  });
+});
+
 module.exports = suite;

@@ -1776,16 +1776,39 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     cleanup(tmp);
   });
 
-  test('a standalone error with no turn.failed still breaks the streak', () => {
-    const { tmp, statsFile } = runFakeCodex([
+  // codex 0.146 emits a top-level `error` for every retryable stream error
+  // (will_retry in the app-server protocol) and then carries on; a real
+  // failure always ends in turn.failed. So the error face shows, but only
+  // turn.failed may cost the streak -- a completed turn used to lose it.
+  test('a standalone error (a retry notice) shows but does not break the streak', () => {
+    const { tmp, statsFile, stateFile } = runFakeCodex([
       { type: 'turn.started' },
-      { type: 'error', message: 'stream died' },
+      { type: 'error', message: 'Reconnecting... 1/5 (stream disconnected before completion)' },
     ], { streak: 4, bestStreak: 9, totalErrors: 1 });
 
     const stats = readJSON(statsFile);
-    assert.strictEqual(stats.brokenStreak, 4);
-    assert.strictEqual(stats.streak, 0);
-    assert.strictEqual(stats.totalErrors, 2);
+    assert.strictEqual(stats.streak, 4);
+    assert.strictEqual(stats.brokenStreak || 0, 0);
+    assert.strictEqual(stats.totalErrors, 1);
+    assert.strictEqual(readJSON(stateFile).state, 'error', 'the notice is still shown');
+    cleanup(tmp);
+  });
+
+  test('a retry notice inside a turn that completes keeps the streak growing', () => {
+    const { tmp, statsFile } = runFakeCodex([
+      { type: 'thread.started', thread_id: 'retry' },
+      { type: 'turn.started' },
+      { type: 'item.started', item: { id: 'i0', type: 'command_execution', command: 'ls', status: 'in_progress' } },
+      { type: 'item.completed', item: { id: 'i0', type: 'command_execution', command: 'ls', aggregated_output: 'a', exit_code: 0, status: 'completed' } },
+      { type: 'error', message: 'Reconnecting... 1/5' },
+      { type: 'item.completed', item: { id: 'i1', type: 'agent_message', text: 'All good.' } },
+      { type: 'turn.completed', usage: {} },
+    ], { streak: 12, bestStreak: 12, totalErrors: 0 });
+
+    const stats = readJSON(statsFile);
+    assert.strictEqual(stats.streak, 13);
+    assert.strictEqual(stats.brokenStreak || 0, 0);
+    assert.strictEqual(stats.totalErrors, 0);
     cleanup(tmp);
   });
 
@@ -3889,7 +3912,12 @@ describe('adapters -- codex-wrapper turn end vs session end', () => {
     "fs.writeSync(1, JSON.stringify({ type: 'turn.started' }) + '\\n');",
     "fs.writeSync(1, JSON.stringify({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } }) + '\\n');",
     "if (process.env.CODEX_FAKE_THEN === 'kill') setTimeout(() => process.kill(process.pid, 'SIGKILL'), 300);",
-    "else setInterval(() => {}, 1000);",
+    // 'late': keep printing while shutting down after a forwarded SIGTERM.
+    "if (process.env.CODEX_FAKE_THEN === 'late') process.on('SIGTERM', () => {",
+    "  fs.writeSync(1, JSON.stringify({ type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'npm test', aggregated_output: 'ok', exit_code: 0, status: 'completed' } }) + '\\n');",
+    "  setTimeout(() => process.exit(0), 100);",
+    "});",
+    "if (process.env.CODEX_FAKE_THEN !== 'kill') setInterval(() => {}, 1000);",
     '',
   ].join('\n');
 
@@ -3919,6 +3947,19 @@ describe('adapters -- codex-wrapper turn end vs session end', () => {
         assert.strictEqual(code, 143);
         const s = readJSON(w.sessionFile);
         assert.strictEqual(s.stopped, true, 'no ghost orbital on its last work face');
+        assert.strictEqual(s.state, 'error');
+      } finally { try { w.child.kill('SIGKILL'); } catch {} cleanup(w.tmp); }
+    });
+
+    test.async('events codex prints while shutting down do not undo the retirement', async () => {
+      const w = spawnHangingWrapper('late');
+      try {
+        await waitFor(() => readJSON(w.sessionFile).state === 'testing', 10000, 'the running tool');
+        w.child.kill('SIGTERM');
+        const { code } = await w.done;
+        assert.strictEqual(code, 143);
+        const s = readJSON(w.sessionFile);
+        assert.strictEqual(s.stopped, true, 'a late item.completed used to rewrite it live');
         assert.strictEqual(s.state, 'error');
       } finally { try { w.child.kill('SIGKILL'); } catch {} cleanup(w.tmp); }
     });
@@ -4011,6 +4052,187 @@ describe('demos -- clean up demo-main on every terminating signal', () => {
       });
     }
   }
+});
+
+// -- Third review pass (Sep 2026) --------------------------------------------
+// Each block below was reproduced against the pre-fix sources first.
+
+describe('adapters -- third review pass: details are drawable text', () => {
+  const OPENCLAW = path.join(ADAPTERS_DIR, 'openclaw-adapter.js');
+  const NOTIFY = path.join(ADAPTERS_DIR, 'codex-notify.js');
+
+  test('an error OBJECT becomes the generic detail, never an object in the file', () => {
+    const t = makeTempEnv('claw-obj');
+    try {
+      runStdinAdapter(OPENCLAW, { event: 'error', session_id: 'claw-obj', message: { code: 500, text: 'boom' } }, t.env);
+      const s = readJSON(path.join(t.sessionsDir, 'claw-obj.json'));
+      assert.strictEqual(s.detail, 'something went wrong');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a multi-line message is written on one line', () => {
+    const t = makeTempEnv('notify-lines');
+    try {
+      const ev = { type: 'agent-turn-complete', 'thread-id': 'nl-1', 'last-assistant-message': 'Done.\n\nI updated it.' };
+      try { execFileSync(NODE, [NOTIFY, JSON.stringify(ev)], { env: t.env, timeout: 10000, stdio: 'pipe' }); } catch (e) { if (e.status) throw e; }
+      const s = readJSON(path.join(t.sessionsDir, 'nl-1.json'));
+      assert.ok(!/[\r\n]/.test(s.detail), JSON.stringify(s.detail));
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('adapters -- third review pass: degraded stdin respects ownership', () => {
+  const OPENCODE = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+  function run(env, input) {
+    try { execFileSync(NODE, [OPENCODE], { input, env, timeout: 10000, stdio: 'pipe', maxBuffer: 1 << 26 }); }
+    catch (e) { if (e.status) throw e; }
+  }
+
+  test('a payload over 1 MB does not clobber a global file another session owns', () => {
+    const t = makeTempEnv('oc-big');
+    try {
+      const owner = { state: 'coding', detail: 'editing x.js', sessionId: 'claude-live', timestamp: Date.now() };
+      fs.writeFileSync(t.stateFile, JSON.stringify(owner));
+      run(t.env, JSON.stringify({ type: 'tool.execute.before', sessionId: 'ses_big', tool: 'write',
+        toolInput: { filePath: 'big.txt', content: 'x'.repeat(1200000) } }));
+      const g = readJSON(t.stateFile);
+      assert.strictEqual(g.sessionId, 'claude-live');
+      assert.strictEqual(g.state, 'coding');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('unparseable stdin keeps the owner\'s sessionId on the global file', () => {
+    const t = makeTempEnv('oc-owner');
+    try {
+      const env = { ...t.env, CLAUDE_SESSION_ID: 'oc-owner' };
+      fs.writeFileSync(t.stateFile, JSON.stringify({ state: 'coding', sessionId: 'oc-owner', timestamp: Date.now() }));
+      run(env, 'not json');
+      const g = readJSON(t.stateFile);
+      assert.strictEqual(g.sessionId, 'oc-owner', 'without it any other window took the file over');
+      assert.strictEqual(g.state, 'thinking');
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('adapters -- third review pass: per-session counters', () => {
+  const OPENCODE = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+  test('two alternating sessions keep their own tool counts and count once each', () => {
+    const t = makeTempEnv('oc-alt');
+    try {
+      for (let i = 0; i < 3; i++) {
+        for (const sid of ['ses_A', 'ses_B']) {
+          runStdinAdapter(OPENCODE, { type: 'tool.execute.before', sessionId: sid, callID: `c${i}`, tool: 'read', toolInput: { filePath: 'a.js' } }, t.env);
+        }
+      }
+      assert.strictEqual(readJSON(path.join(t.sessionsDir, 'ses_A.json')).toolCalls, 3);
+      assert.strictEqual(readJSON(path.join(t.sessionsDir, 'ses_B.json')).toolCalls, 3);
+      assert.strictEqual(readJSON(t.statsFile).daily.sessionCount, 2);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('an adapter event parks a conducting owner\'s agents instead of wiping them', () => {
+    const base = require(path.join(ADAPTERS_DIR, 'base-adapter'));
+    const { defaultStats } = require('../state-machine');
+    const stats = defaultStats();
+    base.initSession(stats, 'claude-A');
+    stats.session.activeSubagents = [{ id: 'claude-A-sub-1', startedAt: Date.now() }];
+    stats.session.subagentCount = 1;
+    base.initSession(stats, 'ses_oc');            // an OpenCode event takes the owner slot
+    assert.deepStrictEqual(stats.session.activeSubagents, []);
+    base.initSession(stats, 'claude-A');          // and hands it back
+    assert.strictEqual(stats.session.activeSubagents.length, 1);
+    assert.strictEqual(stats.session.subagentCount, 1);
+  });
+});
+
+describe('adapters -- third review pass: streams', () => {
+  const base = require(path.join(ADAPTERS_DIR, 'base-adapter'));
+  test.async('a multi-byte character split across chunks survives', async () => {
+    const { PassThrough } = require('stream');
+    const stream = new PassThrough();
+    const got = [];
+    base.processJsonlStream(stream, (e) => got.push(e));
+    const buf = Buffer.from(JSON.stringify({ path: '/repo/café.js' }) + '\n', 'utf8');
+    const cut = buf.indexOf(0xc3) + 1;             // between the two bytes of the e-acute
+    stream.write(buf.subarray(0, cut));
+    stream.write(buf.subarray(cut));
+    stream.end();
+    await new Promise(r => setImmediate(r));
+    assert.deepStrictEqual(got, [{ path: '/repo/café.js' }]);
+  });
+
+  test('exitWhenFlushed exits only once the stream has taken everything', () => {
+    const realExit = process.exit;
+    const realCode = process.exitCode;
+    const calls = [];
+    let flush = null;
+    process.exit = (c) => { calls.push(c); };
+    try {
+      base.exitWhenFlushed(3, { write: (s, cb) => { flush = cb; return false; } });
+      assert.deepStrictEqual(calls, [], 'not before the pipe drains');
+      flush();
+      assert.deepStrictEqual(calls, [3]);
+    } finally {
+      process.exit = realExit;
+      process.exitCode = realCode;
+    }
+  });
+
+  test('source: the passthrough adapters exit through exitWhenFlushed', () => {
+    const engmux = fs.readFileSync(path.join(ADAPTERS_DIR, 'engmux-adapter.js'), 'utf8');
+    const wrapper = fs.readFileSync(path.join(ADAPTERS_DIR, 'codex-wrapper.js'), 'utf8');
+    assert.ok(engmux.includes('exitWhenFlushed(code || 0)'));
+    assert.ok(wrapper.includes('exitWhenFlushed(outcome.exitCode)'));
+    assert.ok(engmux.includes("child.stdout.setEncoding('utf8')"));
+  });
+});
+
+describe('adapters -- third review pass: the OpenCode plugin keeps a session in order', () => {
+  const PLUGIN_FILE = path.join(ADAPTERS_DIR, 'opencode-plugin.mjs');
+  if (POSIX) {
+    test.async('one session\'s payloads spawn one at a time, in order', async () => {
+      const os = require('os');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-order-'));
+      const log = path.join(dir, 'log');
+      const fake = path.join(dir, 'fake-node');
+      // Stands in for `node adapter.js`: logs the payload, works a while, logs the end.
+      fs.writeFileSync(fake, `#!/bin/sh\ncat >> "${log}"\necho >> "${log}"\nsleep 0.3\necho end >> "${log}"\n`);
+      fs.chmodSync(fake, 0o755);
+      const realNode = process.env.CODE_CRUMB_NODE;
+      try {
+        const { CodeCrumbPlugin } = await import(`${require('url').pathToFileURL(PLUGIN_FILE).href}?t=order`);
+        const hooks = await CodeCrumbPlugin();
+        process.env.CODE_CRUMB_NODE = fake;
+        const input = { sessionID: 'ses_order', tool: 'read', callID: 'c1' };
+        const calls = [
+          hooks['tool.execute.before'](input, { args: { filePath: 'a.js' } }),
+          hooks['tool.execute.after']({ ...input, args: { filePath: 'a.js' } }, { title: '', output: 'x', metadata: {} }),
+        ];
+        process.env.CODE_CRUMB_NODE = realNode;
+        await Promise.all(calls);
+        await waitFor(() => (fs.readFileSync(log, 'utf8').match(/^end$/gm) || []).length === 2, 10000, 'both children');
+        const lines = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean);
+        assert.strictEqual(lines.length, 4, lines.join(' | '));
+        assert.strictEqual(lines[1], 'end', 'the second child must not start before the first ends');
+        assert.ok(lines[0].includes('tool.execute.before'));
+        assert.ok(lines[2].includes('tool.execute.after'));
+      } finally {
+        if (realNode === undefined) delete process.env.CODE_CRUMB_NODE; else process.env.CODE_CRUMB_NODE = realNode;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+describe('adapters -- third review pass: the OpenClaw snippets name their session', () => {
+  test('both snippets send a stable session_id without a shell', () => {
+    const header = fs.readFileSync(path.join(ADAPTERS_DIR, 'openclaw-adapter.js'), 'utf8');
+    const setupSrc = fs.readFileSync(path.join(__dirname, '..', 'setup.js'), 'utf8');
+    for (const src of [header, setupSrc]) {
+      assert.ok(src.includes('execFileSync'), 'no shell, so the adapter\'s parent is Pi itself');
+      assert.ok(/openclaw-\$\{process\.pid\}|openclaw-\\\$\{process\.pid\}/.test(src), 'one id per Pi process');
+    }
+  });
 });
 
 module.exports = suite;

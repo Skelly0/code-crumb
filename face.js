@@ -29,6 +29,11 @@ const COMPRESS_LOW_CAP = 30000;
 
 // Max consecutive blocks any single state segment can occupy in the timeline bar
 const MAX_SEGMENT_BLOCKS = 5;
+// A streak break reacts (glitch, "ouch.", "...N streak gone") only while it is
+// this fresh. Every state write carries the LAST break ever recorded, so the
+// first write after a renderer boot -- or a swap to a session last written
+// before a break -- used to replay a days-old one in full.
+const STREAK_BREAK_FRESH_MS = 10000;
 
 // -- Timing --------------------------------------------------------
 // The face has two kinds of state. WORK states (coding, reading, ...) should
@@ -318,9 +323,12 @@ class ClaudeFace {
       const newIsCompletion = COMPLETION_STATES.has(newState);
       const shouldBypass = newIsWork && INTERRUPTIBLE_STATES.has(this.state) && !inGuaranteedWindow;
 
-      // Completions are buffered (not bypassed) while work is running or while a
-      // completion is still inside its guaranteed window.
-      const isCompletionDuringWork = newIsCompletion && ACTIVE_WORK_STATES.has(this.state);
+      // Completions are buffered (not bypassed) while work is running, while an
+      // error is still inside its own minimum (work already waits for it; a
+      // reward used to cut a 4s error face down to a fraction of a second), or
+      // while a completion is still inside its guaranteed window.
+      const isCompletionDuringWork = newIsCompletion
+        && (ACTIVE_WORK_STATES.has(this.state) || this.state === 'error');
       const isCompletionDuringWindow = newIsCompletion && inGuaranteedWindow;
 
       const shouldBuffer = now < this.minDisplayUntil
@@ -335,7 +343,9 @@ class ClaudeFace {
         if (this.pendingState === 'error') return;
         const pendingIsCompletion = COMPLETION_STATES.has(this.pendingState);
         if (pendingIsCompletion && !newIsCompletion) {
-          if (newIsWork) this.pendingWork = { state: newState, detail };
+          // A permission prompt is remembered like work: dropping it here lost
+          // the prompt for good, since the renderer applies each write once.
+          if (newIsWork || newState === 'waiting') this.pendingWork = { state: newState, detail };
           return;
         }
         this.pendingState = newState;
@@ -355,7 +365,10 @@ class ClaudeFace {
       // flushing it now would show `relieved` over the tool that is running --
       // and break the renderer's long-tool hold, which needs the face to name
       // the same state as the file. Drop it, and any work remembered behind it.
-      if (ACTIVE_WORK_STATES.has(newState) && COMPLETION_STATES.has(this.pendingState)) {
+      // The same goes for any other queued state (an older tool, a wait that
+      // has been answered): this write is newer, and flushing the queue later
+      // would replace the tool that is actually running. Only an error stays.
+      if (ACTIVE_WORK_STATES.has(newState) && this.pendingState && this.pendingState !== 'error') {
         this.pendingState = null;
         this.pendingDetail = '';
         this.pendingWork = null;
@@ -498,16 +511,24 @@ class ClaudeFace {
     this.streak = data.streak || 0;
     this.bestStreak = data.bestStreak || 0;
 
-    // Detect streak break -- dramatic reaction proportional to lost streak
-    if (data.brokenStreak > 0 && data.brokenStreakAt !== this.brokenStreakAt) {
-      this.lastBrokenStreak = data.brokenStreak;
+    // Detect streak break -- dramatic reaction proportional to lost streak.
+    // Every new break replaces the last one, including a break that lost
+    // nothing (an error with the streak already at 0 writes brokenStreak 0):
+    // keeping the old value showed "DEVASTATION." for a streak lost earlier.
+    const prevBrokenStreak = this.lastBrokenStreak;
+    if (data.brokenStreakAt && data.brokenStreakAt !== this.brokenStreakAt) {
       this.brokenStreakAt = data.brokenStreakAt;
-      const drama = Math.min(1.0, data.brokenStreak / 50);
-      this.glitchIntensity = Math.max(this.glitchIntensity, 0.5 + drama * 0.5);
-      this.particles.spawn(Math.floor(4 + drama * 16), 'glitch');
+      const fresh = Date.now() - data.brokenStreakAt < STREAK_BREAK_FRESH_MS;
+      this.lastBrokenStreak = fresh ? (data.brokenStreak || 0) : 0;
+      if (this.lastBrokenStreak > 0) {
+        const drama = Math.min(1.0, this.lastBrokenStreak / 50);
+        this.glitchIntensity = Math.max(this.glitchIntensity, 0.5 + drama * 0.5);
+        this.particles.spawn(Math.floor(4 + drama * 16), 'glitch');
+      }
     }
 
     // Inter-session memory
+    const prevDiff = this.diffInfo;
     this.diffInfo = data.diffInfo || null;
     this.dailySessions = data.dailySessions || 0;
     this.dailyCumulativeMs = data.dailyCumulativeMs || 0;
@@ -524,6 +545,16 @@ class ClaudeFace {
       this.milestone = data.milestone;
       this.milestoneShowTime = 180; // ~12 seconds at 15fps
       this.particles.spawn(15, 'sparkle');
+    }
+
+    // The renderer calls setState() before setStats(), so the thought was
+    // picked from the PREVIOUS write's stats: a proud face thought about the
+    // last edit's diff (usually none) and an error about the last break, and
+    // the right one only turned up on the next thought cycle, ~4s later.
+    const diffChanged = JSON.stringify(prevDiff) !== JSON.stringify(this.diffInfo);
+    if ((this.state === 'proud' && diffChanged)
+        || (this.state === 'error' && prevBrokenStreak !== this.lastBrokenStreak)) {
+      this._updateThought();
     }
   }
 
@@ -866,7 +897,10 @@ class ClaudeFace {
         this.state !== 'waiting') {
       this.setState('caffeinated', this.stateDetail || 'hyperdrive!');
     } else if (this.state === 'caffeinated' && recentCount < CAFFEINE_THRESHOLD - 1) {
-      this.setState(this.prevState || 'idle');
+      // Hand back the work detail caffeinated borrowed, or the resumed tool
+      // shows a blank line.
+      const detail = this.stateDetail === 'hyperdrive!' ? '' : this.stateDetail;
+      this.setState(this.prevState || 'idle', detail);
     }
 
     // Thought bubble cycling (jittery at pet spam level 3+)
@@ -913,29 +947,32 @@ class ClaudeFace {
   }
 
   _compressTimeline(now, barWidth = 38) {
-    if (!this._timelineDirty && this._cachedCompressedTimeline
-        && this._cachedCompressedTimeline.barWidth === barWidth) {
-      // Timeline hasn't changed -- update displayNow to reflect current time offset
-      const cached = this._cachedCompressedTimeline;
-      return { entries: cached.entries, displayNow: now - cached.offsetFromNow };
-    }
-    if (this.timeline.length < 2) {
-      const result = { entries: this.timeline.slice(), displayNow: now };
-      this._cachedCompressedTimeline = { entries: result.entries, offsetFromNow: 0, barWidth };
-      this._timelineDirty = false;
-      return result;
-    }
-    let entries = [{ state: this.timeline[0].state, at: this.timeline[0].at }];
-    let offset = 0;
-    for (let i = 1; i < this.timeline.length; i++) {
-      const gap = this.timeline[i].at - this.timeline[i - 1].at;
-      const prevState = this.timeline[i - 1].state;
-      if (LOW_ACTIVITY_STATES.has(prevState) && gap > COMPRESS_LOW_CAP) {
-        offset += gap - COMPRESS_LOW_CAP;
+    // Pass 1 (squeezing long idle gaps) depends only on the timeline, so it is
+    // cached until the next push. Pass 2 depends on `now` as well -- the
+    // current segment keeps growing -- so it runs on every call. Caching its
+    // result froze the cap at the moment of the last push, when the current
+    // segment was ~0ms long: an hour of sleep then filled 27 of 28 blocks.
+    if (this._timelineDirty || !this._cachedCompressedTimeline) {
+      const pass1 = [];
+      let offset = 0;
+      if (this.timeline.length) pass1.push({ state: this.timeline[0].state, at: this.timeline[0].at });
+      for (let i = 1; i < this.timeline.length; i++) {
+        const gap = this.timeline[i].at - this.timeline[i - 1].at;
+        const prevState = this.timeline[i - 1].state;
+        if (LOW_ACTIVITY_STATES.has(prevState) && gap > COMPRESS_LOW_CAP) {
+          offset += gap - COMPRESS_LOW_CAP;
+        }
+        pass1.push({ state: this.timeline[i].state, at: this.timeline[i].at - offset });
       }
-      entries.push({ state: this.timeline[i].state, at: this.timeline[i].at - offset });
+      this._cachedCompressedTimeline = { entries: pass1, offset };
+      this._timelineDirty = false;
     }
-    let displayNow = now - offset;
+    const cached = this._cachedCompressedTimeline;
+    if (this.timeline.length < 2) {
+      return { entries: cached.entries, displayNow: now };
+    }
+    let entries = cached.entries;
+    let displayNow = now - cached.offset;
 
     // Pass 2: cap any segment to MAX_SEGMENT_BLOCKS visual blocks.
     // Uses block-allocation: iteratively identify over-cap segments, then
@@ -989,10 +1026,6 @@ class ClaudeFace {
         }
       }
     }
-
-    // Cache the compressed result; store offset so displayNow can be recomputed
-    this._cachedCompressedTimeline = { entries, offsetFromNow: now - displayNow, barWidth };
-    this._timelineDirty = false;
 
     return { entries, displayNow };
   }
@@ -1261,7 +1294,15 @@ class ClaudeFace {
 
     // Streak counter, timeline, sparkline (togglable via 's', skipped in minimal mode)
     if (this.showStats && !this.minimalMode) {
-      if (this.streak > 0 || this.milestoneShowTime > 0) {
+      // One message on this row: the streak-loss line and the streak/milestone
+      // text used to be drawn over each other ("ouch.row! ★").
+      const lossSeverity = this.state === 'error'
+        ? (this.lastBrokenStreak >= 50 ? 'DEVASTATION.'
+          : this.lastBrokenStreak >= 25 ? 'that really hurt.'
+          : this.lastBrokenStreak >= 10 ? 'ouch.'
+          : '')
+        : '';
+      if (!lossSeverity && (this.streak > 0 || this.milestoneShowTime > 0)) {
         let streakText, sc;
         if (this.milestoneShowTime > 0 && this.milestone) {
           const stars = '\u2605'.repeat(Math.min(5, Math.ceil(this.milestone.value / 20)));
@@ -1284,16 +1325,10 @@ class ClaudeFace {
         }
       }
       // Show dramatic broken streak message
-      if (this.state === 'error' && this.lastBrokenStreak > 5) {
-        const severity = this.lastBrokenStreak >= 50 ? 'DEVASTATION.'
-          : this.lastBrokenStreak >= 25 ? 'that really hurt.'
-          : this.lastBrokenStreak >= 10 ? 'ouch.'
-          : '';
-        if (severity) {
-          const spad = Math.floor((faceW - severity.length) / 2);
-          buf += ansi.to(startRow + 12, startCol);
-          buf += `${ansi.fg(230, 80, 80)}${' '.repeat(Math.max(0, spad))}${severity}${r}`;
-        }
+      if (lossSeverity) {
+        const spad = Math.floor((faceW - lossSeverity.length) / 2);
+        buf += ansi.to(startRow + 12, startCol);
+        buf += `${ansi.fg(230, 80, 80)}${' '.repeat(Math.max(0, spad))}${lossSeverity}${r}`;
       }
 
       // Session timeline bar (with time-compression for long idle/sleep gaps)

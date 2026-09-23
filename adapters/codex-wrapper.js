@@ -25,7 +25,7 @@ const path = require('path');
 const {
   writeState, writeSessionState, readStats, writeStats, guardedWriteState,
   initSession, buildExtra, trackEditedFile,
-  handleToolStart, handleToolEnd, processJsonlStream, signalExitCode,
+  handleToolStart, handleToolEnd, processJsonlStream, signalExitCode, exitWhenFlushed,
 } = require('./base-adapter');
 const {
   toolToState, humanizeToolName, updateStreak, pruneFrequentFiles, prettyModelName,
@@ -69,12 +69,14 @@ let turnOutcome = null; // 'completed' | 'failed' once the turn ends
 
 let lastPromptAt = 0; // attention stamp: set on thread/turn start, carried on every write
 
-// A failed codex turn emits BOTH a top-level `error` and a `turn.failed`.
-// Breaking the streak on each would leave brokenStreak at 0 -- the face reads
-// that as "no streak was lost" and skips the reaction -- and would count the
-// same failure twice in totalErrors. So the streak breaks at most once per
-// turn; a standalone `error` with no turn.failed still breaks it.
+// A failed codex turn always ends in `turn.failed`, and only that breaks the
+// streak. A top-level `error` on its own is not a failure: codex 0.146 emits
+// one for every retryable stream error ("Reconnecting... 1/5", will_retry in
+// the app-server protocol) and then carries on, so breaking the streak there
+// zeroed it on turns that went on to complete. The per-turn flag still guards
+// against counting one failure twice.
 let streakBrokenThisTurn = false;
+let finished = false; // set once by finishSession
 
 function breakStreak(stats) {
   if (streakBrokenThisTurn) return;
@@ -304,6 +306,11 @@ function applyItem(item, phase, countTool) {
 // -- JSONL event dispatcher --------------------------------------------
 
 function handleEvent(event) {
+  // After the session-ending write, nothing may write a live state again:
+  // codex keeps printing while it shuts down after a forwarded signal, and a
+  // late item (or a late thread.started, which minted a brand-new live
+  // session) used to overwrite the retirement.
+  if (finished) return;
   try {
     const type = (event && event.type) || '';
 
@@ -337,11 +344,9 @@ function handleEvent(event) {
       });
     }
     else if (type === 'error') {
+      // Shown, but not counted: see streakBrokenThisTurn.
       const detail = shortText(event.message) || 'something went wrong';
-      commit((stats) => {
-        breakStreak(stats);
-        return { state: 'error', detail };
-      });
+      commit(() => ({ state: 'error', detail }));
     }
     else if (type === 'item.started') applyItem(event.item, 'started', true);
     else if (type === 'item.updated') applyItem(event.item, 'started', false);
@@ -381,8 +386,8 @@ function closeOutcome({ code, signal, caught, turnOutcome: outcome, lastState: l
 }
 
 // The session-ending write happens exactly once, whichever of 'close' or a
-// caught signal gets there first.
-let finished = false;
+// caught signal gets there first (`finished` is declared with the other
+// module state, above handleEvent, which also reads it).
 function finishSession(outcome) {
   if (finished) return false;
   finished = true;
@@ -460,7 +465,7 @@ function main() {
     // and a signal (ours or anyone's) is an interruption.
     const outcome = closeOutcome({ code, signal, caught, turnOutcome, lastState, lastDetail });
     finishSession(outcome);
-    process.exit(outcome.exitCode);
+    exitWhenFlushed(outcome.exitCode);
   });
 }
 

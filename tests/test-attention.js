@@ -1384,4 +1384,55 @@ describe('review round 2 -- degraded payloads keep their session', () => {
   });
 });
 
+// -- Third review pass (Sep 2026) --------------------------------------------
+// Each block below was reproduced against the pre-fix sources first.
+
+describe('renderer -- third review pass', () => {
+  const { needsRescue } = rendererMod;
+
+  test('conducting after the parent\'s Stop is not rescued while agents run', () => {
+    const face = { state: 'subagent' };
+    assert.strictEqual(needsRescue(face, true, false, 2), false,
+      'rescuing it looped responding -> done! -> conducting every ~12s');
+    assert.strictEqual(needsRescue(face, true, false, 0), true, 'no live agents: rescue as before');
+    assert.strictEqual(needsRescue(face, false, true, 2), true, 'a dead editor is still rescued');
+    assert.strictEqual(needsRescue({ state: 'coding' }, true, false, 2), true, 'only the conducting face is exempt');
+  });
+
+  test('readState hands the face text only, on one line', () => {
+    const t = makeTempEnv();
+    try {
+      const fp = path.join(t.tmp, 'obj.json');
+      writeJsonAtomic(fp, { state: 'error', detail: { code: 500 }, workDetail: 'a\nb', timestamp: 5 });
+      const s = rendererMod.readState(fp);
+      assert.strictEqual(s.detail, '');
+      assert.strictEqual(s.workDetail, 'a b');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('source: a turn end never cuts a reward or an error short', () => {
+    const i = rendererSrc.indexOf('if (stateData.stopped && Date.now() < face.minDisplayUntil');
+    assert.ok(i > 0);
+    const cond = rendererSrc.slice(i, rendererSrc.indexOf('{', i));
+    assert.ok(cond.includes('!COMPLETION_STATES.has(face.state)'));
+    assert.ok(cond.includes("face.state !== 'error'"));
+  });
+
+  test('source: the rescue passes the live child count', () => {
+    assert.ok(rendererSrc.includes('needsRescue(face, lastStopped, editorDead, minimal ? 0 : orbital.liveChildCount())'));
+  });
+
+  test('source: a recorded startup write still hands over its counters', () => {
+    const i = rendererSrc.indexOf("if (gate === 'record') {");
+    const body = rendererSrc.slice(i, rendererSrc.indexOf('return;', i));
+    assert.ok(body.includes('face.setStats(stateData)'),
+      'the main row read "0 tools · 0 files" after a boot');
+  });
+
+  test('source: the main row\'s dot reads the real SessionEnd flag, not a turn end', () => {
+    assert.ok(rendererSrc.includes('stopped: !!(mainFace && mainFace.stopped),'));
+    assert.ok(!rendererSrc.includes('stopped: lastStopped,'));
+  });
+});
+
 module.exports = suite;

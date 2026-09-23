@@ -1267,4 +1267,282 @@ describe('platform -- setupOpenCode writes a real OpenCode config', () => {
   });
 });
 
+// -- Third review pass (Sep 2026) --------------------------------------------
+// Each block below was reproduced against the pre-fix sources first.
+
+describe('platform -- third review pass: setup keeps the user\'s own hooks', () => {
+  const quiet = { log: () => {} };
+  const HOOK = '/repo/update-state.js';
+  function env() {
+    const dir = tmpDir('crumb-setup3-');
+    return { dir, settingsPath: path.join(dir, '.claude', 'settings.json') };
+  }
+  function seed(settingsPath, obj) {
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify(obj), 'utf8');
+  }
+  const shared = (ours) => ({ hooks: { PreToolUse: [{ matcher: '', hooks: [
+    { type: 'command', command: '~/bin/audit-log.sh' },
+    { type: 'command', command: `node "${ours}" PreToolUse` },
+  ] }] } });
+
+  test('uninstall removes our command from a shared matcher group, not the group', () => {
+    const { dir, settingsPath } = env();
+    try {
+      seed(settingsPath, shared('/old/code-crumb/update-state.js'));
+      const r = setup.uninstallClaude({ settingsPath, ...quiet });
+      assert.strictEqual(r.removed, 1);
+      const s = readJSON(settingsPath);
+      assert.deepStrictEqual(s.hooks.PreToolUse, [{ matcher: '', hooks: [{ type: 'command', command: '~/bin/audit-log.sh' }] }]);
+    } finally { cleanup(dir); }
+  });
+
+  test('a moved-repo repair keeps the co-located user hook', () => {
+    const { dir, settingsPath } = env();
+    try {
+      seed(settingsPath, shared('/old/code-crumb/update-state.js'));
+      setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
+      const cmds = readJSON(settingsPath).hooks.PreToolUse.flatMap(e => e.hooks.map(h => h.command));
+      assert.ok(cmds.includes('~/bin/audit-log.sh'));
+      assert.ok(cmds.some(c => c.includes(HOOK)));
+      assert.ok(!cmds.some(c => c.includes('/old/code-crumb/')));
+    } finally { cleanup(dir); }
+  });
+
+  test('an unrelated script named update-state.js is not ours', () => {
+    const { dir, settingsPath } = env();
+    try {
+      const theirs = { matcher: 'Bash', hooks: [{ type: 'command', command: 'node ~/dotfiles/tmux/update-state.js' }] };
+      seed(settingsPath, { hooks: { PreToolUse: [theirs] } });
+      setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
+      assert.deepStrictEqual(readJSON(settingsPath).hooks.PreToolUse[0], theirs);
+      const r = setup.uninstallClaude({ settingsPath, ...quiet });
+      assert.strictEqual(r.removed, 22);
+      assert.deepStrictEqual(readJSON(settingsPath).hooks.PreToolUse, [theirs]);
+    } finally { cleanup(dir); }
+  });
+
+  test('the codex installer and uninstaller follow the same rule', () => {
+    const dir = tmpDir('crumb-codex3-');
+    const hooksPath = path.join(dir, '.codex', 'hooks.json');
+    try {
+      fs.mkdirSync(path.dirname(hooksPath), { recursive: true });
+      fs.writeFileSync(hooksPath, JSON.stringify({ hooks: {
+        // Notification is pruned (codex does not fire it) -- the user's hook stays.
+        Notification: [{ matcher: '', hooks: [
+          { type: 'command', command: 'notify-send hi' },
+          { type: 'command', command: 'node "/old/update-state.js" --editor codex Notification' },
+        ] }],
+      } }), 'utf8');
+      const r = setup.setupCodex({ hooksPath, repoRoot: '/repo', ...quiet });
+      assert.strictEqual(r.pruned, 1);
+      assert.deepStrictEqual(readJSON(hooksPath).hooks.Notification,
+        [{ matcher: '', hooks: [{ type: 'command', command: 'notify-send hi' }] }]);
+      setup.uninstallCodex({ hooksPath, ...quiet });
+      assert.deepStrictEqual(Object.keys(readJSON(hooksPath).hooks), ['Notification']);
+    } finally { cleanup(dir); }
+  });
+
+  if (process.platform !== 'win32') {
+    test('the backup is no more readable than the settings file', () => {
+      const { dir, settingsPath } = env();
+      try {
+        seed(settingsPath, { env: { ANTHROPIC_API_KEY: 'secret' } });
+        fs.chmodSync(settingsPath, 0o600);
+        fs.writeFileSync(settingsPath + '.bak', 'old', { mode: 0o644 });
+        fs.chmodSync(settingsPath + '.bak', 0o644);   // a leftover from an earlier run
+        setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
+        assert.strictEqual(fs.statSync(settingsPath + '.bak').mode & 0o777, 0o600);
+        assert.ok(fs.readFileSync(settingsPath + '.bak', 'utf8').includes('secret'));
+      } finally { cleanup(dir); }
+    });
+  }
+});
+
+describe('platform -- third review pass: setup CLI', () => {
+  const SETUP = path.join(ROOT, 'setup.js');
+  function run(args) {
+    const dir = tmpDir('crumb-cli-');
+    const env = { ...process.env, HOME: dir, USERPROFILE: dir };
+    let status = 0;
+    let out = '';
+    try {
+      out = execFileSync(process.execPath, [SETUP, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 }).toString();
+    } catch (e) { status = e.status; out = String(e.stdout || ''); }
+    return { dir, status, out };
+  }
+
+  test('--help prints usage and installs nothing', () => {
+    const r = run(['--help']);
+    try {
+      assert.strictEqual(r.status, 0);
+      assert.ok(r.out.includes('Usage:'));
+      assert.strictEqual(fs.existsSync(path.join(r.dir, '.claude', 'settings.json')), false);
+    } finally { cleanup(r.dir); }
+  });
+
+  test('`codex --uninstall` refuses instead of installing the codex hooks', () => {
+    const r = run(['codex', '--uninstall']);
+    try {
+      assert.strictEqual(r.status, 1);
+      assert.strictEqual(fs.existsSync(path.join(r.dir, '.codex', 'hooks.json')), false);
+    } finally { cleanup(r.dir); }
+  });
+
+  test('an unknown option is an error, not a silent Claude install', () => {
+    const r = run(['--bogus']);
+    try {
+      assert.strictEqual(r.status, 1);
+      assert.ok(r.out.includes('Unknown option'));
+      assert.strictEqual(fs.existsSync(path.join(r.dir, '.claude', 'settings.json')), false);
+    } finally { cleanup(r.dir); }
+  });
+
+  test('the plugin hint needs a marketplace to point at (the npm tarball has none)', () => {
+    const dir = tmpDir('crumb-hint-');
+    try {
+      const lines = [];
+      setup.printClaudeUsage('/x/settings.json', (l) => lines.push(l), dir);
+      assert.ok(!lines.join('\n').includes('marketplace add'));
+      fs.mkdirSync(path.join(dir, '.claude-plugin'));
+      fs.writeFileSync(path.join(dir, '.claude-plugin', 'marketplace.json'), '{}');
+      const again = [];
+      setup.printClaudeUsage('/x/settings.json', (l) => again.push(l), dir);
+      assert.ok(again.join('\n').includes('marketplace add'));
+    } finally { cleanup(dir); }
+  });
+
+  test('enabling autolaunch clears the renderer\'s quit flag', () => {
+    const dir = tmpDir('crumb-quit-');
+    try {
+      const flag = path.join(dir, '.code-crumb-quit');
+      fs.writeFileSync(flag, '1');
+      setup.enableAutolaunch(() => {}, flag);
+      assert.strictEqual(fs.existsSync(flag), false);
+    } finally { cleanup(dir); }
+  });
+});
+
+describe('platform -- third review pass: shared helpers', () => {
+  test('quoteArg doubles backslashes that end up before a quote at a % splice', () => {
+    assert.strictEqual(shared.quoteArg('a\\%b'), '"a\\\\"^%"b"');
+    assert.strictEqual(shared.quoteArg('C:\\temp\\%USERNAME%\\log'),
+      '"C:\\temp\\\\"^%"USERNAME"^%"\\log"');
+    assert.strictEqual(shared.quoteArg('50% off'), '"50"^%" off"', 'unchanged without a backslash');
+  });
+
+  test('getGitBranch resolves a submodule\'s relative gitdir from its own folder', () => {
+    const dir = tmpDir('crumb-gitsub-');
+    try {
+      const sup = path.join(dir, 'super');
+      fs.mkdirSync(path.join(sup, '.git', 'modules', 'lib'), { recursive: true });
+      fs.writeFileSync(path.join(sup, '.git', 'HEAD'), 'ref: refs/heads/supermain\n');
+      fs.writeFileSync(path.join(sup, '.git', 'modules', 'lib', 'HEAD'), 'ref: refs/heads/feature-x\n');
+      fs.mkdirSync(path.join(sup, 'lib', 'src'), { recursive: true });
+      fs.writeFileSync(path.join(sup, 'lib', '.git'), 'gitdir: ../.git/modules/lib\n');
+      assert.strictEqual(shared.getGitBranch(path.join(sup, 'lib', 'src')), 'feature-x');
+      assert.strictEqual(shared.getGitBranch(path.join(sup, 'lib')), 'feature-x');
+    } finally { cleanup(dir); }
+  });
+
+  test('a prefs file holding null reads as {} and is repaired by the next save', () => {
+    let before = null;
+    try { before = fs.readFileSync(shared.PREFS_FILE, 'utf8'); } catch {}
+    try {
+      fs.writeFileSync(shared.PREFS_FILE, 'null');
+      assert.deepStrictEqual(shared.loadPrefs(), {});
+      shared.savePrefs({ showStats: true });
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(shared.PREFS_FILE, 'utf8')), { showStats: true });
+      fs.writeFileSync(shared.PREFS_FILE, '[1,2]');
+      assert.deepStrictEqual(shared.loadPrefs(), {});
+    } finally {
+      if (before === null) { try { fs.unlinkSync(shared.PREFS_FILE); } catch {} }
+      else fs.writeFileSync(shared.PREFS_FILE, before);
+    }
+  });
+
+  describe('platform -- third review pass: the stale spawn-lock takeover is exclusive', () => {
+    function staleLock(dir) {
+      const lock = path.join(dir, 'spawn.lock');
+      fs.writeFileSync(lock, '1');
+      const old = new Date(Date.now() - 60000);
+      fs.utimesSync(lock, old, old);
+      return lock;
+    }
+    test('a takeover in progress (fresh claim) makes the others back off', () => {
+      const dir = tmpDir('crumb-claim-');
+      try {
+        const lock = staleLock(dir);
+        fs.writeFileSync(lock + '.claim', '2');
+        assert.strictEqual(shared.acquireSpawnLock(lock, 5000), false);
+      } finally { cleanup(dir); }
+    });
+    test('the winner leaves no claim behind', () => {
+      const dir = tmpDir('crumb-claim-');
+      try {
+        const lock = staleLock(dir);
+        assert.strictEqual(shared.acquireSpawnLock(lock, 5000), true);
+        assert.strictEqual(fs.existsSync(lock + '.claim'), false);
+        assert.strictEqual(shared.acquireSpawnLock(lock, 5000), false, 'the lock is fresh again');
+      } finally { cleanup(dir); }
+    });
+    test('a claim left by a crashed hook is cleared, and the next hook takes over', () => {
+      const dir = tmpDir('crumb-claim-');
+      try {
+        const lock = staleLock(dir);
+        fs.writeFileSync(lock + '.claim', '2');
+        const old = new Date(Date.now() - 60000);
+        fs.utimesSync(lock + '.claim', old, old);
+        assert.strictEqual(shared.acquireSpawnLock(lock, 5000), false);
+        assert.strictEqual(fs.existsSync(lock + '.claim'), false);
+        assert.strictEqual(shared.acquireSpawnLock(lock, 5000), true);
+      } finally { cleanup(dir); }
+    });
+    test.async('8 hooks racing for one stale lock: exactly one wins', async () => {
+      const dir = tmpDir('crumb-claim-');
+      try {
+        for (let trial = 0; trial < 5; trial++) {
+          const lock = staleLock(dir);
+          const at = Date.now() + 400;
+          const worker = `const s=require(${JSON.stringify(path.join(ROOT, 'shared.js'))});` +
+            `while(Date.now()<${at}){}process.stdout.write(s.acquireSpawnLock(${JSON.stringify(lock)},5000)?'1':'0')`;
+          const outs = await Promise.all(Array.from({ length: 8 }, () => new Promise((resolve) => {
+            const c = spawn(process.execPath, ['-e', worker], { stdio: ['ignore', 'pipe', 'ignore'] });
+            let o = '';
+            c.stdout.on('data', d => { o += d; });
+            c.on('close', () => resolve(o));
+          })));
+          assert.strictEqual(outs.filter(o => o === '1').length, 1, `trial ${trial}: ${outs.join('')}`);
+          fs.unlinkSync(lock);
+        }
+      } finally { cleanup(dir); }
+    });
+  });
+});
+
+describe('platform -- third review pass: launchers', () => {
+  test('source: launch.js reports a signal-killed editor as 128+N, not 0', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'launch.js'), 'utf8');
+    assert.ok(/child\.on\('exit', \(code, signal\) =>/.test(src));
+    assert.ok(src.includes('128 + n'));
+  });
+
+  if (process.platform !== 'win32') {
+    test('code-crumb.sh finds launch.js through a symlink on PATH (the README install)', () => {
+      const dir = tmpDir('crumb-link-');
+      try {
+        fs.mkdirSync(path.join(dir, 'bin'));
+        fs.symlinkSync(path.join(ROOT, 'code-crumb.sh'), path.join(dir, 'bin', 'code-crumb'));
+        fs.mkdirSync(path.join(dir, 'bin2'));
+        fs.symlinkSync('../bin/code-crumb', path.join(dir, 'bin2', 'cc'));  // relative, chained
+        const version = require('../package.json').version;
+        for (const link of [path.join(dir, 'bin', 'code-crumb'), path.join(dir, 'bin2', 'cc')]) {
+          const out = execFileSync(link, ['--version'], { timeout: 10000 }).toString().trim();
+          assert.strictEqual(out, version);
+        }
+      } finally { cleanup(dir); }
+    });
+  }
+});
+
 module.exports = suite;

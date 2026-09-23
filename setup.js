@@ -27,7 +27,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, savePrefs, writeJsonAtomic } = require('./shared');
+const { HOME, QUIT_FLAG_FILE, savePrefs, writeJsonAtomic } = require('./shared');
 
 const HOOK_SCRIPT = path.resolve(__dirname, 'update-state.js');
 
@@ -77,9 +77,35 @@ function buildFaceHooks(hookPath) {
   return faceHooks;
 }
 
-// Any hook entry that points at an update-state.js (ours, at any path).
+// One hook command that runs an update-state.js (ours, at any path). It must
+// end in the argv shape we install -- `update-state.js" [--editor x] <Event>`
+// -- so an unrelated script that happens to be called update-state.js (a tmux
+// status helper, say) is never mistaken for a moved Code Crumb repo.
+const OUR_COMMAND_RE = /update-state\.js["']?\s+(?:--editor[=\s]\S+\s+)?[A-Za-z]+\s*$/;
+function isOurCommand(hh) {
+  return typeof hh?.command === 'string' && OUR_COMMAND_RE.test(hh.command);
+}
+
+// A matcher group that holds at least one of our commands.
 function isOurHook(entry) {
-  return !!entry?.hooks?.some(hh => typeof hh?.command === 'string' && /update-state\.js/.test(hh.command));
+  return !!entry?.hooks?.some(isOurCommand);
+}
+
+// Remove our commands from a list of matcher groups. Filtering is per
+// command, not per group: a user who put their own hook in the same group as
+// ours keeps it, and a group is dropped only once nothing of theirs is left.
+// (Filtering whole groups deleted every co-located user hook on uninstall and
+// on a moved-repo repair.) Returns { kept, removed } -- removed counts commands.
+function stripOurHooks(entries) {
+  const kept = [];
+  let removed = 0;
+  for (const e of entries) {
+    if (!isOurHook(e)) { kept.push(e); continue; }
+    const others = e.hooks.filter(hh => !isOurCommand(hh));
+    removed += e.hooks.length - others.length;
+    if (others.length) kept.push({ ...e, hooks: others });
+  }
+  return { kept, removed };
 }
 
 // Our hook entry pointing at exactly this hookPath.
@@ -130,6 +156,20 @@ function readJsonConfig(filePath, log, label) {
   return { settings, existed: true, raw };
 }
 
+// Write a backup no more readable than the file it copies: a settings.json
+// or opencode.json can hold API keys, and a default-mode (0644) .bak put them
+// in a world-readable file next to the 0600 original. The chmod covers a .bak
+// left over from an earlier run, which writeFileSync's `mode` does not touch.
+function writeBackup(bakPath, raw, mode = 0o600) {
+  try {
+    fs.writeFileSync(bakPath, raw, { encoding: 'utf8', mode });
+    try { fs.chmodSync(bakPath, mode); } catch {}
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Back up the previous file, then write atomically, keeping the file mode.
 function writeSettings(settingsPath, settings, existed, raw, log) {
   const dir = path.dirname(settingsPath);
@@ -137,10 +177,9 @@ function writeSettings(settingsPath, settings, existed, raw, log) {
   let mode = 0o600;
   if (existed) {
     try { mode = fs.statSync(settingsPath).mode & 0o777; } catch {}
-    try {
-      fs.writeFileSync(settingsPath + '.bak', raw, 'utf8');
+    if (writeBackup(settingsPath + '.bak', raw, mode || 0o600)) {
       log(`  [ok] Backup written to ${settingsPath}.bak`);
-    } catch {}
+    }
   }
   const ok = writeJsonAtomic(settingsPath, JSON.stringify(settings, null, 2) + '\n', mode || 0o600);
   if (!ok) log(`  [!!] Failed to write ${settingsPath}`);
@@ -161,6 +200,18 @@ function printClaudeUsage(settingsPath, log, baseDir = __dirname) {
      node "${demoPath}"
 `
     : '';
+  // Same rule for the plugin route: the npm tarball does not ship
+  // .claude-plugin/, so `marketplace add` on an npm install fails with
+  // "Marketplace file not found".
+  const pluginHint = fs.existsSync(path.resolve(baseDir, '.claude-plugin', 'marketplace.json'))
+    ? `
+  Plugin install (alternative -- works with marketplace):
+     claude plugin marketplace add "${path.resolve(baseDir).replace(/\\/g, '/')}"
+     claude plugin install code-crumb@code-crumb
+     Use ONE of the two: with both the manual hooks and the plugin
+     installed every event fires twice and the counters double.
+`
+    : '';
   log(`
   ${'─'.repeat(42)}
 
@@ -171,13 +222,7 @@ function printClaudeUsage(settingsPath, log, baseDir = __dirname) {
 
   2. Use Claude Code as normal in another terminal.
      The face will react to what Claude is doing!
-${demoHint}
-  Plugin install (alternative -- works with marketplace):
-     claude plugin marketplace add "${path.resolve(baseDir).replace(/\\/g, '/')}"
-     claude plugin install code-crumb@code-crumb
-     Use ONE of the two: with both the manual hooks and the plugin
-     installed every event fires twice and the counters double.
-
+${demoHint}${pluginHint}
   To uninstall the manual hooks:
      node setup.js uninstall
   Or the plugin:
@@ -225,7 +270,7 @@ function setupClaude(opts = {}) {
     // A Code Crumb entry with a different path: the repo moved. Replace it
     // instead of reporting "already installed" and leaving a dead hook.
     if (entries.some(isOurHook)) {
-      settings.hooks[event] = entries.filter(e => !isOurHook(e)).concat(hookConfigs);
+      settings.hooks[event] = stripOurHooks(entries).kept.concat(hookConfigs);
       replaced++;
       log(`  ~ Updated ${event} hook path`);
       continue;
@@ -267,8 +312,9 @@ function uninstallClaude(opts = {}) {
     for (const event of Object.keys(settings.hooks)) {
       const entries = settings.hooks[event];
       if (!Array.isArray(entries)) continue;
-      const kept = entries.filter(e => !isOurHook(e));
-      removed += entries.length - kept.length;
+      const { kept, removed: n } = stripOurHooks(entries);
+      if (!n) continue;
+      removed += n;
       if (kept.length) settings.hooks[event] = kept;
       else delete settings.hooks[event];
     }
@@ -383,7 +429,7 @@ function setupCodex(opts = {}) {
     // A Code Crumb entry with a different path or a missing --editor tag:
     // rewrite it rather than leave a hook that mislabels every session.
     if (entries.some(isOurHook)) {
-      settings.hooks[event] = entries.filter(e => !isOurHook(e)).concat(hookConfigs);
+      settings.hooks[event] = stripOurHooks(entries).kept.concat(hookConfigs);
       replaced++;
       log(`  ~ Updated ${event} hook`);
       continue;
@@ -399,9 +445,9 @@ function setupCodex(opts = {}) {
     if (CODEX_HOOK_EVENTS.includes(event)) continue;
     const entries = settings.hooks[event];
     if (!Array.isArray(entries)) continue;
-    const kept = entries.filter(e => !isOurHook(e));
-    if (kept.length === entries.length) continue;
-    pruned += entries.length - kept.length;
+    const { kept, removed: n } = stripOurHooks(entries);
+    if (!n) continue;
+    pruned += n;
     if (kept.length) settings.hooks[event] = kept;
     else delete settings.hooks[event];
     log(`  - Removed ${event} hook (codex does not fire it)`);
@@ -439,8 +485,9 @@ function uninstallCodex(opts = {}) {
     for (const event of Object.keys(settings.hooks)) {
       const entries = settings.hooks[event];
       if (!Array.isArray(entries)) continue;
-      const kept = entries.filter(e => !isOurHook(e));
-      removed += entries.length - kept.length;
+      const { kept, removed: n } = stripOurHooks(entries);
+      if (!n) continue;
+      removed += n;
       if (kept.length) settings.hooks[event] = kept;
       else delete settings.hooks[event];
     }
@@ -509,9 +556,7 @@ function setupCodexNotify() {
     if (!fs.existsSync(codexDir)) {
       fs.mkdirSync(codexDir, { recursive: true });
     }
-    if (configText) {
-      try { fs.writeFileSync(CODEX_CONFIG + '.bak', configText, 'utf8'); } catch {}
-    }
+    if (configText) writeBackup(CODEX_CONFIG + '.bak', configText);
     // Insert at top so the key is at global scope (not under a [section])
     if (!writeJsonAtomic(CODEX_CONFIG, notifyLine + configText)) {
       console.log(`  [!!] Could not write ${CODEX_CONFIG}`);
@@ -742,13 +787,18 @@ function setupOpenClaw() {
 
     // code-crumb-extension.js
     module.exports = function(pi) {
-      const { execSync } = require('child_process');
+      const { execFileSync } = require('child_process');
       const adapter = '${adapterPath}';
+      // One id for this Pi process. Without it every event fell back to the
+      // adapter's parent pid -- a fresh shell per event -- and each tool call
+      // became a session of its own.
+      const session_id = \`openclaw-\${process.pid}\`;
 
       function send(payload) {
         try {
-          execSync(\`node "\${adapter}"\`,
-            { input: JSON.stringify(payload), timeout: 2000, stdio: ['pipe','ignore','ignore'] });
+          execFileSync('node', [adapter],
+            { input: JSON.stringify({ ...payload, session_id }),
+              timeout: 2000, stdio: ['pipe','ignore','ignore'] });
         } catch {}
       }
 
@@ -790,10 +840,19 @@ function setupOpenClaw() {
 
 // -- Autolaunch preference -------------------------------------------
 
-function enableAutolaunch(log = console.log) {
+// Enabling autolaunch also clears the renderer's quit flag: the renderer
+// writes it on every exit, and while it exists no hook launches anything --
+// so the promise printed below was otherwise broken for anyone who had ever
+// closed a renderer window.
+function enableAutolaunch(log = console.log, quitFlagFile = QUIT_FLAG_FILE) {
   savePrefs({ autolaunch: true });
+  try { fs.unlinkSync(quitFlagFile); } catch {}
   log('  [ok] Autolaunch enabled -- the renderer will start automatically on the first hook call');
 }
+
+// Only the hook-based integrations (update-state.js) launch the renderer; the
+// adapters never do, so setup must not offer or promise autolaunch for them.
+const AUTOLAUNCH_COMMANDS = new Set(['claude', 'claude-code', 'codex', 'openai']);
 
 // -- CLI -------------------------------------------------------------
 
@@ -803,12 +862,34 @@ function printUsage() {
   console.log('         node setup.js opencode [--install|--uninstall]\n');
 }
 
+const KNOWN_FLAGS = new Set(['--autolaunch', '--install', '--uninstall', '--help']);
+
 function main() {
   const rawArgs = process.argv.slice(2);
-  const args = rawArgs.filter(a => !a.startsWith('--'));
-  const flags = rawArgs.filter(a => a.startsWith('--'));
+  const args = rawArgs.filter(a => !a.startsWith('-'));
+  const flags = rawArgs.filter(a => a.startsWith('-'));
   const autolaunchFlag = flags.includes('--autolaunch');
   const command = (args[0] || '').toLowerCase();
+
+  // A flag setup does not know used to be dropped silently, so the command
+  // fell through to the default Claude install: `--help` installed 22 hooks
+  // and `codex --uninstall` INSTALLED the Codex hooks.
+  if (flags.includes('--help') || flags.includes('-h')) {
+    printUsage();
+    return;
+  }
+  const unknown = flags.filter(f => !KNOWN_FLAGS.has(f));
+  if (unknown.length) {
+    console.log(`\n  Unknown option: ${unknown.join(' ')}`);
+    printUsage();
+    process.exit(1);
+  }
+  if ((flags.includes('--install') || flags.includes('--uninstall')) && command !== 'opencode') {
+    console.log('\n  --install / --uninstall only apply to `opencode`.');
+    console.log('  To remove the Claude Code and Codex hooks: node setup.js uninstall');
+    printUsage();
+    process.exit(1);
+  }
 
   // `node setup.js --autolaunch` on its own only flips the preference; it
   // used to silently re-run the whole Claude Code hook install as well.
@@ -864,7 +945,12 @@ function main() {
       process.exit(1);
   }
 
-  if (autolaunchFlag) {
+  if (!AUTOLAUNCH_COMMANDS.has(command || 'claude')) {
+    if (autolaunchFlag) {
+      console.log('  [!!] --autolaunch only works with the Claude Code and Codex hooks;');
+      console.log(`       ${command} events never start the renderer -- run it yourself.`);
+    }
+  } else if (autolaunchFlag) {
     enableAutolaunch();
   } else if (process.stdout.isTTY && process.stdin.isTTY) {
     // Interactive prompt

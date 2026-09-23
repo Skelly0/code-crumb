@@ -78,15 +78,19 @@ function splitMcpToolName(toolName) {
   const rawTool = parts.slice(2).join('__');
   return {
     server: server.replace(/_/g, ' '),
-    tool: rawTool.replace(/_/g, ' '),
+    tool: rawTool.replace(/[_-]/g, ' '),
     rawTool,
   };
 }
 
 function mcpVerbState(rawTool) {
-  if (MCP_SEARCH_VERBS.test(rawTool)) return 'searching';
-  if (MCP_READ_VERBS.test(rawTool)) return 'reading';
-  if (MCP_WRITE_VERBS.test(rawTool)) return 'coding';
+  // The verb tables expect snake_case. Servers also ship kebab-case
+  // (`find-tasks`) and camelCase (`getIssue`) names, which used to fall
+  // through to executing; fold both into snake_case first.
+  const t = toText(rawTool).replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/-/g, '_');
+  if (MCP_SEARCH_VERBS.test(t)) return 'searching';
+  if (MCP_READ_VERBS.test(t)) return 'reading';
+  if (MCP_WRITE_VERBS.test(t)) return 'coding';
   return 'executing';
 }
 
@@ -100,7 +104,8 @@ function mcpVerbState(rawTool) {
 
 // Commands that only look at things. Their segments carry no intent, and
 // their stdout is content (a grep for ENOENT prints ENOENT), not a verdict.
-const READ_ONLY_COMMANDS = /^(cat|less|more|head|tail|grep|egrep|fgrep|rg|ag|ack|find|fd|ls|dir|wc|bat|file|stat|echo|printf|which|where|type|diff|tree|du|df|pwd)$/i;
+// `cd`/`pushd`/`popd` only move: `cd repo && git log` is still a read.
+const READ_ONLY_COMMANDS = /^(cat|less|more|head|tail|grep|egrep|fgrep|rg|ag|ack|find|fd|ls|dir|wc|bat|file|stat|echo|printf|which|where|type|diff|tree|du|df|pwd|cd|pushd|popd)$/i;
 const GIT_READ_ONLY_SUBCOMMANDS = /^(diff|log|show|grep|blame|status)$/i;
 
 // Replace every quoted string with an empty one. Left to right, so whichever
@@ -142,10 +147,14 @@ function isReadOnlySegment(segment) {
 //   unquoted  the command with quoted string arguments emptied
 //   intent    unquoted, minus the segments that only read (cat/grep/git log...)
 //   readOnly  true when every segment only reads
-// Segments split on && || ; | & and newlines.
+// Segments split on && || ; | & and newlines -- but not on the `&` inside a
+// redirect (`2>&1`, `>&2`, `&>file`, `<&3`): splitting `grep x 2>&1` left a
+// segment `1`, which is not a read-only command, so an ordinary grep had its
+// stdout scanned for errors and its matches read as a failure.
+const SHELL_SEGMENT_SPLIT = /&&|\|\||(?<![<>])&(?!>)|[;|\r\n]/;
 function shellIntent(cmd) {
   const unquoted = stripQuotedArgs(cmd);
-  const segments = unquoted.split(/&&|\|\||[;|&\r\n]/).filter(s => s.trim());
+  const segments = unquoted.split(SHELL_SEGMENT_SPLIT).filter(s => s.trim());
   const acting = segments.filter(s => !isReadOnlySegment(s));
   return {
     unquoted,
@@ -163,6 +172,21 @@ function isTestCommand(intent) {
     /\b(pytest|nosetests)\b/i.test(intent) ||
     /\bnode\s+(--test|test)\b/i.test(intent) ||
     /\b(make|gradle|mvn|php\s+artisan)\s+test\b/i.test(intent);
+}
+
+// Package installs. One table for both sides of a tool call: the PostToolUse
+// copy had bare `yarn` and `pnpm`, so `yarn lint` or `pnpm dev` finished as
+// "installed", while `npm i x` and `pip3 install x` showed installing and
+// then finished as "command succeeded".
+function isInstallCommand(intent) {
+  return /\b(npm|yarn|pnpm|bun)\s+(install|i|add)\b/i.test(intent) ||
+    /\b(pip|pip3)\s+(install|-r)\b/i.test(intent) ||
+    /\b(cargo\s+build|cargo\s+add)\b/i.test(intent) ||
+    /\b(apt|apt-get|apk)\s+(install|add)\b/i.test(intent) ||
+    /\b(brew\s+install|homebrew)\b/i.test(intent) ||
+    /\b(go\s+get|go\s+install)\b/i.test(intent) ||
+    /\b(composer\s+require|composer\s+install)\b/i.test(intent) ||
+    /\b(dotnet\s+add|dotnet\s+restore)\b/i.test(intent);
 }
 
 function toolToState(toolName, toolInput) {
@@ -199,14 +223,7 @@ function toolToState(toolName, toolInput) {
     }
 
     // Detect install commands
-    else if (/\b(npm|yarn|pnpm|bun)\s+(install|i|add)\b/i.test(intent) ||
-        /\b(pip|pip3)\s+(install|-r)\b/i.test(intent) ||
-        /\b(cargo\s+build|cargo\s+add)\b/i.test(intent) ||
-        /\b(apt|apt-get|apk)\s+(install|add)\b/i.test(intent) ||
-        /\b(brew\s+install|homebrew)\b/i.test(intent) ||
-        /\b(go\s+get|go\s+install)\b/i.test(intent) ||
-        /\b(composer\s+require|composer\s+install)\b/i.test(intent) ||
-        /\b(dotnet\s+add|dotnet\s+restore)\b/i.test(intent)) {
+    else if (isInstallCommand(intent)) {
       result = { state: 'installing', detail: shortCmd || 'installing' };
     }
 
@@ -356,14 +373,14 @@ const stderrErrorPatterns = [
 // an error match on its own line (see lineIsGuarded).
 const WARNING_GUARD = /warning/i;                   // warnings aren't errors
 const falsePositives = [
-  /0 errors?\b/i,
+  /\b0 errors?\b/i,                                  // not "10 errors"
   /no errors?\b/i,
   /errors?:\s*0\b/i,
   /error handling/i,
   /error\.js/i,                                     // Just a filename
   /stderr/i,                                        // Talking about stderr
   /\.error\s*[=(]/,                                 // Property/method named error
-  /error_count.*0/i,
+  /error_count\W*0\b/i,                              // not "error_count: 10"
   WARNING_GUARD,
   /no conflicts?\b/i,                               // "no conflicts" isn't a conflict
   /Merge made by/i,                                 // git merge success ("Merge made by recursive strategy")
@@ -453,6 +470,16 @@ function errorDetail(stdout, stderr) {
 // classifyToolResult can react to them. Without this an interrupted
 // command used to render as relieved / "command succeeded".
 function normalizeToolResponse(data) {
+  // Claude Code's PostToolUseFailure carries no tool_response at all: the
+  // failure is `error` (a string -- a failing Bash command's own output lands
+  // there) plus `is_interrupt`. Read those, or every failed tool reads as
+  // "something went wrong" and an Esc never shows "interrupted".
+  if (data.tool_result == null && data.tool_response == null
+      && (typeof data.error === 'string' || data.is_interrupt !== undefined)) {
+    const out = { stdout: '', stderr: toText(data.error) };
+    if (data.is_interrupt !== undefined) out.interrupted = !!data.is_interrupt;
+    return out;
+  }
   const rawResult = data.tool_result ?? data.tool_response ?? {};
   if (typeof rawResult === 'string') return { stdout: rawResult, stderr: '' };
   if (Array.isArray(rawResult)) {
@@ -552,11 +579,13 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
   let diffInfo = null;
 
   // Decision tree -- in order of confidence
-  if (isError) {
-    state = 'error'; detail = errorDetail(stdout, stderr);
-  } else if (toolResponse?.interrupted) {
+  // Interrupted first: PostToolUseFailure forces isErrorFlag, and an Esc
+  // is still an interruption rather than a generic failure.
+  if (toolResponse?.interrupted) {
     state = 'error';
     detail = 'interrupted';
+  } else if (isError) {
+    state = 'error'; detail = errorDetail(stdout, stderr);
   } else if (exitCode !== null && exitCode !== 0) {
     state = 'error'; detail = exitDetail(stdout, stderr, exitCode);
   } else if (inferredExit !== null && inferredExit !== 0) {
@@ -592,7 +621,7 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
     const isTest = isTestCommand(intent);
     const isBuild = /\b(build|compile|tsc|webpack|vite|esbuild|rollup|make)\b/i.test(intent);
     const isGit = /\bgit\s/i.test(unquoted);
-    const isInstall = /\b(npm\s+install|yarn|pip\s+install|cargo\s+build|pnpm|bun\s+(add|install))\b/i.test(intent);
+    const isInstall = isInstallCommand(intent);
 
     if (isGit && isMergeConflict(stdout, stderr)) {
       state = 'error';
@@ -916,6 +945,79 @@ function subagentLabel(data) {
   return toText(d.agent_type) || 'subagent';
 }
 
+// -- Per-Session Counters (pure logic) -------------------------------------
+// Shared by update-state.js and the adapters (base-adapter.js), so a session
+// switch restores counters and parks agents the same way on both paths.
+//
+// Per-session counters. The shared stats file has ONE `session` owner, and two
+// top-level windows alternating hooks used to reset it on every switch: each
+// window's file reported the other's toolCalls, and daily.sessionCount grew by
+// one per alternation. Each session now keeps its own counters, keyed by id,
+// and the session file reports those. Bounded: idle entries age out after a
+// day and the map keeps the 50 most recently seen.
+const COUNTER_MAX_AGE_MS = 24 * 3600000;
+const COUNTER_MAX_ENTRIES = 50;
+const COUNTER_MAX_FILES = 200;
+
+function freshCounter(now) {
+  return { toolCalls: 0, filesEdited: [], start: now, commitCount: 0, creditedMs: 0, lastSeen: now, counted: false };
+}
+
+// Repair one entry in place (a hand-edited or older stats file must never
+// throw below). Returns null for anything that is not an entry at all.
+function normalizeCounter(c, now) {
+  if (!c || typeof c !== 'object' || Array.isArray(c)) return null;
+  const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+  c.toolCalls = num(c.toolCalls, 0);
+  c.start = num(c.start, now) || now;
+  c.commitCount = num(c.commitCount, 0);
+  c.creditedMs = num(c.creditedMs, 0);
+  c.lastSeen = num(c.lastSeen, now);
+  c.counted = !!c.counted;
+  c.filesEdited = Array.isArray(c.filesEdited)
+    ? c.filesEdited.filter(f => typeof f === 'string').slice(0, COUNTER_MAX_FILES) : [];
+  return c;
+}
+
+// While a session does not own stats.session, its running agents (and its
+// subagent count) wait on its counter entry. Only stored when there is
+// something to keep, so an idle window's entry stays small.
+const COUNTER_MAX_AGENTS = 32;
+
+function parkAgents(c, session) {
+  if (!c || !session) return;
+  const active = Array.isArray(session.activeSubagents)
+    ? session.activeSubagents.filter(s => s && typeof s === 'object').slice(0, COUNTER_MAX_AGENTS) : [];
+  if (active.length) c.activeSubagents = active; else delete c.activeSubagents;
+  if (session.subagentCount > 0) c.subagentCount = session.subagentCount; else delete c.subagentCount;
+}
+
+function unparkAgents(c, session) {
+  if (!c || !session) return;
+  if (Array.isArray(c.activeSubagents)) {
+    session.activeSubagents = c.activeSubagents.filter(s => s && typeof s === 'object');
+  }
+  if (typeof c.subagentCount === 'number' && Number.isFinite(c.subagentCount)) {
+    session.subagentCount = c.subagentCount;
+  }
+  delete c.activeSubagents;
+  delete c.subagentCount;
+}
+
+function pruneCounters(map, keepId, now) {
+  for (const id of Object.keys(map)) {
+    const c = map[id];
+    if (!c || typeof c !== 'object') { delete map[id]; continue; }
+    if (id !== keepId && now - (c.lastSeen || 0) > COUNTER_MAX_AGE_MS) delete map[id];
+  }
+  const ids = Object.keys(map);
+  if (ids.length <= COUNTER_MAX_ENTRIES) return;
+  ids.sort((a, b) => (map[b].lastSeen || 0) - (map[a].lastSeen || 0));
+  for (const id of ids.slice(COUNTER_MAX_ENTRIES)) {
+    if (id !== keepId) delete map[id];
+  }
+}
+
 // -- Parallel Session Classification (pure logic) -------------------------
 
 // Registry limits for stats.topLevelSessions ({ sessionId: lastSeenMs }).
@@ -961,6 +1063,15 @@ function pruneTopLevelSessions(registry, now) {
 }
 
 module.exports = {
+  COUNTER_MAX_AGE_MS,
+  COUNTER_MAX_ENTRIES,
+  COUNTER_MAX_FILES,
+  COUNTER_MAX_AGENTS,
+  freshCounter,
+  normalizeCounter,
+  parkAgents,
+  unparkAgents,
+  pruneCounters,
   toolToState,
   humanizeToolName,
   toText,

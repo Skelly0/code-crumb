@@ -25,14 +25,16 @@
 // |      node adapters/openclaw-adapter.js                         |
 // |                                                                |
 // |  Usage (as Pi extension -- add to your skill or extension):    |
-// |    const { execSync } = require('child_process');              |
+// |    const { execFileSync } = require('child_process');          |
+// |    const session_id = `openclaw-${process.pid}`;               |
 // |    pi.on('tool_call', (event) => {                             |
-// |      execSync(`echo '${JSON.stringify({                        |
-// |        event: 'tool_call',                                     |
-// |        toolName: event.toolName,                               |
-// |        input: event.input                                      |
-// |      })}' | node /path/to/openclaw-adapter.js`);               |
+// |      execFileSync('node', ['/path/to/openclaw-adapter.js'], {  |
+// |        input: JSON.stringify({ event: 'tool_call', session_id, |
+// |          toolName: event.toolName, input: event.input }),      |
+// |      });                                                       |
 // |    });                                                         |
+// |  Send a session_id: without one each event falls back to the   |
+// |  adapter's parent pid, a fresh shell per event under execSync. |
 // +================================================================+
 
 const { runStdinAdapter } = require('./base-adapter');

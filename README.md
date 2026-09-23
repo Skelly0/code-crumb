@@ -31,7 +31,7 @@ Install directly from the Code Crumb marketplace — no cloning required:
 Then open a second terminal and run the face:
 
 ```bash
-node ~/.claude/plugins/cache/code-crumb/*/renderer.js
+node ~/.claude/plugins/cache/code-crumb/code-crumb/*/renderer.js
 ```
 
 > [!TIP]
@@ -84,7 +84,7 @@ node code-crumb/setup.js openclaw           # OpenClaw/Pi
 node code-crumb/renderer.js           # in a separate terminal
 ```
 
-Add `--autolaunch` to any setup command to skip the manual renderer step entirely.
+Add `--autolaunch` to the `claude` or `codex` setup command to skip the manual renderer step entirely. Autolaunch is driven by the hook script, so the OpenCode, OpenClaw and codex-notify integrations never start the renderer; run it yourself (or use the launcher below). After you quit the renderer it stays closed until your editor starts a new session.
 
 ### Launcher (auto-opens face + editor)
 

@@ -21,14 +21,16 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { StringDecoder } = require('string_decoder');
 const {
   STATE_FILE, SESSIONS_DIR, STATS_FILE, STATS_LOCK_FILE,
-  safeFilename, writeJsonAtomic, acquireFileLock,
+  safeFilename, writeJsonAtomic, acquireFileLock, detailText,
 } = require('../shared');
 const {
   toolToState, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
   EDIT_TOOLS,
-  pruneFrequentFiles, topFrequentFiles, prettyModelName,
+  pruneFrequentFiles, topFrequentFiles, prettyModelName, toText,
+  COUNTER_MAX_FILES, freshCounter, normalizeCounter, parkAgents, unparkAgents, pruneCounters,
 } = require('../state-machine');
 
 // -- State file writing ------------------------------------------------
@@ -42,8 +44,17 @@ function pidField() {
   return process.platform !== 'win32' ? { pid: process.ppid } : {};
 }
 
+// Every adapter detail goes through here: providers hand over raw error
+// objects and multi-line messages (an OpenClaw `message: {code, text}` object,
+// a Codex notify reply with blank lines), which the renderer cannot draw.
+// The cap keeps a long provider error inside the ~1 KB state-file budget.
+const MAX_DETAIL_CHARS = 200;
+function cleanDetail(detail) {
+  return detailText(detail).slice(0, MAX_DETAIL_CHARS);
+}
+
 function writeState(state, detail = '', extra = {}) {
-  const data = { state, detail, timestamp: Date.now(), ...pidField(), ...extra };
+  const data = { state, detail: cleanDetail(detail), timestamp: Date.now(), ...pidField(), ...extra };
   try { writeJsonAtomic(STATE_FILE, data, 0o600); } catch {}
 }
 
@@ -52,7 +63,7 @@ function writeSessionState(sessionId, state, detail = '', stopped = false, extra
     fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
     const filename = safeFilename(sessionId) + '.json';
     const data = {
-      session_id: sessionId, state, detail,
+      session_id: sessionId, state, detail: cleanDetail(detail),
       timestamp: Date.now(), cwd: process.cwd(), stopped,
       ...pidField(),
       ...extra,
@@ -71,7 +82,34 @@ function readStats() {
 }
 
 function writeStats(stats) {
+  try { syncSessionCounter(stats); } catch {}
   try { writeJsonAtomic(STATS_FILE, stats, 0o600); } catch {}
+}
+
+// Mirror the owner's live counters into its sessionCounters entry, so a later
+// switch away and back (by an adapter or by update-state.js) restores them.
+function syncSessionCounter(stats, now = Date.now()) {
+  const id = stats && stats.session && stats.session.id;
+  if (!id) return;
+  const counters = sessionCounters(stats);
+  let c = normalizeCounter(counters[id], now);
+  if (!c) c = counters[id] = freshCounter(now);
+  c.toolCalls = stats.session.toolCalls || 0;
+  c.filesEdited = (stats.session.filesEdited || [])
+    .filter(f => typeof f === 'string').slice(0, COUNTER_MAX_FILES);
+  if (stats.session.start) c.start = stats.session.start;
+  c.commitCount = stats.session.commitCount || 0;
+  c.lastSeen = now;
+  c.counted = true;
+  pruneCounters(counters, id, now);
+}
+
+function sessionCounters(stats) {
+  if (!stats.sessionCounters || typeof stats.sessionCounters !== 'object'
+      || Array.isArray(stats.sessionCounters)) {
+    stats.sessionCounters = {};
+  }
+  return stats.sessionCounters;
 }
 
 // -- Session-guarded global state write --------------------------------
@@ -125,15 +163,37 @@ function guardedWriteState(sessionId, state, detail, extra, opts = {}) {
 // Call once per event to ensure the stats object has today's daily bucket
 // and the current session is tracked.
 
+// A change of owner follows the update-state.js contract: the incoming
+// session gets its OWN counters back (a switch is not a new session), it is
+// counted in daily.sessionCount once per id, and the outgoing owner's running
+// agents are parked on its counter entry. Zeroing here used to make two
+// alternating adapter sessions each report a single tool call, count a
+// "session" per event, and wipe a conducting Claude owner's activeSubagents
+// -- leaving its synthetic orbitals nothing to retire them.
 function initSession(stats, sessionId) {
-  const today = new Date().toISOString().slice(0, 10);
+  const now = Date.now();
+  const today = new Date(now).toISOString().slice(0, 10);
   if (!stats.daily || stats.daily.date !== today) {
     stats.daily = { date: today, sessionCount: 0, cumulativeMs: 0 };
   }
   if (!stats.frequentFiles) stats.frequentFiles = {};
   if (stats.session.id !== sessionId) {
-    stats.daily.sessionCount++;
-    stats.session = { id: sessionId, start: Date.now(), toolCalls: 0, filesEdited: [], subagentCount: 0, commitCount: 0, activeSubagents: [] };
+    const counters = sessionCounters(stats);
+    const outgoing = stats.session.id ? normalizeCounter(counters[stats.session.id], now) : null;
+    if (outgoing) parkAgents(outgoing, stats.session);
+    let counter = normalizeCounter(counters[sessionId], now);
+    if (!counter) counter = counters[sessionId] = freshCounter(now);
+    counter.lastSeen = now;
+    if (!counter.counted) {
+      stats.daily.sessionCount++;
+      counter.counted = true;
+    }
+    stats.session = {
+      id: sessionId, start: counter.start,
+      toolCalls: counter.toolCalls, filesEdited: counter.filesEdited.slice(),
+      subagentCount: 0, commitCount: counter.commitCount, activeSubagents: [],
+    };
+    unparkAgents(counter, stats.session);
   }
   if (stats.recentMilestone && Date.now() - stats.recentMilestone.at > 8000) {
     stats.recentMilestone = null;
@@ -209,13 +269,30 @@ function signalExitCode(signal) {
   return n ? 128 + n : 1;
 }
 
+// -- Exiting after a passthrough ---------------------------------------
+// A write to a piped stdout is asynchronous on POSIX, and process.exit()
+// discards whatever the pipe has not taken yet: a 200 KB engmux result
+// reached its reader as 146 KB, and a slow reader of codex-wrapper lost the
+// last JSONL lines (turn.completed among them). Writes complete in order, so
+// the callback of an empty write fires once everything before it is out.
+function exitWhenFlushed(code, stream = process.stdout) {
+  process.exitCode = code;
+  try {
+    stream.write('', () => process.exit(code));
+  } catch {
+    process.exit(code);
+  }
+}
+
 // -- Stdin JSON reader -------------------------------------------------
 // Reads all of stdin as a single JSON blob, parses it, and calls the
 // provided handler function. This is the pattern used by opencode-adapter,
 // openclaw-adapter, and similar stdin-based adapters.
 //
 // handler(data) should process the parsed event object.
-// On parse failure, fallbackFn(err) is called if provided. A throw inside
+// On parse failure, fallbackFn(err) is called if provided; on input over
+// MAX_INPUT, fallbackFn(null, { override, raw }) -- override is the
+// classifyTruncatedInput result, raw the truncated text. A throw inside
 // handler() is swallowed on its own -- it must NOT be reported as
 // "unparseable stdin", or every mapping bug would hide behind the fallback's
 // thinking face.
@@ -236,7 +313,14 @@ function processStdinEvent(handler, fallbackFn, opts = {}) {
   stream.on('end', () => {
     if (inputTruncated) {
       const truncResult = classifyTruncatedInput('', input);
-      writeState(truncResult.state, truncResult.detail);
+      // The adapter's fallback knows the session and takes the ownership
+      // guard; a bare writeState let any huge payload (a Write of a big file)
+      // clobber the global file another live session owns.
+      if (fallbackFn) {
+        try { fallbackFn(null, { override: truncResult, raw: input }); } catch {}
+      } else {
+        writeState(truncResult.state, truncResult.detail);
+      }
       exit(0);
       return;
     }
@@ -262,6 +346,10 @@ function processStdinEvent(handler, fallbackFn, opts = {}) {
 
 function processJsonlStream(stream, handler) {
   let buffer = '';
+  // Decode across chunk boundaries: chunk.toString() on each Buffer turned a
+  // multi-byte character split between two chunks into two U+FFFD, so a path
+  // like café.js reached the face (and frequentFiles) garbled.
+  const decoder = new StringDecoder('utf8');
   const flush = () => {
     if (buffer.trim()) {
       try {
@@ -273,7 +361,7 @@ function processJsonlStream(stream, handler) {
     }
   };
   stream.on('data', (chunk) => {
-    buffer += chunk.toString();
+    buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
     const lines = buffer.split(/\r?\n/);
     buffer = lines.pop(); // Keep incomplete line in buffer
     for (const line of lines) {
@@ -286,7 +374,10 @@ function processJsonlStream(stream, handler) {
       }
     }
   });
-  stream.on('end', flush);
+  stream.on('end', () => {
+    buffer += decoder.end();
+    flush();
+  });
 }
 
 // -- Full stdin-based adapter runner -----------------------------------
@@ -407,7 +498,8 @@ function runStdinAdapter(options) {
       }
       else if (event === 'error') {
         state = 'error';
-        detail = data.message || data.reason || data.output?.error || 'something went wrong';
+        detail = toText(data.message) || toText(data.reason) || toText(data.output?.error)
+          || 'something went wrong';
         updateStreak(stats, true);
       }
       else if (event === 'waiting' || event === 'Notification') {
@@ -442,11 +534,22 @@ function runStdinAdapter(options) {
     } finally {
       if (releaseStats) releaseStats();
     }
-  }, () => {
-    // Fallback on parse error -- write thinking state with guard.
-    // Same editor-prefixed ID as the main path so the session never splits.
-    const sessionId = process.env.CLAUDE_SESSION_ID || `${defaultEditor}-${process.ppid}`;
-    guardedWriteState(sessionId, 'thinking', '', {});
+  }, (err, trunc) => {
+    // Fallback on unparseable or oversized stdin -- still this session's
+    // event, so it goes through the ownership guard, under the payload's own
+    // id when a truncated one still names it, else the same editor-prefixed
+    // id as the main path so the session never splits. The id rides in extra
+    // too: a write without one erased the owner's sessionId from the global
+    // file, and the next event from any other window took it over.
+    const rawId = trunc
+      ? ((/"session_?id"\s*:\s*"([^"\\]{1,256})"/i.exec(trunc.raw) || [])[1] || '') : '';
+    const sessionId = rawId || process.env.CLAUDE_SESSION_ID || `${defaultEditor}-${process.ppid}`;
+    const shown = trunc ? trunc.override : { state: 'thinking', detail: '' };
+    guardedWriteState(sessionId, shown.state, shown.detail, {
+      sessionId,
+      modelName: process.env.CODE_CRUMB_MODEL || defaultModel,
+      editor: defaultEditor,
+    });
   });
 }
 
@@ -466,4 +569,5 @@ module.exports = {
   processJsonlStream,
   runStdinAdapter,
   signalExitCode,
+  exitWhenFlushed,
 };

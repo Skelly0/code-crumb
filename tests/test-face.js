@@ -2844,4 +2844,139 @@ describe('face.js -- same-state work write drops a stale queued completion', () 
   });
 });
 
+// -- Third review pass (Sep 2026) --------------------------------------------
+// Each block below was reproduced against the pre-fix sources first.
+
+describe('face.js -- third review pass: buffering', () => {
+  test('a permission prompt behind a queued reward is remembered, then shown', () => {
+    const face = new ClaudeFace();
+    face.setState('reading', 'a.js');
+    face.setState('satisfied', 'read a.js');     // queued behind the running tool
+    face.setState('waiting', 'allow?');          // used to be dropped outright
+    assert.deepStrictEqual(face.pendingWork, { state: 'waiting', detail: 'allow?' });
+    face.minDisplayUntil = Date.now() - 1;
+    face.update(66);                              // the reward lands, the wait is promoted
+    assert.strictEqual(face.state, 'satisfied');
+    assert.strictEqual(face.pendingState, 'waiting');
+    face.lastStateChange = Date.now() - 5000;     // past the guaranteed window
+    face.minDisplayUntil = Date.now() - 1;
+    face.update(66);
+    assert.strictEqual(face.state, 'waiting');
+    assert.strictEqual(face.stateDetail, 'allow?');
+  });
+
+  test('a same-state work write drops an older queued tool', () => {
+    const face = new ClaudeFace();
+    face.setState('executing', 'lint');
+    face.setState('coding', 'editing b.js');     // buffered behind executing
+    assert.strictEqual(face.pendingState, 'coding');
+    face.setState('executing', 'npm run build'); // the newest write
+    assert.strictEqual(face.pendingState, null);
+    assert.strictEqual(face.stateDetail, 'npm run build');
+  });
+
+  test('a reward queues behind an on-screen error instead of replacing it', () => {
+    const face = new ClaudeFace();
+    face.setState('error', 'tests failed');
+    face.setState('satisfied', 'read a.js');
+    assert.strictEqual(face.state, 'error');
+    assert.strictEqual(face.pendingState, 'satisfied');
+    face.minDisplayUntil = Date.now() - 1;
+    face.update(66);
+    assert.strictEqual(face.state, 'satisfied');
+  });
+
+  test('caffeine wearing off hands the tool its detail back', () => {
+    const face = new ClaudeFace();
+    face.setState('testing', 'npm test');
+    face.forceState('caffeinated', 'npm test');
+    face.prevState = 'testing';
+    face.stateChangeTimes = [];                   // the burst is over
+    face.minDisplayUntil = Date.now() - 1;
+    face.update(66);
+    assert.strictEqual(face.state, 'testing');
+    assert.strictEqual(face.stateDetail, 'npm test');
+  });
+});
+
+describe('face.js -- third review pass: timeline cap', () => {
+  test('the current segment stays capped as it grows (the cache froze the cap)', () => {
+    // A working session -- enough short segments that the cap applies (when
+    // every segment is over it, the guard deliberately leaves them as-is) --
+    // and then the face falls asleep.
+    const base = Date.now() - 8000000;
+    const tl = [];
+    const work = ['coding', 'reading', 'executing', 'searching', 'testing'];
+    for (let i = 0; i < 20; i++) tl.push({ state: work[i % work.length], at: base + i * 3000 });
+    tl.push({ state: 'sleeping', at: base + 60000 });
+    const cached = new ClaudeFace();
+    cached.timeline = tl.map(e => ({ ...e }));
+    cached._timelineDirty = true;
+    cached._compressTimeline(base + 60001, 38);   // the frame right after falling asleep
+    const later = base + 60000 + 3600000;          // an hour of sleep
+    const a = cached._compressTimeline(later, 38);
+    const fresh = new ClaudeFace();
+    fresh.timeline = tl.map(e => ({ ...e }));
+    fresh._timelineDirty = true;
+    const b = fresh._compressTimeline(later, 38);
+    assert.deepStrictEqual(a, b, 'a cached call must match a fresh one');
+    const first = a.entries[0].at;
+    const last = a.entries[a.entries.length - 1].at;
+    const blocks = (a.displayNow - last) / (a.displayNow - first) * 38;
+    assert.ok(blocks <= MAX_SEGMENT_BLOCKS + 0.001, `sleep segment is ${blocks.toFixed(1)} blocks`);
+  });
+});
+
+describe('face.js -- third review pass: streak loss', () => {
+  test('a days-old break (renderer boot, or a swap) does not replay the reaction', () => {
+    const face = new ClaudeFace();
+    face.setStats({ brokenStreak: 30, brokenStreakAt: Date.now() - 86400000 });
+    assert.strictEqual(face.lastBrokenStreak, 0);
+    assert.strictEqual(face.glitchIntensity, 0);
+  });
+
+  test('a later break that lost nothing replaces the previous loss', () => {
+    const face = new ClaudeFace();
+    face.setStats({ brokenStreak: 60, brokenStreakAt: Date.now() - 20 });
+    assert.strictEqual(face.lastBrokenStreak, 60);
+    face.setStats({ brokenStreak: 0, brokenStreakAt: Date.now() });
+    assert.strictEqual(face.lastBrokenStreak, 0, 'no second "DEVASTATION." for the same loss');
+  });
+
+  test('the error thought is re-picked once the stats name the loss', () => {
+    const face = new ClaudeFace();
+    face.setState('error', 'tests failed');       // renderer order: state first
+    face.setStats({ brokenStreak: 42, brokenStreakAt: Date.now() });
+    assert.strictEqual(face.thoughtText, '...42 streak gone');
+  });
+
+  test('the proud diff thought appears with the write, not ~4s later', () => {
+    const face = new ClaudeFace();
+    face.setState('proud', 'saved a.js');         // renderer order: state first
+    face.setStats({ diffInfo: { added: 12, removed: 3 } });
+    assert.strictEqual(face.thoughtText, '+12 -3 lines');
+  });
+
+  test('the loss line and the milestone are never drawn over each other', () => {
+    const face = new ClaudeFace();
+    face.showStats = true;
+    face.forceState('error', 'boom');
+    face.milestone = { type: 'streak', value: 10, at: Date.now() };
+    face.milestoneShowTime = 100;
+    face.lastBrokenStreak = 12;
+    const origCols = process.stdout.columns;
+    const origRows = process.stdout.rows;
+    process.stdout.columns = 100;
+    process.stdout.rows = 50;
+    let out;
+    try { out = face.render(); } finally {
+      process.stdout.columns = origCols;
+      process.stdout.rows = origRows;
+    }
+    const plain = out.replace(/\x1b\[[^A-Za-z]*[A-Za-z]/g, '');
+    assert.ok(plain.includes('ouch.'), 'the loss line is drawn');
+    assert.ok(!plain.includes('in a row'), 'the milestone text is not drawn under it');
+  });
+});
+
 module.exports = suite;

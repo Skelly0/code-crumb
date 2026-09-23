@@ -52,15 +52,34 @@ const INTERRUPTIBLE_STATES = new Set([
 
 // -- Utilities -------------------------------------------------------
 
+// A detail line as the renderer can draw it. Text only: an adapter once wrote
+// an error OBJECT here, and `.slice` on it threw inside the orbital render,
+// blanking the whole ring for as long as the file lived. One line: a raw
+// newline spills the text into column 1 of the rows below. No control bytes:
+// an escape sequence in a detail would reach the terminal as-is.
+function detailText(v) {
+  let s = '';
+  if (typeof v === 'string') s = v;
+  else if (typeof v === 'number' || typeof v === 'boolean') s = String(v);
+  return s.replace(/[\r\n\t]+/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
+}
+
 function safeFilename(id) {
   return String(id).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) || '_empty';
+}
+
+// Only a plain object counts as prefs: a file holding `null` (or an array)
+// parsed fine, crashed the renderer at startup on `prefs.paletteIndex`, and
+// could never be repaired by savePrefs (Object.assign(null) threw).
+function asPrefsObject(v) {
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
 }
 
 function loadPrefs() {
   try {
     const raw = fs.readFileSync(PREFS_FILE, 'utf8').trim();
     if (!raw) return {};
-    return JSON.parse(raw);
+    return asPrefsObject(JSON.parse(raw));
   } catch {
     return {};
   }
@@ -71,7 +90,7 @@ function savePrefs(updates) {
     let prefs = {};
     try {
       const raw = fs.readFileSync(PREFS_FILE, 'utf8').trim();
-      if (raw) prefs = JSON.parse(raw);
+      if (raw) prefs = asPrefsObject(JSON.parse(raw));
     } catch {}
     Object.assign(prefs, updates);
     writeJsonAtomic(PREFS_FILE, prefs, 0o600);
@@ -107,21 +126,41 @@ function writeJsonAtomic(file, obj, mode = 0o600) {
 // with O_EXCL; a lock older than staleMs is taken over. Anything odd (no
 // directory, permissions) yields true -- the lock is a courtesy, never a
 // reason not to launch.
+//
+// Nothing deletes the lock, so every launch after the first goes through the
+// stale takeover, and a plain overwrite there let every hook that saw the
+// stale lock "win" (up to 3 of 8 in a race) -- each opening a terminal. The
+// takeover is now exclusive too: only the hook that creates `<lock>.claim`
+// (O_EXCL) may overwrite, and only while the lock is still the stale one it
+// saw. A claim left by a hook that died mid-takeover is cleared once stale.
 function acquireSpawnLock(lockFile, staleMs = 5000) {
   try {
     fs.writeFileSync(lockFile, String(process.pid), { flag: 'wx' });
     return true;
   } catch (e) {
     if (!e || e.code !== 'EEXIST') return true;
+    let seen;
+    try { seen = fs.statSync(lockFile).mtimeMs; } catch { return true; }
+    if (Date.now() - seen <= staleMs) return false;
+    const claim = lockFile + '.claim';
     try {
-      if (Date.now() - fs.statSync(lockFile).mtimeMs > staleMs) {
-        fs.writeFileSync(lockFile, String(process.pid));
-        return true;
-      }
+      fs.writeFileSync(claim, String(process.pid), { flag: 'wx' });
+    } catch {
+      try {
+        if (Date.now() - fs.statSync(claim).mtimeMs > staleMs) fs.unlinkSync(claim);
+      } catch {}
+      return false;
+    }
+    try {
+      // Someone finished a takeover between our stat and our claim.
+      if (fs.statSync(lockFile).mtimeMs !== seen) return false;
+      fs.writeFileSync(lockFile, String(process.pid));
+      return true;
     } catch {
       return true;
+    } finally {
+      try { fs.unlinkSync(claim); } catch {}
     }
-    return false;
   }
 }
 
@@ -251,7 +290,9 @@ function withStatsLock(fn) {
 //     inside quotes as one literal ". The old \" toggled cmd out of quotes and
 //     exposed the rest of the argument (`a"b & whoami` ran whoami).
 //   - Backslashes are literal to the argv parser except before a ", so a run
-//     of them before an embedded " or the closing quote is doubled.
+//     of them before an embedded " or the closing quote is doubled -- and so
+//     is a run before a %, because the % splice below puts a " right after
+//     it (`a\%b` used to arrive as `a"%b`, and a path could split in two).
 //   - cmd expands %VAR% even inside quotes and nothing escapes a % there, so
 //     each % is emitted outside the quotes as ^% ("50"^%" off"): the caret
 //     breaks the variable name before expansion and is removed afterwards.
@@ -266,7 +307,7 @@ function quoteArg(arg) {
   let s = String(arg).replace(/\r\n|[\r\n]/g, ' ');
   if (s === '') return '""';
   if (!/[\s"&|<>^()%!,;=]/.test(s)) return s;
-  s = s.replace(/(\\*)"/g, '$1$1""').replace(/(\\+)$/, '$1$1');
+  s = s.replace(/(\\*)"/g, '$1$1""').replace(/(\\+)$/, '$1$1').replace(/(\\+)(?=%)/g, '$1$1');
   return '"' + s.replace(/%/g, '"^%"') + '"';
 }
 
@@ -363,10 +404,14 @@ function getGitBranch(cwd) {
       try {
         const stat = fs.statSync(gitPath);
         if (!stat.isDirectory()) {
-          // Worktree: .git is a file like "gitdir: /path/to/.git/worktrees/foo"
+          // Worktree: .git is a file like "gitdir: /path/to/.git/worktrees/foo".
+          // A submodule's is relative ("gitdir: ../.git/modules/lib"), and it is
+          // relative to the directory holding the .git file -- resolving it
+          // against process.cwd() read the superproject's HEAD from any
+          // subfolder of the submodule.
           const content = fs.readFileSync(gitPath, 'utf8').trim();
           if (content.startsWith('gitdir:')) {
-            headFile = path.join(content.slice(7).trim(), 'HEAD');
+            headFile = path.join(path.resolve(dir, content.slice(7).trim()), 'HEAD');
           }
         }
         const head = fs.readFileSync(headFile, 'utf8').trim();
@@ -390,7 +435,7 @@ module.exports = {
   HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, QUIT_FLAG_FILE, TEAMS_DIR, TMUX_FILE, SPAWN_LOCK_FILE,
   STATS_LOCK_FILE, LOCK_WAIT_MS, LOCK_STALE_MS, LOCK_SPIN_MS,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
-  safeFilename, loadPrefs, savePrefs, getGitBranch, getIsWorktree,
+  safeFilename, detailText, loadPrefs, savePrefs, getGitBranch, getIsWorktree,
   writeJsonAtomic, acquireSpawnLock, sleepSync, acquireFileLock, withStatsLock,
   quoteArg, shQuote, buildRendererCommands,
 };

@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, STATE_FILE, SESSIONS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch, QUIT_FLAG_FILE, safeFilename } = require('./shared');
+const { HOME, STATE_FILE, SESSIONS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch, QUIT_FLAG_FILE, safeFilename, detailText } = require('./shared');
 
 // -- Modules -------------------------------------------------------
 const {
@@ -63,7 +63,14 @@ const { ACTIVE_WORK_STATES, COMPLETION_STATES } = require('./shared');
 const RESCUE_EXCLUDE = new Set(['idle', 'sleeping', 'responding', 'starting', 'happy', 'satisfied', 'proud', 'relieved', 'error']);
 
 // Pure: should the stopped/dead rescue force the face to responding now?
-function needsRescue(face, lastStopped, editorDead) {
+// Not while conducting (`liveChildren` agents still running): after the
+// parent's Stop, idleCascade's conducting hold turns the resting face into
+// `subagent` for as long as a background agent runs, and rescuing that sent it
+// round responding -> done! -> conducting -> responding every ~12s for the
+// agent's whole life. A dead editor is still rescued -- its agents are not
+// really running.
+function needsRescue(face, lastStopped, editorDead, liveChildren = 0) {
+  if (face.state === 'subagent' && !editorDead && liveChildren > 0) return false;
   return !!((lastStopped || editorDead) && !RESCUE_EXCLUDE.has(face.state));
 }
 // States in which a missed Stop/start event is worth a fresh file read: every
@@ -340,7 +347,7 @@ function readState(filePath = STATE_FILE) {
     const data = JSON.parse(raw);
     return {
       state: data.state || 'idle',
-      detail: data.detail || '',
+      detail: detailText(data.detail),
       timestamp: data.timestamp || 0,
       sessionId: data.sessionId || data.session_id || '',
       modelName: data.modelName || '',
@@ -364,7 +371,7 @@ function readState(filePath = STATE_FILE) {
       commitCount: data.commitCount || 0,
       isSessionStart: data.isSessionStart || false,
       workState: data.workState || null,
-      workDetail: data.workDetail || '',
+      workDetail: detailText(data.workDetail),
       pid: data.pid || 0,
       editor: data.editor || '',
       lastPromptAt: data.lastPromptAt || 0,
@@ -592,6 +599,10 @@ function runUnifiedMode() {
           if (ts > lastAppliedTimestamp) {
             lastAppliedTimestamp = ts;
             lastAppliedState = stateData.state;
+            // The counters are not the state: take them, or the stats rows
+            // and the session list's main row read "0 tools · 0 files" until
+            // the session happens to write again.
+            face.setStats(stateData);
           }
           return;
         }
@@ -646,8 +657,12 @@ function runUnifiedMode() {
           lastAppliedTimestamp = ts;
           lastAppliedState = stateData.state;
           // Force-apply stopped state (session ended) — bypass minimum display time
-          // so the face doesn't get stuck on "thinking" when Claude is interrupted
-          if (stateData.stopped && Date.now() < face.minDisplayUntil) {
+          // so the face doesn't get stuck on "thinking" when Claude is interrupted.
+          // Never for a reward or an error: a reward owns its guaranteed window
+          // and an error its 4s, and a turn end used to cut either short (a
+          // `relieved` shown for a quarter of a second). They queue instead.
+          if (stateData.stopped && Date.now() < face.minDisplayUntil
+              && !COMPLETION_STATES.has(face.state) && face.state !== 'error') {
             face.minDisplayUntil = Date.now();
           }
 
@@ -674,7 +689,7 @@ function runUnifiedMode() {
     // We bypass setState() here to avoid it re-buffering the state.
     // Completion states (happy/satisfied/proud/relieved) are excluded — they
     // already transition to idle via the linger path with sessionActive=false.
-    if (needsRescue(face, lastStopped, editorDead)) {
+    if (needsRescue(face, lastStopped, editorDead, minimal ? 0 : orbital.liveChildCount())) {
       face.forceState('responding', 'wrapping up', 3000); // respect responding's 3s min display time
     }
 
@@ -994,7 +1009,10 @@ function runUnifiedMode() {
         // Without this the main row is the one row in the list with no model
         // segment, while every orbital below it has one.
         model: face.model || '',
-        stopped: lastStopped,
+        // The real SessionEnd flag, not lastStopped: that one folds a plain
+        // turn end in, and drew the live main row as an ended session (a grey
+        // cross) every time the list was opened between turns.
+        stopped: !!(mainFace && mainFace.stopped),
         isMain: true,
         isPinned: pinnedSessionId === mainSessionId,
         toolCalls: face.toolCallCount,

@@ -192,6 +192,45 @@ function throttled(payload, now) {
 const lastModelBySession = new Map();
 const MAX_MODEL_KEYS = 64;
 
+// Per-session delivery order for the async payloads. Each one is its own
+// node process and nothing ordered two of them: for a fast tool the `after`
+// child could take the stats lock and write before the `before` child (4-7
+// runs in 30), leaving the face on "reading ... still running" after the tool
+// had finished. A session's payloads now go out one at a time, in order. The
+// hooks still return at once -- only the spawns queue -- and a child that
+// hangs holds its session's queue for CHAIN_WAIT_MS at most.
+const CHAIN_WAIT_MS = 3000;
+const inFlight = new Map(); // sessionId -> promise settling when its last child is done
+
+function spawnAdapter(node, json) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(node, [ADAPTER], {
+        stdio: ['pipe', 'ignore', 'ignore'],
+        windowsHide: true,
+      });
+    } catch {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(resolve, CHAIN_WAIT_MS);
+    if (timer.unref) timer.unref();
+    const done = () => { clearTimeout(timer); resolve(); };
+    child.on('error', done);
+    child.on('close', done);
+    child.stdin.on('error', () => {});
+    child.stdin.end(json);
+  });
+}
+
+function sendInOrder(key, node, json) {
+  const prev = inFlight.get(key);
+  const next = prev ? prev.then(() => spawnAdapter(node, json)) : spawnAdapter(node, json);
+  inFlight.set(key, next);
+  next.then(() => { if (inFlight.get(key) === next) inFlight.delete(key); });
+}
+
 // Returns whether the payload was handed to a child process. OpenCode
 // ignores what a hook resolves to; the tests use it to count sends.
 function send(payload) {
@@ -219,13 +258,7 @@ function send(payload) {
       });
       return true;
     }
-    const child = spawn(node, [ADAPTER], {
-      stdio: ['pipe', 'ignore', 'ignore'],
-      windowsHide: true,
-    });
-    child.on('error', () => {});
-    child.stdin.on('error', () => {});
-    child.stdin.end(json);
+    sendInOrder(payload.sessionId || '', node, json);
     return true;
   } catch {
     return false;

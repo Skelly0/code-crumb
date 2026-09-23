@@ -968,7 +968,7 @@ describe('emotions -- a dead editor stays dead after the center moves away', () 
 // s1_startup / s5_resume cover them end to end).
 describe('emotions -- renderer closure fixes (source lint)', () => {
   test('a startup-gated write is recorded as applied, not just skipped', () => {
-    assert.ok(/if \(gate === 'record'\) \{[\s\S]{0,400}?lastAppliedTimestamp = ts;\s*lastAppliedState = stateData\.state;[\s\S]{0,40}?\}\s*return;/.test(RENDERER_SRC));
+    assert.ok(/if \(gate === 'record'\) \{[\s\S]{0,400}?lastAppliedTimestamp = ts;\s*lastAppliedState = stateData\.state;[\s\S]{0,400}?\}\s*return;/.test(RENDERER_SRC));
   });
 
   test('a newer write under a new pid retires the armed pid and clears editorDead', () => {

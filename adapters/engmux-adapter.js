@@ -15,7 +15,7 @@
 // +======================================================================+
 
 const { spawn } = require('child_process');
-const { writeSessionState, signalExitCode } = require('./base-adapter');
+const { writeSessionState, signalExitCode, exitWhenFlushed } = require('./base-adapter');
 
 const SESSION_ID = `engmux-${process.pid}-${Date.now()}`;
 const PARENT_SESSION = process.env.CLAUDE_SESSION_ID || String(process.ppid);
@@ -102,7 +102,10 @@ function main() {
   });
 
   let stdout = '';
-  child.stdout.on('data', (chunk) => { if (stdout.length < MAX_OUTPUT) stdout += chunk.toString(); });
+  // Decoded as a stream: chunk.toString() per chunk garbled any multi-byte
+  // character split across two chunks.
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { if (stdout.length < MAX_OUTPUT) stdout += chunk; });
 
   // 3. Cycle states while running
   let cycleIndex = 0;
@@ -120,7 +123,8 @@ function main() {
     if (signal) {
       process.stdout.write(stdout);
       writeState('error', `killed (${signal})`, true);
-      process.exit(signalExitCode(signal));
+      exitWhenFlushed(signalExitCode(signal));
+      return;
     }
 
     let success = false;
@@ -140,7 +144,8 @@ function main() {
     }
 
     writeState(success ? 'happy' : 'error', detail, true);
-    process.exit(code || 0);
+    // Not process.exit: the passthrough above may still be in the pipe.
+    exitWhenFlushed(code || 0);
   });
 
   child.on('error', (err) => {

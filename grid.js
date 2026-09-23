@@ -9,7 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  HOME, SESSIONS_DIR, safeFilename,
+  HOME, SESSIONS_DIR, safeFilename, detailText,
   ACTIVE_WORK_STATES, INTERRUPTIBLE_STATES, COMPLETION_STATES,
 } = require('./shared');
 const { ansi, breathe, dimColor, themes, COMPLETION_LINGER } = require('./themes');
@@ -368,7 +368,7 @@ class MiniFace {
       const canInterrupt = ACTIVE_WORK_STATES.has(newState) && INTERRUPTIBLE_STATES.has(this.state);
       if (now >= this.minDisplayUntil || newState === 'error' || newState === 'spawning' || data.stopped || canInterrupt) {
         this.state = newState;
-        this.detail = data.detail || '';
+        this.detail = detailText(data.detail);
         // Work states get shorter display (800ms) so tool activity is visible
         this.minDisplayUntil = now + (ACTIVE_WORK_STATES.has(newState) ? 800 : 1500);
         this.pendingState = null;
@@ -376,12 +376,12 @@ class MiniFace {
       } else {
         // Buffer as pending instead of dropping — will flush when minDisplayUntil expires
         this.pendingState = newState;
-        this.pendingDetail = data.detail || '';
+        this.pendingDetail = detailText(data.detail);
       }
     } else {
       // Same state — refresh the timer and update detail
       this.minDisplayUntil = now + 1500;
-      this.detail = data.detail || '';
+      this.detail = detailText(data.detail);
       // A fresh write of the same WORK state is a new tool call; a completion
       // still queued from the previous one would otherwise flush over it.
       if (ACTIVE_WORK_STATES.has(newState) && COMPLETION_STATES.has(this.pendingState)) {
@@ -407,6 +407,15 @@ class MiniFace {
       }
     }
     if (data.parentSession) this.parentSession = data.parentSession;
+    else if (this.parentSession && !data.isTeammate && !this.isTeammate) {
+      // update-state.js heals a window falsely stamped as a subagent (#134)
+      // by dropping parentSession/taskDescription from its file. Every child
+      // write carries parentSession, so its absence IS the heal: without this
+      // the face stayed a "child" -- never the center, counted as a live
+      // child of its old parent -- for as long as the renderer ran.
+      this.parentSession = null;
+      this.taskDescription = data.taskDescription || '';
+    }
     if (data.agentType) this.agentType = data.agentType;
     if (data.teamName) {
       this.teamName = data.teamName;
@@ -963,7 +972,11 @@ class OrbitalSystem {
             if (data.parentSession && !data.stopped &&
                 parentIsFresh(data.parentSession) &&
                 now - fileMtimeMs <= CHILD_ORPHAN_TIMEOUT) continue;
-            if (data.pid && isOwnedByLiveProcess(data.pid, data.timestamp || fileMtimeMs)) continue;
+            // A stopped file is finished (SessionEnd, a retired agent): its
+            // editor living on must not keep it on disk, or every retired
+            // agent piled up -- read and parsed on each load -- for the
+            // editor's whole lifetime (Unix only; win32 writes no pid).
+            if (!data.stopped && data.pid && isOwnedByLiveProcess(data.pid, data.timestamp || fileMtimeMs)) continue;
           } catch {
             continue; // Parse failure = mid-write race — protect the file
           }
@@ -1171,7 +1184,8 @@ class OrbitalSystem {
           survivingResults.push(r); // Protected — subagent in a long model turn
           continue;
         }
-        if (r.data && r.data.pid && isOwnedByLiveProcess(r.data.pid, r.data.timestamp || r.mtimeMs)) {
+        if (r.data && !r.data.stopped && r.data.pid &&
+            isOwnedByLiveProcess(r.data.pid, r.data.timestamp || r.mtimeMs)) {
           survivingResults.push(r); // Protected — owning process alive
           continue;
         }
@@ -1270,6 +1284,10 @@ class OrbitalSystem {
         face.label = base.slice(0, 8);
       } else if (face.isMainSession && face.modelName) {
         face.label = face.modelName.slice(0, 8);
+      } else if (face.parentSession && face.agentType) {
+        // A child's modelName is its agent type only when one is known (a
+        // legacy child carries the editor name), so read agentType directly.
+        face.label = face.agentType.slice(0, 8);
       } else {
         cwdIndex[base] = (cwdIndex[base] || 0) + 1;
         face.label = 'sub-' + (i + 1);
@@ -1824,8 +1842,8 @@ function orderSessionList(mainInfo, faces) {
 // lingers on the list for ~10s after it ends so the user sees it finish, but
 // it is display-only: pinning it is a no-op the policy immediately undoes
 // (a stopped session is never live, so the pin is released on the same tick),
-// which reads as a dead key. The main row is always navigable -- between turns
-// its `stopped` is the folded `turnEnded`, and pin/unpin must keep working.
+// which reads as a dead key. The main row is always navigable: the cursor
+// starts there, and unpinning it must keep working whatever its state.
 //   entries  [{ face, depth }] from orderSessionList
 // Returns the session ids, in rendered order, that j/k and Enter may select.
 function listNavigableIds(entries) {
@@ -1839,7 +1857,10 @@ function _truncatePath(fullPath, maxLen) {
   // Normalize to forward slashes
   const p = fullPath.replace(/\\/g, '/');
   // Replace home dir with ~
-  const display = HOME_FWD && p.startsWith(HOME_FWD) ? '~' + p.slice(HOME_FWD.length) : p;
+  // Only on a path boundary: HOME=/home/al must not turn /home/alice into ~ice.
+  const home = HOME_FWD.replace(/\/+$/, '');
+  const underHome = HOME_FWD && (p === HOME_FWD || p.startsWith(home + '/'));
+  const display = underHome ? '~' + p.slice(home.length) : p;
   if (display.length <= maxLen) return display;
   // Show .../<last two segments>
   const parts = display.split('/');
@@ -2010,8 +2031,8 @@ function renderSessionList(cols, rows, entriesOrFaces, paletteThemes, mainInfo, 
       row++;
 
       // Row 3: "    task/detail text" — full task description preferred
-      const detailText = (face.taskDescription || face.detail || 'waiting...').slice(0, body);
-      const row3Full = indent + detailText;
+      const row3Text = (face.taskDescription || face.detail || 'waiting...').slice(0, body);
+      const row3Full = indent + row3Text;
       buf += line(row, `${rowDc}${row3Full}${' '.repeat(Math.max(0, innerW - row3Full.length))}`);
       row++;
 

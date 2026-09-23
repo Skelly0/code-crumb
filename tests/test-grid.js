@@ -3458,11 +3458,32 @@ describe('grid.js -- MiniFace field persistence', () => {
     assert.strictEqual(face.taskDescription, 'fix bugs');
   });
 
-  test('parentSession persists when subsequent update omits it', () => {
+  // Every child write carries parentSession, so a write without it is
+  // update-state.js healing a window falsely stamped as a subagent (#134).
+  // The face used to keep the stale stamp: never the center, and counted as
+  // a live child of its old parent for as long as the renderer ran.
+  test('a write without parentSession heals a falsely stamped window', () => {
     const face = new MiniFace('persist-parent');
-    face.updateFromFile({ state: 'coding', parentSession: 'parent-123' });
-    face.updateFromFile({ state: 'reading' });
+    face.updateFromFile({ state: 'coding', parentSession: 'parent-123', taskDescription: 'stolen task', timestamp: 1 });
+    assert.strictEqual(face.isMainSession, false);
+    face.updateFromFile({ state: 'reading', timestamp: 2 });
+    assert.strictEqual(face.parentSession, null);
+    assert.strictEqual(face.taskDescription, '');
+    assert.strictEqual(face.isMainSession, true);
+  });
+
+  test('a child keeps parentSession across its own writes', () => {
+    const face = new MiniFace('persist-child');
+    face.updateFromFile({ state: 'coding', parentSession: 'parent-123', timestamp: 1 });
+    face.updateFromFile({ state: 'reading', parentSession: 'parent-123', timestamp: 2 });
     assert.strictEqual(face.parentSession, 'parent-123');
+  });
+
+  test('a teammate keeps parentSession when a write omits it', () => {
+    const face = new MiniFace('persist-mate');
+    face.updateFromFile({ state: 'coding', parentSession: 'lead', isTeammate: true, timestamp: 1 });
+    face.updateFromFile({ state: 'reading', timestamp: 2 });
+    assert.strictEqual(face.parentSession, 'lead');
   });
 });
 
@@ -4268,6 +4289,116 @@ describe('grid.js -- PID start-time refresh runs once per TTL expiry', () => {
       _pidStartCache.delete(pid);
       _setPidResolver(null);
     }
+  });
+});
+
+// -- Third review pass (Sep 2026) --------------------------------------------
+// Each block below was reproduced against the pre-fix sources first.
+
+describe('grid.js -- third review pass: stopped files are not kept by a live pid', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const pathMod = require('path');
+  function staleFile(dir, id, data) {
+    const fp = pathMod.join(dir, id + '.json');
+    fs.writeFileSync(fp, JSON.stringify({ session_id: id, pid: process.pid, timestamp: Date.now() - STALE_MS - 60000, ...data }));
+    const old = new Date(Date.now() - STALE_MS - 60000);
+    fs.utimesSync(fp, old, old);
+    return fp;
+  }
+
+  test('sync purge: a retired agent file goes even while its editor lives', () => {
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'crumb-purge-'));
+    seedOwningPid();
+    try {
+      const done = staleFile(dir, 'p-agent-1', { state: 'happy', stopped: true, parentSession: 'p' });
+      const live = staleFile(dir, 'win-2', { state: 'coding' });
+      const orbital = new OrbitalSystem();
+      orbital._sessionsDir = dir;
+      orbital.loadSessions('main-id');
+      assert.strictEqual(fs.existsSync(done), false, 'stopped: finished with its file');
+      assert.strictEqual(fs.existsSync(live), true, 'live pid still protects a live session');
+    } finally {
+      _pidStartCache.delete(process.pid);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test.async('async purge: the same rule', async () => {
+    const dir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'crumb-purge-'));
+    seedOwningPid();
+    try {
+      const done = staleFile(dir, 'p-agent-2', { state: 'happy', stopped: true, parentSession: 'p' });
+      const orbital = new OrbitalSystem();
+      orbital._sessionsDir = dir;
+      orbital._applySessionResults('main-id', [{
+        file: 'p-agent-2.json', mtimeMs: Date.now() - STALE_MS - 60000,
+        data: JSON.parse(fs.readFileSync(done, 'utf8')),
+      }]);
+      await new Promise(r => setTimeout(r, 50)); // fs.unlink is fire-and-forget
+      assert.strictEqual(fs.existsSync(done), false);
+    } finally {
+      _pidStartCache.delete(process.pid);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('grid.js -- third review pass: session list and labels', () => {
+  const { HOME } = require('../shared');
+  const homeFwd = HOME.replace(/\\/g, '/').replace(/\/+$/, '');
+
+  test('~ replaces HOME only on a path boundary', () => {
+    const sibling = new MiniFace('sib');
+    sibling.state = 'coding';
+    sibling.cwd = homeFwd + 'ice/proj';          // shares HOME's prefix, is not under it
+    const inside = new MiniFace('in');
+    inside.state = 'coding';
+    inside.cwd = homeFwd + '/proj';
+    const plain = renderSessionList(120, 40, [sibling, inside], PALETTES[0].themes).replace(/\x1b\[[^A-Za-z]*[A-Za-z]/g, '');
+    assert.ok(!plain.includes('~ice/proj'), 'a sibling of HOME is not under ~');
+    assert.ok(plain.includes('~/proj'), 'a folder under HOME still is');
+  });
+
+  test('a child with no task falls back to its agent type, not sub-N', () => {
+    const orbital = new OrbitalSystem();
+    for (const [id, type] of [['p-agent-a', 'Explore'], ['p-agent-b', 'Plan']]) {
+      const f = new MiniFace(id);
+      f.parentSession = 'p';
+      f.agentType = type;
+      f.modelName = type;
+      f.cwd = '/repo';                             // shared, so the cwd cannot tell them apart
+      orbital.faces.set(id, f);
+    }
+    orbital._assignLabels();
+    assert.strictEqual(orbital.faces.get('p-agent-a').label, 'Explore');
+    assert.strictEqual(orbital.faces.get('p-agent-b').label, 'Plan');
+  });
+
+  test('a legacy child without an agent type still gets sub-N, not the editor name', () => {
+    const orbital = new OrbitalSystem();
+    for (const id of ['legacy-1', 'legacy-2']) {
+      const f = new MiniFace(id);
+      f.parentSession = 'p';
+      f.modelName = 'claude';
+      f.cwd = '/repo';
+      orbital.faces.set(id, f);
+    }
+    orbital._assignLabels();
+    assert.ok(/^sub-\d$/.test(orbital.faces.get('legacy-1').label));
+  });
+
+  test('a detail that is not text is dropped, not drawn (an object blanked the ring)', () => {
+    const face = new MiniFace('obj');
+    face.updateFromFile({ state: 'error', detail: { code: 500, text: 'boom' }, timestamp: 1 });
+    assert.strictEqual(face.detail, '');
+    const multi = new MiniFace('multi');
+    multi.updateFromFile({ state: 'coding', detail: 'line one\nline two', timestamp: 2 });
+    assert.strictEqual(multi.detail, 'line one line two');
+    const orbital = new OrbitalSystem();
+    orbital.faces.set('obj', new MiniFace('obj'));
+    orbital.faces.get('obj').updateFromFile({ state: 'error', detail: { code: 1 }, timestamp: 3 });
+    assert.doesNotThrow(() => orbital.render(120, 60, { row: 20, col: 40, w: 30, h: 12, centerX: 55, centerY: 26 }, null));
   });
 });
 
