@@ -4224,6 +4224,133 @@ describe('adapters -- third review pass: the OpenCode plugin keeps a session in 
   }
 });
 
+describe('adapters -- review round: batches, turn ends and counters', () => {
+  const base = require(path.join(ADAPTERS_DIR, 'base-adapter'));
+  const { defaultStats } = require('../state-machine');
+  const OPENCODE = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+
+  test.async('processStdinEvent applies a JSON array in order, one handler call each', async () => {
+    const { Readable } = require('stream');
+    const seen = [];
+    await new Promise((resolve) => {
+      const stream = new Readable({ read() {} });
+      base.processStdinEvent((d) => { seen.push(d.n); if (d.n === 2) throw new Error('one bad event'); }, null, {
+        stream, exit: () => resolve(),
+      });
+      stream.push('[{"n":1},{"n":2},{"n":3}]');
+      stream.push(null);
+    });
+    assert.deepStrictEqual(seen, [1, 2, 3], 'a throw in one element does not stop the rest');
+  });
+
+  test('a batched turn end lands last: queued tool events cannot undo it', () => {
+    const t = makeTempEnv('oc-batch');
+    try {
+      const input = JSON.stringify([
+        { type: 'tool.execute.before', sessionId: 'ses_b', callID: 'c1', tool: 'read', toolInput: { filePath: 'a.js' } },
+        { type: 'tool.execute.after', sessionId: 'ses_b', callID: 'c1', tool: 'read', toolInput: { filePath: 'a.js' }, output: 'x' },
+        { type: 'session.idle', sessionId: 'ses_b' },
+      ]);
+      try { execFileSync(NODE, [OPENCODE], { input, env: t.env, timeout: 10000, stdio: 'pipe' }); }
+      catch (e) { if (e.status) throw e; }
+      const sf = readJSON(path.join(t.sessionsDir, 'ses_b.json'));
+      assert.strictEqual(sf.state, 'happy');
+      assert.strictEqual(sf.turnEnded, true);
+      assert.strictEqual(sf.toolCalls, 1, 'the queued tool still counted');
+      assert.strictEqual(readJSON(t.stateFile).stopped, true);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('buildExtra does not count time update-state.js already credited', () => {
+    const stats = defaultStats();
+    base.initSession(stats, 'ses_c');
+    stats.session.start = Date.now() - 3600000;
+    stats.sessionCounters.ses_c.creditedMs = 3600000;   // credited on a switch away
+    const extra = base.buildExtra(stats, 'ses_c', 'opencode', 'opencode');
+    assert.ok(extra.dailyCumulativeMs - stats.daily.cumulativeMs < 60000,
+      `${extra.dailyCumulativeMs - stats.daily.cumulativeMs}ms counted twice`);
+  });
+
+  test('a session carried across midnight counts once in the new day', () => {
+    const stats = defaultStats();
+    base.initSession(stats, 'A');
+    base.initSession(stats, 'B');
+    // Make that "yesterday": both were counted in the old day's bucket.
+    stats.daily = { date: '2020-01-01', sessionCount: 2, cumulativeMs: 0 };
+    stats.sessionCounters.A.countedDay = '2020-01-01';
+    stats.sessionCounters.B.countedDay = '2020-01-01';
+    base.initSession(stats, 'A');
+    base.initSession(stats, 'B');
+    base.initSession(stats, 'A');
+    assert.strictEqual(stats.daily.sessionCount, 2);
+  });
+
+  test('pruneCounters evicts throwaway ids before a busy window', () => {
+    const { pruneCounters, freshCounter } = require('../state-machine');
+    const now = Date.now();
+    const map = { busy: { ...freshCounter(now - 100000), toolCalls: 3 } };
+    for (let i = 0; i < 60; i++) map[`flood-${i}`] = { ...freshCounter(now - i), toolCalls: 1 };
+    pruneCounters(map, 'flood-0', now);
+    assert.ok(map.busy, 'the least recently seen, but busy, window keeps its counters');
+    assert.strictEqual(Object.keys(map).length, 50);
+  });
+
+  test('pruneCounters never evicts parked agents', () => {
+    const { pruneCounters, freshCounter } = require('../state-machine');
+    const now = Date.now();
+    const map = { owner: { ...freshCounter(now - 100000), activeSubagents: [{ id: 'owner-sub-1' }] } };
+    for (let i = 0; i < 60; i++) map[`flood-${i}`] = freshCounter(now - i);
+    pruneCounters(map, 'flood-0', now);
+    assert.ok(map.owner, 'the oldest entry holds agents and stays');
+    assert.ok(Object.keys(map).length <= 51);
+  });
+
+  if (POSIX) {
+    test.async('the plugin\'s session.idle takes the queued payloads with it', async () => {
+      const os = require('os');
+      const PLUGIN_FILE = path.join(ADAPTERS_DIR, 'opencode-plugin.mjs');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-drain-'));
+      const log = path.join(dir, 'log');
+      const fake = path.join(dir, 'fake-node');
+      // One write per payload, so two children cannot interleave inside a line.
+      fs.writeFileSync(fake, `#!/bin/sh\nprintf '%s\\n' "$(cat)" >> "${log}"\nsleep 0.3\necho end >> "${log}"\n`);
+      fs.chmodSync(fake, 0o755);
+      const realNode = process.env.CODE_CRUMB_NODE;
+      try {
+        const { CodeCrumbPlugin } = await import(`${require('url').pathToFileURL(PLUGIN_FILE).href}?t=drain`);
+        const hooks = await CodeCrumbPlugin();
+        process.env.CODE_CRUMB_NODE = fake;
+        const tool = (id) => ({ sessionID: 'ses_d', tool: 'read', callID: id });
+        const calls = [
+          hooks['tool.execute.before'](tool('c1'), { args: { filePath: 'a.js' } }),   // spawns now
+          hooks['tool.execute.before'](tool('c2'), { args: { filePath: 'b.js' } }),   // queued
+          hooks['tool.execute.before'](tool('c3'), { args: { filePath: 'c.js' } }),   // queued
+          hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_d' } } }),
+        ];
+        process.env.CODE_CRUMB_NODE = realNode;
+        await Promise.all(calls);
+        await new Promise(r => setTimeout(r, 1200));
+        const lines = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean);
+        const payloads = lines.filter(l => l !== 'end');
+        assert.strictEqual(payloads.length, 2, lines.join(' | '));
+        const batch = JSON.parse(payloads.find(l => l.startsWith('[')));
+        assert.deepStrictEqual(batch.map(p => p.type),
+          ['tool.execute.before', 'tool.execute.before', 'session.idle'], 'the turn end is last');
+      } finally {
+        if (realNode === undefined) delete process.env.CODE_CRUMB_NODE; else process.env.CODE_CRUMB_NODE = realNode;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test('source: the plugin\'s spawn never throws past its promise', () => {
+    const src = fs.readFileSync(path.join(ADAPTERS_DIR, 'opencode-plugin.mjs'), 'utf8');
+    assert.ok(src.includes('if (!child.stdin) { done(); return; }'), 'EMFILE: a child with no stdin');
+    const i = src.indexOf('function spawnAdapter');
+    assert.ok(/return new Promise\(\(resolve\) => \{\s*try \{/.test(src.slice(i, i + 200)));
+  });
+});
+
 describe('adapters -- third review pass: the OpenClaw snippets name their session', () => {
   test('both snippets send a stable session_id without a shell', () => {
     const header = fs.readFileSync(path.join(ADAPTERS_DIR, 'openclaw-adapter.js'), 'utf8');

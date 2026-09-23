@@ -192,43 +192,75 @@ function throttled(payload, now) {
 const lastModelBySession = new Map();
 const MAX_MODEL_KEYS = 64;
 
-// Per-session delivery order for the async payloads. Each one is its own
-// node process and nothing ordered two of them: for a fast tool the `after`
-// child could take the stats lock and write before the `before` child (4-7
-// runs in 30), leaving the face on "reading ... still running" after the tool
-// had finished. A session's payloads now go out one at a time, in order. The
-// hooks still return at once -- only the spawns queue -- and a child that
-// hangs holds its session's queue for CHAIN_WAIT_MS at most.
+// Per-session delivery order for the async payloads. Each one used to be its
+// own node process and nothing ordered two of them: for a fast tool the
+// `after` child could take the stats lock and write before the `before` child
+// (4-7 runs in 30), leaving the face on "reading ... still running" after the
+// tool had finished. A session now has one child at a time; whatever arrives
+// meanwhile queues and goes out as ONE batch (the adapter takes a JSON array
+// and applies it in order) when that child is done, so a burst costs a single
+// cold start. The hooks still return at once. A child that hangs holds its
+// session's queue for CHAIN_WAIT_MS at most.
+//
+// The turn-end payloads (SYNC_TYPES) take the session's queue with them, in
+// the same synchronous batch: queued events used to spawn AFTER the turn end
+// and undo it -- a late tool.execute.before re-opened the turn, re-stamped
+// attention and cleared `stopped`.
 const CHAIN_WAIT_MS = 3000;
-const inFlight = new Map(); // sessionId -> promise settling when its last child is done
+const queues = new Map(); // sessionId -> { running, pending: [{ json, node }] }
 
-function spawnAdapter(node, json) {
+// Resolves when the child is done (or CHAIN_WAIT_MS passes); never rejects,
+// whatever spawn does -- under EMFILE a child comes back with no stdin, and a
+// throw here used to leave a rejected promise that muted the session for good.
+function spawnAdapter(node, input) {
   return new Promise((resolve) => {
-    let child;
     try {
-      child = spawn(node, [ADAPTER], {
+      const child = spawn(node, [ADAPTER], {
         stdio: ['pipe', 'ignore', 'ignore'],
         windowsHide: true,
       });
+      const timer = setTimeout(resolve, CHAIN_WAIT_MS);
+      if (timer.unref) timer.unref();
+      const done = () => { clearTimeout(timer); resolve(); };
+      child.on('error', done);
+      child.on('close', done);
+      if (!child.stdin) { done(); return; }
+      child.stdin.on('error', () => {});
+      child.stdin.end(input);
     } catch {
       resolve();
-      return;
     }
-    const timer = setTimeout(resolve, CHAIN_WAIT_MS);
-    if (timer.unref) timer.unref();
-    const done = () => { clearTimeout(timer); resolve(); };
-    child.on('error', done);
-    child.on('close', done);
-    child.stdin.on('error', () => {});
-    child.stdin.end(json);
+  });
+}
+
+// One payload is sent as itself, several as a JSON array.
+function batchInput(items) {
+  return items.length === 1 ? items[0].json : `[${items.map(i => i.json).join(',')}]`;
+}
+
+function pump(key) {
+  const q = queues.get(key);
+  if (!q || q.running) return;
+  if (!q.pending.length) { queues.delete(key); return; }
+  const batch = q.pending.splice(0);
+  q.running = true;
+  spawnAdapter(batch[0].node, batchInput(batch)).then(() => {
+    q.running = false;
+    pump(key);
   });
 }
 
 function sendInOrder(key, node, json) {
-  const prev = inFlight.get(key);
-  const next = prev ? prev.then(() => spawnAdapter(node, json)) : spawnAdapter(node, json);
-  inFlight.set(key, next);
-  next.then(() => { if (inFlight.get(key) === next) inFlight.delete(key); });
+  let q = queues.get(key);
+  if (!q) { q = { running: false, pending: [] }; queues.set(key, q); }
+  q.pending.push({ json, node });
+  pump(key);
+}
+
+// Everything still queued for this session, taken out of the queue.
+function takeQueued(key) {
+  const q = queues.get(key);
+  return q ? q.pending.splice(0) : [];
 }
 
 // Returns whether the payload was handed to a child process. OpenCode
@@ -250,8 +282,10 @@ function send(payload) {
     const json = JSON.stringify(payload);
     const node = nodeBinary();
     if (SYNC_TYPES.has(payload.type)) {
+      const batch = takeQueued(payload.sessionId || '');
+      batch.push({ json, node });
       spawnSync(node, [ADAPTER], {
-        input: json,
+        input: batchInput(batch),
         stdio: ['pipe', 'ignore', 'ignore'],
         windowsHide: true,
         timeout: SYNC_CAP_MS,

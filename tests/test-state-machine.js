@@ -3842,6 +3842,29 @@ describe('update-state -- third review pass: hook bookkeeping', () => {
   });
 });
 
+describe('update-state -- review round: a session counts once per day', () => {
+  test('a session still running after midnight counts in the new day', () => {
+    const { tmp, statsFile, env } = makeTempEnv('day-1');
+    try {
+      const stats = defaultStats();
+      stats.session = { id: 'day-1', start: Date.now() - 60000, toolCalls: 2, filesEdited: [], subagentCount: 0, commitCount: 0, activeSubagents: [] };
+      stats.daily = { date: '2020-01-01', sessionCount: 1, cumulativeMs: 0 };
+      stats.sessionCounters = { 'day-1': { toolCalls: 2, filesEdited: [], start: Date.now() - 60000, commitCount: 0, creditedMs: 0, lastSeen: Date.now(), countedDay: '2020-01-01', counted: true } };
+      fsMod.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+      runUpdateState('PreToolUse', { session_id: 'day-1', tool_name: 'Read', tool_input: { file_path: 'a.js' } }, env);
+      runUpdateState('PreToolUse', { session_id: 'day-1', tool_name: 'Read', tool_input: { file_path: 'b.js' } }, env);
+      assert.strictEqual(readJSON(statsFile).daily.sessionCount, 1, 'counted once today, not never');
+    } finally { cleanup(tmp); }
+  });
+
+  test('a legacy `counted: true` entry is not counted again on upgrade', () => {
+    const { normalizeCounter } = require('../state-machine');
+    const c = normalizeCounter({ toolCalls: 1, counted: true }, Date.now());
+    assert.strictEqual(c.countedDay, new Date().toISOString().slice(0, 10));
+    assert.strictEqual(c.counted, undefined);
+  });
+});
+
 describe('update-state -- third review pass: autolaunch quit flag', () => {
   // The renderer writes ~/.code-crumb-quit on every exit and nothing removed
   // it, so after the first closed window no hook ever launched a renderer

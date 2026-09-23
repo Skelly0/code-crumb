@@ -971,8 +971,12 @@ const COUNTER_MAX_AGE_MS = 24 * 3600000;
 const COUNTER_MAX_ENTRIES = 50;
 const COUNTER_MAX_FILES = 200;
 
+// `countedDay` is the daily bucket (YYYY-MM-DD, UTC like stats.daily.date) in
+// which this session last counted toward daily.sessionCount. It replaced a
+// `counted` boolean that never reset, so a session running across midnight
+// was never counted in the new day at all.
 function freshCounter(now) {
-  return { toolCalls: 0, filesEdited: [], start: now, commitCount: 0, creditedMs: 0, lastSeen: now, counted: false };
+  return { toolCalls: 0, filesEdited: [], start: now, commitCount: 0, creditedMs: 0, lastSeen: now, countedDay: '' };
 }
 
 // Repair one entry in place (a hand-edited or older stats file must never
@@ -985,7 +989,12 @@ function normalizeCounter(c, now) {
   c.commitCount = num(c.commitCount, 0);
   c.creditedMs = num(c.creditedMs, 0);
   c.lastSeen = num(c.lastSeen, now);
-  c.counted = !!c.counted;
+  // A pre-countedDay entry that was counted is taken as counted today:
+  // counting it again right after an upgrade would be the worse error.
+  if (typeof c.countedDay !== 'string') {
+    c.countedDay = c.counted ? new Date(now).toISOString().slice(0, 10) : '';
+  }
+  delete c.counted;
   c.filesEdited = Array.isArray(c.filesEdited)
     ? c.filesEdited.filter(f => typeof f === 'string').slice(0, COUNTER_MAX_FILES) : [];
   return c;
@@ -1024,9 +1033,16 @@ function pruneCounters(map, keepId, now) {
   }
   const ids = Object.keys(map);
   if (ids.length <= COUNTER_MAX_ENTRIES) return;
-  ids.sort((a, b) => (map[b].lastSeen || 0) - (map[a].lastSeen || 0));
+  // Over the cap, throwaway entries (at most one tool call, nothing parked)
+  // go first, then the least recently seen. A flood of short-lived ids -- an
+  // old OpenClaw snippet mints one per event -- used to push a busy window's
+  // counters out, and it came back as a brand-new session.
+  const throwaway = (id) => (map[id].toolCalls || 0) <= 1 && !Array.isArray(map[id].activeSubagents);
+  ids.sort((a, b) => (throwaway(a) - throwaway(b)) || ((map[b].lastSeen || 0) - (map[a].lastSeen || 0)));
   for (const id of ids.slice(COUNTER_MAX_ENTRIES)) {
-    if (id !== keepId) delete map[id];
+    // Never evict parked agents: their SubagentStops would match nothing
+    // and their orbitals would be ghosts.
+    if (id !== keepId && !Array.isArray(map[id].activeSubagents)) delete map[id];
   }
 }
 

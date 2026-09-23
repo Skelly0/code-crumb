@@ -2886,6 +2886,33 @@ describe('face.js -- third review pass: buffering', () => {
     assert.strictEqual(face.state, 'satisfied');
   });
 
+  test('a newer error is shown for its full minimum, not replaced by an older reward', () => {
+    const face = new ClaudeFace();
+    face.setState('error', 'A failed');
+    face.setState('satisfied', 'read a.js');     // queued behind the first error
+    face.minDisplayUntil = Date.now() + 500;      // the first error is nearly done
+    face.setState('error', 'C failed');          // same state, newer failure
+    assert.strictEqual(face.pendingState, null, 'the older reward is dropped');
+    assert.ok(face.minDisplayUntil - Date.now() > 3000, 'the new error gets its own 4s');
+    assert.strictEqual(face.stateDetail, 'C failed');
+  });
+
+  test('a remembered prompt survives a later reward and a repeated work state', () => {
+    const face = new ClaudeFace();
+    face.setState('reading', 'A');
+    face.setState('satisfied', 'read A');
+    face.setState('waiting', 'allow?');
+    face.setState('satisfied', 'read C');        // a newer reward replaces the queued one
+    assert.deepStrictEqual(face.pendingWork, { state: 'waiting', detail: 'allow?' });
+    face.setState('reading', 'B');               // same work state again (parallel tools)
+    assert.strictEqual(face.pendingState, 'waiting', 'the prompt is still owed an answer');
+    const f2 = new ClaudeFace();
+    f2.setState('reading', 'A');
+    f2.setState('waiting', 'allow?');            // queued behind the running read
+    f2.setState('reading', 'B');
+    assert.strictEqual(f2.pendingState, 'waiting');
+  });
+
   test('caffeine wearing off hands the tool its detail back', () => {
     const face = new ClaudeFace();
     face.setState('testing', 'npm test');
@@ -2935,26 +2962,54 @@ describe('face.js -- third review pass: streak loss', () => {
     assert.strictEqual(face.glitchIntensity, 0);
   });
 
-  test('a later break that lost nothing replaces the previous loss', () => {
+  test('a loss belongs to its error: a burst keeps it, leaving the error ends it', () => {
     const face = new ClaudeFace();
-    face.setStats({ brokenStreak: 60, brokenStreakAt: Date.now() - 20 });
+    face.setState('error', 'tests failed');
+    face.setStats({ state: 'error', brokenStreak: 60, brokenStreakAt: Date.now() - 20 });
     assert.strictEqual(face.lastBrokenStreak, 60);
-    face.setStats({ brokenStreak: 0, brokenStreakAt: Date.now() });
-    assert.strictEqual(face.lastBrokenStreak, 0, 'no second "DEVASTATION." for the same loss');
+    // A second failure right behind the first: the streak was already 0.
+    face.setState('error', 'lint failed');
+    face.setStats({ state: 'error', brokenStreak: 0, brokenStreakAt: Date.now() });
+    assert.strictEqual(face.lastBrokenStreak, 60, 'the burst keeps "DEVASTATION." on screen');
+    face.minDisplayUntil = Date.now() - 1;
+    face.setState('reading', 'a.js');
+    assert.strictEqual(face.state, 'reading');
+    assert.strictEqual(face.lastBrokenStreak, 0, 'leaving the error ends the loss');
+    face.setState('error', 'boom');
+    face.setStats({ state: 'error', brokenStreak: 0, brokenStreakAt: Date.now() + 1 });
+    assert.strictEqual(face.lastBrokenStreak, 0, 'a later error does not replay it');
   });
 
   test('the error thought is re-picked once the stats name the loss', () => {
     const face = new ClaudeFace();
     face.setState('error', 'tests failed');       // renderer order: state first
-    face.setStats({ brokenStreak: 42, brokenStreakAt: Date.now() });
+    face.setStats({ state: 'error', brokenStreak: 42, brokenStreakAt: Date.now() });
     assert.strictEqual(face.thoughtText, '...42 streak gone');
   });
 
   test('the proud diff thought appears with the write, not ~4s later', () => {
     const face = new ClaudeFace();
     face.setState('proud', 'saved a.js');         // renderer order: state first
-    face.setStats({ diffInfo: { added: 12, removed: 3 } });
+    face.setStats({ state: 'proud', diffInfo: { added: 12, removed: 3 } });
     assert.strictEqual(face.thoughtText, '+12 -3 lines');
+  });
+
+  test('a write buffered behind the proud face does not wipe its diff thought', () => {
+    const face = new ClaudeFace();
+    face.setState('proud', 'saved a.js');
+    face.setStats({ state: 'proud', diffInfo: { added: 12, removed: 3 } });
+    face.setState('reading', 'b.js');             // inside the guaranteed window: queued
+    face.setStats({ state: 'reading', diffInfo: null });
+    assert.strictEqual(face.state, 'proud');
+    assert.strictEqual(face.thoughtText, '+12 -3 lines');
+  });
+
+  test('a stale milestone (renderer boot, a swap) does not replay', () => {
+    const face = new ClaudeFace();
+    face.setStats({ milestone: { type: 'streak', value: 25, at: Date.now() - 65000 } });
+    assert.strictEqual(face.milestoneShowTime, 0);
+    face.setStats({ milestone: { type: 'streak', value: 30, at: Date.now() } });
+    assert.ok(face.milestoneShowTime > 0, 'a fresh one still does');
   });
 
   test('the loss line and the milestone are never drawn over each other', () => {

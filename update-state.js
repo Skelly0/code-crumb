@@ -776,7 +776,7 @@ process.stdin.on('end', () => {
         toolCalls: stats.session.toolCalls || 0,
         filesEdited: (stats.session.filesEdited || []).filter(f => typeof f === 'string').slice(0, COUNTER_MAX_FILES),
         start: stats.session.start || now, commitCount: stats.session.commitCount || 0,
-        creditedMs: 0, lastSeen: now, counted: true,
+        creditedMs: 0, lastSeen: now, countedDay: stats.daily.date,
       };
     }
     let counter = _normalizeCounter(counters[sessionId], now);
@@ -786,9 +786,9 @@ process.stdin.on('end', () => {
     // of stats.session ownership, which two alternating windows did on every
     // hook. An agent event does not count its parent (the parent's own events
     // will), nor does a legacy subagent count itself.
-    if (!counter.counted && !isAgentEvent && !isKnownSubagent) {
+    if (counter.countedDay !== stats.daily.date && !isAgentEvent && !isKnownSubagent) {
       stats.daily.sessionCount++;
-      counter.counted = true;
+      counter.countedDay = stats.daily.date;
     }
 
     if (stats.session.id !== sessionId && !isAgentEvent && !isKnownSubagent && !isParallelSession) {
@@ -1150,7 +1150,7 @@ process.stdin.on('end', () => {
       // activeSubagents mid-dispatch, so every SubagentStop after an
       // auto-compact matched nothing. Any other source is a fresh session.
       if (data.source !== 'compact') {
-        counter = counters[sessionId] = { ..._freshCounter(now), counted: counter.counted };
+        counter = counters[sessionId] = { ..._freshCounter(now), countedDay: counter.countedDay };
         stats.session = {
           id: sessionId, start: now,
           toolCalls: 0, filesEdited: [], subagentCount: 0, commitCount: 0,

@@ -29,11 +29,11 @@ const COMPRESS_LOW_CAP = 30000;
 
 // Max consecutive blocks any single state segment can occupy in the timeline bar
 const MAX_SEGMENT_BLOCKS = 5;
-// A streak break reacts (glitch, "ouch.", "...N streak gone") only while it is
-// this fresh. Every state write carries the LAST break ever recorded, so the
-// first write after a renderer boot -- or a swap to a session last written
-// before a break -- used to replay a days-old one in full.
-const STREAK_BREAK_FRESH_MS = 10000;
+// A streak break (glitch, "ouch.", "...N streak gone") or a milestone reacts
+// only while it is this fresh. Every state write carries the LAST break ever
+// recorded (and a milestone for up to 8s), so the first write after a renderer
+// boot -- or a swap to a session last written before one -- used to replay it.
+const STATS_EVENT_FRESH_MS = 10000;
 
 // -- Timing --------------------------------------------------------
 // The face has two kinds of state. WORK states (coding, reading, ...) should
@@ -350,8 +350,9 @@ class ClaudeFace {
         }
         this.pendingState = newState;
         this.pendingDetail = detail;
-        // A completion means the tool behind any remembered work has finished.
-        if (newIsCompletion) this.pendingWork = null;
+        // A completion means the tool behind any remembered work has finished
+        // -- but a remembered prompt is no tool, and still wants an answer.
+        if (newIsCompletion && !this._pendingWait()) this.pendingWork = null;
         return;
       }
 
@@ -359,18 +360,30 @@ class ClaudeFace {
     } else {
       this.lastStateChange = Date.now();
       this.stateDetail = detail;
+      // A newer error is the one to show for its full minimum: an older reward
+      // (or tool) queued behind the first error used to flush over it the
+      // moment the first one's 4s ran out.
+      if (newState === 'error') {
+        this.pendingState = null;
+        this.pendingDetail = '';
+        this.pendingWork = null;
+        this.minDisplayUntil = Date.now() + this._getMinDisplayMs('error');
+      }
       // A fresh write of the work state already on screen is a NEW tool call
       // (fast Bash -> relieved queued -> second Bash arrives as executing
       // again). The queued completion belongs to the tool that finished, so
       // flushing it now would show `relieved` over the tool that is running --
       // and break the renderer's long-tool hold, which needs the face to name
       // the same state as the file. Drop it, and any work remembered behind it.
-      // The same goes for any other queued state (an older tool, a wait that
-      // has been answered): this write is newer, and flushing the queue later
-      // would replace the tool that is actually running. Only an error stays.
-      if (ACTIVE_WORK_STATES.has(newState) && this.pendingState && this.pendingState !== 'error') {
-        this.pendingState = null;
-        this.pendingDetail = '';
+      // The same goes for an older queued tool: this write is newer, and
+      // flushing the queue later would replace the tool that is actually
+      // running. An error stays, and so does a permission prompt -- parallel
+      // tools can keep writing while one of them waits for an answer.
+      if (ACTIVE_WORK_STATES.has(newState) && this.pendingState
+          && this.pendingState !== 'error' && this.pendingState !== 'waiting') {
+        const wait = this._pendingWait();
+        this.pendingState = wait ? wait.state : null;
+        this.pendingDetail = wait ? wait.detail : '';
         this.pendingWork = null;
       }
     }
@@ -378,6 +391,11 @@ class ClaudeFace {
     // Immediately show new activity in thought bubble
     this.thoughtTimer = 0;
     this._updateThought();
+  }
+
+  // A permission prompt remembered behind a queued reward, if any.
+  _pendingWait() {
+    return this.pendingWork && this.pendingWork.state === 'waiting' ? this.pendingWork : null;
   }
 
   // Apply a state immediately, skipping the buffering rules, and drop anything
@@ -415,6 +433,9 @@ class ClaudeFace {
   // The unconditional part of a state change: bookkeeping, timeline, particles.
   _applyState(newState, detail, now) {
     const newIsCompletion = COMPLETION_STATES.has(newState);
+    // A streak loss belongs to the error it came with: leaving the error face
+    // ends it, so a later, unrelated error never replays "DEVASTATION.".
+    if (newState !== 'error') this.lastBrokenStreak = 0;
     this.prevState = this.state;
     this.state = newState;
     this.transitionFrame = 0;
@@ -512,16 +533,18 @@ class ClaudeFace {
     this.bestStreak = data.bestStreak || 0;
 
     // Detect streak break -- dramatic reaction proportional to lost streak.
-    // Every new break replaces the last one, including a break that lost
-    // nothing (an error with the streak already at 0 writes brokenStreak 0):
-    // keeping the old value showed "DEVASTATION." for a streak lost earlier.
+    // Only a fresh break reacts (STATS_EVENT_FRESH_MS). A break that lost
+    // nothing -- a second failure right behind the first, with the streak
+    // already at 0 -- leaves the loss of the error on screen alone; the loss
+    // ends with that error face (see _applyState).
     const prevBrokenStreak = this.lastBrokenStreak;
     if (data.brokenStreakAt && data.brokenStreakAt !== this.brokenStreakAt) {
       this.brokenStreakAt = data.brokenStreakAt;
-      const fresh = Date.now() - data.brokenStreakAt < STREAK_BREAK_FRESH_MS;
-      this.lastBrokenStreak = fresh ? (data.brokenStreak || 0) : 0;
-      if (this.lastBrokenStreak > 0) {
-        const drama = Math.min(1.0, this.lastBrokenStreak / 50);
+      const fresh = Date.now() - data.brokenStreakAt < STATS_EVENT_FRESH_MS;
+      const lost = fresh ? (data.brokenStreak || 0) : 0;
+      if (lost > 0) {
+        this.lastBrokenStreak = lost;
+        const drama = Math.min(1.0, lost / 50);
         this.glitchIntensity = Math.max(this.glitchIntensity, 0.5 + drama * 0.5);
         this.particles.spawn(Math.floor(4 + drama * 16), 'glitch');
       }
@@ -540,8 +563,10 @@ class ClaudeFace {
     if (data.gitBranch) this.gitBranch = data.gitBranch;
     this.commitCount = data.commitCount || 0;
 
-    // Detect milestone
-    if (data.milestone && (!this.milestone || data.milestone.at !== this.milestone.at)) {
+    // Detect milestone (fresh ones only, like a streak break: a Stop written
+    // within 8s of one still carries it, and replayed it on renderer boot)
+    if (data.milestone && (!this.milestone || data.milestone.at !== this.milestone.at)
+        && Date.now() - (data.milestone.at || 0) < STATS_EVENT_FRESH_MS) {
       this.milestone = data.milestone;
       this.milestoneShowTime = 180; // ~12 seconds at 15fps
       this.particles.spawn(15, 'sparkle');
@@ -550,10 +575,13 @@ class ClaudeFace {
     // The renderer calls setState() before setStats(), so the thought was
     // picked from the PREVIOUS write's stats: a proud face thought about the
     // last edit's diff (usually none) and an error about the last break, and
-    // the right one only turned up on the next thought cycle, ~4s later.
+    // the right one only turned up on the next thought cycle, ~4s later. Only
+    // for the write that is on screen: a later write buffered behind the proud
+    // face carries `diffInfo: null` and must not wipe its thought.
     const diffChanged = JSON.stringify(prevDiff) !== JSON.stringify(this.diffInfo);
-    if ((this.state === 'proud' && diffChanged)
-        || (this.state === 'error' && prevBrokenStreak !== this.lastBrokenStreak)) {
+    if (data.state === this.state
+        && ((this.state === 'proud' && diffChanged)
+          || (this.state === 'error' && prevBrokenStreak !== this.lastBrokenStreak))) {
       this._updateThought();
     }
   }

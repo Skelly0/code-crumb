@@ -100,7 +100,6 @@ function syncSessionCounter(stats, now = Date.now()) {
   if (stats.session.start) c.start = stats.session.start;
   c.commitCount = stats.session.commitCount || 0;
   c.lastSeen = now;
-  c.counted = true;
   pruneCounters(counters, id, now);
 }
 
@@ -165,8 +164,8 @@ function guardedWriteState(sessionId, state, detail, extra, opts = {}) {
 
 // A change of owner follows the update-state.js contract: the incoming
 // session gets its OWN counters back (a switch is not a new session), it is
-// counted in daily.sessionCount once per id, and the outgoing owner's running
-// agents are parked on its counter entry. Zeroing here used to make two
+// counted in daily.sessionCount once per id and day, and the outgoing owner's
+// running agents are parked on its counter entry. Zeroing here used to make two
 // alternating adapter sessions each report a single tool call, count a
 // "session" per event, and wipe a conducting Claude owner's activeSubagents
 // -- leaving its synthetic orbitals nothing to retire them.
@@ -177,17 +176,30 @@ function initSession(stats, sessionId) {
     stats.daily = { date: today, sessionCount: 0, cumulativeMs: 0 };
   }
   if (!stats.frequentFiles) stats.frequentFiles = {};
+  const counters = sessionCounters(stats);
+  // Seed the owner's entry from stats.session when it has none (a stats file
+  // from before the map): it was counted when it was adopted.
+  if (stats.session.id && !normalizeCounter(counters[stats.session.id], now)) {
+    counters[stats.session.id] = {
+      ...freshCounter(stats.session.start || now),
+      toolCalls: stats.session.toolCalls || 0,
+      filesEdited: (stats.session.filesEdited || []).filter(f => typeof f === 'string').slice(0, COUNTER_MAX_FILES),
+      commitCount: stats.session.commitCount || 0,
+      lastSeen: now, countedDay: stats.daily.date,
+    };
+  }
+  let counter = normalizeCounter(counters[sessionId], now);
+  if (!counter) counter = counters[sessionId] = freshCounter(now);
+  counter.lastSeen = now;
+  // Once per session per day -- a session running across midnight counts in
+  // the new day too (see freshCounter's countedDay).
+  if (counter.countedDay !== stats.daily.date) {
+    stats.daily.sessionCount++;
+    counter.countedDay = stats.daily.date;
+  }
   if (stats.session.id !== sessionId) {
-    const counters = sessionCounters(stats);
     const outgoing = stats.session.id ? normalizeCounter(counters[stats.session.id], now) : null;
     if (outgoing) parkAgents(outgoing, stats.session);
-    let counter = normalizeCounter(counters[sessionId], now);
-    if (!counter) counter = counters[sessionId] = freshCounter(now);
-    counter.lastSeen = now;
-    if (!counter.counted) {
-      stats.daily.sessionCount++;
-      counter.counted = true;
-    }
     stats.session = {
       id: sessionId, start: counter.start,
       toolCalls: counter.toolCalls, filesEdited: counter.filesEdited.slice(),
@@ -207,7 +219,12 @@ function initSession(stats, sessionId) {
 // every write costs the ~1 KB state-file budget for nothing, and would defeat
 // the `!extra[field]` sticky test on the reading side.
 function buildExtra(stats, sessionId, modelName, editor, model) {
-  const currentSessionMs = stats.session.start ? Date.now() - stats.session.start : 0;
+  // Minus what update-state.js already credited to daily.cumulativeMs when it
+  // took ownership away from this session -- the same sum it writes itself.
+  // Restoring the session's original start made that time count twice.
+  const counter = stats.sessionCounters && stats.sessionCounters[sessionId];
+  const credited = counter && typeof counter.creditedMs === 'number' ? counter.creditedMs : 0;
+  const currentSessionMs = stats.session.start ? Math.max(0, Date.now() - stats.session.start - credited) : 0;
   return {
     sessionId,
     modelName,
@@ -289,7 +306,10 @@ function exitWhenFlushed(code, stream = process.stdout) {
 // provided handler function. This is the pattern used by opencode-adapter,
 // openclaw-adapter, and similar stdin-based adapters.
 //
-// handler(data) should process the parsed event object.
+// handler(data) should process the parsed event object. A JSON array is a
+// batch (the OpenCode plugin queues a session's events while its previous
+// child runs): each element is handled in order, as if it had been its own
+// process, and one element's throw does not stop the rest.
 // On parse failure, fallbackFn(err) is called if provided; on input over
 // MAX_INPUT, fallbackFn(null, { override, raw }) -- override is the
 // classifyTruncatedInput result, raw the truncated text. A throw inside
@@ -334,7 +354,9 @@ function processStdinEvent(handler, fallbackFn, opts = {}) {
       exit(0);
       return;
     }
-    try { handler(data); } catch {}
+    for (const item of Array.isArray(data) ? data : [data]) {
+      try { handler(item); } catch {}
+    }
     exit(0);
   });
   // 'end' handler above already calls exit(0); no 'close' handler needed
