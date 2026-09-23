@@ -113,6 +113,10 @@ function _readSessionFile(id) {
 // name and provenance, and carry the sticky fields forward. They used to drop
 // editor, modelName, model and lastPromptAt -- and since every later write
 // carries sticky fields only from the previous file, those stayed lost.
+// Not the subagent stamps, though: on a teammate's own file those only ever
+// come from the legacy foreign-session misclassification, the main path's
+// heal skips teammates, and this from-scratch write is what clears them.
+const TEAMMATE_STICKY = STICKY_FIELDS.filter(f => !['parentSession', 'taskDescription', 'agentType'].includes(f));
 function _teammateSessionExtra(sessionId, teamExtra) {
   const out = {
     modelName: process.env.CODE_CRUMB_MODEL || DEFAULT_MODEL_NAME,
@@ -122,7 +126,7 @@ function _teammateSessionExtra(sessionId, teamExtra) {
   };
   const prev = _readSessionFile(sessionId);
   if (prev) {
-    for (const field of STICKY_FIELDS) {
+    for (const field of TEAMMATE_STICKY) {
       if (prev[field] && !out[field]) out[field] = prev[field];
     }
   }
@@ -346,8 +350,9 @@ function ensureRendererRunning(editorStarting = false) {
     // Check quit flag — user intentionally quit, don't auto-relaunch. The
     // renderer writes it on every exit and nothing else removed it, so one
     // closed window disabled autolaunch for good. It now lasts until the
-    // editor starts again (a `startup` SessionStart), which is exactly the
-    // moment the setup prompt promises a launch.
+    // editor starts again -- a `startup` SessionStart, or `resume` (how
+    // `claude --continue` / `--resume` and `codex resume` start) -- which is
+    // exactly the moment the setup prompt promises a launch.
     if (editorStarting) {
       try { fs.unlinkSync(QUIT_FLAG_FILE); } catch {}
     }
@@ -597,7 +602,7 @@ process.stdin.on('data', chunk => {
 process.stdin.on('end', () => {
   ensureRendererRunning(
     (hookEvent || _rawField(input, 'hook_event_name')) === 'SessionStart'
-    && _rawField(input, 'source') === 'startup');
+    && /^(startup|resume)$/.test(_rawField(input, 'source')));
   if (inputTruncated) {
     // Too large to parse. The envelope ids are still recoverable from the raw
     // text, and they must be: this used to write ONLY the global file, with

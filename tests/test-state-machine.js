@@ -3677,12 +3677,21 @@ describe('state-machine -- third review pass: shell intent and classification', 
     assert.strictEqual(post('pushd x && grep ENOENT -r . ; popd', ENOENT_OUT).state, 'relieved');
   });
 
+  test('a failed cd is still an error (merged output, no exit code)', () => {
+    const r = post('cd src/components && ls', 'bash: line 1: cd: src/components: No such file or directory');
+    assert.strictEqual(r.state, 'error');
+    assert.strictEqual(post('cd nope', 'cd: no such file or directory: nope').state, 'error');
+    assert.strictEqual(post('cd src && ls', 'a.js b.js').state, 'relieved');
+  });
+
   test('install detection is one table on both sides of a tool call', () => {
-    for (const cmd of ['yarn lint', 'pnpm dev', 'pnpm run format', 'yarn']) {
+    for (const cmd of ['yarn lint', 'pnpm dev', 'pnpm run format', 'yarn run add-thing', 'npm run build']) {
       assert.notStrictEqual(toolToState('Bash', { command: cmd }).state, 'installing', cmd);
       assert.notStrictEqual(post(cmd, '').detail, 'installed', cmd);
     }
-    for (const cmd of ['npm i lodash', 'pip3 install x', 'yarn add react', 'go get x', 'brew install jq']) {
+    for (const cmd of ['npm i lodash', 'pip3 install x', 'yarn add react', 'go get x', 'brew install jq',
+      'yarn', 'yarn --frozen-lockfile', 'npm ci', 'pnpm -r install', 'pnpm --filter web add zod',
+      'pnpm -w add -D typescript', 'yarn workspace web add zod', 'yarn global add serve']) {
       assert.strictEqual(toolToState('Bash', { command: cmd }).state, 'installing', cmd);
       assert.strictEqual(post(cmd, '').detail, 'installed', cmd);
     }
@@ -3800,6 +3809,23 @@ describe('update-state -- third review pass: hook bookkeeping', () => {
     });
   }
 
+  test('a teammate write still clears a stale subagent stamp', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('mate-2');
+    try {
+      fsMod.mkdirSync(sessionsDir, { recursive: true });
+      fsMod.writeFileSync(pathMod.join(sessionsDir, 'mate-2.json'), JSON.stringify({
+        session_id: 'mate-2', state: 'coding', timestamp: Date.now() - 1000, editor: 'claude',
+        parentSession: 'owner', taskDescription: 'real task', agentType: 'Explore',
+      }), 'utf8');
+      runUpdateState('TeammateIdle', { session_id: 'mate-2', teammate_name: 'r', team_name: 't' }, env);
+      const s = readJSON(pathMod.join(sessionsDir, 'mate-2.json'));
+      assert.strictEqual(s.parentSession, undefined, 'a teammate is no child of the owner');
+      assert.strictEqual(s.taskDescription, undefined);
+      assert.strictEqual(s.agentType, undefined);
+      assert.strictEqual(s.editor, 'claude');
+    } finally { cleanup(tmp); }
+  });
+
   test('the counter helpers are shared from state-machine.js', () => {
     const sm = require('../state-machine');
     for (const k of ['freshCounter', 'normalizeCounter', 'parkAgents', 'unparkAgents', 'pruneCounters']) {
@@ -3841,6 +3867,13 @@ describe('update-state -- third review pass: autolaunch quit flag', () => {
     });
   });
 
+  test('a resumed start (`claude --continue` / `--resume`) clears it too', () => {
+    withQuitFlag((env, flag) => {
+      runUpdateState('SessionStart', { session_id: 'quit-1', source: 'resume' }, env);
+      assert.strictEqual(fsMod.existsSync(flag), false);
+    });
+  });
+
   test('a compaction or an ordinary hook leaves it alone', () => {
     withQuitFlag((env, flag) => {
       runUpdateState('SessionStart', { session_id: 'quit-1', source: 'compact' }, env);
@@ -3857,8 +3890,8 @@ describe('update-state -- third review pass: autolaunch quit flag', () => {
     assert.ok(body.indexOf('fs.unlinkSync(QUIT_FLAG_FILE)') > 0);
     assert.ok(body.indexOf('fs.unlinkSync(QUIT_FLAG_FILE)') < body.indexOf('fs.accessSync(QUIT_FLAG_FILE)'),
       'the unlink must come before the access check');
-    assert.ok(/_rawField\(input, 'source'\) === 'startup'/.test(src),
-      'only a startup SessionStart clears it: compact/resume/clear are the same editor run');
+    assert.ok(src.includes("/^(startup|resume)$/.test(_rawField(input, 'source'))"),
+      'only an editor start clears it: compact and clear happen inside a running session');
   });
 });
 

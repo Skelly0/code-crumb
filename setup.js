@@ -78,10 +78,13 @@ function buildFaceHooks(hookPath) {
 }
 
 // One hook command that runs an update-state.js (ours, at any path). It must
-// end in the argv shape we install -- `update-state.js" [--editor x] <Event>`
-// -- so an unrelated script that happens to be called update-state.js (a tmux
-// status helper, say) is never mistaken for a moved Code Crumb repo.
-const OUR_COMMAND_RE = /update-state\.js["']?\s+(?:--editor[=\s]\S+\s+)?[A-Za-z]+\s*$/;
+// end in the argv shape we install -- `update-state.js" [--editor x] <Event>`,
+// with a real hook event -- so an unrelated script that happens to be called
+// update-state.js (a tmux status helper, `update-state.js busy`) is never
+// mistaken for a moved Code Crumb repo. Every event ever installed is still in
+// HOOK_EVENTS (and CODEX_HOOK_EVENTS is a subset), so old installs still match.
+const OUR_COMMAND_RE = new RegExp(
+  `update-state\\.js["']?\\s+(?:--editor[=\\s]\\S+\\s+)?(?:${HOOK_EVENTS.join('|')})\\s*$`);
 function isOurCommand(hh) {
   return typeof hh?.command === 'string' && OUR_COMMAND_RE.test(hh.command);
 }
@@ -156,14 +159,16 @@ function readJsonConfig(filePath, log, label) {
   return { settings, existed: true, raw };
 }
 
-// Write a backup no more readable than the file it copies: a settings.json
-// or opencode.json can hold API keys, and a default-mode (0644) .bak put them
-// in a world-readable file next to the 0600 original. The chmod covers a .bak
-// left over from an earlier run, which writeFileSync's `mode` does not touch.
-function writeBackup(bakPath, raw, mode = 0o600) {
+// Write an owner-only backup: a settings.json or opencode.json can hold API
+// keys, and a default-mode (0644) .bak put them in a world-readable file next
+// to the 0600 original. A leftover .bak is removed first, so the secrets are
+// never written into a file with its old mode (and a read-only one left by a
+// read-only settings file cannot stop the backup being refreshed).
+function writeBackup(bakPath, raw) {
   try {
-    fs.writeFileSync(bakPath, raw, { encoding: 'utf8', mode });
-    try { fs.chmodSync(bakPath, mode); } catch {}
+    try { fs.unlinkSync(bakPath); } catch {}
+    fs.writeFileSync(bakPath, raw, { encoding: 'utf8', mode: 0o600 });
+    try { fs.chmodSync(bakPath, 0o600); } catch {}
     return true;
   } catch {
     return false;
@@ -177,7 +182,7 @@ function writeSettings(settingsPath, settings, existed, raw, log) {
   let mode = 0o600;
   if (existed) {
     try { mode = fs.statSync(settingsPath).mode & 0o777; } catch {}
-    if (writeBackup(settingsPath + '.bak', raw, mode || 0o600)) {
+    if (writeBackup(settingsPath + '.bak', raw)) {
       log(`  [ok] Backup written to ${settingsPath}.bak`);
     }
   }
@@ -201,17 +206,18 @@ function printClaudeUsage(settingsPath, log, baseDir = __dirname) {
 `
     : '';
   // Same rule for the plugin route: the npm tarball does not ship
-  // .claude-plugin/, so `marketplace add` on an npm install fails with
-  // "Marketplace file not found".
-  const pluginHint = fs.existsSync(path.resolve(baseDir, '.claude-plugin', 'marketplace.json'))
-    ? `
+  // .claude-plugin/, so `marketplace add <this folder>` on an npm install
+  // fails with "Marketplace file not found" -- point it at GitHub instead.
+  const marketplace = fs.existsSync(path.resolve(baseDir, '.claude-plugin', 'marketplace.json'))
+    ? `"${path.resolve(baseDir).replace(/\\/g, '/')}"`
+    : 'Skelly0/code-crumb';
+  const pluginHint = `
   Plugin install (alternative -- works with marketplace):
-     claude plugin marketplace add "${path.resolve(baseDir).replace(/\\/g, '/')}"
+     claude plugin marketplace add ${marketplace}
      claude plugin install code-crumb@code-crumb
      Use ONE of the two: with both the manual hooks and the plugin
      installed every event fires twice and the counters double.
-`
-    : '';
+`;
   log(`
   ${'─'.repeat(42)}
 

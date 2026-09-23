@@ -1312,7 +1312,10 @@ describe('platform -- third review pass: setup keeps the user\'s own hooks', () 
   test('an unrelated script named update-state.js is not ours', () => {
     const { dir, settingsPath } = env();
     try {
-      const theirs = { matcher: 'Bash', hooks: [{ type: 'command', command: 'node ~/dotfiles/tmux/update-state.js' }] };
+      const theirs = { matcher: 'Bash', hooks: [
+        { type: 'command', command: 'node ~/dotfiles/tmux/update-state.js' },
+        { type: 'command', command: 'node ~/.tmux/update-state.js busy' },   // one word, not an event
+      ] };
       seed(settingsPath, { hooks: { PreToolUse: [theirs] } });
       setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
       assert.deepStrictEqual(readJSON(settingsPath).hooks.PreToolUse[0], theirs);
@@ -1344,6 +1347,21 @@ describe('platform -- third review pass: setup keeps the user\'s own hooks', () 
   });
 
   if (process.platform !== 'win32') {
+    test('a read-only settings file does not freeze the backup', () => {
+      const { dir, settingsPath } = env();
+      try {
+        seed(settingsPath, { v: 1 });
+        fs.chmodSync(settingsPath, 0o444);
+        setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
+        fs.chmodSync(settingsPath, 0o644);
+        fs.writeFileSync(settingsPath, JSON.stringify({ v: 2, hooks: readJSON(settingsPath).hooks }));
+        fs.chmodSync(settingsPath, 0o444);
+        setup.uninstallClaude({ settingsPath, ...quiet });
+        assert.strictEqual(readJSON(settingsPath + '.bak').v, 2, 'the second run refreshed the backup');
+        assert.strictEqual(fs.statSync(settingsPath + '.bak').mode & 0o777, 0o600);
+      } finally { cleanup(dir); }
+    });
+
     test('the backup is no more readable than the settings file', () => {
       const { dir, settingsPath } = env();
       try {
@@ -1398,17 +1416,21 @@ describe('platform -- third review pass: setup CLI', () => {
     } finally { cleanup(r.dir); }
   });
 
-  test('the plugin hint needs a marketplace to point at (the npm tarball has none)', () => {
+  test('the plugin hint points an npm install (no .claude-plugin/) at GitHub', () => {
     const dir = tmpDir('crumb-hint-');
+    const local = `marketplace add "${path.resolve(dir).replace(/\\/g, '/')}"`;
     try {
       const lines = [];
       setup.printClaudeUsage('/x/settings.json', (l) => lines.push(l), dir);
-      assert.ok(!lines.join('\n').includes('marketplace add'));
+      const out = lines.join('\n');
+      assert.ok(!out.includes(local), 'this folder is no marketplace');
+      assert.ok(out.includes('marketplace add Skelly0/code-crumb'));
+      assert.ok(out.includes('ONE of the two'), 'the double-install warning stays');
       fs.mkdirSync(path.join(dir, '.claude-plugin'));
       fs.writeFileSync(path.join(dir, '.claude-plugin', 'marketplace.json'), '{}');
       const again = [];
       setup.printClaudeUsage('/x/settings.json', (l) => again.push(l), dir);
-      assert.ok(again.join('\n').includes('marketplace add'));
+      assert.ok(again.join('\n').includes(local), 'a clone still points at itself');
     } finally { cleanup(dir); }
   });
 
@@ -1429,6 +1451,14 @@ describe('platform -- third review pass: shared helpers', () => {
     assert.strictEqual(shared.quoteArg('C:\\temp\\%USERNAME%\\log'),
       '"C:\\temp\\\\"^%"USERNAME"^%"\\log"');
     assert.strictEqual(shared.quoteArg('50% off'), '"50"^%" off"', 'unchanged without a backslash');
+  });
+
+  test('detailText drops C0 and C1 controls (U+009B alone is a CSI)', () => {
+    assert.strictEqual(shared.detailText('edit \u009b1;1Hpwned\u009b2K.js'), 'edit 1;1Hpwned2K.js');
+    assert.strictEqual(shared.detailText('a\u001b[31mb'), 'a[31mb');
+    assert.strictEqual(shared.detailText('line\nnext'), 'line next');
+    assert.strictEqual(shared.detailText('caf\u00e9'), 'caf\u00e9', 'printable non-ASCII stays');
+    assert.strictEqual(shared.detailText({ a: 1 }), '');
   });
 
   test('getGitBranch resolves a submodule\'s relative gitdir from its own folder', () => {

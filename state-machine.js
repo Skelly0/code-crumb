@@ -104,9 +104,12 @@ function mcpVerbState(rawTool) {
 
 // Commands that only look at things. Their segments carry no intent, and
 // their stdout is content (a grep for ENOENT prints ENOENT), not a verdict.
-// `cd`/`pushd`/`popd` only move: `cd repo && git log` is still a read.
+// `cd`/`pushd`/`popd` only move: `cd repo && git log` is still a read. Their
+// only output is their own failure, though, so that is still looked for
+// (SHELL_MOVE_FAILURE) -- editors that report no exit code rely on it.
 const READ_ONLY_COMMANDS = /^(cat|less|more|head|tail|grep|egrep|fgrep|rg|ag|ack|find|fd|ls|dir|wc|bat|file|stat|echo|printf|which|where|type|diff|tree|du|df|pwd|cd|pushd|popd)$/i;
 const GIT_READ_ONLY_SUBCOMMANDS = /^(diff|log|show|grep|blame|status)$/i;
+const SHELL_MOVE_FAILURE = /\b(?:cd|pushd|popd):.*(?:no such file or directory|not a directory|permission denied)/i;
 
 // Replace every quoted string with an empty one. Left to right, so whichever
 // quote opens first owns the span: a double-quoted heredoc commit message
@@ -177,9 +180,14 @@ function isTestCommand(intent) {
 // Package installs. One table for both sides of a tool call: the PostToolUse
 // copy had bare `yarn` and `pnpm`, so `yarn lint` or `pnpm dev` finished as
 // "installed", while `npm i x` and `pip3 install x` showed installing and
-// then finished as "command succeeded".
+// then finished as "command succeeded". Flags and workspace selectors may sit
+// between the manager and its verb (`pnpm --filter web add zod`, `pnpm -r
+// install`, `yarn workspace web add zod`, `yarn global add serve`), and a
+// bare `yarn` (flags at most) IS `yarn install`.
+const PKG_INSTALL_RE = /\b(npm|yarn|pnpm|bun)(?:\s+(?:(?:--filter|-F|--cwd|--prefix|--dir|-C)\s+\S+|workspace\s+\S+|global|-\S+))*\s+(install|i|add|ci)(?=\s|$)/i;
+const BARE_YARN_RE = /(?:^|;)\s*yarn(?:\s+-\S+)*\s*(?=;|$)/i;
 function isInstallCommand(intent) {
-  return /\b(npm|yarn|pnpm|bun)\s+(install|i|add)\b/i.test(intent) ||
+  return PKG_INSTALL_RE.test(intent) || BARE_YARN_RE.test(intent) ||
     /\b(pip|pip3)\s+(install|-r)\b/i.test(intent) ||
     /\b(cargo\s+build|cargo\s+add)\b/i.test(intent) ||
     /\b(apt|apt-get|apk)\s+(install|add)\b/i.test(intent) ||
@@ -591,6 +599,10 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
   } else if (inferredExit !== null && inferredExit !== 0) {
     state = 'error'; detail = exitDetail(stdout, stderr, inferredExit);
   } else if (!READ_TOOLS.test(name) && !SEARCH_TOOLS.test(name) && !WEB_TOOLS.test(name) && looksLikeError(stderr, stderrErrorPatterns)) {
+    state = 'error'; detail = errorDetail(stdout, stderr);
+  } else if (isShell && readOnly && SHELL_MOVE_FAILURE.test(stripAnsi(stdout))) {
+    // A read-only chain's stdout is content -- except a failed `cd`, whose
+    // message is the only thing it can print (merged output, no exit code).
     state = 'error'; detail = errorDetail(stdout, stderr);
   } else if (isShell && !readOnly && looksLikeError(stdout, stdoutErrorPatterns)) {
     // Only check stdout patterns for shell commands -- other tools have

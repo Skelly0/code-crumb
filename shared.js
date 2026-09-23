@@ -55,13 +55,14 @@ const INTERRUPTIBLE_STATES = new Set([
 // A detail line as the renderer can draw it. Text only: an adapter once wrote
 // an error OBJECT here, and `.slice` on it threw inside the orbital render,
 // blanking the whole ring for as long as the file lived. One line: a raw
-// newline spills the text into column 1 of the rows below. No control bytes:
-// an escape sequence in a detail would reach the terminal as-is.
+// newline spills the text into column 1 of the rows below. No control
+// characters, C1 included: an escape sequence in a detail (a file name, a
+// provider error) would reach the terminal as-is, and U+009B alone is a CSI.
 function detailText(v) {
   let s = '';
   if (typeof v === 'string') s = v;
   else if (typeof v === 'number' || typeof v === 'boolean') s = String(v);
-  return s.replace(/[\r\n\t]+/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
+  return s.replace(/[\r\n\t]+/g, ' ').replace(/[\x00-\x1f\x7f-\x9f]/g, '');
 }
 
 function safeFilename(id) {
