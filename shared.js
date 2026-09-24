@@ -104,13 +104,28 @@ function savePrefs(updates) {
 // the renderer (which watches these files) never reads a half-written one.
 // Falls back to a direct write if the rename is refused. Returns true on
 // success; never throws.
+//
+// On Windows a rename over a file someone else has open without delete
+// sharing -- a virus scanner, the search indexer, another hook's read --
+// fails EPERM/EACCES/EBUSY for a few milliseconds. Going straight to the
+// direct write then is exactly the torn write this function exists to
+// prevent, so those codes are retried briefly first.
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const RENAME_RETRIES = 3;
 function writeJsonAtomic(file, obj, mode = 0o600) {
   const data = typeof obj === 'string' ? obj : JSON.stringify(obj);
   const tmp = `${file}.${process.pid}.${Date.now().toString(36)}.tmp`;
   try {
     fs.writeFileSync(tmp, data, { encoding: 'utf8', mode });
-    fs.renameSync(tmp, file);
-    return true;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        fs.renameSync(tmp, file);
+        return true;
+      } catch (e) {
+        if (attempt >= RENAME_RETRIES || !e || !RENAME_RETRY_CODES.has(e.code)) throw e;
+        sleepSync(2);
+      }
+    }
   } catch {
     try { fs.unlinkSync(tmp); } catch {}
     try {
@@ -162,6 +177,36 @@ function acquireSpawnLock(lockFile, staleMs = 5000) {
     } finally {
       try { fs.unlinkSync(claim); } catch {}
     }
+  }
+}
+
+// -- Renderer liveness ----------------------------------------------
+// Whether a renderer is running, by its PID file. The renderer rewrites the
+// file every PID_HEARTBEAT_MS; one older than PID_STALE_MS belongs to a
+// renderer that died without cleaning up -- a crash, a kill, or a Windows
+// logoff, which delivers no signal at all -- whatever process has since been
+// given that PID. The hook, launch.js and the renderer's own start-up guard
+// all ask here: they used to disagree about EPERM (a PID reused by a process
+// we may not signal), so a stale file on Windows made every hook open a
+// window that printed "already running" and closed, forever.
+const PID_HEARTBEAT_MS = 10000;
+const PID_STALE_MS = 60000;
+function isRendererAlive(pidFile = PID_FILE, now = Date.now()) {
+  let pid, mtimeMs;
+  try {
+    pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+    mtimeMs = fs.statSync(pidFile).mtimeMs;
+  } catch {
+    return false;
+  }
+  // kill(0) would signal our own process group.
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (now - mtimeMs > PID_STALE_MS) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return !!e && e.code === 'EPERM';
   }
 }
 
@@ -334,28 +379,34 @@ function wtEscape(quotedArg) {
   return String(quotedArg).replace(/;/g, '\\;');
 }
 
-function buildRendererCommands(platform, rendererArgs, windowTitle) {
-  const detached = { detached: true, stdio: 'ignore' };
+// opts.nodeBin is the node to run (default `node`, resolved by the launched
+// shell -- callers pass process.execPath); opts.cwd is the launch directory.
+function buildRendererCommands(platform, rendererArgs, windowTitle, opts = {}) {
+  const nodeBin = opts.nodeBin || 'node';
+  // A plain word stays as is; a path (spaces, quotes...) is single-quoted.
+  const shNode = /^[\w\/.,:+=@%-]+$/.test(nodeBin) ? nodeBin : shQuote(nodeBin);
+  const detached = { detached: true, stdio: 'ignore', ...(opts.cwd ? { cwd: opts.cwd } : {}) };
   if (platform === 'win32') {
     const quoted = rendererArgs.map(quoteArg);
+    const node = quoteArg(nodeBin);
     return {
       // wt is an app-execution alias that can only be started through a
       // shell; shell:true joins args verbatim, so every arg is pre-quoted.
       wt: {
         cmd: 'wt',
-        args: ['-w', '0', 'new-tab', '--title', wtEscape(quoteArg(windowTitle)), 'node', ...quoted.map(wtEscape)],
+        args: ['-w', '0', 'new-tab', '--title', wtEscape(quoteArg(windowTitle)), wtEscape(node), ...quoted.map(wtEscape)],
         opts: { ...detached, shell: true },
       },
       // cmd.exe's `start` parses its own line; hand it one verbatim string.
       cmd: {
-        cmd: 'cmd',
-        args: ['/c', `start ${quoteArg(windowTitle)} node ${quoted.join(' ')}`],
+        cmd: opts.cmdExe || 'cmd',
+        args: ['/c', `start ${quoteArg(windowTitle)} ${node} ${quoted.join(' ')}`],
         opts: { ...detached, windowsVerbatimArguments: true },
       },
     };
   }
   if (platform === 'darwin') {
-    const shellLine = 'node ' + rendererArgs.map(shQuote).join(' ') + '; exit';
+    const shellLine = shNode + ' ' + rendererArgs.map(shQuote).join(' ') + '; exit';
     return {
       osascript: {
         cmd: 'osascript',
@@ -365,11 +416,58 @@ function buildRendererCommands(platform, rendererArgs, windowTitle) {
     };
   }
   return {
-    'gnome-terminal': { cmd: 'gnome-terminal', args: ['--title=' + windowTitle, '--', 'node', ...rendererArgs], opts: detached },
-    konsole:          { cmd: 'konsole', args: ['--new-tab', '-e', 'node', ...rendererArgs], opts: detached },
-    'xfce4-terminal': { cmd: 'xfce4-terminal', args: ['--title=' + windowTitle, '-e', 'node ' + rendererArgs.map(shQuote).join(' ')], opts: detached },
-    xterm:            { cmd: 'xterm', args: ['-T', windowTitle, '-e', 'node', ...rendererArgs], opts: detached },
+    'gnome-terminal': { cmd: 'gnome-terminal', args: ['--title=' + windowTitle, '--', nodeBin, ...rendererArgs], opts: detached },
+    konsole:          { cmd: 'konsole', args: ['--new-tab', '-e', nodeBin, ...rendererArgs], opts: detached },
+    'xfce4-terminal': { cmd: 'xfce4-terminal', args: ['--title=' + windowTitle, '-e', shNode + ' ' + rendererArgs.map(shQuote).join(' ')], opts: detached },
+    xterm:            { cmd: 'xterm', args: ['-T', windowTitle, '-e', nodeBin, ...rendererArgs], opts: detached },
   };
+}
+
+// Open the renderer in a new terminal window. Returns true if a terminal was
+// started. Shared by the hook's autolaunch and launch.js.
+//
+// Everything runs from HOME with absolute binaries. A hook's cwd is the
+// user's project, and cmd.exe looks in the current directory BEFORE the PATH
+// (and tries PATHEXT, .JS included): a cloned repo's where.bat, wt.cmd or
+// node.cmd ran silently the first time autolaunch fired, a project file named
+// node.js opened in Windows Script Host instead of the face, and the renderer
+// kept the project folder locked for its whole life. process.execPath is the
+// node running this code, so the new terminal needs no `node` on its own
+// PATH either (Windows Terminal starts tabs with its own environment).
+function spawnRendererWindow(rendererPath, windowTitle, platform = process.platform) {
+  const { spawn, execFileSync, execSync } = require('child_process');
+  const sysDir = path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32');
+  const cmds = buildRendererCommands(platform, [rendererPath], windowTitle, {
+    nodeBin: process.execPath,
+    cwd: HOME,
+    cmdExe: process.env.ComSpec || path.join(sysDir, 'cmd.exe'),
+  });
+  let child = null;
+  if (platform === 'win32') {
+    // Probe for Windows Terminal before spawning (spawn doesn't throw synchronously)
+    let hasWt = false;
+    try {
+      execFileSync(path.join(sysDir, 'where.exe'), ['wt'], { stdio: 'ignore', cwd: HOME, windowsHide: true });
+      hasWt = true;
+    } catch {}
+    const c = hasWt ? cmds.wt : cmds.cmd;
+    child = spawn(c.cmd, c.args, c.opts);
+  } else if (platform === 'darwin') {
+    child = spawn(cmds.osascript.cmd, cmds.osascript.args, cmds.osascript.opts);
+  } else {
+    // Linux -- try common terminal emulators in order
+    for (const key of Object.keys(cmds)) {
+      try {
+        execSync(`command -v ${cmds[key].cmd}`, { stdio: 'ignore', cwd: HOME });
+        child = spawn(cmds[key].cmd, cmds[key].args, cmds[key].opts);
+        break;
+      } catch {}
+    }
+  }
+  if (!child) return false;
+  child.on('error', () => {});
+  child.unref();
+  return true;
 }
 
 // Returns true if the nearest .git entry in the dir tree is a file (worktree),
@@ -434,9 +532,10 @@ function getGitBranch(cwd) {
 
 module.exports = {
   HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PREFS_FILE, PID_FILE, QUIT_FLAG_FILE, TEAMS_DIR, TMUX_FILE, SPAWN_LOCK_FILE,
+  PID_HEARTBEAT_MS, PID_STALE_MS, isRendererAlive,
   STATS_LOCK_FILE, LOCK_WAIT_MS, LOCK_STALE_MS, LOCK_SPIN_MS,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   safeFilename, detailText, loadPrefs, savePrefs, getGitBranch, getIsWorktree,
   writeJsonAtomic, acquireSpawnLock, sleepSync, acquireFileLock, withStatsLock,
-  quoteArg, shQuote, buildRendererCommands,
+  quoteArg, shQuote, buildRendererCommands, spawnRendererWindow,
 };

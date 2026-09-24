@@ -107,9 +107,38 @@ function mcpVerbState(rawTool) {
 // `cd`/`pushd`/`popd` only move: `cd repo && git log` is still a read. Their
 // only output is their own failure, though, so that is still looked for
 // (SHELL_MOVE_FAILURE) -- editors that report no exit code rely on it.
-const READ_ONLY_COMMANDS = /^(cat|less|more|head|tail|grep|egrep|fgrep|rg|ag|ack|find|fd|ls|dir|wc|bat|file|stat|echo|printf|which|where|type|diff|tree|du|df|pwd|cd|pushd|popd)$/i;
+// The PowerShell cmdlets (and their aliases) and cmd's findstr are the same
+// reads on Windows: without them `Get-Content src/x.js` had its content read
+// as a failure there, and broke the streak.
+const READ_ONLY_COMMANDS = /^(cat|less|more|head|tail|grep|egrep|fgrep|rg|ag|ack|find|fd|ls|dir|wc|bat|file|stat|echo|printf|which|where|type|diff|tree|du|df|pwd|cd|pushd|popd|findstr|get-content|gc|select-string|sls|get-childitem|gci|get-item|gi|test-path|resolve-path|get-location|gl|set-location|sl|write-output|write-host|measure-object|select-object|sort-object|where-object|format-table|format-list|out-string)$/i;
 const GIT_READ_ONLY_SUBCOMMANDS = /^(diff|log|show|grep|blame|status)$/i;
 const SHELL_MOVE_FAILURE = /\b(?:cd|pushd|popd):.*(?:no such file or directory|not a directory|permission denied)/i;
+
+// A shell wrapper is not the intent; the script it runs is. Codex on Windows
+// runs every command as `pwsh -Command <script>`, so the first word was always
+// `pwsh` and nothing inside was ever recognised. Unwraps pwsh/powershell
+// -Command/-c, cmd /c, and sh/bash/zsh -c (twice at most, for a nested one),
+// dropping one level of quotes around the script.
+// The shell may be named by a path (`/bin/zsh -lc`, `"C:\Program Files\
+// PowerShell\7\pwsh.exe" -Command`), quoted or not.
+const SHELL_DIR = String.raw`(?:"[^"]*[\\/]|[^\s"]*[\\/])?`;
+const SHELL_WRAPPER_RE = new RegExp(String.raw`^\s*(?:` +
+  SHELL_DIR + String.raw`(?:pwsh|powershell)(?:\.exe)?"?(?:\s+-(?:NoProfile|NoLogo|NonInteractive|nop|noni|ExecutionPolicy\s+\S+))*\s+-(?:Command|c)\b` +
+  '|' + SHELL_DIR + String.raw`cmd(?:\.exe)?"?(?:\s+\/[dqs])*\s+\/[ck]\b` +
+  '|' + SHELL_DIR + String.raw`(?:ba|z|da)?sh(?:\.exe)?"?\s+-(?:l?c|cl?)\b` +
+  String.raw`)\s*([\s\S]*)$`, 'i');
+function unwrapShell(cmd) {
+  let s = toText(cmd);
+  for (let i = 0; i < 2; i++) {
+    const m = SHELL_WRAPPER_RE.exec(s);
+    if (!m) break;
+    s = m[1].trim();
+    if (s.length >= 2 && ((s[0] === '"' && s.endsWith('"')) || (s[0] === "'" && s.endsWith("'")))) {
+      s = s.slice(1, -1);
+    }
+  }
+  return s;
+}
 
 // Replace every quoted string with an empty one. Left to right, so whichever
 // quote opens first owns the span: a double-quoted heredoc commit message
@@ -156,7 +185,7 @@ function isReadOnlySegment(segment) {
 // stdout scanned for errors and its matches read as a failure.
 const SHELL_SEGMENT_SPLIT = /&&|\|\||(?<![<>])&(?!>)|[;|\r\n]/;
 function shellIntent(cmd) {
-  const unquoted = stripQuotedArgs(cmd);
+  const unquoted = stripQuotedArgs(unwrapShell(cmd));
   const segments = unquoted.split(SHELL_SEGMENT_SPLIT).filter(s => s.trim());
   const acting = segments.filter(s => !isReadOnlySegment(s));
   return {
@@ -759,6 +788,7 @@ function classifyTruncatedInput(hookEvent, rawInput) {
     SubagentStart:      { state: 'subagent',   detail: 'spawning subagent' },
     SubagentStop:       { state: 'happy',      detail: 'subagent done' },
     StopFailure:        { state: 'error',      detail: 'API error' },
+    Interrupt:          { state: 'error',      detail: 'interrupted' },
     PreCompact:         { state: 'thinking',   detail: 'compacting memory' },
     PostCompact:        { state: 'satisfied',  detail: 'memory compacted' },
     PermissionRequest:  { state: 'waiting',    detail: 'needs permission' },

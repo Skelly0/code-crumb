@@ -1852,14 +1852,18 @@ function listNavigableIds(entries) {
     .map(e => e.face.sessionId);
 }
 
-function _truncatePath(fullPath, maxLen) {
+function _truncatePath(fullPath, maxLen, foldCase = process.platform === 'win32') {
   if (!fullPath) return '';
   // Normalize to forward slashes
   const p = fullPath.replace(/\\/g, '/');
   // Replace home dir with ~
   // Only on a path boundary: HOME=/home/al must not turn /home/alice into ~ice.
+  // Windows paths are case-insensitive, and editors disagree about the drive
+  // letter (c:\Users\sam vs C:\Users\sam), so compare folded there.
   const home = HOME_FWD.replace(/\/+$/, '');
-  const underHome = HOME_FWD && (p === HOME_FWD || p.startsWith(home + '/'));
+  const fold = (x) => (foldCase ? x.toLowerCase() : x);
+  const fp = fold(p);
+  const underHome = !!home && (fp === fold(home) || fp.startsWith(fold(home) + '/'));
   const display = underHome ? '~' + p.slice(home.length) : p;
   if (display.length <= maxLen) return display;
   // Show .../<last two segments>
@@ -2072,7 +2076,7 @@ module.exports = {
   MIN_SESSION_LIST_ROWS, SESSION_LIST_ENTRY_ROWS,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _sweepPidCache,
-  _setPidResolver, KNOWN_EDITORS,
+  _setPidResolver, KNOWN_EDITORS, _truncatePath,
   STALE_MS, ORPHAN_TIMEOUT, CHILD_ORPHAN_TIMEOUT, REPOSITION_MS, SLACK_MS, PID_PROTECT_CAP_MS, PID_CACHE_TTL_MS,
   INTER_GROUP_GAP, INTRA_GROUP_GAP, TETHER_BRIGHTNESS, GROUP_LABEL_BRIGHTNESS,
   CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS,

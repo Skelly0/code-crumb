@@ -3982,4 +3982,46 @@ describe('update-state -- third review pass: autolaunch quit flag', () => {
   });
 });
 
+// -- Round 3 (Windows) -------------------------------------------------------
+// Codex on Windows runs every command as `pwsh -Command <script>`, and on
+// POSIX as `/bin/zsh -lc '<script>'`: the wrapper, not the script, was the
+// first word, so nothing inside was recognised -- a Get-Content's content
+// read as a failure and broke the streak, and npm test never showed testing.
+
+describe('state-machine -- round 3: wrapped and Windows shells', () => {
+  const SCARY = 'Error: ENOENT something failed';
+  const post = (cmd) => classifyToolResult('Bash', { command: cmd }, { stdout: SCARY, stderr: '', exitCode: 0 });
+  const pre = (cmd) => toolToState('Bash', { command: cmd }).state;
+
+  test('PowerShell and cmd reads print content, not verdicts', () => {
+    for (const cmd of [
+      'Get-Content src/x.js', 'gc x | Select-String ENOENT', 'Get-ChildItem -Recurse',
+      'findstr /s ENOENT *.js', 'Test-Path x; Write-Output done',
+    ]) assert.strictEqual(post(cmd).state, 'relieved', cmd);
+  });
+
+  test('a wrapped read is still a read', () => {
+    for (const cmd of [
+      'pwsh -Command "Get-Content x"',
+      'powershell.exe -NoProfile -NonInteractive -Command "gc x"',
+      '"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -NoProfile -Command "Get-Content x"',
+      'C:\\Windows\\System32\\cmd.exe /d /c type x',
+      "bash -lc 'grep -rn ENOENT src'",
+      "/bin/zsh -lc 'cat build.log'",
+    ]) assert.strictEqual(post(cmd).state, 'relieved', cmd);
+  });
+
+  test('a wrapped acting command is still judged, and its intent is seen', () => {
+    assert.strictEqual(post('pwsh -Command "npm run build"').state, 'error');
+    assert.strictEqual(pre('"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -NoProfile -Command "npm test"'), 'testing');
+    assert.strictEqual(pre('/usr/bin/bash -lc "npm install"'), 'installing');
+    assert.strictEqual(pre('/bin/zsh -lc \'git commit -m "fix the build"\''), 'committing');
+  });
+
+  test('an unknown wrapper is not unwrapped', () => {
+    assert.strictEqual(post('fish -c ls').state, 'error', 'fish is not in the table');
+    assert.strictEqual(post('mybash -c "cat x"').state, 'error', 'a name only ending in sh is not a shell');
+  });
+});
+
 module.exports = suite;

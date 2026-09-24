@@ -1435,4 +1435,165 @@ describe('renderer -- third review pass', () => {
   });
 });
 
+// -- Round 3: cross-writer contract --------------------------------------------
+// Each reproduced against the pre-fix sources with real update-state.js runs.
+
+describe('round 3 -- cross-writer contract', () => {
+  // Codex puts a required `model` on every hook payload and has no
+  // PostModelSwitch; its rollout has no message.model for the Stop tail-read.
+  test('a codex session follows its model from any payload', () => {
+    const t = makeTempEnv('cx-mdl');
+    const env = { ...t.env, CODE_CRUMB_EDITOR: 'codex' };
+    try {
+      runUpdateState('SessionStart', { session_id: 'cx-mdl', source: 'startup', model: 'gpt-5.1-codex' }, env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'cx-mdl')).model, 'gpt-5.1-codex');
+      runUpdateState('UserPromptSubmit', { session_id: 'cx-mdl', prompt: 'x', model: 'gpt-5.1-codex-mini' }, env);
+      runUpdateState('PreToolUse', {
+        session_id: 'cx-mdl', tool_name: 'Bash', tool_input: { command: 'ls' }, model: 'gpt-5.1-codex-mini',
+      }, env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'cx-mdl')).model, 'gpt-5.1-codex-mini',
+        'the session file follows the switch');
+      assert.strictEqual(readJSON(t.stateFile).model, 'gpt-5.1-codex-mini', 'and so does the global file');
+      runUpdateState('PostToolUse', {
+        session_id: 'cx-mdl', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: { stdout: 'a' },
+      }, env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'cx-mdl')).model, 'gpt-5.1-codex-mini',
+        'a payload without one keeps the sticky value');
+    } finally { cleanup(t.tmp); }
+  });
+
+  // Codex runs Interrupt, not Stop, when the user presses Esc: nothing closed
+  // the turn and the face held "running command · still running" for 10 min.
+  test('a codex Interrupt ends the turn without breaking the streak', () => {
+    const t = makeTempEnv('cx-int');
+    const env = { ...t.env, CODE_CRUMB_EDITOR: 'codex' };
+    try {
+      runUpdateState('SessionStart', { session_id: 'cx-int', source: 'startup' }, env);
+      runUpdateState('UserPromptSubmit', { session_id: 'cx-int', prompt: 'x' }, env);
+      runUpdateState('PreToolUse', { session_id: 'cx-int', tool_name: 'Bash', tool_input: { command: 'npm run dev' } }, env);
+      const streakBefore = readJSON(t.statsFile).streak;
+      runUpdateState('Interrupt', { session_id: 'cx-int', turn_id: 't1', model: 'gpt-5.1-codex' }, env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'cx-int'));
+      assert.strictEqual(s.state, 'error');
+      assert.strictEqual(s.detail, 'interrupted');
+      assert.strictEqual(s.turnEnded, true, 'the session file says the turn is over');
+      assert.ok(!s.stopped, 'but the session is not');
+      assert.strictEqual(readJSON(t.stateFile).stopped, true, 'the global file is released');
+      assert.strictEqual(readJSON(t.statsFile).streak, streakBefore, 'an Esc is not a failure');
+      runUpdateState('Interrupt', '', env);   // the empty-stdin path agrees
+      const f = readJSON(sessionFile(t.sessionsDir, 'cx-int'));
+      assert.strictEqual(f.detail, 'interrupted');
+      assert.strictEqual(f.turnEnded, true);
+    } finally { cleanup(t.tmp); }
+  });
+
+  // Events that can land BETWEEN turns used to reopen the finished turn (45s
+  // of thinking, nothing to close it), and an echo carrying `turnEnded` on a
+  // work face was rescued into a second responding -> done!. A face the
+  // rescue would replace now carries the end as `turnOver`.
+  function endedTurn(id, env) {
+    runUpdateState('SessionStart', { session_id: id, source: 'startup' }, env);
+    runUpdateState('UserPromptSubmit', { session_id: id, prompt: 'x' }, env);
+    runUpdateState('Stop', { session_id: id }, env);
+  }
+  const turnFlags = (f) => ({ turnEnded: !!f.turnEnded, turnOver: !!f.turnOver, stopped: !!f.stopped });
+
+  test('/compact between turns keeps the turn over, and PostCompact closes it', () => {
+    const t = makeTempEnv('amb-1');
+    try {
+      endedTurn('amb-1', t.env);
+      runUpdateState('PreCompact', { session_id: 'amb-1', trigger: 'manual' }, t.env);
+      let f = readJSON(sessionFile(t.sessionsDir, 'amb-1'));
+      assert.strictEqual(f.state, 'thinking');
+      assert.deepStrictEqual(turnFlags(f), { turnEnded: false, turnOver: true, stopped: false });
+      assert.strictEqual(readJSON(t.stateFile).stopped, true, 'tmux still sees a finished turn');
+      runUpdateState('SessionStart', { session_id: 'amb-1', source: 'compact' }, t.env);
+      assert.deepStrictEqual(turnFlags(readJSON(sessionFile(t.sessionsDir, 'amb-1'))),
+        { turnEnded: false, turnOver: true, stopped: false });
+      runUpdateState('PostCompact', { session_id: 'amb-1', trigger: 'manual' }, t.env);
+      f = readJSON(sessionFile(t.sessionsDir, 'amb-1'));
+      assert.strictEqual(f.state, 'satisfied');
+      assert.deepStrictEqual(turnFlags(f), { turnEnded: true, turnOver: false, stopped: false });
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a subagent auto-compaction and a /model after Stop do not reopen the turn', () => {
+    const t = makeTempEnv('amb-2');
+    try {
+      endedTurn('amb-2', t.env);
+      // Claude Code sends an agent's PreCompact with the parent's id and no agent_id.
+      runUpdateState('PreCompact', { session_id: 'amb-2', trigger: 'auto' }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'amb-2')).turnOver, true);
+      runUpdateState('PostModelSwitch', { session_id: 'amb-2', to_model: 'claude-opus-5', source: 'command' }, t.env);
+      const f = readJSON(sessionFile(t.sessionsDir, 'amb-2'));
+      assert.strictEqual(f.detail, 'now Opus');
+      assert.deepStrictEqual(turnFlags(f), { turnEnded: false, turnOver: true, stopped: false });
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a mid-turn compaction is still live work', () => {
+    const t = makeTempEnv('amb-3');
+    try {
+      runUpdateState('SessionStart', { session_id: 'amb-3', source: 'startup' }, t.env);
+      runUpdateState('UserPromptSubmit', { session_id: 'amb-3', prompt: 'x' }, t.env);
+      runUpdateState('PreCompact', { session_id: 'amb-3', trigger: 'auto' }, t.env);
+      assert.deepStrictEqual(turnFlags(readJSON(sessionFile(t.sessionsDir, 'amb-3'))),
+        { turnEnded: false, turnOver: false, stopped: false });
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('an echo on a work face carries turnOver; on a reward or error, turnEnded', () => {
+    const t = makeTempEnv('amb-4');
+    try {
+      endedTurn('amb-4', t.env);
+      runUpdateState('ConfigChange', { session_id: 'amb-4', source: 'user_settings', file_path: '/x/settings.json' }, t.env);
+      let f = readJSON(sessionFile(t.sessionsDir, 'amb-4'));
+      assert.strictEqual(f.state, 'reading');
+      assert.deepStrictEqual(turnFlags(f), { turnEnded: false, turnOver: true, stopped: false },
+        'a reading face with turnEnded was rescued into responding -> done!');
+      runUpdateState('PostToolUse', {
+        session_id: 'amb-4', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: { stdout: 'a' },
+      }, t.env);
+      f = readJSON(sessionFile(t.sessionsDir, 'amb-4'));
+      assert.strictEqual(f.state, 'relieved');
+      assert.deepStrictEqual(turnFlags(f), { turnEnded: true, turnOver: false, stopped: false });
+      runUpdateState('ConfigChange', '', t.env);   // the empty-stdin path agrees
+      assert.deepStrictEqual(turnFlags(readJSON(sessionFile(t.sessionsDir, 'amb-4'))),
+        { turnEnded: false, turnOver: true, stopped: false });
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('the renderer reads turnOver as not active, never as a turn end to rescue', () => {
+    const { readState } = require('../renderer');
+    const t = makeTempEnv('amb-5');
+    try {
+      const f = path.join(t.tmp, 'x.json');
+      fs.writeFileSync(f, JSON.stringify({ state: 'thinking', turnOver: true, timestamp: 1 }));
+      const r = readState(f);
+      assert.strictEqual(r.turnOver, true);
+      assert.strictEqual(r.stopped, false, 'not folded into stopped, so never rescued');
+      fs.writeFileSync(f, JSON.stringify({ state: 'happy', turnEnded: true, turnOver: true, timestamp: 1 }));
+      assert.strictEqual(readState(f).turnOver, false, 'a real turn end wins');
+    } finally { cleanup(t.tmp); }
+    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    assert.ok(/const sessionActive = !lastStopped && !lastTurnOver && !editorDead;/.test(src));
+    assert.ok(/&& !stateData\.stopped\s*\n\s*&& !ACTIVE_WORK_STATES\.has\(face\.state\)/.test(src),
+      'a finished turn never re-injects its tool');
+  });
+
+  test('setup registers the codex Interrupt and PostCompact hooks, and uninstall finds them', () => {
+    const setup = require('../setup');
+    const built = setup.buildCodexHooks(path.join(__dirname, '..'));
+    const t = makeTempEnv('cx-setup');
+    try {
+      const hooksPath = path.join(t.tmp, 'hooks.json');
+      const only = { hooks: { Interrupt: built.hooks.Interrupt, PostCompact: built.hooks.PostCompact } };
+      assert.ok(only.hooks.Interrupt && only.hooks.PostCompact, 'both are registered');
+      fs.writeFileSync(hooksPath, JSON.stringify(only));
+      const r = setup.uninstallCodex({ hooksPath, log: () => {} });
+      assert.strictEqual(r.removed, 2, 'an Interrupt command is recognised as ours');
+    } finally { cleanup(t.tmp); }
+  });
+});
+
 module.exports = suite;

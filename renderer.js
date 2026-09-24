@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, STATE_FILE, SESSIONS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch, QUIT_FLAG_FILE, safeFilename, detailText } = require('./shared');
+const { HOME, STATE_FILE, SESSIONS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch, QUIT_FLAG_FILE, safeFilename, detailText, isRendererAlive, PID_HEARTBEAT_MS } = require('./shared');
 
 // -- Modules -------------------------------------------------------
 const {
@@ -365,6 +365,9 @@ function readState(filePath = STATE_FILE) {
       dailyCumulativeMs: data.dailyCumulativeMs || 0,
       frequentFiles: data.frequentFiles || {},
       stopped: !!(data.stopped || data.turnEnded),
+      // The turn is over but the face is one the rescue would replace (a
+      // wait, a /compact between turns): not active, never rescued.
+      turnOver: !!data.turnOver && !(data.stopped || data.turnEnded),
       cwd: data.cwd || null,
       isWorktree: data.isWorktree || false,
       gitBranch: data.gitBranch || null,
@@ -382,18 +385,10 @@ function readState(filePath = STATE_FILE) {
 }
 
 // -- PID guard -----------------------------------------------------
+// The shared rule (shared.js isRendererAlive): a PID file without a fresh
+// heartbeat is a dead renderer's, whatever process now has that PID.
 function isAlreadyRunning() {
-  try {
-    const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
-    if (isNaN(pid)) return false;
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    if (err.code === 'EPERM') {
-      return true;
-    }
-    return false;
-  }
+  return isRendererAlive(PID_FILE);
 }
 
 function writePid() {
@@ -450,6 +445,7 @@ function runUnifiedMode() {
 
   let lastMtime = 0;
   let lastStopped = false;    // Track if Stop hook has fired (turn ended)
+  let lastTurnOver = false;   // Turn over, but on a face that is not rescued (see readState)
   let lastForceReadTime = 0;  // Track periodic forced re-reads (bypasses mtime race)
   let lastEditorPid = 0;      // Validated (armed) PID of the editor process
   let candidatePid = 0;       // PID from the latest state write, pending validation
@@ -482,6 +478,7 @@ function runUnifiedMode() {
     lastAppliedState = null;
     lastAppliedTimestamp = 0;
     lastStopped = false;
+    lastTurnOver = false;
     editorDead = false;
     lastEditorPid = 0;
     candidatePid = 0;
@@ -574,7 +571,7 @@ function runUnifiedMode() {
         // It is demoted by staleness instead (the policy drops a stale session
         // and picks another), which is the honest reading: a session waiting
         // for its next prompt looks exactly like one whose window was closed.
-        if (lastEditorPid && !editorDead && !lastStopped && !RESCUE_EXCLUDE.has(face.state)) {
+        if (lastEditorPid && !editorDead && !lastStopped && !lastTurnOver && !RESCUE_EXCLUDE.has(face.state)) {
           if (!isProcessAlive(lastEditorPid)) markMainDead();
         }
       }
@@ -596,6 +593,7 @@ function runUnifiedMode() {
           // record the write as applied, or it reads as "new" (ts > 0) once
           // the startup window closes and is shown after all.
           lastStopped = !!stateData.stopped;
+          lastTurnOver = !!stateData.turnOver;
           if (ts > lastAppliedTimestamp) {
             lastAppliedTimestamp = ts;
             lastAppliedState = stateData.state;
@@ -617,6 +615,7 @@ function runUnifiedMode() {
         }
 
         lastStopped = !!stateData.stopped;
+        lastTurnOver = !!stateData.turnOver;
         // Same session id, new editor process (e.g. `claude --resume` after a
         // crash): a NEWER write reporting a different PID retires the armed
         // one at once. Otherwise the death check kept testing the old, dead
@@ -668,9 +667,13 @@ function runUnifiedMode() {
 
           // If PostToolUse includes a workState the renderer missed (PreToolUse
           // was overwritten before we read it), inject the work state first.
-          // setState buffering queues the completion state behind it.
+          // setState buffering queues the completion state behind it. Never
+          // for a finished turn: a late PostToolUse after Stop then showed its
+          // tool, the rescue saw a work face on a stopped turn, and forceState
+          // replaced the queued reward with a second "wrapping up" -> done!.
           if (ACTIVE_WORK_STATES.has(stateData.workState)
               && COMPLETION_STATES.has(stateData.state)
+              && !stateData.stopped
               && !ACTIVE_WORK_STATES.has(face.state)) {
             face.setState(stateData.workState, stateData.workDetail || '');
           }
@@ -713,6 +716,7 @@ function runUnifiedMode() {
           lastAppliedTimestamp = freshTs;
           lastAppliedState = freshData.state;
           lastStopped = stoppedNow;
+          lastTurnOver = false;
           // If the file says responding, apply it; otherwise
           // we just set lastStopped so the rescue block above fires next frame.
           if (freshData.state === 'responding') {
@@ -727,7 +731,7 @@ function runUnifiedMode() {
 
     // Session is active until Stop hook fires (writes stopped: true)
     // or the armed editor PID is found dead
-    const sessionActive = !lastStopped && !editorDead;
+    const sessionActive = !lastStopped && !lastTurnOver && !editorDead;
 
     // Timeout-driven transitions: starting → idle, responding → happy once the
     // session ended, a completion's linger, thinking/idle timeouts, and the
@@ -807,6 +811,9 @@ function runUnifiedMode() {
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
   try { process.on('SIGHUP', cleanup); } catch {}
+  // Ctrl+Break on Windows; without a handler it killed the renderer with the
+  // PID file left behind.
+  if (process.platform === 'win32') { try { process.on('SIGBREAK', cleanup); } catch {} }
 
   // Raw stdin keypress handling
   if (process.stdin.isTTY) {
@@ -908,6 +915,7 @@ function runUnifiedMode() {
         lastNewWriteAt = ts;
         lastAppliedState = newData.state;
         lastStopped = !!newData.stopped;
+        lastTurnOver = !!newData.turnOver;
         // forceState, not setState: a materialized face must show its own
         // session at once. Any leftover minDisplayUntil belongs to the session
         // that just left, and setState would buffer this behind it. No third
@@ -1121,6 +1129,9 @@ function main() {
       process.exit(0);
     }
     writePid();
+    // Heartbeat: rewrite the PID file so a stale one (a renderer that died
+    // without cleanup) can be told from a live one -- see isRendererAlive.
+    setInterval(writePid, PID_HEARTBEAT_MS).unref();
   }
 
   // NO_COLOR compliance (https://no-color.org)

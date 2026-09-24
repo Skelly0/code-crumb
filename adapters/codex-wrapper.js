@@ -84,6 +84,9 @@ let lastPromptAt = 0; // attention stamp: set on thread/turn start, carried on e
 let streakBrokenThisTurn = false;
 let finished = false; // set once by finishSession
 
+// How long after codex exits the wrapper waits for its stdout to close.
+const EXIT_GRACE_MS = 3000;
+
 function breakStreak(stats) {
   if (streakBrokenThisTurn) return;
   streakBrokenThisTurn = true;
@@ -479,13 +482,25 @@ function main() {
   // 'close', not 'exit': exit fires while stdout may still hold buffered
   // JSONL, so the last events of a turn (turn.completed included) could be
   // lost to the process.exit below.
-  codex.on('close', (code, signal) => {
+  let closed = false;
+  const onClose = (code, signal) => {
+    if (closed) return;
+    closed = true;
     // The stream already said how the turn ended; exiting only stops the
     // session. A non-zero exit with no failure reported is the crash case,
     // and a signal (ours or anyone's) is an interruption.
     const outcome = closeOutcome({ code, signal, caught, turnOutcome, lastState, lastDetail });
     finishSession(outcome);
     exitWhenFlushed(outcome.exitCode);
+  };
+  codex.on('close', onClose);
+  // But 'close' waits for every holder of the stdout pipe, and anything codex
+  // (or a shell shim in front of it) leaves running in the background keeps
+  // it open: the wrapper then sat blocking the user's terminal, the session
+  // unretired, for as long as that process lived. Once codex itself has
+  // exited, a short grace drains what is buffered and then ends the run.
+  codex.on('exit', (code, signal) => {
+    setTimeout(() => onClose(code, signal), EXIT_GRACE_MS).unref();
   });
 }
 

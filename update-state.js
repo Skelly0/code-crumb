@@ -11,7 +11,7 @@
 // |          SessionStart, SessionEnd, PreCompact, PostCompact,    |
 // |          PermissionRequest, Setup, Elicitation,                |
 // |          ElicitationResult, ConfigChange, InstructionsLoaded,  |
-// |          StopFailure, PostModelSwitch                          |
+// |          StopFailure, PostModelSwitch, and Codex's Interrupt   |
 // |                                                                |
 // |  Works with Claude Code, Codex CLI, and OpenCode               |
 // +================================================================+
@@ -21,7 +21,8 @@ const path = require('path');
 const {
   STATE_FILE, SESSIONS_DIR, STATS_FILE, PID_FILE, QUIT_FLAG_FILE, SPAWN_LOCK_FILE, STATS_LOCK_FILE,
   safeFilename, getGitBranch, getIsWorktree, loadPrefs,
-  writeJsonAtomic, acquireSpawnLock, acquireFileLock, buildRendererCommands,
+  writeJsonAtomic, acquireSpawnLock, acquireFileLock, spawnRendererWindow, isRendererAlive,
+  COMPLETION_STATES,
 } = require('./shared');
 const {
   toolToState, normalizeToolResponse, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
@@ -66,7 +67,10 @@ const TURN_OPENING_EVENTS = new Set([
   'PreToolUse', 'UserPromptSubmit', 'SessionStart', 'SubagentStart',
   'PreCompact', 'Setup', 'PostModelSwitch',
 ]);
-const TURN_CLOSING_EVENTS = new Set(['Stop', 'StopFailure', 'SessionEnd']);
+// Interrupt is Codex's: it runs no Stop hook when the user presses Esc (and
+// none at all for a failed turn), only Interrupt. Without it the face held
+// "running command · still running" for the whole 10-minute long-tool hold.
+const TURN_CLOSING_EVENTS = new Set(['Stop', 'StopFailure', 'SessionEnd', 'Interrupt']);
 
 // Session files that may inherit a finished turn from their predecessor.
 // `waiting` is the exception: the renderer folds `turnEnded` into `stopped`
@@ -76,6 +80,31 @@ const TURN_CLOSING_EVENTS = new Set(['Stop', 'StopFailure', 'SessionEnd']);
 // (a background SubagentStop after an idle_prompt) still knows the turn is over.
 function carriesTurnEnd(event) {
   return !TURN_OPENING_EVENTS.has(event) && !TURN_CLOSING_EVENTS.has(event);
+}
+
+// Turn-opening events that also happen BETWEEN turns: a /compact, a /model, a
+// config reload, a subagent's own auto-compaction (Claude Code sends that one
+// with the parent's session_id and no agent_id). After a finished turn they
+// sit beside it rather than start a new one, so they keep its end (as
+// `turnOver`, below). Dropping it left the renderer on the 45s thinking
+// timeout with nothing left to close the turn.
+const AMBIENT_EVENTS = new Set(['PreCompact', 'PostModelSwitch', 'SessionStart', 'Setup']);
+
+// The states a finished turn may be carried with as `turnEnded`. The renderer
+// folds `turnEnded` into `stopped`, force-rescues every face outside its
+// RESCUE_EXCLUDE to "wrapping up", and shows a new idle + stopped write as
+// responding: a ConfigChange's `reading` after a Stop replayed the whole
+// responding -> done! celebration. Everything else carries the same fact as
+// `turnOver`, which the renderer reads as "not active" (the short idle
+// timeout) but never rescues -- `waiting` was the first such case.
+const TURN_END_SAFE_STATES = new Set([...COMPLETION_STATES, 'error']);
+
+// What a write inherits from a session file that records a finished turn:
+// null, 'turnEnded' or 'turnOver'.
+function inheritedTurnEnd(event, state) {
+  if (AMBIENT_EVENTS.has(event)) return 'turnOver';
+  if (!carriesTurnEnd(event)) return null;
+  return TURN_END_SAFE_STATES.has(state) ? 'turnEnded' : 'turnOver';
 }
 
 // Sticky session-file fields: set once, preserved across every later write.
@@ -344,39 +373,13 @@ function ensureRendererRunning(editorStarting = false) {
     }
     try { fs.accessSync(QUIT_FLAG_FILE); return; } catch {}
 
-    // Check if renderer alive via PID file
-    try {
-      const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
-      if (!isNaN(pid)) { process.kill(pid, 0); return; } // alive
-    } catch {}
+    // Renderer alive (PID file with a fresh heartbeat)? Nothing to do.
+    if (isRendererAlive(PID_FILE)) return;
 
     // Renderer dead/missing — one hook spawns it, the rest back off.
     if (!acquireSpawnLock(SPAWN_LOCK_FILE, 5000)) return;
 
-    const { spawn, execSync } = require('child_process');
-    const rendererPath = path.resolve(__dirname, 'renderer.js');
-    const cmds = buildRendererCommands(process.platform, [rendererPath], 'Code Crumb');
-
-    let child;
-    if (process.platform === 'win32') {
-      // Probe for Windows Terminal before spawning (spawn doesn't throw synchronously)
-      let hasWt = false;
-      try { execSync('where wt', { stdio: 'ignore' }); hasWt = true; } catch {}
-      const c = hasWt ? cmds.wt : cmds.cmd;
-      child = spawn(c.cmd, c.args, c.opts);
-    } else if (process.platform === 'darwin') {
-      child = spawn(cmds.osascript.cmd, cmds.osascript.args, cmds.osascript.opts);
-    } else {
-      // Linux — try common terminal emulators in order
-      for (const key of Object.keys(cmds)) {
-        try {
-          execSync(`command -v ${cmds[key].cmd}`, { stdio: 'ignore' });
-          child = spawn(cmds[key].cmd, cmds[key].args, cmds[key].opts);
-          break;
-        } catch {}
-      }
-    }
-    if (child) child.unref();
+    spawnRendererWindow(path.resolve(__dirname, 'renderer.js'), 'Code Crumb');
   } catch {} // Never throw from a hook
 }
 
@@ -509,9 +512,9 @@ function writeFallback(ids, override) {
     // No payload here, so no to_model to name.
     fallbackState = 'thinking';
     fallbackDetail = 'model switched';
-  } else if (hookEvent === 'StopFailure') {
+  } else if (hookEvent === 'StopFailure' || hookEvent === 'Interrupt') {
     fallbackState = 'error';
-    fallbackDetail = 'API error';
+    fallbackDetail = hookEvent === 'Interrupt' ? 'interrupted' : 'API error';
     // The failed turn is over: global `stopped`, session-file `turnEnded`.
     if (!isAgent) fallbackExtra.stopped = true;
   }
@@ -545,9 +548,9 @@ function writeFallback(ids, override) {
     for (const field of STICKY_FIELDS) {
       if (prevSession[field] && !sessionExtra[field]) sessionExtra[field] = prevSession[field];
     }
-    if ((prevSession.turnEnded || prevSession.turnOver) && carriesTurnEnd(hookEvent)) {
-      if (fallbackState === 'waiting') sessionExtra.turnOver = true;
-      else sessionExtra.turnEnded = true;
+    if (prevSession.turnEnded || prevSession.turnOver) {
+      const inherit = inheritedTurnEnd(hookEvent, fallbackState);
+      if (inherit) sessionExtra[inherit] = true;
     }
   }
   const globalExtra = (!fallbackExtra.stopped && globalWasOurStop
@@ -561,7 +564,7 @@ function writeFallback(ids, override) {
     delete idleFallbackExtra.turnOver;
     writeSessionState(sessionFileId, 'idle', 'between turns', false, idleFallbackExtra);
   } else {
-    if (hookEvent === 'StopFailure' && !isAgent) {
+    if ((hookEvent === 'StopFailure' || hookEvent === 'Interrupt') && !isAgent) {
       sessionExtra.turnEnded = true;
       delete sessionExtra.turnOver;
     }
@@ -814,14 +817,22 @@ process.stdin.on('end', () => {
       stats.recentMilestone = null;
     }
 
-    // Real model identity. No hook payload carries it except SessionStart
+    // Real model identity. Claude Code carries it only on SessionStart
     // (`model`) and PostModelSwitch (`to_model`), so everything else is either
     // carried forward by STICKY_FIELDS or read out of a transcript once.
+    // Codex puts a required `model` on EVERY hook payload -- and has no
+    // PostModelSwitch, and its rollout JSONL has no message.model -- so a
+    // payload model is taken whenever one is present: it is free, and the
+    // only way a Codex session ever follows a /model. (PostModelSwitch also
+    // fires with source 'resume', so a restored session re-stamps itself.)
     // Every transcript-backed path needs one, and only Claude Code sends it:
     // checking first keeps Codex and the adapters at zero extra reads.
     const transcriptPath = toText(data.transcript_path);
+    const payloadModel = toText(hookEvent === 'PostModelSwitch' ? data.to_model : data.model);
     let rawModel = '';
-    if (isAgentEvent && transcriptPath) {
+    if (payloadModel) {
+      rawModel = payloadModel;
+    } else if (isAgentEvent && transcriptPath) {
       // SubagentStart carries no model at all, so an agent's own transcript is
       // the only source. The agent's session file is the memory: once stamped,
       // this never reads again -- hence one bounded read per agent, not per
@@ -836,10 +847,6 @@ process.stdin.on('end', () => {
       if (!known) {
         rawModel = _readTranscriptModel(agentTranscriptPath(transcriptPath, agentId));
       }
-    } else if (hookEvent === 'SessionStart' || hookEvent === 'PostModelSwitch') {
-      // Both are free -- a payload field, no file touched. PostModelSwitch also
-      // fires with source 'resume', so a restored session re-stamps itself.
-      rawModel = toText(hookEvent === 'PostModelSwitch' ? data.to_model : data.model);
     } else if (hookEvent === 'Stop' && transcriptPath) {
       // Covers the hole in the free path: SessionStart's `model` is optional
       // and Claude Code does not always send it. The tail at a turn end (after
@@ -1238,6 +1245,17 @@ process.stdin.on('end', () => {
         if (!isKnownSubagent) _creditSession(stats, counter, now);
       }
     }
+    else if (hookEvent === 'Interrupt') {
+      // Codex's Esc: the turn is over, cut short by the user. Shown like
+      // Claude Code's interrupted tool call, but it is the user's choice, so
+      // the streak is left alone. It ends the turn exactly as StopFailure does.
+      state = 'error';
+      detail = 'interrupted';
+      if (!agentId) {
+        failureEndsTurn = true;
+        if (!isKnownSubagent) _creditSession(stats, counter, now);
+      }
+    }
     else {
       if (toolName) {
         ({ state, detail } = toolToState(toolName, toolInput));
@@ -1374,7 +1392,8 @@ process.stdin.on('end', () => {
       // two swap animations. The session-file block below decides for itself
       // from the session file's own fields (`stopped`, else `turnEnded`).
       if (!isAgentEvent && existing.stopped && existing.sessionId === sessionId && !stopped &&
-          carriesTurnEnd(hookEvent) && state !== 'waiting') {
+          (carriesTurnEnd(hookEvent) || (AMBIENT_EVENTS.has(hookEvent) && hookEvent !== 'SessionStart'))
+          && state !== 'waiting') {
         globalStopped = true;
       }
       // Preserve model name — subagents sharing session ID must not overwrite the owner's name.
@@ -1450,12 +1469,12 @@ process.stdin.on('end', () => {
           // `stopped || turnEnded` on a session file and the renderer folds
           // both -- but only SessionEnd sets `stopped` here, so the global
           // owner and a parallel window take the same path: `turnEnded`
-          // carried forward. A wait carries it as `turnOver` instead (see
-          // carriesTurnEnd), and the next echo turns that back into turnEnded.
-          if (!stopped && (existingSession.turnEnded || existingSession.turnOver)
-              && carriesTurnEnd(hookEvent)) {
-            if (state === 'waiting') extra.turnOver = true;
-            else extra.turnEnded = true;
+          // carried forward. A face the renderer would rescue carries it as
+          // `turnOver` instead (see inheritedTurnEnd), and the next echo with
+          // a reward or an error turns that back into turnEnded.
+          if (!stopped && (existingSession.turnEnded || existingSession.turnOver)) {
+            const inherit = inheritedTurnEnd(hookEvent, state);
+            if (inherit) extra[inherit] = true;
           }
           for (const field of STICKY_FIELDS) {
             if (existingSession[field] && !extra[field]) {

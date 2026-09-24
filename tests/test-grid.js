@@ -4360,6 +4360,19 @@ describe('grid.js -- third review pass: session list and labels', () => {
     assert.ok(plain.includes('~/proj'), 'a folder under HOME still is');
   });
 
+  test('~ ignores case on Windows, where editors disagree about the drive letter', () => {
+    const { _truncatePath } = require('../grid');
+    const flipped = homeFwd.replace(/[a-z]/i, (c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()));
+    assert.notStrictEqual(flipped, homeFwd, 'the fixture HOME has a letter to flip');
+    assert.strictEqual(_truncatePath(flipped + '/proj', 80, true), '~/proj', 'folded on win32');
+    assert.strictEqual(_truncatePath(flipped.replace(/\//g, '\\') + '\\proj', 80, true), '~/proj',
+      'backslashes too');
+    assert.strictEqual(_truncatePath(flipped + '/proj', 80, false), flipped + '/proj',
+      'case-sensitive elsewhere');
+    assert.strictEqual(_truncatePath(flipped + 'ice/proj', 80, true), flipped + 'ice/proj',
+      'folding keeps the path-boundary rule');
+  });
+
   test('a child with no task falls back to its agent type, not sub-N', () => {
     const orbital = new OrbitalSystem();
     for (const [id, type] of [['p-agent-a', 'Explore'], ['p-agent-b', 'Plan']]) {

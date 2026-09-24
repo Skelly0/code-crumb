@@ -1765,6 +1765,38 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     } finally { cleanup(tmp); }
   });
 
+  // `close` waits for every holder of codex's stdout, so a process codex (or a
+  // shim in front of it) leaves in the background used to keep the wrapper --
+  // and the user's terminal -- blocked, the session unretired, for its whole life.
+  if (process.platform !== 'win32') {
+    test('a background process holding stdout does not keep the wrapper alive', () => {
+      const base = makeTempEnv('codex-grace');
+      try {
+        const binDir = path.join(base.tmp, 'bin');
+        fs.mkdirSync(binDir, { recursive: true });
+        const sh = path.join(binDir, 'codex');
+        fs.writeFileSync(sh, [
+          '#!/bin/sh',
+          'sleep 20 2>/dev/null &',       // holds codex's stdout, not the test's stderr
+          'echo \'{"type":"thread.started","thread_id":"tg"}\'',
+          'echo \'{"type":"turn.started"}\'',
+          'echo \'{"type":"turn.completed"}\'',
+          'exit 0',
+          '',
+        ].join('\n'), 'utf8');
+        fs.chmodSync(sh, 0o755);
+        const env = { ...base.env, PATH: binDir + path.delimiter + (process.env.PATH || '') };
+        delete env.CLAUDE_SESSION_ID;
+        const t0 = Date.now();
+        execFileSync(NODE, [WRAPPER, 'a prompt'], { env, timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] });
+        const took = Date.now() - t0;
+        assert.ok(took < 10000, `the wrapper exits after a short grace, not with the sleeper (${took}ms)`);
+        const session = readJSON(path.join(base.sessionsDir, 'codex-tg.json'));
+        assert.strictEqual(session.stopped, true, 'and retires the session on the way out');
+      } finally { cleanup(base.tmp); }
+    });
+  }
+
   test('a failed turn breaks the streak once, not twice', () => {
     // Codex reports one failure as BOTH a top-level error and a turn.failed.
     // Breaking the streak on each would leave brokenStreak at 0 (face.js only
@@ -2028,9 +2060,10 @@ describe('adapters -- engmux-adapter', () => {
 
   // Runs one dispatch to completion with a stand-in for the python
   // interpreter and returns the orbital session file it left behind.
-  function runEngmux(args, python) {
+  function runEngmux(args, python, envPatch = {}) {
     const base = makeTempEnv('engmux-parent');
-    const env = { ...base.env, ENGMUX_PYTHON: python };
+    const env = { ...base.env, ENGMUX_PYTHON: python, ...envPatch };
+    for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k];
     try {
       execFileSync(NODE, [ADAPTER, ...args], {
         env, timeout: 20000, stdio: ['pipe', 'pipe', 'pipe'],
@@ -2084,6 +2117,16 @@ describe('adapters -- engmux-adapter', () => {
     assert.strictEqual(session.state, 'error', 'a failed dispatch ends on the error face');
     assert.strictEqual(session.stopped, true, 'the orbital is retired when the dispatch ends');
     assert.ok(session.detail, 'the failure is described');
+  });
+
+  // Claude Code's tool processes get CLAUDE_CODE_SESSION_ID, not CLAUDE_SESSION_ID.
+  test('inside Claude Code the parent is CLAUDE_CODE_SESSION_ID, not the shell pid', () => {
+    const { session } = runEngmux(['-E', 'opencode', 'do X'], NODE,
+      { CLAUDE_SESSION_ID: undefined, CLAUDE_CODE_SESSION_ID: 'cc-session-uuid' });
+    assert.strictEqual(session.parentSession, 'cc-session-uuid');
+    const nested = runEngmux(['-E', 'opencode', 'do X'], NODE,
+      { CLAUDE_SESSION_ID: 'engmux-outer', CLAUDE_CODE_SESSION_ID: 'cc-session-uuid' }).session;
+    assert.strictEqual(nested.parentSession, 'engmux-outer', 'an explicit CLAUDE_SESSION_ID still wins');
   });
 
   test('a python that cannot be spawned still retires the orbital with an error', () => {
@@ -2390,9 +2433,25 @@ describe('bug fix regressions', () => {
   });
 
   test('renderer.js PID guard handles EPERM as running (#65)', () => {
+    // The guard now lives in shared.isRendererAlive, which the renderer, the
+    // hook and launch.js all share (they used to disagree about EPERM).
+    const { isRendererAlive } = require(path.join(__dirname, '..', 'shared.js'));
+    const tmp = fs.mkdtempSync(path.join(require('os').tmpdir(), 'cc-pid65-'));
+    const pidFile = path.join(tmp, 'pid');
+    const realKill = process.kill;
+    try {
+      fs.writeFileSync(pidFile, '424242');
+      process.kill = () => { const e = new Error('perm'); e.code = 'EPERM'; throw e; };
+      assert.strictEqual(isRendererAlive(pidFile), true, 'EPERM means the process exists');
+      process.kill = () => { const e = new Error('gone'); e.code = 'ESRCH'; throw e; };
+      assert.strictEqual(isRendererAlive(pidFile), false, 'ESRCH means it does not');
+    } finally {
+      process.kill = realKill;
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-    assert.ok(src.includes("err.code === 'EPERM'"),
-      'PID guard catch should check for EPERM and treat as running');
+    assert.ok(/return isRendererAlive\(PID_FILE\)/.test(src),
+      'the renderer start-up guard asks shared.isRendererAlive');
   });
 
   test('forceState applies the state at once and holds it for the given minimum (#67)', () => {
@@ -2981,17 +3040,26 @@ describe('bug fix structural tests', () => {
   const OPENCODE_ADAPTER = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
   const PARTICLES = path.join(__dirname, '..', 'particles.js');
 
-  // Bug #1 -- Windows Terminal fallback probes with execSync('where wt')
-  test('update-state.js probes for wt with "where wt" before spawning', () => {
-    const src = fs.readFileSync(UPDATE_STATE, 'utf8');
-    assert.ok(src.includes('where wt'),
-      'should probe for wt with execSync("where wt") instead of relying on spawn throw');
+  // Bug #1 -- Windows Terminal fallback probes for wt before spawning. The
+  // spawn moved to shared.spawnRendererWindow (launch.js shares it), and the
+  // probe is System32's where.exe run from HOME, never a `where` that cmd.exe
+  // would look up in the user's project folder first.
+  test('the renderer spawn probes for wt with System32 where.exe before spawning', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'shared.js'), 'utf8');
+    const body = src.slice(src.indexOf('function spawnRendererWindow('));
+    assert.ok(/execFileSync\(path\.join\(sysDir, 'where\.exe'\), \['wt'\]/.test(body),
+      'probes with an absolute where.exe, not execSync("where wt")');
+    assert.ok(/cwd: HOME/.test(body.slice(0, body.indexOf('\n}\n'))),
+      'runs the probe from HOME, not the project folder');
+    assert.ok(fs.readFileSync(UPDATE_STATE, 'utf8').includes('spawnRendererWindow('),
+      'update-state.js opens the window through the shared helper');
   });
 
-  test('update-state.js sets hasWt flag from where-wt probe result', () => {
-    const src = fs.readFileSync(UPDATE_STATE, 'utf8');
-    assert.ok(src.includes('hasWt'),
-      'should have hasWt boolean flag controlled by where-wt probe');
+  test('the renderer spawn falls back to cmd when the wt probe fails', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'shared.js'), 'utf8');
+    const body = src.slice(src.indexOf('function spawnRendererWindow('));
+    assert.ok(/hasWt \? cmds\.wt : cmds\.cmd/.test(body),
+      'hasWt picks Windows Terminal, else a plain cmd window');
   });
 
   // Bug #2 -- OpenCode adapter toolInput unwraps the args, never the wrapper
@@ -3330,7 +3398,7 @@ describe('editor PID liveness tracking', () => {
       'PID death should set editorDead');
     assert.ok(rendererSrc.includes('(lastStopped || editorDead) && !RESCUE_EXCLUDE.has(face.state)'),
       'rescue block should fire on lastStopped OR editorDead');
-    assert.ok(rendererSrc.includes('!lastStopped && !editorDead'),
+    assert.ok(/sessionActive = !lastStopped && (?:!lastTurnOver && )?!editorDead/.test(rendererSrc),
       'sessionActive should account for editorDead');
     assert.ok(!rendererSrc.match(/isProcessAlive\(lastEditorPid\)\)\s*\{\s*lastStopped = true/),
       'PID death must not be stored in lastStopped (clobbered by forced re-read)');
