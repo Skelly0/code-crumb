@@ -26,7 +26,7 @@ const {
 } = require('./shared');
 const {
   toolToState, normalizeToolResponse, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
-  EDIT_TOOLS, SUBAGENT_TOOLS, toText,
+  EDIT_TOOLS, SUBAGENT_TOOLS, ASK_TOOLS, toText,
   pruneFrequentFiles, topFrequentFiles, buildSubagentSessionState,
   subagentSessionId, subagentLabel,
   classifyForeignSession, pruneTopLevelSessions,
@@ -1303,6 +1303,14 @@ process.stdin.on('end', () => {
 
     if (stopped) extra.stopped = true;
     if (workState) { extra.workState = workState; extra.workDetail = workDetail; }
+    // This write answers whatever the face was asked to wait on: the user
+    // spoke (UserPromptSubmit), an elicitation came back, an AskUserQuestion
+    // returned. The renderer drops a wait still queued behind a reward, which
+    // otherwise reappeared after the answer. Not sticky -- one write only.
+    if (hookEvent === 'UserPromptSubmit' || hookEvent === 'ElicitationResult'
+        || ((hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure') && ASK_TOOLS.test(toolName))) {
+      extra.answered = true;
+    }
     if (hookEvent === 'SessionStart') extra.isSessionStart = true;
 
     // Attention stamp: the user just addressed THIS session. The renderer's

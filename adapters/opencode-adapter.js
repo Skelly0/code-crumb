@@ -113,7 +113,8 @@ function mapEvent(event, toolName, toolInput, toolOutput, isError, data) {
     return { state: 'waiting', detail: 'allow?' };
   }
   if (event === 'permission_reply') {
-    return { state: 'satisfied', detail: 'got your answer' };
+    // `answered`: the renderer drops the prompt if it is still queued.
+    return { state: 'satisfied', detail: 'got your answer', extra: { answered: true } };
   }
   if (event === 'message_update') {
     if (data.is_thinking) {

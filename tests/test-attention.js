@@ -1632,6 +1632,35 @@ describe('round 3 -- cross-writer contract', () => {
     } finally { cleanup(t.tmp); }
   });
 
+  // A wait queued behind a reward reappeared after it was answered. The
+  // answering write now says so, once, and the renderer drops the wait.
+  test('writes that answer a prompt carry answered, once', () => {
+    const t = makeTempEnv('ans-1');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'ans-1', prompt: 'x' }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'ans-1')).answered, true, 'the user spoke');
+      runUpdateState('PreToolUse', { session_id: 'ans-1', tool_name: 'AskUserQuestion', tool_input: {} }, t.env);
+      assert.ok(!readJSON(sessionFile(t.sessionsDir, 'ans-1')).answered, 'not sticky');
+      runUpdateState('PostToolUse', { session_id: 'ans-1', tool_name: 'AskUserQuestion', tool_input: {},
+        tool_response: { answers: {} } }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'ans-1')).answered, true, 'the question returned');
+      runUpdateState('ElicitationResult', { session_id: 'ans-1', action: 'accept' }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'ans-1')).answered, true, 'the elicitation came back');
+    } finally { cleanup(t.tmp); }
+    const { readState } = require('../renderer');
+    const t2 = makeTempEnv('ans-2');
+    try {
+      const f = path.join(t2.tmp, 'x.json');
+      fs.writeFileSync(f, JSON.stringify({ state: 'satisfied', answered: true, timestamp: 1 }));
+      assert.strictEqual(readState(f).answered, true);
+    } finally { cleanup(t2.tmp); }
+    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    assert.ok(/if \(stateData\.answered\) face\.dropWait\(\);\s*face\.setState\(stateData\.state/.test(src));
+    const oc = require('../adapters/opencode-adapter');
+    assert.deepStrictEqual(oc.mapEvent('permission_reply', '', {}, '', false, {}).extra, { answered: true },
+      'OpenCode\'s permission.replied too');
+  });
+
   test('setup registers the codex Interrupt and PostCompact hooks, and uninstall finds them', () => {
     const setup = require('../setup');
     const built = setup.buildCodexHooks(path.join(__dirname, '..'));

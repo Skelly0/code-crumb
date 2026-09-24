@@ -365,10 +365,12 @@ class ClaudeFace {
       this.stateDetail = detail;
       // A newer error is the one to show for its full minimum: an older reward
       // (or tool) queued behind the first error used to flush over it the
-      // moment the first one's 4s ran out.
+      // moment the first one's 4s ran out. A permission prompt stays queued:
+      // it still wants an answer, and the renderer applies each write once.
       if (newState === 'error') {
-        this.pendingState = null;
-        this.pendingDetail = '';
+        const wait = this._queuedWait();
+        this.pendingState = wait ? wait.state : null;
+        this.pendingDetail = wait ? wait.detail : '';
         this.pendingWork = null;
         this.minDisplayUntil = Date.now() + this._getMinDisplayMs('error');
       }
@@ -399,6 +401,24 @@ class ClaudeFace {
   // A permission prompt remembered behind a queued reward, if any.
   _pendingWait() {
     return this.pendingWork && this.pendingWork.state === 'waiting' ? this.pendingWork : null;
+  }
+
+  // A prompt waiting anywhere in the queue: queued itself, or remembered.
+  _queuedWait() {
+    if (this.pendingState === 'waiting') return { state: 'waiting', detail: this.pendingDetail };
+    return this._pendingWait();
+  }
+
+  // The prompt was answered (the write that says so carries `answered`): a
+  // queued or remembered wait is spent. Without this the answered prompt
+  // reappeared as soon as the reward it was queued behind ran out --
+  // "allow?" drawn again right after "got your answer".
+  dropWait() {
+    if (this.pendingState === 'waiting') {
+      this.pendingState = null;
+      this.pendingDetail = '';
+    }
+    if (this._pendingWait()) this.pendingWork = null;
   }
 
   // Apply a state immediately, skipping the buffering rules, and drop anything
@@ -447,9 +467,14 @@ class ClaudeFace {
     this.minDisplayUntil = now + this._getMinDisplayMs(newState);
     // Promote work remembered behind the completion that just landed; it
     // flushes after the completion's guaranteed window (see update()).
+    // An error keeps a prompt that is waiting in the queue (see setState).
+    const wait = newState === 'error' ? this._queuedWait() : null;
     if (newIsCompletion && this.pendingWork) {
       this.pendingState = this.pendingWork.state;
       this.pendingDetail = this.pendingWork.detail;
+    } else if (wait) {
+      this.pendingState = wait.state;
+      this.pendingDetail = wait.detail;
     } else {
       this.pendingState = null;
       this.pendingDetail = '';

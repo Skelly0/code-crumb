@@ -905,6 +905,55 @@ describe('adapters -- opencode-adapter (plugin payloads)', () => {
     } finally { cleanup(tmp); }
   });
 
+  // Round-2 regressions, round 3 fixes. A batch over the adapter's 1 MB stdin
+  // cap lost every event in it; a child spawned before a synchronous turn end
+  // could deliver after it and re-open the turn; same-millisecond batch
+  // elements were not "newer" to the renderer.
+  test.async('the plugin caps huge arguments (keeping line counts) and cuts batches under the stdin cap', async () => {
+    const plugin = path.join(ADAPTERS_DIR, 'opencode-plugin.mjs');
+    const P = (await import(require('url').pathToFileURL(plugin).href)).CodeCrumbPlugin;
+    const content = 'x'.repeat(70000) + '\nline\n'.repeat(3000);
+    const t = P.translate('tool.execute.before', { tool: 'write', sessionID: 's', callID: 'c' }, { args: { filePath: 'a.txt', content } });
+    assert.ok(t.toolInput.content.length < 80000, `capped (${t.toolInput.content.length})`);
+    assert.strictEqual(t.toolInput.content.split('\n').length, content.split('\n').length, 'line count kept');
+    assert.strictEqual(t.toolInput.filePath, 'a.txt');
+    const mk = (n) => ({ json: 'x'.repeat(n), bytes: n });
+    const pending = [mk(500000), mk(500000), mk(10), mk(2000000), mk(5)];
+    const sizes = [];
+    while (pending.length) sizes.push(P.takeBatch(pending).length);
+    assert.deepStrictEqual(sizes, [1, 2, 1, 1], 'each batch fits, and an oversized item still goes alone');
+  });
+
+  test('a payload numbered before the recorded turn end counts but does not draw', () => {
+    const { tmp, statsFile, sessionsDir, env } = makeTempEnv('oc-seq');
+    try {
+      delete env.CLAUDE_SESSION_ID;
+      const base = { sessionId: 'ses_q', pluginId: 'P1' };
+      runStdinAdapter(ADAPTER, { ...base, seq: 1, type: 'tool.execute.before', tool: 'bash', toolInput: { command: 'ls' } }, env);
+      runStdinAdapter(ADAPTER, { ...base, seq: 3, type: 'session.idle' }, env);
+      const ended = readJSON(path.join(sessionsDir, 'ses_q.json'));
+      assert.strictEqual(ended.turnEnded, true);
+      assert.strictEqual(ended.endSeq, 3);
+      const calls = readJSON(statsFile).totalToolCalls;
+      runStdinAdapter(ADAPTER, { ...base, seq: 2, type: 'tool.execute.before', tool: 'read', toolInput: { filePath: 'b.js' } }, env);
+      const after = readJSON(path.join(sessionsDir, 'ses_q.json'));
+      assert.strictEqual(after.timestamp, ended.timestamp, 'the straggler did not re-open the turn');
+      assert.strictEqual(readJSON(statsFile).totalToolCalls, calls + 1, 'but its tool call counted');
+      runStdinAdapter(ADAPTER, { ...base, seq: 4, type: 'tool.execute.before', tool: 'read', toolInput: { filePath: 'c.js' } }, env);
+      const next = readJSON(path.join(sessionsDir, 'ses_q.json'));
+      assert.strictEqual(next.state, 'reading', 'the next turn draws');
+      assert.ok(!next.turnEnded);
+      runStdinAdapter(ADAPTER, { sessionId: 'ses_q', pluginId: 'P2', seq: 1, type: 'tool.execute.before', tool: 'bash', toolInput: { command: 'pwd' } }, env);
+      assert.strictEqual(readJSON(path.join(sessionsDir, 'ses_q.json')).state, 'executing', 'a restarted plugin starts its own numbering');
+    } finally { cleanup(tmp); }
+  });
+
+  test('adapter timestamps are strictly increasing within a process', () => {
+    const { nextTimestamp } = require('../adapters/base-adapter');
+    const a = nextTimestamp(), b = nextTimestamp(), c = nextTimestamp();
+    assert.ok(a < b && b < c, `${a} ${b} ${c}`);
+  });
+
   test('adapter identity fields are text, whatever the payload sends', () => {
     const { tmp, sessionsDir, env } = makeTempEnv('oc-types');
     try {
@@ -4416,6 +4465,11 @@ describe('adapters -- third review pass: the OpenCode plugin keeps a session in 
         assert.strictEqual(lines[1], 'end', 'the second child must not start before the first ends');
         assert.ok(lines[0].includes('tool.execute.before'));
         assert.ok(lines[2].includes('tool.execute.after'));
+        // Numbered in the order OpenCode reported them (round 3: the adapter
+        // drops a straggler numbered before a recorded turn end).
+        const [a, b] = [JSON.parse(lines[0]), JSON.parse(lines[2])];
+        assert.ok(a.seq > 0 && b.seq > a.seq, `${a.seq} then ${b.seq}`);
+        assert.ok(a.pluginId && a.pluginId === b.pluginId);
       } finally {
         if (realNode === undefined) delete process.env.CODE_CRUMB_NODE; else process.env.CODE_CRUMB_NODE = realNode;
         fs.rmSync(dir, { recursive: true, force: true });

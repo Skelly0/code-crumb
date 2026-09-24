@@ -3034,4 +3034,54 @@ describe('face.js -- third review pass: streak loss', () => {
   });
 });
 
+// -- Round 3: prompts in the queue ---------------------------------------------
+
+describe('face.js -- round 3: prompts in the queue', () => {
+  // A reward on screen (inside its guaranteed window) with a prompt queued behind it.
+  function rewardWithQueuedWait() {
+    const f = new ClaudeFace();
+    f.setState('happy', 'done');
+    f.setState('waiting', 'allow?');
+    assert.strictEqual(f.state, 'happy');
+    assert.strictEqual(f.pendingState, 'waiting', 'fixture: the prompt is queued');
+    return f;
+  }
+
+  test('an error keeps a queued prompt (a new error face)', () => {
+    const f = rewardWithQueuedWait();
+    f.setState('error', 'boom');
+    assert.strictEqual(f.state, 'error');
+    assert.strictEqual(f.pendingState, 'waiting', 'the prompt still wants an answer');
+  });
+
+  test('a newer same-state error keeps it too, and drops everything else', () => {
+    const f = new ClaudeFace();
+    f.setState('error', 'first');
+    f.setState('waiting', 'allow?');                 // buffered behind the error's 4s
+    assert.strictEqual(f.pendingState, 'waiting');
+    f.setState('error', 'second');
+    assert.strictEqual(f.stateDetail, 'second');
+    assert.strictEqual(f.pendingState, 'waiting', 'the same-state branch used to clear it');
+    const g = new ClaudeFace();
+    g.setState('error', 'first');
+    g.setState('happy', 'x');                        // a reward queued behind the error
+    g.setState('error', 'second');
+    assert.strictEqual(g.pendingState, null, 'an older reward is still dropped');
+  });
+
+  test('an answer spends the queued or remembered prompt', () => {
+    const f = rewardWithQueuedWait();
+    f.dropWait();
+    assert.strictEqual(f.pendingState, null);
+    const g = new ClaudeFace();
+    g.setState('coding', 'x');
+    g.setState('happy', 'done');                     // queued behind the work
+    g.setState('waiting', 'allow?');                 // remembered behind that reward
+    assert.strictEqual(g.pendingWork && g.pendingWork.state, 'waiting', 'fixture: remembered');
+    g.dropWait();
+    assert.strictEqual(g.pendingWork, null);
+    assert.strictEqual(g.pendingState, 'happy', 'the reward itself stays');
+  });
+});
+
 module.exports = suite;

@@ -54,8 +54,18 @@ function cleanDetail(detail) {
   return detailText(detail).slice(0, MAX_DETAIL_CHARS);
 }
 
+// Strictly increasing within this process. A batch (the OpenCode plugin's
+// queue) applies several events in one process, often inside one
+// millisecond, and the renderer only applies a write NEWER than the last:
+// the second of two same-millisecond writes was never shown.
+let lastStamp = 0;
+function nextTimestamp() {
+  lastStamp = Math.max(Date.now(), lastStamp + 1);
+  return lastStamp;
+}
+
 function writeState(state, detail = '', extra = {}) {
-  const data = { state, detail: cleanDetail(detail), timestamp: Date.now(), ...pidField(), ...extra };
+  const data = { state, detail: cleanDetail(detail), timestamp: nextTimestamp(), ...pidField(), ...extra };
   try { writeJsonAtomic(STATE_FILE, data, 0o600); } catch {}
 }
 
@@ -65,7 +75,7 @@ function writeSessionState(sessionId, state, detail = '', stopped = false, extra
     const filename = safeFilename(sessionId) + '.json';
     const data = {
       session_id: sessionId, state, detail: cleanDetail(detail),
-      timestamp: Date.now(), cwd: process.cwd(), stopped,
+      timestamp: nextTimestamp(), cwd: process.cwd(), stopped,
       ...pidField(),
       ...extra,
     };
@@ -498,6 +508,20 @@ function runStdinAdapter(options) {
     if (parentSession === sessionId) parentSession = '';
     const statsId = parentSession || sessionId;
 
+    // Delivery order. The OpenCode plugin numbers every payload (`seq`, per
+    // plugin instance `pluginId`), and a turn end records its number on the
+    // session file. A payload numbered BEFORE the recorded end reached us
+    // after it: a child already spawned when the turn-end write blocked the
+    // plugin's event loop delivered its batch late and re-opened the turn --
+    // attention re-stamped, the turn end erased. It still counts; it just
+    // does not draw. (A late tool end is left alone: it has its own rule.)
+    const seq = typeof data.seq === 'number' ? data.seq : 0;
+    const pluginId = toText(data.pluginId);
+    const recordedEnd = prevSession && pluginId && prevSession.pluginId === pluginId
+      && typeof prevSession.endSeq === 'number' ? prevSession.endSeq : 0;
+    const straggler = !!(seq && recordedEnd && seq < recordedEnd
+      && event !== 'tool_end' && event !== 'PostToolUse');
+
     // Read -> mutate -> write of the shared stats file, serialized: several
     // adapter processes can run at once and the last writer would otherwise
     // drop the others' counter increments. A failed acquire proceeds
@@ -587,6 +611,11 @@ function runStdinAdapter(options) {
       if (stopped && !parentSession) creditOwnerSession(stats);
       // Built before the tool end was classified, so refresh the commit count.
       extra.commitCount = stats.session.commitCount || 0;
+      if (straggler) {
+        pruneFrequentFiles(stats.frequentFiles);
+        writeStats(stats);
+        return;
+      }
       if (!parentSession) guardedWriteState(sessionId, state, detail, extra, { toolEnd: isToolEnd });
       // A turn end is not a session end. On the session file `stopped` is
       // reserved for session_end (the update-state.js contract): the orbital
@@ -604,6 +633,9 @@ function runStdinAdapter(options) {
         if (prevSession.stopped) sessionStopped = true;
         else sessionExtra.turnEnded = true;
       }
+      // The turn end's number, kept on every later write of this plugin's.
+      if (seq && pluginId && stopped) { sessionExtra.endSeq = seq; sessionExtra.pluginId = pluginId; }
+      else if (recordedEnd) { sessionExtra.endSeq = recordedEnd; sessionExtra.pluginId = pluginId; }
       writeSessionState(sessionId, state, detail, sessionStopped, sessionExtra);
       pruneFrequentFiles(stats.frequentFiles);
       writeStats(stats);
@@ -683,4 +715,5 @@ module.exports = {
   signalExitCode,
   exitWhenFlushed,
   creditOwnerSession,
+  nextTimestamp,
 };

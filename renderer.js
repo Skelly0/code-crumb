@@ -394,6 +394,7 @@ function readState(filePath = STATE_FILE) {
       workState: data.workState ? knownState(data.workState, null) : null,
       workDetail: detailText(data.workDetail),
       workSince: typeof data.workSince === 'number' ? data.workSince : 0,
+      answered: !!data.answered,
       pid: Number.isInteger(data.pid) && data.pid > 0 ? data.pid : 0,
       editor: text(data.editor),
       lastPromptAt: typeof data.lastPromptAt === 'number' ? data.lastPromptAt : 0,
@@ -707,6 +708,8 @@ function runUnifiedMode() {
             face.setState(stateData.workState, stateData.workDetail || '');
           }
 
+          // A write that answers a prompt spends any wait still queued.
+          if (stateData.answered) face.dropWait();
           face.setState(stateData.state, stateData.detail);
           face.setStats(stateData);
         }
