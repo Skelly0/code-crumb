@@ -31,6 +31,7 @@ const {
   EDIT_TOOLS,
   pruneFrequentFiles, topFrequentFiles, prettyModelName, toText,
   COUNTER_MAX_FILES, freshCounter, normalizeCounter, parkAgents, unparkAgents, pruneCounters,
+  creditSession, creditEndFor, touchCounter, localDay,
 } = require('../lib/state-machine');
 
 // -- State file writing ------------------------------------------------
@@ -53,8 +54,18 @@ function cleanDetail(detail) {
   return detailText(detail).slice(0, MAX_DETAIL_CHARS);
 }
 
+// Strictly increasing within this process. A batch (the OpenCode plugin's
+// queue) applies several events in one process, often inside one
+// millisecond, and the renderer only applies a write NEWER than the last:
+// the second of two same-millisecond writes was never shown.
+let lastStamp = 0;
+function nextTimestamp() {
+  lastStamp = Math.max(Date.now(), lastStamp + 1);
+  return lastStamp;
+}
+
 function writeState(state, detail = '', extra = {}) {
-  const data = { state, detail: cleanDetail(detail), timestamp: Date.now(), ...pidField(), ...extra };
+  const data = { state, detail: cleanDetail(detail), timestamp: nextTimestamp(), ...pidField(), ...extra };
   try { writeJsonAtomic(STATE_FILE, data, 0o600); } catch {}
 }
 
@@ -64,7 +75,7 @@ function writeSessionState(sessionId, state, detail = '', stopped = false, extra
     const filename = safeFilename(sessionId) + '.json';
     const data = {
       session_id: sessionId, state, detail: cleanDetail(detail),
-      timestamp: Date.now(), cwd: process.cwd(), stopped,
+      timestamp: nextTimestamp(), cwd: process.cwd(), stopped,
       ...pidField(),
       ...extra,
     };
@@ -99,14 +110,26 @@ function syncSessionCounter(stats, now = Date.now()) {
     .filter(f => typeof f === 'string').slice(0, COUNTER_MAX_FILES);
   if (stats.session.start) c.start = stats.session.start;
   c.commitCount = stats.session.commitCount || 0;
-  c.lastSeen = now;
+  touchCounter(c, now);
   pruneCounters(counters, id, now);
+}
+
+// Fold the owner's elapsed time into today's total and the records, as
+// update-state.js does at Stop/SessionEnd. Adapters never did, so an
+// OpenCode/OpenClaw/Codex session's time only reached daily.cumulativeMs when
+// another session took ownership away from it.
+function creditOwnerSession(stats, now = Date.now()) {
+  try {
+    syncSessionCounter(stats, now);
+    const c = stats.sessionCounters && stats.sessionCounters[stats.session.id];
+    if (c) creditSession(stats, c, now);
+  } catch {}
 }
 
 function sessionCounters(stats) {
   if (!stats.sessionCounters || typeof stats.sessionCounters !== 'object'
       || Array.isArray(stats.sessionCounters)) {
-    stats.sessionCounters = {};
+    stats.sessionCounters = Object.create(null);
   }
   return stats.sessionCounters;
 }
@@ -171,11 +194,11 @@ function guardedWriteState(sessionId, state, detail, extra, opts = {}) {
 // -- leaving its synthetic orbitals nothing to retire them.
 function initSession(stats, sessionId) {
   const now = Date.now();
-  const today = new Date(now).toISOString().slice(0, 10);
+  const today = localDay(now);
   if (!stats.daily || stats.daily.date !== today) {
     stats.daily = { date: today, sessionCount: 0, cumulativeMs: 0 };
   }
-  if (!stats.frequentFiles) stats.frequentFiles = {};
+  if (!stats.frequentFiles) stats.frequentFiles = Object.create(null);
   const counters = sessionCounters(stats);
   // Seed the owner's entry from stats.session when it has none (a stats file
   // from before the map): it was counted when it was adopted.
@@ -190,7 +213,7 @@ function initSession(stats, sessionId) {
   }
   let counter = normalizeCounter(counters[sessionId], now);
   if (!counter) counter = counters[sessionId] = freshCounter(now);
-  counter.lastSeen = now;
+  touchCounter(counter, now);
   // Once per session per day -- a session running across midnight counts in
   // the new day too (see freshCounter's countedDay).
   if (counter.countedDay !== stats.daily.date) {
@@ -199,6 +222,9 @@ function initSession(stats, sessionId) {
   }
   if (stats.session.id !== sessionId) {
     const outgoing = stats.session.id ? normalizeCounter(counters[stats.session.id], now) : null;
+    // Credit the outgoing owner up to its own last activity (creditEndFor),
+    // as update-state.js does on a switch.
+    if (outgoing) creditSession(stats, outgoing, creditEndFor(outgoing, now));
     if (outgoing) parkAgents(outgoing, stats.session);
     stats.session = {
       id: sessionId, start: counter.start,
@@ -224,7 +250,8 @@ function buildExtra(stats, sessionId, modelName, editor, model) {
   // Restoring the session's original start made that time count twice.
   const counter = stats.sessionCounters && stats.sessionCounters[sessionId];
   const credited = counter && typeof counter.creditedMs === 'number' ? counter.creditedMs : 0;
-  const currentSessionMs = stats.session.start ? Math.max(0, Date.now() - stats.session.start - credited) : 0;
+  const idle = counter && typeof counter.idleMs === 'number' ? counter.idleMs : 0;
+  const currentSessionMs = stats.session.start ? Math.max(0, Date.now() - stats.session.start - idle - credited) : 0;
   return {
     sessionId,
     modelName,
@@ -232,6 +259,9 @@ function buildExtra(stats, sessionId, modelName, editor, model) {
     editor: editor || '',
     toolCalls: stats.session.toolCalls,
     filesEdited: stats.session.filesEdited.length,
+    // Without it the face never showed the commit marker for an adapter
+    // session, though update-state.js writes it for Claude/Codex hooks.
+    commitCount: stats.session.commitCount || 0,
     sessionStart: stats.session.start,
     streak: stats.streak,
     bestStreak: stats.bestStreak,
@@ -255,7 +285,10 @@ function trackEditedFile(stats, toolName, toolInput) {
     if (base && !stats.session.filesEdited.includes(base)) {
       stats.session.filesEdited.push(base);
     }
-    if (base) stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
+    if (base) {
+      stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
+      pruneFrequentFiles(stats.frequentFiles, base);
+    }
   }
 }
 
@@ -272,6 +305,10 @@ function handleToolStart(stats, toolName, toolInput) {
 function handleToolEnd(stats, toolName, toolInput, toolResponse, isError) {
   const result = classifyToolResult(toolName, toolInput, toolResponse, isError);
   updateStreak(stats, result.state === 'error');
+  // Same rule as update-state.js: a commit counts for this session.
+  if (result.state === 'proud' && result.detail === 'committed') {
+    stats.session.commitCount = (stats.session.commitCount || 0) + 1;
+  }
   return result;
 }
 
@@ -310,8 +347,8 @@ function exitWhenFlushed(code, stream = process.stdout) {
 // batch (the OpenCode plugin queues a session's events while its previous
 // child runs): each element is handled in order, as if it had been its own
 // process, and one element's throw does not stop the rest.
-// On parse failure, fallbackFn(err) is called if provided; on input over
-// MAX_INPUT, fallbackFn(null, { override, raw }) -- override is the
+// On parse failure, fallbackFn(err, { raw }) is called if provided; on input
+// over MAX_INPUT, fallbackFn(null, { override, raw }) -- override is the
 // classifyTruncatedInput result, raw the truncated text. A throw inside
 // handler() is swallowed on its own -- it must NOT be reported as
 // "unparseable stdin", or every mapping bug would hide behind the fallback's
@@ -348,8 +385,10 @@ function processStdinEvent(handler, fallbackFn, opts = {}) {
     try {
       data = JSON.parse(input);
     } catch (err) {
+      // The raw text rides along: a cut-off payload usually still names its
+      // session, and the fallback must not mint a phantom one instead.
       if (fallbackFn) {
-        try { fallbackFn(err); } catch {}
+        try { fallbackFn(err, { raw: input }); } catch {}
       }
       exit(0);
       return;
@@ -429,17 +468,21 @@ function runStdinAdapter(options) {
     const toolOutput = norm.toolOutput || '';
     const isError = norm.isError || false;
     // Fallback ID is editor-prefixed so anonymous sessions are
-    // self-describing and never collide across editors.
-    const sessionId = norm.sessionId
-      || data.session_id
+    // self-describing and never collide across editors. Every identity field
+    // is text (update-state.js does the same): an object session_id keyed the
+    // renderer's faces by a fresh object on every load (a respawn and a swap
+    // animation every 2s), a number made the session list read the selection
+    // as a row index, and an object model_name crashed the renderer's labels.
+    const sessionId = toText(norm.sessionId)
+      || toText(data.session_id)
       || process.env.CLAUDE_SESSION_ID
       || `${defaultEditor}-${process.ppid}`;
-    const modelName = norm.modelName
-      || data.model_name
+    const modelName = toText(norm.modelName)
+      || toText(data.model_name)
       || process.env.CODE_CRUMB_MODEL
       || defaultModel;
-    const editor = norm.editor
-      || data.editor
+    const editor = toText(norm.editor)
+      || toText(data.editor)
       || process.env.CODE_CRUMB_EDITOR
       || defaultEditor;
     // Real model identity, when an adapter can supply one. No env fallback:
@@ -447,26 +490,74 @@ function runStdinAdapter(options) {
     // Prettified here so every adapter can just forward the provider's raw id.
     const model = prettyModelName(norm.model || data.model || '');
 
+
     // Read -> mutate -> write of the shared stats file, serialized: several
     // adapter processes can run at once and the last writer would otherwise
     // drop the others' counter increments. A failed acquire proceeds
     // unlocked -- the lock must never cost the adapter its event.
     const releaseStats = acquireFileLock(STATS_LOCK_FILE);
     try {
-      const stats = readStats();
-      initSession(stats, sessionId);
-
-      const extra = buildExtra(stats, sessionId, modelName, editor, model);
-
-      // Attention stamp for the renderer's main-face policy. Each adapter
-      // event is its own process, so the session file is the only memory:
-      // the first event of a session, or the first after a turn end, starts a
-      // new turn and stamps now; anything else carries the old stamp forward.
+      // The session file is the only memory an adapter has (each event is its
+      // own process): the attention stamp, the model, the parent and the
+      // delivery order below all come from it. It is read under the lock:
+      // read before it, a process waiting on the lock while a synchronous
+      // turn end wrote `turnEnded`/`endSeq` acted on the older file -- and
+      // erased the very turn end the straggler rule protects.
       let prevSession = null;
       try {
         prevSession = JSON.parse(fs.readFileSync(
           path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
       } catch {}
+      if (!prevSession || typeof prevSession !== 'object') prevSession = null;
+
+      // A child session -- OpenCode's task tool runs one per delegated task --
+      // is an orbital of its parent, like a Claude Code subagent: it never
+      // stamps attention (every task used to take the center from the session
+      // that launched it), never owns the global file, counts its tool calls
+      // toward its parent, and its turn end retires it. Only session.created
+      // names the parent, so later events take it from the session file.
+      let parentSession = toText(norm.parentSession) || toText(data.parentSession)
+        || (prevSession ? toText(prevSession.parentSession) : '');
+      if (parentSession === sessionId) parentSession = '';
+      // Counters go to the ROOT session: a task can run a task of its own,
+      // and a grandchild pointing at its direct parent made that child the
+      // stats owner -- counted as a session of its own, the root credited
+      // and its time counted twice.
+      let statsId = parentSession || sessionId;
+      for (let depth = 0; parentSession && depth < 4; depth++) {
+        let up = '';
+        try {
+          const f = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, safeFilename(statsId) + '.json'), 'utf8'));
+          up = f && typeof f === 'object' ? toText(f.parentSession) : '';
+        } catch {}
+        if (!up || up === statsId || up === sessionId) break;
+        statsId = up;
+      }
+
+      // Delivery order. The OpenCode plugin numbers every payload (`seq`, per
+      // plugin instance `pluginId`), and a turn end records its number on the
+      // session file. A payload numbered BEFORE the recorded end reached us
+      // after it: a child already spawned when the turn-end write blocked the
+      // plugin's event loop delivered its batch late and re-opened the turn --
+      // attention re-stamped, the turn end erased. It still counts; it just
+      // does not draw. (A late tool end is left alone: it has its own rule.)
+      const seq = typeof data.seq === 'number' ? data.seq : 0;
+      const pluginId = toText(data.pluginId);
+      const recordedEnd = prevSession && pluginId && prevSession.pluginId === pluginId
+        && typeof prevSession.endSeq === 'number' ? prevSession.endSeq : 0;
+      const straggler = !!(seq && recordedEnd && seq < recordedEnd
+        && event !== 'tool_end' && event !== 'PostToolUse');
+
+      const stats = readStats();
+      initSession(stats, statsId);
+
+      const extra = buildExtra(stats, statsId, modelName, editor, model);
+      extra.sessionId = sessionId;
+      if (parentSession) extra.parentSession = parentSession;
+
+      // Attention stamp for the renderer's main-face policy: the first event
+      // of a session, or the first after a turn end, starts a new turn and
+      // stamps now; anything else carries the old stamp forward.
       // The session file is the only memory an adapter has, and a plugin that
       // restarts holds no model until its next message: carry it forward.
       if (prevSession && prevSession.model && !extra.model) extra.model = prevSession.model;
@@ -480,7 +571,7 @@ function runStdinAdapter(options) {
       // A live file with no stamp self-heals rather than staying blind for the
       // whole turn: an `error` can be the first event a session ever writes,
       // and an upgrade can land mid-turn over a pre-feature session file.
-      if (!endsTurn && !lateToolEnd &&
+      if (!endsTurn && !lateToolEnd && !parentSession &&
           (!prevSession || prevSession.stopped || prevSession.turnEnded || !prevSession.lastPromptAt)) {
         extra.lastPromptAt = Date.now();
       } else if (prevSession && prevSession.lastPromptAt) {
@@ -534,13 +625,25 @@ function runStdinAdapter(options) {
       extra.filesEdited = stats.session.filesEdited.length;
       if (stopped) extra.stopped = true;
 
-      guardedWriteState(sessionId, state, detail, extra, { toolEnd: isToolEnd });
+      // A turn (or session) end folds this session's time into today's
+      // total and the records. (extra's dailyCumulativeMs already counts
+      // that time as the running session's, so it reads the same.)
+      if (stopped && !parentSession) creditOwnerSession(stats);
+      // Built before the tool end was classified, so refresh the commit count.
+      extra.commitCount = stats.session.commitCount || 0;
+      if (straggler) {
+        pruneFrequentFiles(stats.frequentFiles);
+        writeStats(stats);
+        return;
+      }
+      if (!parentSession) guardedWriteState(sessionId, state, detail, extra, { toolEnd: isToolEnd });
       // A turn end is not a session end. On the session file `stopped` is
       // reserved for session_end (the update-state.js contract): the orbital
       // loader latches it and the main policy drops a stopped session, so a
       // turn-end `stopped` bounced the center away and back every turn and
       // released any pin on it. The global file keeps `stopped` for tmux.
-      const turnOnly = stopped && event !== 'session_end';
+      // A child's turn end is its whole life: it retires like a subagent.
+      const turnOnly = stopped && event !== 'session_end' && !parentSession;
       const sessionExtra = { ...extra };
       if (turnOnly) { delete sessionExtra.stopped; sessionExtra.turnEnded = true; }
       let sessionStopped = stopped && !turnOnly;
@@ -550,6 +653,9 @@ function runStdinAdapter(options) {
         if (prevSession.stopped) sessionStopped = true;
         else sessionExtra.turnEnded = true;
       }
+      // The turn end's number, kept on every later write of this plugin's.
+      if (seq && pluginId && stopped) { sessionExtra.endSeq = seq; sessionExtra.pluginId = pluginId; }
+      else if (recordedEnd) { sessionExtra.endSeq = recordedEnd; sessionExtra.pluginId = pluginId; }
       writeSessionState(sessionId, state, detail, sessionStopped, sessionExtra);
       pruneFrequentFiles(stats.frequentFiles);
       writeStats(stats);
@@ -563,17 +669,62 @@ function runStdinAdapter(options) {
     // id as the main path so the session never splits. The id rides in extra
     // too: a write without one erased the owner's sessionId from the global
     // file, and the next event from any other window took it over.
-    const rawId = trunc
-      ? ((/"session_?id"\s*:\s*"([^"\\]{1,256})"/i.exec(trunc.raw) || [])[1] || '') : '';
+    const raw = trunc && typeof trunc.raw === 'string' ? trunc.raw : '';
+    const oversized = !err && !!trunc;
+    const rawId = (/"session_?id"\s*:\s*"([^"\\]{1,256})"/i.exec(raw) || [])[1] || '';
     const sessionId = rawId || process.env.CLAUDE_SESSION_ID || `${defaultEditor}-${process.ppid}`;
-    const shown = trunc ? trunc.override : { state: 'thinking', detail: '' };
-    guardedWriteState(sessionId, shown.state, shown.detail, {
+    // What the oversized payload was. Only a tool END is judged for errors:
+    // judging any event as one read a huge Write's content ("exit code 2")
+    // as a failure. A tool start shows its tool; anything else, thinking.
+    const rawType = (/"(?:type|event)"\s*:\s*"([^"\\]{1,64})"/.exec(raw) || [])[1] || '';
+    const rawTool = (/"(?:tool_name|toolName|tool)"\s*:\s*"([^"\\]{1,128})"/.exec(raw) || [])[1] || '';
+    // The adapter's own mapping names the event (OpenCode's
+    // tool.execute.after, OpenClaw's tool_execution_end...): a second list
+    // here missed OpenClaw's, and a late oversized tool end re-opened a turn.
+    let kind = '';
+    try { kind = toText((normaliseEvent({ type: rawType, event: rawType }) || {}).event); } catch {}
+    const toolEnd = kind === 'tool_end' || kind === 'PostToolUse';
+    const toolStart = kind === 'tool_start' || kind === 'PreToolUse';
+    let shown;
+    if (!oversized) shown = { state: 'thinking', detail: '' };
+    else if (toolEnd || !rawType) shown = classifyTruncatedInput(toolEnd ? 'PostToolUse' : '', raw);
+    else if (toolStart && rawTool) shown = toolToState(rawTool, {});
+    else shown = { state: 'thinking', detail: 'large input' };
+
+    // The session file too, like update-state.js's fallback: without it the
+    // orbital (or the main face, which reads the session file) stood on the
+    // tool's start for up to the 10-minute long-tool hold.
+    let prev = null;
+    try {
+      prev = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
+    } catch {}
+    if (!prev || typeof prev !== 'object') prev = null;
+    const extra = {
       sessionId,
-      modelName: process.env.CODE_CRUMB_MODEL || defaultModel,
-      editor: defaultEditor,
-    });
+      modelName: (prev && toText(prev.modelName)) || process.env.CODE_CRUMB_MODEL || defaultModel,
+      editor: (prev && toText(prev.editor)) || defaultEditor,
+    };
+    // Sticky fields and the counters: the face's stats rows read every one,
+    // and a write without them showed zeros until the next normal write.
+    for (const k of ['lastPromptAt', 'model', 'parentSession', 'taskDescription',
+      'toolCalls', 'filesEdited', 'commitCount', 'sessionStart', 'streak', 'bestStreak',
+      'brokenStreak', 'brokenStreakAt', 'dailySessions', 'dailyCumulativeMs', 'frequentFiles']) {
+      if (prev && prev[k] !== undefined && prev[k] !== null) extra[k] = prev[k];
+    }
+    if (!extra.parentSession) {
+      guardedWriteState(sessionId, shown.state, shown.detail, { ...extra }, { toolEnd });
+    }
+    // Only under an id the payload itself named: the synthetic
+    // `<editor>-<ppid>` of an unparseable payload is no session, and a file
+    // under it was a live phantom orbital (`opencode-1` once OpenCode exited).
+    if (rawId && !(prev && prev.stopped)) {
+      const sessionExtra = { ...extra };
+      if (prev && (prev.turnEnded || prev.turnOver) && toolEnd) sessionExtra.turnEnded = true;
+      writeSessionState(sessionId, shown.state, shown.detail, false, sessionExtra);
+    }
   });
 }
+
 
 module.exports = {
   pidField,
@@ -592,4 +743,6 @@ module.exports = {
   runStdinAdapter,
   signalExitCode,
   exitWhenFlushed,
+  creditOwnerSession,
+  nextTimestamp,
 };

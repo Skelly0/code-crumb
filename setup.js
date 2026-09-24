@@ -50,13 +50,16 @@ const HOOK_EVENTS = [
   'PostModelSwitch',
 ];
 
-// Codex 0.146 fires a subset of the same event names (no Notification, no
-// PostToolUseFailure). Registering an event codex does not know about only
-// leaves dead config behind, so this list is exactly its supported set.
+// Codex fires a subset of the same event names (no Notification, no
+// PostToolUseFailure), plus one of its own: Interrupt, which it runs INSTEAD
+// of Stop when the user presses Esc (0.156; PostCompact arrived with it).
+// Registering an event codex does not know about only leaves dead config
+// behind -- hooks.json is parsed leniently, so an older codex ignores the key
+// and still runs every other hook (checked against 0.156 with an unknown key).
 const CODEX_HOOK_EVENTS = [
-  'PreToolUse', 'PostToolUse', 'PermissionRequest', 'PreCompact',
+  'PreToolUse', 'PostToolUse', 'PermissionRequest', 'PreCompact', 'PostCompact',
   'SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop',
-  'UserPromptSubmit', 'Stop',
+  'UserPromptSubmit', 'Stop', 'Interrupt',
 ];
 
 // -- Claude Code Setup -----------------------------------------------
@@ -82,9 +85,10 @@ function buildFaceHooks(hookPath) {
 // with a real hook event -- so an unrelated script that happens to be called
 // update-state.js (a tmux status helper, `update-state.js busy`) is never
 // mistaken for a moved Code Crumb repo. Every event ever installed is still in
-// HOOK_EVENTS (and CODEX_HOOK_EVENTS is a subset), so old installs still match.
+// HOOK_EVENTS or CODEX_HOOK_EVENTS, so old installs still match.
+const ALL_HOOK_EVENTS = [...new Set([...HOOK_EVENTS, ...CODEX_HOOK_EVENTS])];
 const OUR_COMMAND_RE = new RegExp(
-  `update-state\\.js["']?\\s+(?:--editor[=\\s]\\S+\\s+)?(?:${HOOK_EVENTS.join('|')})\\s*$`);
+  `update-state\\.js["']?\\s+(?:--editor[=\\s]\\S+\\s+)?(?:${ALL_HOOK_EVENTS.join('|')})\\s*$`);
 function isOurCommand(hh) {
   return typeof hh?.command === 'string' && OUR_COMMAND_RE.test(hh.command);
 }

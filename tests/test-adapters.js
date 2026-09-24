@@ -834,6 +834,167 @@ describe('adapters -- opencode-adapter (plugin payloads)', () => {
     cleanup(tmp);
   });
 
+  // The task tool runs each task in a child session (sessions.create({ parentID })).
+  // Written as a session of its own, every task took the center from the
+  // session that launched it and piled up on the ring.
+  test.async('a task child session is an orbital of its parent, never a center candidate', async () => {
+    const plugin = path.join(ADAPTERS_DIR, 'opencode-plugin.mjs');
+    const tr = (await import(require('url').pathToFileURL(plugin).href)).CodeCrumbPlugin.translate;
+    const created = tr('event', { event: { type: 'session.created', properties: { info: { id: 'ses_kid', parentID: 'ses_dad' } } } });
+    assert.deepStrictEqual(created, { type: 'session.created', sessionId: 'ses_kid', parentSession: 'ses_dad' });
+    assert.ok(!('parentSession' in tr('event', { event: { type: 'session.created', properties: { info: { id: 'ses_dad' } } } })));
+
+    const { tmp, stateFile, statsFile, sessionsDir, env } = makeTempEnv('oc-child');
+    try {
+      delete env.CLAUDE_SESSION_ID;
+      runStdinAdapter(ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_dad', tool: 'task', toolInput: { description: 'x' } }, env);
+      runStdinAdapter(ADAPTER, created, env);
+      // Later child payloads carry no parent: the session file remembers it.
+      runStdinAdapter(ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_kid', tool: 'grep', toolInput: { pattern: 'x' } }, env);
+      let kid = readJSON(path.join(sessionsDir, 'ses_kid.json'));
+      assert.strictEqual(kid.parentSession, 'ses_dad');
+      assert.ok(!kid.lastPromptAt, 'a child never stamps attention');
+      assert.strictEqual(readJSON(stateFile).sessionId, 'ses_dad', 'nor takes the global file');
+      assert.strictEqual(readJSON(statsFile).daily.sessionCount, 1, 'nor counts as a session of its own');
+      runStdinAdapter(ADAPTER, { type: 'session.idle', sessionId: 'ses_kid' }, env);
+      kid = readJSON(path.join(sessionsDir, 'ses_kid.json'));
+      assert.strictEqual(kid.stopped, true, 'its turn end retires it');
+      assert.strictEqual(readJSON(stateFile).sessionId, 'ses_dad');
+      assert.ok(!readJSON(stateFile).stopped, 'and does not end the parent\'s turn');
+    } finally { cleanup(tmp); }
+  });
+
+  // An oversized payload used to reach only the global file: the orbital
+  // (and the main face, which reads the session file) stood on the tool's
+  // start, and every event was judged as a tool result -- a big Write whose
+  // content said "exit code 2" put a false error on the global file.
+  test('an oversized payload reaches the session file, judged by its own event', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('oc-big');
+    try {
+      delete env.CLAUDE_SESSION_ID;
+      runStdinAdapter(ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_big', tool: 'write', toolInput: { filePath: 'a.txt' } }, env);
+      const big = 'x'.repeat(600000) + '\nexit code 2\nError: nope\n' + 'y'.repeat(600000);
+      runStdinAdapter(ADAPTER, { type: 'tool.execute.after', sessionId: 'ses_big', tool: 'write',
+        toolInput: { filePath: 'a.txt', content: big }, title: '', output: '' }, env);
+      const f = readJSON(path.join(sessionsDir, 'ses_big.json'));
+      assert.notStrictEqual(f.state, 'coding', 'no longer stuck on the tool start');
+      assert.notStrictEqual(f.state, 'error', 'a write\'s content is not a verdict');
+      assert.ok(f.lastPromptAt > 0, 'the attention stamp is carried');
+      assert.strictEqual(readJSON(stateFile).state, f.state, 'the global file agrees');
+      runStdinAdapter(ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_big', tool: 'write',
+        toolInput: { filePath: 'b.txt', content: big } }, env);
+      assert.strictEqual(readJSON(path.join(sessionsDir, 'ses_big.json')).state, 'coding', 'an oversized start shows its tool');
+    } finally { cleanup(tmp); }
+  });
+
+  // Round-2 regressions, round 3 fixes. A batch over the adapter's 1 MB stdin
+  // cap lost every event in it; a child spawned before a synchronous turn end
+  // could deliver after it and re-open the turn; same-millisecond batch
+  // elements were not "newer" to the renderer.
+  test.async('the plugin caps huge arguments (keeping line counts) and cuts batches under the stdin cap', async () => {
+    const plugin = path.join(ADAPTERS_DIR, 'opencode-plugin.mjs');
+    const P = (await import(require('url').pathToFileURL(plugin).href)).CodeCrumbPlugin;
+    const content = 'x'.repeat(70000) + '\nline\n'.repeat(3000);
+    const t = P.translate('tool.execute.before', { tool: 'write', sessionID: 's', callID: 'c' }, { args: { filePath: 'a.txt', content } });
+    assert.ok(t.toolInput.content.length < 80000, `capped (${t.toolInput.content.length})`);
+    assert.strictEqual(t.toolInput.content.split('\n').length, content.split('\n').length, 'line count kept');
+    assert.strictEqual(t.toolInput.filePath, 'a.txt');
+    const mk = (n) => ({ json: 'x'.repeat(n), bytes: n });
+    const pending = [mk(500000), mk(500000), mk(10), mk(2000000), mk(5)];
+    const sizes = [];
+    while (pending.length) sizes.push(P.takeBatch(pending).length);
+    assert.deepStrictEqual(sizes, [1, 2, 1, 1], 'each batch fits, and an oversized item still goes alone');
+  });
+
+  test('a payload numbered before the recorded turn end counts but does not draw', () => {
+    const { tmp, statsFile, sessionsDir, env } = makeTempEnv('oc-seq');
+    try {
+      delete env.CLAUDE_SESSION_ID;
+      const base = { sessionId: 'ses_q', pluginId: 'P1' };
+      runStdinAdapter(ADAPTER, { ...base, seq: 1, type: 'tool.execute.before', tool: 'bash', toolInput: { command: 'ls' } }, env);
+      runStdinAdapter(ADAPTER, { ...base, seq: 3, type: 'session.idle' }, env);
+      const ended = readJSON(path.join(sessionsDir, 'ses_q.json'));
+      assert.strictEqual(ended.turnEnded, true);
+      assert.strictEqual(ended.endSeq, 3);
+      const calls = readJSON(statsFile).totalToolCalls;
+      runStdinAdapter(ADAPTER, { ...base, seq: 2, type: 'tool.execute.before', tool: 'read', toolInput: { filePath: 'b.js' } }, env);
+      const after = readJSON(path.join(sessionsDir, 'ses_q.json'));
+      assert.strictEqual(after.timestamp, ended.timestamp, 'the straggler did not re-open the turn');
+      assert.strictEqual(readJSON(statsFile).totalToolCalls, calls + 1, 'but its tool call counted');
+      runStdinAdapter(ADAPTER, { ...base, seq: 4, type: 'tool.execute.before', tool: 'read', toolInput: { filePath: 'c.js' } }, env);
+      const next = readJSON(path.join(sessionsDir, 'ses_q.json'));
+      assert.strictEqual(next.state, 'reading', 'the next turn draws');
+      assert.ok(!next.turnEnded);
+      runStdinAdapter(ADAPTER, { sessionId: 'ses_q', pluginId: 'P2', seq: 1, type: 'tool.execute.before', tool: 'bash', toolInput: { command: 'pwd' } }, env);
+      assert.strictEqual(readJSON(path.join(sessionsDir, 'ses_q.json')).state, 'executing', 'a restarted plugin starts its own numbering');
+    } finally { cleanup(tmp); }
+  });
+
+  // Round 4: the session file must be read under the stats lock. Read before
+  // it, a process that waited on the lock while the synchronous turn end
+  // wrote turnEnded/endSeq acted on the older file and re-opened the turn.
+  // A preload holds the late process just before its lock acquire.
+  test.async('a process waiting on the stats lock sees the turn end written meanwhile', async () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('oc-toctou');
+    try {
+      delete env.CLAUDE_SESSION_ID;
+      const ready = path.join(tmp, 'ready'), go = path.join(tmp, 'go');
+      const gate = path.join(tmp, 'gate.js');
+      fs.writeFileSync(gate, [
+        "'use strict';",
+        "const fs = require('fs');",
+        `const shared = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'shared.js'))});`,
+        'const orig = shared.acquireFileLock;',
+        'let first = true;',
+        'shared.acquireFileLock = function (...a) {',
+        '  if (first) {',
+        '    first = false;',
+        `    fs.writeFileSync(${JSON.stringify(ready)}, 'x');`,
+        '    const until = Date.now() + 10000;',
+        `    while (!fs.existsSync(${JSON.stringify(go)}) && Date.now() < until) { const t = Date.now(); while (Date.now() - t < 2); }`,
+        '  }',
+        '  return orig.apply(this, a);',
+        '};',
+        '',
+      ].join('\n'));
+      const base = { sessionId: 'ses_lk', pluginId: 'PL' };
+      runStdinAdapter(ADAPTER, { ...base, seq: 1, type: 'tool.execute.before', tool: 'bash', toolInput: { command: 'ls' } }, env);
+      const late = spawn(NODE, ['-r', gate, ADAPTER], { env, stdio: ['pipe', 'ignore', 'ignore'] });
+      const closed = new Promise(r => late.on('close', r));
+      late.stdin.end(JSON.stringify({ ...base, seq: 2, type: 'tool.execute.before', tool: 'read', toolInput: { filePath: 'x.js' } }));
+      const until = Date.now() + 10000;
+      while (!fs.existsSync(ready) && Date.now() < until) await new Promise(r => setTimeout(r, 5));
+      runStdinAdapter(ADAPTER, { ...base, seq: 3, type: 'session.idle' }, env);
+      const ended = readJSON(path.join(sessionsDir, 'ses_lk.json'));
+      fs.writeFileSync(go, 'x');
+      await closed;
+      const after = readJSON(path.join(sessionsDir, 'ses_lk.json'));
+      assert.strictEqual(after.turnEnded, true, `the turn end survives (${after.state} / ${after.detail})`);
+      assert.strictEqual(after.endSeq, 3);
+      assert.strictEqual(after.timestamp, ended.timestamp, 'the straggler did not draw');
+    } finally { cleanup(tmp); }
+  });
+
+  test('adapter timestamps are strictly increasing within a process', () => {
+    const { nextTimestamp } = require('../adapters/base-adapter');
+    const a = nextTimestamp(), b = nextTimestamp(), c = nextTimestamp();
+    assert.ok(a < b && b < c, `${a} ${b} ${c}`);
+  });
+
+  test('adapter identity fields are text, whatever the payload sends', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('oc-types');
+    try {
+      runStdinAdapter(ADAPTER, {
+        type: 'tool.execute.before', sessionId: 4242, tool: 'bash', toolInput: { command: 'ls' },
+        model_name: { provider: 'x', id: 'y' }, editor: ['oc'],
+      }, env);
+      const f = readJSON(path.join(sessionsDir, '4242.json'));
+      assert.strictEqual(f.sessionId, '4242', 'a numeric id becomes its string');
+      assert.strictEqual(typeof f.modelName, 'string');
+      assert.strictEqual(typeof f.editor, 'string');
+    } finally { cleanup(tmp); }
+  });
+
   test('the payload session id wins over the opencode-<ppid> fallback', () => {
     const { tmp, stateFile, env } = makeTempEnv('oc-plug-2');
     delete env.CLAUDE_SESSION_ID;
@@ -1575,7 +1736,9 @@ describe('adapters -- codex-wrapper classifyItem (real ThreadEvent schema)', () 
 
 describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
   // runFakeCodex (tests/_harness.js) replays a fixture through the wrapper's
-  // real spawn path, including the Windows .cmd shim.
+  // real spawn path, including the Windows .cmd shim. The tests that need a
+  // hand-built fake spawn the wrapper themselves.
+  const WRAPPER = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
 
   test('a running npm test shows the testing face', () => {
     const { tmp, stateFile } = runFakeCodex([
@@ -1690,6 +1853,103 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     cleanup(tmp);
   });
 
+  test('codex failing before it says anything counts no session', () => {
+    const { tmp, statsFile, sessionsDir } = runFakeCodex([]);
+    try {
+      const stats = fs.existsSync(statsFile) ? readJSON(statsFile) : null;
+      assert.ok(!stats || (stats.daily.sessionCount || 0) === 0, 'the placeholder id is not a session');
+      const files = fs.existsSync(sessionsDir) ? fs.readdirSync(sessionsDir) : [];
+      assert.deepStrictEqual(files, [], 'and leaves no orbital behind');
+    } finally { cleanup(tmp); }
+  });
+
+  // `close` waits for every holder of codex's stdout, so a process codex (or a
+  // shim in front of it) leaves in the background used to keep the wrapper --
+  // and the user's terminal -- blocked, the session unretired, for its whole life.
+  if (process.platform !== 'win32') {
+    test('a background process holding stdout does not keep the wrapper alive', () => {
+      const base = makeTempEnv('codex-grace');
+      try {
+        const binDir = path.join(base.tmp, 'bin');
+        fs.mkdirSync(binDir, { recursive: true });
+        const sh = path.join(binDir, 'codex');
+        fs.writeFileSync(sh, [
+          '#!/bin/sh',
+          'sleep 20 2>/dev/null &',       // holds codex's stdout, not the test's stderr
+          'echo \'{"type":"thread.started","thread_id":"tg"}\'',
+          'echo \'{"type":"turn.started"}\'',
+          'echo \'{"type":"turn.completed"}\'',
+          'exit 0',
+          '',
+        ].join('\n'), 'utf8');
+        fs.chmodSync(sh, 0o755);
+        const env = { ...base.env, PATH: binDir + path.delimiter + (process.env.PATH || '') };
+        delete env.CLAUDE_SESSION_ID;
+        const t0 = Date.now();
+        execFileSync(NODE, [WRAPPER, 'a prompt'], { env, timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] });
+        const took = Date.now() - t0;
+        assert.ok(took < 10000, `the wrapper exits after a short grace, not with the sleeper (${took}ms)`);
+        const session = readJSON(path.join(base.sessionsDir, 'tg.json'));
+        assert.strictEqual(session.stopped, true, 'and retires the session on the way out');
+      } finally { cleanup(base.tmp); }
+    });
+  }
+
+  // Setup installs codex's native hooks AND suggests the wrapper for `codex
+  // exec`, which runs those hooks too: each run was two sessions, with the
+  // tool calls, the daily session count and the streak all counted twice.
+  test('with codex\'s own hooks live, a wrapped run is one session counted once', () => {
+    const base = makeTempEnv('codex-dual');
+    try {
+      const binDir = path.join(base.tmp, 'bin');
+      fs.mkdirSync(binDir, { recursive: true });
+      const T = '019a-dual-thread';
+      const US = path.join(__dirname, '..', 'update-state.js');
+      fs.writeFileSync(path.join(binDir, 'codex-fake.js'), [
+        "'use strict';",
+        "const { execFileSync } = require('child_process');",
+        `const T = ${JSON.stringify(T)};`,
+        `const hook = (ev, extra) => execFileSync(process.execPath, [${JSON.stringify(US)}, '--editor', 'codex', ev],`,
+        "  { input: JSON.stringify({ session_id: T, hook_event_name: ev, model: 'gpt-5.1-codex', ...extra }) });",
+        "const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');",
+        "hook('SessionStart', { source: 'startup' });",
+        "out({ type: 'thread.started', thread_id: T });",
+        "hook('UserPromptSubmit', { prompt: 'fix it' });",
+        "out({ type: 'turn.started' });",
+        "hook('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' } });",
+        "out({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'ls', status: 'in_progress' } });",
+        "hook('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: 'a' });",
+        "out({ type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'ls', aggregated_output: 'a', exit_code: 0, status: 'completed' } });",
+        "hook('Stop', {});",
+        "out({ type: 'turn.completed', usage: {} });",
+        '',
+      ].join('\n'), 'utf8');
+      if (process.platform === 'win32') {
+        fs.writeFileSync(path.join(binDir, 'codex.cmd'), '@node "%~dp0codex-fake.js" %*\r\n', 'utf8');
+      } else {
+        const sh = path.join(binDir, 'codex');
+        fs.writeFileSync(sh, '#!/bin/sh\nexec node "$(dirname "$0")/codex-fake.js" "$@"\n', 'utf8');
+        fs.chmodSync(sh, 0o755);
+      }
+      const env = { ...base.env };
+      for (const k of Object.keys(env)) if (/^path$/i.test(k)) delete env[k];
+      env.PATH = binDir + path.delimiter + (process.env.PATH || '');
+      delete env.CLAUDE_SESSION_ID;
+      execFileSync(NODE, [WRAPPER, 'fix it'], { env, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] });
+
+      assert.deepStrictEqual(fs.readdirSync(base.sessionsDir), [`${T}.json`], 'one session file, the hooks\' id');
+      const stats = readJSON(base.statsFile);
+      assert.strictEqual(stats.totalToolCalls, 1, 'one tool call');
+      assert.strictEqual(stats.daily.sessionCount, 1, 'one session');
+      assert.strictEqual(stats.streak, 1, 'one success');
+      const f = readJSON(path.join(base.sessionsDir, `${T}.json`));
+      assert.strictEqual(f.stopped, true, 'the wrapper still retires the run');
+      assert.strictEqual(f.state, 'idle', 'on the hooks\' last frame, not its own stale one');
+      assert.ok(f.lastPromptAt > 0, 'keeping their attention stamp');
+      assert.strictEqual(f.model, 'gpt-5.1-codex');
+    } finally { cleanup(base.tmp); }
+  });
+
   test('a failed turn breaks the streak once, not twice', () => {
     // Codex reports one failure as BOTH a top-level error and a turn.failed.
     // Breaking the streak on each would leave brokenStreak at 0 (face.js only
@@ -1765,7 +2025,7 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
       { type: 'thread.started', thread_id: 'abc' },
     ]);
     const state = readJSON(stateFile);
-    assert.strictEqual(state.sessionId, 'codex-abc');
+    assert.strictEqual(state.sessionId, 'abc', 'the bare thread id -- the id codex\'s own hooks carry');
     assert.strictEqual(state.editor, 'codex');
     assert.strictEqual(state.modelName, 'codex', 'the status line says "codex is ..." by default');
     // The wrapper is long-lived, so it publishes its OWN pid, not its parent's.
@@ -1773,7 +2033,7 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     assert.ok(state.pid > 0 && state.pid !== process.pid,
       `pid should be the wrapper process, not the test runner (${process.pid})`);
     const files = fs.readdirSync(sessionsDir);
-    assert.deepStrictEqual(files, ['codex-abc.json'], 'exactly one orbital, named for the thread');
+    assert.deepStrictEqual(files, ['abc.json'], 'exactly one orbital, named for the thread');
     cleanup(tmp);
   });
 
@@ -1824,7 +2084,7 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     assert.strictEqual(state.state, 'responding');
     assert.strictEqual(state.detail, 'wrapping up');
     assert.strictEqual(state.stopped, true);
-    assert.strictEqual(state.sessionId, 'codex-live');
+    assert.strictEqual(state.sessionId, 'live');
     cleanup(tmp);
   });
 
@@ -1953,9 +2213,10 @@ describe('adapters -- engmux-adapter', () => {
 
   // Runs one dispatch to completion with a stand-in for the python
   // interpreter and returns the orbital session file it left behind.
-  function runEngmux(args, python) {
+  function runEngmux(args, python, envPatch = {}) {
     const base = makeTempEnv('engmux-parent');
-    const env = { ...base.env, ENGMUX_PYTHON: python };
+    const env = { ...base.env, ENGMUX_PYTHON: python, ...envPatch };
+    for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k];
     try {
       execFileSync(NODE, [ADAPTER, ...args], {
         env, timeout: 20000, stdio: ['pipe', 'pipe', 'pipe'],
@@ -2009,6 +2270,16 @@ describe('adapters -- engmux-adapter', () => {
     assert.strictEqual(session.state, 'error', 'a failed dispatch ends on the error face');
     assert.strictEqual(session.stopped, true, 'the orbital is retired when the dispatch ends');
     assert.ok(session.detail, 'the failure is described');
+  });
+
+  // Claude Code's tool processes get CLAUDE_CODE_SESSION_ID, not CLAUDE_SESSION_ID.
+  test('inside Claude Code the parent is CLAUDE_CODE_SESSION_ID, not the shell pid', () => {
+    const { session } = runEngmux(['-E', 'opencode', 'do X'], NODE,
+      { CLAUDE_SESSION_ID: undefined, CLAUDE_CODE_SESSION_ID: 'cc-session-uuid' });
+    assert.strictEqual(session.parentSession, 'cc-session-uuid');
+    const nested = runEngmux(['-E', 'opencode', 'do X'], NODE,
+      { CLAUDE_SESSION_ID: 'engmux-outer', CLAUDE_CODE_SESSION_ID: 'cc-session-uuid' }).session;
+    assert.strictEqual(nested.parentSession, 'engmux-outer', 'an explicit CLAUDE_SESSION_ID still wins');
   });
 
   test('a python that cannot be spawned still retires the orbital with an error', () => {
@@ -2265,9 +2536,25 @@ describe('bug fix regressions', () => {
   });
 
   test('renderer.js PID guard handles EPERM as running (#65)', () => {
+    // The guard now lives in shared.isRendererAlive, which the renderer, the
+    // hook and launch.js all share (they used to disagree about EPERM).
+    const { isRendererAlive } = require(path.join(__dirname, '..', 'lib', 'shared.js'));
+    const tmp = fs.mkdtempSync(path.join(require('os').tmpdir(), 'cc-pid65-'));
+    const pidFile = path.join(tmp, 'pid');
+    const realKill = process.kill;
+    try {
+      fs.writeFileSync(pidFile, '424242');
+      process.kill = () => { const e = new Error('perm'); e.code = 'EPERM'; throw e; };
+      assert.strictEqual(isRendererAlive(pidFile), true, 'EPERM means the process exists');
+      process.kill = () => { const e = new Error('gone'); e.code = 'ESRCH'; throw e; };
+      assert.strictEqual(isRendererAlive(pidFile), false, 'ESRCH means it does not');
+    } finally {
+      process.kill = realKill;
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-    assert.ok(src.includes("err.code === 'EPERM'"),
-      'PID guard catch should check for EPERM and treat as running');
+    assert.ok(/return isRendererAlive\(PID_FILE\)/.test(src),
+      'the renderer start-up guard asks shared.isRendererAlive');
   });
 
   test('forceState applies the state at once and holds it for the given minimum (#67)', () => {
@@ -2415,7 +2702,7 @@ describe('update-state.js stopped flag preservation (#98)', () => {
   test('source: renderer fresh-read loop only detects false->true stopped transitions', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
     assert.ok(
-      src.includes('stoppedNow && !lastStopped && freshTs'),
+      src.includes('stoppedNow && !lastStopped && isNewerWrite(freshTs'),
       'renderer.js fresh-read should only detect false->true transitions'
     );
     assert.ok(
@@ -2856,17 +3143,26 @@ describe('bug fix structural tests', () => {
   const OPENCODE_ADAPTER = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
   const PARTICLES = path.join(__dirname, '..', 'lib', 'particles.js');
 
-  // Bug #1 -- Windows Terminal fallback probes with execSync('where wt')
-  test('update-state.js probes for wt with "where wt" before spawning', () => {
-    const src = fs.readFileSync(UPDATE_STATE, 'utf8');
-    assert.ok(src.includes('where wt'),
-      'should probe for wt with execSync("where wt") instead of relying on spawn throw');
+  // Bug #1 -- Windows Terminal fallback probes for wt before spawning. The
+  // spawn moved to shared.spawnRendererWindow (launch.js shares it), and the
+  // probe is System32's where.exe run from HOME, never a `where` that cmd.exe
+  // would look up in the user's project folder first.
+  test('the renderer spawn probes for wt with System32 where.exe before spawning', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'shared.js'), 'utf8');
+    const body = src.slice(src.indexOf('function spawnRendererWindow('));
+    assert.ok(/execFileSync\(path\.join\(sysDir, 'where\.exe'\), \['wt'\]/.test(body),
+      'probes with an absolute where.exe, not execSync("where wt")');
+    assert.ok(/cwd: HOME/.test(body.slice(0, body.indexOf('\n}\n'))),
+      'runs the probe from HOME, not the project folder');
+    assert.ok(fs.readFileSync(UPDATE_STATE, 'utf8').includes('spawnRendererWindow('),
+      'update-state.js opens the window through the shared helper');
   });
 
-  test('update-state.js sets hasWt flag from where-wt probe result', () => {
-    const src = fs.readFileSync(UPDATE_STATE, 'utf8');
-    assert.ok(src.includes('hasWt'),
-      'should have hasWt boolean flag controlled by where-wt probe');
+  test('the renderer spawn falls back to cmd when the wt probe fails', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'shared.js'), 'utf8');
+    const body = src.slice(src.indexOf('function spawnRendererWindow('));
+    assert.ok(/hasWt \? cmds\.wt : cmds\.cmd/.test(body),
+      'hasWt picks Windows Terminal, else a plain cmd window');
   });
 
   // Bug #2 -- OpenCode adapter toolInput unwraps the args, never the wrapper
@@ -3205,7 +3501,7 @@ describe('editor PID liveness tracking', () => {
       'PID death should set editorDead');
     assert.ok(rendererSrc.includes('(lastStopped || editorDead) && !RESCUE_EXCLUDE.has(face.state)'),
       'rescue block should fire on lastStopped OR editorDead');
-    assert.ok(rendererSrc.includes('!lastStopped && !editorDead'),
+    assert.ok(/sessionActive = !lastStopped && (?:\(!lastTurnOver \|\| lastCompacting\) && )?!editorDead/.test(rendererSrc),
       'sessionActive should account for editorDead');
     assert.ok(!rendererSrc.match(/isProcessAlive\(lastEditorPid\)\)\s*\{\s*lastStopped = true/),
       'PID death must not be stored in lastStopped (clobbered by forced re-read)');
@@ -3218,7 +3514,7 @@ describe('editor PID liveness tracking', () => {
       'candidate PID should require a 2.5s survival window');
     assert.ok(rendererSrc.includes('isProcessAlive(candidatePid)'),
       'candidate PID should be liveness-checked before arming');
-    assert.ok(rendererSrc.includes('editorDead && ts > lastAppliedTimestamp'),
+    assert.ok(rendererSrc.includes('editorDead && isNewerWrite(ts, lastAppliedTimestamp, now)'),
       'a fresh write should clear a false editorDead (PID reuse guard)');
   });
 
@@ -3731,7 +4027,7 @@ describe('adapters -- codex-wrapper turn end vs session end', () => {
   // end from the close handler's session end, which overwrites it.
   test('turn.completed / turn.failed are turn ends; the next turn clears them', () => {
     const threadId = `te-${Date.now()}`;
-    const file = path.join(SHARED.SESSIONS_DIR, SHARED.safeFilename(`codex-${threadId}`) + '.json');
+    const file = path.join(SHARED.SESSIONS_DIR, SHARED.safeFilename(threadId) + '.json');
     withStateFile({ sessionId: 'nobody', stopped: true, timestamp: 0 }, () => {
       wrapper.handleEvent({ type: 'thread.started', thread_id: threadId });
       wrapper.handleEvent({ type: 'turn.started' });
@@ -3819,7 +4115,7 @@ describe('adapters -- codex-wrapper turn end vs session end', () => {
     env.PATH = binDir + path.delimiter + (process.env.PATH || '');
     delete env.CLAUDE_SESSION_ID;
     const child = spawn(NODE, [WRAPPER, 'a prompt'], { env, stdio: ['ignore', 'ignore', 'ignore'] });
-    return { ...base, child, done: exited(child), sessionFile: path.join(base.sessionsDir, 'codex-sig.json') };
+    return { ...base, child, done: exited(child), sessionFile: path.join(base.sessionsDir, 'sig.json') };
   }
 
   if (POSIX) {
@@ -4101,6 +4397,11 @@ describe('adapters -- third review pass: the OpenCode plugin keeps a session in 
         assert.strictEqual(lines[1], 'end', 'the second child must not start before the first ends');
         assert.ok(lines[0].includes('tool.execute.before'));
         assert.ok(lines[2].includes('tool.execute.after'));
+        // Numbered in the order OpenCode reported them (round 3: the adapter
+        // drops a straggler numbered before a recorded turn end).
+        const [a, b] = [JSON.parse(lines[0]), JSON.parse(lines[2])];
+        assert.ok(a.seq > 0 && b.seq > a.seq, `${a.seq} then ${b.seq}`);
+        assert.ok(a.pluginId && a.pluginId === b.pluginId);
       } finally {
         if (realNode === undefined) delete process.env.CODE_CRUMB_NODE; else process.env.CODE_CRUMB_NODE = realNode;
         fs.rmSync(dir, { recursive: true, force: true });
@@ -4180,6 +4481,44 @@ describe('adapters -- review round: batches, turn ends and counters', () => {
     assert.strictEqual(Object.keys(map).length, 50);
   });
 
+  test('an adapter turn end credits the session\'s time and records', () => {
+    const OPENCODE = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+    const t = makeTempEnv('oc-time');
+    try {
+      runStdinAdapter(OPENCODE, { type: 'tool.execute.before', sessionId: 'ses_t', callID: 'c1', tool: 'read', toolInput: { filePath: 'a.js' } }, t.env);
+      const s = readJSON(t.statsFile);
+      const back = Date.now() - 40 * 60000;               // the session began 40 minutes ago
+      s.session.start = back;
+      s.sessionCounters.ses_t.start = back;
+      fs.writeFileSync(t.statsFile, JSON.stringify(s));
+      runStdinAdapter(OPENCODE, { type: 'session.idle', sessionId: 'ses_t' }, t.env);
+      const after = readJSON(t.statsFile);
+      assert.ok(after.daily.cumulativeMs >= 39 * 60000, `${after.daily.cumulativeMs}ms: adapters credited nothing`);
+      assert.ok(after.records.longestSession >= 39 * 60000);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('an adapter counts a git commit for its session', () => {
+    const OPENCLAW = path.join(ADAPTERS_DIR, 'openclaw-adapter.js');
+    const t = makeTempEnv('claw-commit');
+    try {
+      runStdinAdapter(OPENCLAW, { event: 'tool_result', session_id: 'claw-c', toolName: 'bash',
+        input: { command: 'git commit -m "x"' }, output: '[main abc123] x' }, t.env);
+      const sf = readJSON(path.join(t.sessionsDir, 'claw-c.json'));
+      assert.deepStrictEqual([sf.state, sf.detail], ['proud', 'committed']);
+      assert.strictEqual(sf.commitCount, 1);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('pruneCounters never evicts the session whose hook is running', () => {
+    const { pruneCounters, freshCounter } = require('../lib/state-machine');
+    const now = Date.now();
+    const map = { owner: freshCounter(now), live: { ...freshCounter(now - 5000), toolCalls: 0 } };
+    for (let i = 0; i < 60; i++) map[`busy-${i}`] = { ...freshCounter(now - i), toolCalls: 5 };
+    pruneCounters(map, ['owner', 'live'], now);
+    assert.ok(map.owner && map.live, 'evicting it re-counted it as a new session on every event');
+  });
+
   test('pruneCounters never evicts parked agents', () => {
     const { pruneCounters, freshCounter } = require('../lib/state-machine');
     const now = Date.now();
@@ -4244,6 +4583,73 @@ describe('adapters -- third review pass: the OpenClaw snippets name their sessio
       assert.ok(src.includes('execFileSync'), 'no shell, so the adapter\'s parent is Pi itself');
       assert.ok(/openclaw-\$\{process\.pid\}|openclaw-\\\$\{process\.pid\}/.test(src), 'one id per Pi process');
     }
+  });
+});
+
+// -- Round 4: review of the round-3 adapter changes --------------------------
+
+describe('adapters -- round 4', () => {
+  const OPENCODE = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+  const OPENCLAW = path.join(ADAPTERS_DIR, 'openclaw-adapter.js');
+  const rawRun = (adapter, input, env) => {
+    try { execFileSync(NODE, [adapter], { input, env, timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] }); }
+    catch (e) { if (e.status !== 0 && e.status !== null) throw e; }
+  };
+
+  // The fallback kept its own list of tool-end names, which missed
+  // OpenClaw's: a late oversized tool_execution_end re-opened a finished turn.
+  test('an oversized OpenClaw tool end is judged as one, and keeps a turn end', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('pi-big');
+    try {
+      runStdinAdapter(OPENCLAW, { event: 'tool_call', session_id: 'pi-1', toolName: 'bash', input: { command: 'make' } }, env);
+      runStdinAdapter(OPENCLAW, { event: 'turn_end', session_id: 'pi-1' }, env);
+      assert.strictEqual(readJSON(path.join(sessionsDir, 'pi-1.json')).turnEnded, true, 'fixture');
+      const big = 'x'.repeat(1100000);
+      rawRun(OPENCLAW, JSON.stringify({ event: 'tool_execution_end', session_id: 'pi-1', toolName: 'bash',
+        input: { command: 'make' }, output: 'make: *** [all] Error 2\nexit code 2\n' + big }), env);
+      const f = readJSON(path.join(sessionsDir, 'pi-1.json'));
+      assert.strictEqual(f.turnEnded, true, `the late tool end kept the turn end (${f.state} / ${f.detail})`);
+      assert.strictEqual(f.state, 'error', 'and was judged as a tool end');
+      assert.strictEqual(readJSON(stateFile).stopped, true, 'the global file too');
+    } finally { cleanup(tmp); }
+  });
+
+  // An unparseable payload wrote a session file under the synthetic
+  // <editor>-<ppid> id: a live phantom orbital. And the fallback's write
+  // carried no counters, so the stats rows read zero.
+  test('the fallback writes a session file only under the payload\'s own id, with its counters', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('oc-fb');
+    try {
+      delete env.CLAUDE_SESSION_ID;
+      runStdinAdapter(OPENCODE, { type: 'tool.execute.before', sessionId: 'ses_fb', tool: 'edit', toolInput: { filePath: 'a.js' } }, env);
+      const before = readJSON(path.join(sessionsDir, 'ses_fb.json'));
+      rawRun(OPENCODE, '{"type":"tool.execute.after","sessionId":"ses_fb","tool":"edit","toolInput":{"filePath":"a.js","content":"xx', env);
+      assert.deepStrictEqual(fs.readdirSync(sessionsDir).sort(), ['ses_fb.json'], 'no phantom opencode-<ppid> session');
+      const after = readJSON(path.join(sessionsDir, 'ses_fb.json'));
+      assert.strictEqual(after.toolCalls, before.toolCalls, 'counters carried');
+      assert.strictEqual(after.filesEdited, before.filesEdited);
+      assert.strictEqual(after.sessionStart, before.sessionStart);
+      rawRun(OPENCODE, 'not json at all', env);
+      assert.deepStrictEqual(fs.readdirSync(sessionsDir).sort(), ['ses_fb.json'], 'an id-less payload writes no session file');
+    } finally { cleanup(tmp); }
+  });
+
+  // A task can run a task: the grandchild's direct parent is itself a child,
+  // and it became the stats owner (a second session, the root credited).
+  test('a nested OpenCode child counts toward the root session', () => {
+    const { tmp, statsFile, env } = makeTempEnv('oc-nest');
+    try {
+      delete env.CLAUDE_SESSION_ID;
+      runStdinAdapter(OPENCODE, { type: 'tool.execute.before', sessionId: 'ses_root', tool: 'task', toolInput: {} }, env);
+      runStdinAdapter(OPENCODE, { type: 'session.created', sessionId: 'ses_kid', parentSession: 'ses_root' }, env);
+      runStdinAdapter(OPENCODE, { type: 'session.created', sessionId: 'ses_grand', parentSession: 'ses_kid' }, env);
+      runStdinAdapter(OPENCODE, { type: 'tool.execute.before', sessionId: 'ses_grand', tool: 'read', toolInput: { filePath: 'a.js' } }, env);
+      const st = readJSON(statsFile);
+      assert.strictEqual(st.session.id, 'ses_root');
+      assert.strictEqual(st.daily.sessionCount, 1);
+      assert.deepStrictEqual(Object.keys(st.sessionCounters), ['ses_root']);
+      assert.strictEqual(st.session.toolCalls, 2);
+    } finally { cleanup(tmp); }
   });
 });
 

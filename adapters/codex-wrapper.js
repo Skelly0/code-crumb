@@ -24,20 +24,26 @@ const { spawn } = require('child_process');
 const path = require('path');
 const {
   writeState, writeSessionState, readStats, writeStats, guardedWriteState,
-  initSession, buildExtra, trackEditedFile,
+  initSession, buildExtra, trackEditedFile, creditOwnerSession,
   handleToolStart, handleToolEnd, processJsonlStream, signalExitCode, exitWhenFlushed,
 } = require('./base-adapter');
 const {
-  toolToState, humanizeToolName, updateStreak, pruneFrequentFiles, prettyModelName,
+  toolToState, humanizeToolName, updateStreak, pruneFrequentFiles, prettyModelName, toText,
 } = require('../lib/state-machine');
 const { buildEditorSpawn } = require('../launch');
 const shared = require('../lib/shared');
-const { withStatsLock } = shared;
+const { withStatsLock, SESSIONS_DIR, safeFilename } = shared;
 
 // -- Session setup -----------------------------------------------------
 
 // thread.started replaces this with the real codex thread id.
 let sessionId = process.env.CLAUDE_SESSION_ID || `codex-${process.pid}`;
+let threadStarted = false;
+let committedAny = false; // a stats cycle has run under the current id
+// A real identity: the caller's CLAUDE_SESSION_ID, or codex's own thread id.
+function ownsRealId() {
+  return threadStarted || !!process.env.CLAUDE_SESSION_ID;
+}
 const modelName = process.env.CODE_CRUMB_MODEL || 'codex';
 const EDITOR = 'codex';
 // Real model identity, from the `-m` this wrapper forwards to codex. Filled in
@@ -77,6 +83,16 @@ let lastPromptAt = 0; // attention stamp: set on thread/turn start, carried on e
 // against counting one failure twice.
 let streakBrokenThisTurn = false;
 let finished = false; // set once by finishSession
+
+// Set once codex's own native hooks (node setup.js codex) are seen writing
+// this session. The wrapper then stops writing what the hooks already report
+// (see hooksAreLive), or every run was two sessions -- double the tool
+// calls, the daily sessions and the streak.
+let hooksLive = false;
+const WRAPPER_START = Date.now();
+
+// How long after codex exits the wrapper waits for its stdout to close.
+const EXIT_GRACE_MS = 3000;
 
 function breakStreak(stats) {
   if (streakBrokenThisTurn) return;
@@ -247,12 +263,15 @@ function writeGlobal(state, detail, extra) {
 // the ownership guard), `turnEnded` on the session file -- `stopped` there
 // would retire the orbital and drop the session from the main-face policy.
 function commit(decide) {
+  committedAny = true;
   withStatsLock(() => {
     const stats = readStats();
     initSession(stats, sessionId);
     const out = decide(stats);
     if (out && out.state) {
       const detail = out.detail === undefined ? lastDetail : out.detail;
+      // A turn or session end folds this session's time into today's total.
+      if (out.stopped || out.turnEnded) creditOwnerSession(stats);
       const extra = { ...buildExtra(stats, sessionId, modelName, EDITOR, codexModel), pid: process.pid };
       if (out.diffInfo) extra.diffInfo = out.diffInfo;
       if (out.stopped || out.turnEnded) extra.stopped = true;
@@ -305,6 +324,37 @@ function applyItem(item, phase, countTool) {
 
 // -- JSONL event dispatcher --------------------------------------------
 
+// Whether codex's native hooks are writing this session too. They write the
+// same file (same id) with the editor tag `codex` and never this process's
+// pid -- a hook's pid is codex's (Unix) or absent (win32) -- so a hook write
+// newer than this wrapper is proof. Checked before each write until seen.
+function hooksAreLive() {
+  if (!threadStarted) return false;
+  try {
+    const f = JSON.parse(fs.readFileSync(
+      path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
+    if (!hooksLive && f && f.editor === 'codex' && f.pid !== process.pid
+        && (f.timestamp || 0) >= WRAPPER_START) hooksLive = true;
+    // Follow what the hooks last wrote, so the run's final frame (see
+    // closeOutcome) is their state, carrying their attention stamp and model,
+    // and not whatever this wrapper wrote before it went quiet.
+    if (hooksLive && f && typeof f.state === 'string') {
+      lastState = f.state;
+      lastDetail = typeof f.detail === 'string' ? f.detail : '';
+      if (f.lastPromptAt) lastPromptAt = f.lastPromptAt;
+      if (typeof f.model === 'string' && f.model) codexModel = f.model;
+    }
+  } catch {}
+  return hooksLive;
+}
+
+// With the hooks live, they report the turn and every tool more precisely
+// than the event stream does. What they never see stays the wrapper's: a
+// failed turn (codex runs no Stop for one), a retry notice, and the end of
+// the run (finishSession).
+const HOOK_COVERED = new Set(['thread.started', 'turn.started', 'turn.completed',
+  'item.started', 'item.updated', 'item.completed']);
+
 function handleEvent(event) {
   // After the session-ending write, nothing may write a live state again:
   // codex keeps printing while it shuts down after a forwarded signal, and a
@@ -313,14 +363,24 @@ function handleEvent(event) {
   if (finished) return;
   try {
     const type = (event && event.type) || '';
+    if (type === 'thread.started' && event.thread_id) {
+      sessionId = toText(event.thread_id) || sessionId;
+      ownIds.add(sessionId);
+      threadStarted = true;
+    }
+    if (HOOK_COVERED.has(type) && hooksAreLive()) {
+      if (type === 'turn.started') streakBrokenThisTurn = false;
+      if (type === 'turn.completed') turnOutcome = 'completed';
+      return;
+    }
 
     if (type === 'thread.started') {
       // The codex thread id is the session identity; before it arrives the
       // wrapper only owns the global state file, so no orphan orbital is left.
-      if (event.thread_id) {
-        sessionId = `codex-${event.thread_id}`;
-        ownIds.add(sessionId);
-      }
+      // The id was taken above: the bare thread id, which is also the
+      // `session_id` codex's native hooks carry, so a run the hooks see too is
+      // one session, not two (the placeholder stays editor-prefixed).
+      threadStarted = true;
       lastPromptAt = Date.now();
       commit(() => ({ state: 'starting', detail: 'codex is waking up' }));
     }
@@ -392,7 +452,18 @@ function finishSession(outcome) {
   if (finished) return false;
   finished = true;
   try {
-    commit(() => ({ state: outcome.state, detail: outcome.detail, stopped: true }));
+    if (hooksLive) hooksAreLive();   // the hooks' latest frame, stamp and model
+    if (!ownsRealId() && !committedAny) {
+      // Codex ended (or was interrupted) before saying anything: the id is
+      // still the placeholder, which must not become a session of its own --
+      // a full commit counted it in daily.sessionCount and left an orbital.
+      writeGlobal(outcome.state, outcome.detail, {
+        sessionId, modelName, ...(codexModel ? { model: codexModel } : {}),
+        editor: EDITOR, pid: process.pid, stopped: true,
+      });
+    } else {
+      commit(() => ({ state: outcome.state, detail: outcome.detail, stopped: true }));
+    }
   } catch {}
   return true;
 }
@@ -459,13 +530,26 @@ function main() {
   // 'close', not 'exit': exit fires while stdout may still hold buffered
   // JSONL, so the last events of a turn (turn.completed included) could be
   // lost to the process.exit below.
-  codex.on('close', (code, signal) => {
+  let closed = false;
+  const onClose = (code, signal) => {
+    if (closed) return;
+    closed = true;
+    if (hooksLive) hooksAreLive();   // end on the hooks' latest frame
     // The stream already said how the turn ended; exiting only stops the
     // session. A non-zero exit with no failure reported is the crash case,
     // and a signal (ours or anyone's) is an interruption.
     const outcome = closeOutcome({ code, signal, caught, turnOutcome, lastState, lastDetail });
     finishSession(outcome);
     exitWhenFlushed(outcome.exitCode);
+  };
+  codex.on('close', onClose);
+  // But 'close' waits for every holder of the stdout pipe, and anything codex
+  // (or a shell shim in front of it) leaves running in the background keeps
+  // it open: the wrapper then sat blocking the user's terminal, the session
+  // unretired, for as long as that process lived. Once codex itself has
+  // exited, a short grace drains what is buffered and then ends the run.
+  codex.on('exit', (code, signal) => {
+    setTimeout(() => onClose(code, signal), EXIT_GRACE_MS).unref();
   });
 }
 

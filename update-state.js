@@ -11,7 +11,7 @@
 // |          SessionStart, SessionEnd, PreCompact, PostCompact,    |
 // |          PermissionRequest, Setup, Elicitation,                |
 // |          ElicitationResult, ConfigChange, InstructionsLoaded,  |
-// |          StopFailure, PostModelSwitch                          |
+// |          StopFailure, PostModelSwitch, and Codex's Interrupt   |
 // |                                                                |
 // |  Works with Claude Code, Codex CLI, and OpenCode               |
 // +================================================================+
@@ -21,11 +21,12 @@ const path = require('path');
 const {
   STATE_FILE, SESSIONS_DIR, STATS_FILE, PID_FILE, QUIT_FLAG_FILE, SPAWN_LOCK_FILE, STATS_LOCK_FILE,
   safeFilename, getGitBranch, getIsWorktree, loadPrefs,
-  writeJsonAtomic, acquireSpawnLock, acquireFileLock, buildRendererCommands,
+  writeJsonAtomic, acquireSpawnLock, acquireFileLock, spawnRendererWindow, isRendererAlive,
+  COMPLETION_STATES,
 } = require('./lib/shared');
 const {
   toolToState, normalizeToolResponse, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
-  EDIT_TOOLS, SUBAGENT_TOOLS, toText,
+  EDIT_TOOLS, SUBAGENT_TOOLS, ASK_TOOLS, toText,
   pruneFrequentFiles, topFrequentFiles, buildSubagentSessionState,
   subagentSessionId, subagentLabel,
   classifyForeignSession, pruneTopLevelSessions,
@@ -33,6 +34,7 @@ const {
   COUNTER_MAX_FILES,
   freshCounter: _freshCounter, normalizeCounter: _normalizeCounter,
   parkAgents: _parkAgents, unparkAgents: _unparkAgents, pruneCounters: _pruneCounters,
+  creditSession: _creditSession, creditEndFor, touchCounter, localDay,
 } = require('./lib/state-machine');
 
 // Safety net for a missed SubagentStop: an activeSubagents entry older than
@@ -65,7 +67,10 @@ const TURN_OPENING_EVENTS = new Set([
   'PreToolUse', 'UserPromptSubmit', 'SessionStart', 'SubagentStart',
   'PreCompact', 'Setup', 'PostModelSwitch',
 ]);
-const TURN_CLOSING_EVENTS = new Set(['Stop', 'StopFailure', 'SessionEnd']);
+// Interrupt is Codex's: it runs no Stop hook when the user presses Esc (and
+// none at all for a failed turn), only Interrupt. Without it the face held
+// "running command · still running" for the whole 10-minute long-tool hold.
+const TURN_CLOSING_EVENTS = new Set(['Stop', 'StopFailure', 'SessionEnd', 'Interrupt']);
 
 // Session files that may inherit a finished turn from their predecessor.
 // `waiting` is the exception: the renderer folds `turnEnded` into `stopped`
@@ -77,6 +82,43 @@ function carriesTurnEnd(event) {
   return !TURN_OPENING_EVENTS.has(event) && !TURN_CLOSING_EVENTS.has(event);
 }
 
+// Turn-opening events that also happen BETWEEN turns: a /compact, a /model, a
+// config reload, a subagent's own auto-compaction (Claude Code sends that one
+// with the parent's session_id and no agent_id). After a finished turn they
+// sit beside it rather than start a new one, so they keep its end (as
+// `turnOver`, below). Dropping it left the renderer on the 45s thinking
+// timeout with nothing left to close the turn.
+const AMBIENT_EVENTS = new Set(['PreCompact', 'PostModelSwitch', 'SessionStart', 'Setup']);
+
+// The states a finished turn may be carried with as `turnEnded`. The renderer
+// folds `turnEnded` into `stopped`, force-rescues every face outside its
+// RESCUE_EXCLUDE to "wrapping up", and shows a new idle + stopped write as
+// responding: a ConfigChange's `reading` after a Stop replayed the whole
+// responding -> done! celebration. Everything else carries the same fact as
+// `turnOver`, which the renderer reads as "not active" (the short idle
+// timeout) but never rescues -- `waiting` was the first such case.
+const TURN_END_SAFE_STATES = new Set([...COMPLETION_STATES, 'error']);
+
+// Which tool call a permission prompt is waiting on. PermissionRequest
+// carries no tool_use_id (checked against the 2.1.281 schema), only the
+// tool's name and input -- and so does the PostToolUse that answers it when
+// the user allows. A short digest keeps the session file small.
+function toolCallKey(name, input) {
+  let text = '';
+  try { text = JSON.stringify(input) || ''; } catch {}
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+  return `${toText(name)}:${h.toString(36)}:${text.length}`;
+}
+
+// What a write inherits from a session file that records a finished turn:
+// null, 'turnEnded' or 'turnOver'.
+function inheritedTurnEnd(event, state) {
+  if (AMBIENT_EVENTS.has(event)) return 'turnOver';
+  if (!carriesTurnEnd(event)) return null;
+  return TURN_END_SAFE_STATES.has(state) ? 'turnEnded' : 'turnOver';
+}
+
 // Sticky session-file fields: set once, preserved across every later write.
 // `editor` is deliberately absent: every write stamps it fresh (EDITOR is
 // never empty), so a copy-if-missing loop could never fire for it. The owner's
@@ -86,23 +128,8 @@ const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeamm
 // Per-session counters, and the parking of a non-owner's agents, live in
 // state-machine.js (see "Per-Session Counters") -- the adapters share them.
 
-// Fold a session's elapsed time into the records and today's cumulative
-// total. `creditedMs` remembers how much was already added, so crediting the
-// same session at every turn end and every ownership switch never counts a
-// millisecond twice.
-function _creditSession(stats, c, now) {
-  if (!c || !c.start) return;
-  const dur = now - c.start;
-  if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
-  if (c.filesEdited.length > (stats.records.mostFilesEdited || 0)) {
-    stats.records.mostFilesEdited = c.filesEdited.length;
-  }
-  const delta = dur - (c.creditedMs || 0);
-  if (delta > 0) {
-    stats.daily.cumulativeMs += delta;
-    c.creditedMs = dur;
-  }
-}
+// Session time and records are credited by state-machine.js's creditSession
+// (shared with the adapters) -- see creditEndFor for an outgoing owner.
 
 // Read a session file, or null.
 function _readSessionFile(id) {
@@ -361,39 +388,13 @@ function ensureRendererRunning(editorStarting = false) {
     }
     try { fs.accessSync(QUIT_FLAG_FILE); return; } catch {}
 
-    // Check if renderer alive via PID file
-    try {
-      const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
-      if (!isNaN(pid)) { process.kill(pid, 0); return; } // alive
-    } catch {}
+    // Renderer alive (PID file with a fresh heartbeat)? Nothing to do.
+    if (isRendererAlive(PID_FILE)) return;
 
     // Renderer dead/missing — one hook spawns it, the rest back off.
     if (!acquireSpawnLock(SPAWN_LOCK_FILE, 5000)) return;
 
-    const { spawn, execSync } = require('child_process');
-    const rendererPath = path.resolve(__dirname, 'renderer.js');
-    const cmds = buildRendererCommands(process.platform, [rendererPath], 'Code Crumb');
-
-    let child;
-    if (process.platform === 'win32') {
-      // Probe for Windows Terminal before spawning (spawn doesn't throw synchronously)
-      let hasWt = false;
-      try { execSync('where wt', { stdio: 'ignore' }); hasWt = true; } catch {}
-      const c = hasWt ? cmds.wt : cmds.cmd;
-      child = spawn(c.cmd, c.args, c.opts);
-    } else if (process.platform === 'darwin') {
-      child = spawn(cmds.osascript.cmd, cmds.osascript.args, cmds.osascript.opts);
-    } else {
-      // Linux — try common terminal emulators in order
-      for (const key of Object.keys(cmds)) {
-        try {
-          execSync(`command -v ${cmds[key].cmd}`, { stdio: 'ignore' });
-          child = spawn(cmds[key].cmd, cmds[key].args, cmds[key].opts);
-          break;
-        } catch {}
-      }
-    }
-    if (child) child.unref();
+    spawnRendererWindow(path.resolve(__dirname, 'renderer.js'), 'Code Crumb');
   } catch {} // Never throw from a hook
 }
 
@@ -467,6 +468,7 @@ function writeFallback(ids, override) {
     fallbackState = 'thinking';
     fallbackDetail = 'reading your message';
     fallbackExtra.lastPromptAt = Date.now();
+    fallbackExtra.answered = true;   // the user spoke (a big paste lands here)
   } else if (hookEvent === 'TeammateIdle') {
     fallbackState = 'waiting';
     fallbackDetail = 'teammate idle';
@@ -516,6 +518,7 @@ function writeFallback(ids, override) {
   } else if (hookEvent === 'ElicitationResult') {
     fallbackState = 'satisfied';
     fallbackDetail = 'input received';
+    fallbackExtra.answered = true;
   } else if (hookEvent === 'ConfigChange') {
     fallbackState = 'reading';
     fallbackDetail = 'config updated';
@@ -526,9 +529,9 @@ function writeFallback(ids, override) {
     // No payload here, so no to_model to name.
     fallbackState = 'thinking';
     fallbackDetail = 'model switched';
-  } else if (hookEvent === 'StopFailure') {
+  } else if (hookEvent === 'StopFailure' || hookEvent === 'Interrupt') {
     fallbackState = 'error';
-    fallbackDetail = 'API error';
+    fallbackDetail = hookEvent === 'Interrupt' ? 'interrupted' : 'API error';
     // The failed turn is over: global `stopped`, session-file `turnEnded`.
     if (!isAgent) fallbackExtra.stopped = true;
   }
@@ -562,13 +565,14 @@ function writeFallback(ids, override) {
     for (const field of STICKY_FIELDS) {
       if (prevSession[field] && !sessionExtra[field]) sessionExtra[field] = prevSession[field];
     }
-    if ((prevSession.turnEnded || prevSession.turnOver) && carriesTurnEnd(hookEvent)) {
-      if (fallbackState === 'waiting') sessionExtra.turnOver = true;
-      else sessionExtra.turnEnded = true;
+    if (prevSession.turnEnded || prevSession.turnOver) {
+      const inherit = inheritedTurnEnd(hookEvent, fallbackState);
+      if (inherit) sessionExtra[inherit] = true;
     }
   }
   const globalExtra = (!fallbackExtra.stopped && globalWasOurStop
-    && carriesTurnEnd(hookEvent) && fallbackState !== 'waiting')
+    && (carriesTurnEnd(hookEvent) || (AMBIENT_EVENTS.has(hookEvent) && hookEvent !== 'SessionStart'))
+    && fallbackState !== 'waiting')
     ? { ...fallbackExtra, stopped: true } : fallbackExtra;
   if (shouldWriteGlobal) writeState(fallbackState, fallbackDetail, globalExtra);
 
@@ -578,7 +582,7 @@ function writeFallback(ids, override) {
     delete idleFallbackExtra.turnOver;
     writeSessionState(sessionFileId, 'idle', 'between turns', false, idleFallbackExtra);
   } else {
-    if (hookEvent === 'StopFailure' && !isAgent) {
+    if ((hookEvent === 'StopFailure' || hookEvent === 'Interrupt') && !isAgent) {
       sessionExtra.turnEnded = true;
       delete sessionExtra.turnOver;
     }
@@ -629,6 +633,8 @@ process.stdin.on('end', () => {
   let diffInfo = null;
   let workState = null;
   let workDetail = null;
+  let waitingOn = null; // set by a PermissionRequest (see toolCallKey)
+  let compacting = false; // a PreCompact that is real work on this session
   // A compaction restart normally carries lastPromptAt forward off its own
   // session file. Set when that file is gone, so there is nothing to carry.
   let compactWithoutPredecessor = false;
@@ -681,15 +687,15 @@ process.stdin.on('end', () => {
     const stats = readStats();
 
     // Daily tracking -- reset counters on new day
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDay();
     if (!stats.daily || stats.daily.date !== today) {
       stats.daily = { date: today, sessionCount: 0, cumulativeMs: 0 };
     }
-    if (!stats.frequentFiles) stats.frequentFiles = {};
+    if (!stats.frequentFiles) stats.frequentFiles = Object.create(null);
     // Registry of known top-level sessions (#134) — populated at SessionStart,
     // which real subagents never fire. Used to tell parallel editor windows
     // apart from subagents when their hooks interleave.
-    if (!stats.topLevelSessions) stats.topLevelSessions = {};
+    if (!stats.topLevelSessions) stats.topLevelSessions = Object.create(null);
     // A user prompt is proof of a top-level session, and so is a Stop that
     // carries no agent_id (a subagent's turn ends in SubagentStop, or in a
     // Stop WITH agent_id). Registering here, before classification, rescues a
@@ -768,7 +774,7 @@ process.stdin.on('end', () => {
     const now = Date.now();
     if (!stats.sessionCounters || typeof stats.sessionCounters !== 'object'
         || Array.isArray(stats.sessionCounters)) {
-      stats.sessionCounters = {};
+      stats.sessionCounters = Object.create(null);
     }
     const counters = stats.sessionCounters;
     // Seed the owner's entry from stats.session when it has none (a stats
@@ -784,7 +790,7 @@ process.stdin.on('end', () => {
     }
     let counter = _normalizeCounter(counters[sessionId], now);
     if (!counter) counter = counters[sessionId] = _freshCounter(now);
-    counter.lastSeen = now;
+    touchCounter(counter, now);
     // daily.sessionCount counts sessions, once per id -- not once per switch
     // of stats.session ownership, which two alternating windows did on every
     // hook. An agent event does not count its parent (the parent's own events
@@ -798,7 +804,7 @@ process.stdin.on('end', () => {
       // Credit the outgoing owner's records, then adopt this session with its
       // OWN counters -- a switch is not a new session.
       const outgoing = stats.session.id ? counters[stats.session.id] : null;
-      if (outgoing) _creditSession(stats, outgoing, now);
+      if (outgoing) _creditSession(stats, outgoing, creditEndFor(outgoing, now));
       if ((stats.session.subagentCount || 0) > (stats.records.mostSubagents || 0)) {
         stats.records.mostSubagents = stats.session.subagentCount;
       }
@@ -831,14 +837,27 @@ process.stdin.on('end', () => {
       stats.recentMilestone = null;
     }
 
-    // Real model identity. No hook payload carries it except SessionStart
+    // Real model identity. Claude Code carries it only on SessionStart
     // (`model`) and PostModelSwitch (`to_model`), so everything else is either
     // carried forward by STICKY_FIELDS or read out of a transcript once.
+    // Codex puts a required `model` on EVERY hook payload -- and has no
+    // PostModelSwitch, and its rollout JSONL has no message.model -- so a
+    // payload model is taken whenever one is present: it is free, and the
+    // only way a Codex session ever follows a /model. (PostModelSwitch also
+    // fires with source 'resume', so a restored session re-stamps itself.)
     // Every transcript-backed path needs one, and only Claude Code sends it:
     // checking first keeps Codex and the adapters at zero extra reads.
     const transcriptPath = toText(data.transcript_path);
+    // Not from a lifecycle event an agent fires into its PARENT's records:
+    // Codex runs SubagentStart/Stop (and an agent's compaction) inside the
+    // child, so their `model` is the child's, and it replaced the parent's on
+    // the status line for as long as the child ran.
+    const payloadModel = (agentId && !isAgentEvent)
+      ? '' : toText(hookEvent === 'PostModelSwitch' ? data.to_model : data.model);
     let rawModel = '';
-    if (isAgentEvent && transcriptPath) {
+    if (payloadModel) {
+      rawModel = payloadModel;
+    } else if (isAgentEvent && transcriptPath) {
       // SubagentStart carries no model at all, so an agent's own transcript is
       // the only source. The agent's session file is the memory: once stamped,
       // this never reads again -- hence one bounded read per agent, not per
@@ -853,10 +872,6 @@ process.stdin.on('end', () => {
       if (!known) {
         rawModel = _readTranscriptModel(agentTranscriptPath(transcriptPath, agentId));
       }
-    } else if (hookEvent === 'SessionStart' || hookEvent === 'PostModelSwitch') {
-      // Both are free -- a payload field, no file touched. PostModelSwitch also
-      // fires with source 'resume', so a restored session re-stamps itself.
-      rawModel = toText(hookEvent === 'PostModelSwitch' ? data.to_model : data.model);
     } else if (hookEvent === 'Stop' && transcriptPath) {
       // Covers the hole in the free path: SessionStart's `model` is optional
       // and Claude Code does not always send it. The tail at a turn end (after
@@ -875,9 +890,8 @@ process.stdin.on('end', () => {
     if (hookEvent === 'PreToolUse') {
       ({ state, detail } = toolToState(toolName, toolInput));
 
-      // Every session counts its own tool calls (see COUNTER_MAX_AGE_MS). The
-      // global lifetime totals stay owner-only, as before: subagent and
-      // parallel-window calls must not inflate them twice over.
+      // Every session counts its own tool calls (see COUNTER_MAX_AGE_MS in
+      // state-machine.js); the lifetime totals are handled below.
       counter.toolCalls++;
       const fp = EDIT_TOOLS.test(toolName)
         ? toText(toolInput.file_path || toolInput.notebook_path || toolInput.path || toolInput.target_file) : '';
@@ -885,9 +899,16 @@ process.stdin.on('end', () => {
       if (base && !counter.filesEdited.includes(base) && counter.filesEdited.length < COUNTER_MAX_FILES) {
         counter.filesEdited.push(base);
       }
-      if (!isKnownSubagent && !isParallelSession) {
+      // Lifetime totals: every top-level window counts once. A parallel
+      // window used to be left out only while the owner was conducting (the
+      // one time it is classified), though its calls are counted nowhere
+      // else. A legacy subagent's calls are its parent's work, not a window's.
+      if (!isKnownSubagent) {
         stats.totalToolCalls = (stats.totalToolCalls || 0) + 1;
-        if (base) stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
+        if (base) {
+          stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
+          pruneFrequentFiles(stats.frequentFiles, base);
+        }
       }
 
       // Propagate tool state to the most recently started LEGACY subagent
@@ -1181,6 +1202,13 @@ process.stdin.on('end', () => {
       state = 'thinking';
       const trigger = toText(data.trigger) || 'auto';
       detail = trigger === 'manual' ? 'compacting memory' : 'auto-compacting';
+      // Between turns a PreCompact keeps the turn's end (turnOver, see
+      // AMBIENT_EVENTS) so PostCompact can close it again -- but when the
+      // compaction is this session's own work the face stays active while
+      // it runs: a manual /compact, and Codex, which compacts at the START of
+      // a turn, before UserPromptSubmit. An auto one after a Claude Code Stop
+      // is a background agent's, sent with the parent's id and no agent_id.
+      compacting = !agentId && (trigger !== 'auto' || EDITOR !== 'claude');
     }
     else if (hookEvent === 'PostCompact') {
       state = 'satisfied';
@@ -1189,6 +1217,7 @@ process.stdin.on('end', () => {
     else if (hookEvent === 'PermissionRequest') {
       state = 'waiting';
       detail = toolName ? `allow ${toolName}?` : 'needs permission';
+      waitingOn = toolCallKey(toolName, toolInput);
     }
     else if (hookEvent === 'Setup') {
       state = 'starting';
@@ -1249,6 +1278,17 @@ process.stdin.on('end', () => {
         if (!isKnownSubagent) _creditSession(stats, counter, now);
       }
     }
+    else if (hookEvent === 'Interrupt') {
+      // Codex's Esc: the turn is over, cut short by the user. Shown like
+      // Claude Code's interrupted tool call, but it is the user's choice, so
+      // the streak is left alone. It ends the turn exactly as StopFailure does.
+      state = 'error';
+      detail = 'interrupted';
+      if (!agentId) {
+        failureEndsTurn = true;
+        if (!isKnownSubagent) _creditSession(stats, counter, now);
+      }
+    }
     else {
       if (toolName) {
         ({ state, detail } = toolToState(toolName, toolInput));
@@ -1270,7 +1310,7 @@ process.stdin.on('end', () => {
     }
 
     // Build extra data for state files -- this session's OWN counters.
-    const currentSessionMs = Math.max(0, now - counter.start - counter.creditedMs);
+    const currentSessionMs = Math.max(0, now - counter.start - (counter.idleMs || 0) - counter.creditedMs);
     const extra = {
       sessionId,
       modelName,
@@ -1296,6 +1336,16 @@ process.stdin.on('end', () => {
 
     if (stopped) extra.stopped = true;
     if (workState) { extra.workState = workState; extra.workDetail = workDetail; }
+    if (waitingOn) extra.waitingOn = waitingOn;
+    if (compacting) extra.compacting = true;
+    // This write answers whatever the face was asked to wait on: the user
+    // spoke (UserPromptSubmit), an elicitation came back, an AskUserQuestion
+    // returned. The renderer drops a wait still queued behind a reward, which
+    // otherwise reappeared after the answer. Not sticky -- one write only.
+    if (hookEvent === 'UserPromptSubmit' || hookEvent === 'ElicitationResult'
+        || ((hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure') && ASK_TOOLS.test(toolName))) {
+      extra.answered = true;
+    }
     if (hookEvent === 'SessionStart') extra.isSessionStart = true;
 
     // Attention stamp: the user just addressed THIS session. The renderer's
@@ -1385,7 +1435,8 @@ process.stdin.on('end', () => {
       // two swap animations. The session-file block below decides for itself
       // from the session file's own fields (`stopped`, else `turnEnded`).
       if (!isAgentEvent && existing.stopped && existing.sessionId === sessionId && !stopped &&
-          carriesTurnEnd(hookEvent) && state !== 'waiting') {
+          (carriesTurnEnd(hookEvent) || (AMBIENT_EVENTS.has(hookEvent) && hookEvent !== 'SessionStart'))
+          && state !== 'waiting') {
         globalStopped = true;
       }
       // Preserve model name — subagents sharing session ID must not overwrite the owner's name.
@@ -1415,6 +1466,13 @@ process.stdin.on('end', () => {
         const mySession = JSON.parse(fs.readFileSync(
           path.join(SESSIONS_DIR, safeFilename(writeSessionId) + '.json'), 'utf8'));
         if (mySession.parentSession) shouldWriteGlobal = false;
+        // The model is carried above only while the global file already
+        // names this session. Taking it back from another window found the
+        // other's file there, so tmux mode lost the model for good; the
+        // session's own file still has it.
+        if (!isAgentEvent && !extra.model && typeof mySession.model === 'string' && mySession.model) {
+          extra.model = mySession.model;
+        }
       } catch {}
     }
 
@@ -1461,12 +1519,30 @@ process.stdin.on('end', () => {
           // `stopped || turnEnded` on a session file and the renderer folds
           // both -- but only SessionEnd sets `stopped` here, so the global
           // owner and a parallel window take the same path: `turnEnded`
-          // carried forward. A wait carries it as `turnOver` instead (see
-          // carriesTurnEnd), and the next echo turns that back into turnEnded.
-          if (!stopped && (existingSession.turnEnded || existingSession.turnOver)
-              && carriesTurnEnd(hookEvent)) {
-            if (state === 'waiting') extra.turnOver = true;
-            else extra.turnEnded = true;
+          // carried forward. A face the renderer would rescue carries it as
+          // `turnOver` instead (see inheritedTurnEnd), and the next echo with
+          // a reward or an error turns that back into turnEnded.
+          if (!stopped && (existingSession.turnEnded || existingSession.turnOver)) {
+            const inherit = inheritedTurnEnd(hookEvent, state);
+            if (inherit) extra[inherit] = true;
+          }
+          // A permission prompt is answered by allowing it, too: then the only
+          // word is the asking tool's own PostToolUse. Until that (or the
+          // user's next prompt), the question stays on the file.
+          if (existingSession.waitingOn && !extra.waitingOn) {
+            const post = hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure';
+            if (post && existingSession.waitingOn === toolCallKey(toolName, toolInput)) {
+              extra.answered = true;
+            } else if (!extra.answered && !TURN_CLOSING_EVENTS.has(hookEvent)) {
+              extra.waitingOn = existingSession.waitingOn;
+            }
+          }
+          // The piggybacked work state is only worth injecting if the renderer
+          // never saw the PreToolUse write. Name that write by its timestamp
+          // (when the file still holds it) so the renderer can tell.
+          if (extra.workState && existingSession.state === extra.workState
+              && typeof existingSession.timestamp === 'number') {
+            extra.workSince = existingSession.timestamp;
           }
           for (const field of STICKY_FIELDS) {
             if (existingSession[field] && !extra[field]) {
@@ -1500,7 +1576,7 @@ process.stdin.on('end', () => {
       if (isAgentEvent) _touchSessionFile(sessionId);
     }
     pruneFrequentFiles(stats.frequentFiles);
-    _pruneCounters(counters, stats.session.id, now);
+    _pruneCounters(counters, [stats.session.id, sessionId], now);
     writeStats(stats);
     } finally { if (releaseStats) releaseStats(); }
   } catch {

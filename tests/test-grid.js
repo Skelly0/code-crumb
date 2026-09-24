@@ -3937,6 +3937,28 @@ describe('grid.js -- recycled-PID purge integration', () => {
     assert.strictEqual(face.isStale(), false);
   });
 
+  // A child's pid is its parent's editor: alive, that proves nothing about
+  // the agent. A missed SubagentStop left a ghost for the editor's lifetime.
+  test('isStale: a child\'s pid protects only for CHILD_ORPHAN_TIMEOUT', () => {
+    const { CHILD_ORPHAN_TIMEOUT } = require('../lib/grid');
+    _pidStartCache.clear();
+    const mk = (quietMs) => {
+      const f = new MiniFace('p-agent-x');
+      f.pid = process.pid;
+      f.state = 'executing';
+      f.parentSession = 'p';
+      f.parentAlive = false;
+      f.lastUpdate = Date.now() - quietMs;
+      _pidStartCache.set(process.pid, { value: f.lastUpdate - 3600 * 1000, resolvedAt: Date.now() });
+      return f;
+    };
+    assert.strictEqual(mk(5 * 60 * 1000).isStale(), false, 'a quiet agent inside the window is kept');
+    assert.strictEqual(mk(CHILD_ORPHAN_TIMEOUT + 60000).isStale(), true, 'a ghost past it is not');
+    const top = mk(CHILD_ORPHAN_TIMEOUT + 60000);
+    top.parentSession = null;
+    assert.strictEqual(top.isStale(), false, 'a top-level session keeps its editor\'s protection');
+  });
+
   test('loadSessions purges a stale file whose pid was recycled', () => {
     const fs = require('fs');
     const pathMod = require('path');
@@ -3973,9 +3995,12 @@ describe('grid.js -- recycled-PID purge integration', () => {
 
   test('source: purge paths use isOwnedByLiveProcess, not bare isProcessAlive', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'lib', 'grid.js'), 'utf8');
-    assert.ok(src.includes('isOwnedByLiveProcess(this.pid, this.lastUpdate)'), 'isStale gated');
-    assert.ok(src.includes('isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)'), 'face-pid purge gated');
-    assert.ok(src.includes('isOwnedByLiveProcess(face.pid, face.lastUpdate)'), 'keep-alive gated');
+    // Every site goes through pidProtects, which is isOwnedByLiveProcess plus
+    // the child cap (round 3).
+    assert.ok(/function pidProtects[\s\S]*?isOwnedByLiveProcess\(pid, lastWriteMs\)/.test(src), 'pidProtects gated');
+    assert.ok(src.includes('pidProtects(this.pid, this.lastUpdate'), 'isStale gated');
+    assert.ok(src.includes('pidProtects(knownFace.pid, knownFace.lastUpdate'), 'face-pid purge gated');
+    assert.ok(src.includes('pidProtects(face.pid, face.lastUpdate'), 'keep-alive gated');
     assert.ok(!src.includes('knownFace.pid && isProcessAlive(knownFace.pid)'), 'old face-pid call removed');
   });
 });
@@ -4360,6 +4385,19 @@ describe('grid.js -- third review pass: session list and labels', () => {
     assert.ok(plain.includes('~/proj'), 'a folder under HOME still is');
   });
 
+  test('~ ignores case on Windows, where editors disagree about the drive letter', () => {
+    const { _truncatePath } = require('../lib/grid');
+    const flipped = homeFwd.replace(/[a-z]/i, (c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()));
+    assert.notStrictEqual(flipped, homeFwd, 'the fixture HOME has a letter to flip');
+    assert.strictEqual(_truncatePath(flipped + '/proj', 80, true), '~/proj', 'folded on win32');
+    assert.strictEqual(_truncatePath(flipped.replace(/\//g, '\\') + '\\proj', 80, true), '~/proj',
+      'backslashes too');
+    assert.strictEqual(_truncatePath(flipped + '/proj', 80, false), flipped + '/proj',
+      'case-sensitive elsewhere');
+    assert.strictEqual(_truncatePath(flipped + 'ice/proj', 80, true), flipped + 'ice/proj',
+      'folding keeps the path-boundary rule');
+  });
+
   test('a child with no task falls back to its agent type, not sub-N', () => {
     const orbital = new OrbitalSystem();
     for (const [id, type] of [['p-agent-a', 'Explore'], ['p-agent-b', 'Plan']]) {
@@ -4399,6 +4437,318 @@ describe('grid.js -- third review pass: session list and labels', () => {
     orbital.faces.set('obj', new MiniFace('obj'));
     orbital.faces.get('obj').updateFromFile({ state: 'error', detail: { code: 1 }, timestamp: 3 });
     assert.doesNotThrow(() => orbital.render(120, 60, { row: 20, col: 40, w: 30, h: 12, centerX: 55, centerY: 26 }, null));
+  });
+});
+
+// -- Round 3: hostile session files (fuzz) ----------------------------------
+// Session files are written by any adapter, and README documents model_name
+// as a free-form adapter input. Each of these crashed the renderer or blanked
+// the ring before.
+
+describe('grid.js -- round 3: hostile session files', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const withDir = (files, fn) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-hostile-'));
+    try {
+      for (const [name, body] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), body);
+      const orbital = new OrbitalSystem();
+      orbital._sessionsDir = dir;
+      return fn(orbital, dir);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  };
+  const now = Date.now();
+
+  test('non-string text fields are dropped, and labelling and rendering survive', () => {
+    withDir({
+      'a.json': JSON.stringify({ session_id: 'a', state: 'coding', timestamp: now,
+        modelName: { provider: 'x', id: 'y' }, cwd: 5, taskDescription: ['t'], teammateName: {}, gitBranch: null }),
+      'b.json': JSON.stringify({ session_id: 'b', state: 'reading', timestamp: now, cwd: '/r/b' }),
+    }, (orbital) => {
+      orbital.loadSessions(null);
+      const a = orbital.faces.get('a');
+      assert.ok(a, 'the session still loads');
+      for (const k of ['modelName', 'cwd', 'taskDescription', 'teammateName', 'gitBranch']) {
+        assert.ok(a[k] == null || typeof a[k] === 'string', `${k} is text or unset (${typeof a[k]})`);
+      }
+      assert.doesNotThrow(() => orbital._assignLabels());
+      assert.doesNotThrow(() => a.update && a.update(16));
+      assert.doesNotThrow(() => renderSessionList(120, 40, [...orbital.faces.values()], PALETTES[0].themes));
+    });
+  });
+
+  test.async('a file holding null, a number or an array is skipped, sync and async', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-hostile-'));
+    try {
+      for (const [name, body] of Object.entries({
+        'n.json': 'null', 'k.json': '5', 'arr.json': '[1,2]',
+        'ok.json': JSON.stringify({ session_id: 'ok', state: 'idle', timestamp: now }),
+      })) fs.writeFileSync(path.join(dir, name), body);
+      const orbital = new OrbitalSystem();
+      orbital._sessionsDir = dir;
+      assert.doesNotThrow(() => orbital.loadSessions(null));
+      assert.deepStrictEqual([...orbital.faces.keys()], ['ok']);
+      // The async pass applies its results inside an fs callback, where a
+      // throw is uncaught: catch it here instead of letting it kill the run.
+      let thrown = null;
+      const onErr = (e) => { thrown = e; };
+      process.once('uncaughtException', onErr);
+      orbital.faces.clear();
+      orbital.loadSessionsAsync(null);
+      const until = Date.now() + 3000;
+      while (orbital._loadingInProgress && Date.now() < until) await new Promise(r => setTimeout(r, 10));
+      process.removeListener('uncaughtException', onErr);
+      assert.strictEqual(thrown, null, `the async pass threw: ${thrown && thrown.message}`);
+      assert.ok(!orbital._loadingInProgress, 'the async pass finished');
+      assert.deepStrictEqual([...orbital.faces.keys()], ['ok']);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('an object session_id keys by file name, a numeric one by its string', () => {
+    withDir({
+      'x.json': JSON.stringify({ session_id: { a: 1 }, state: 'idle', timestamp: now }),
+      'y.json': JSON.stringify({ session_id: 77, state: 'idle', timestamp: now }),
+    }, (orbital) => {
+      orbital.loadSessions(null);
+      assert.deepStrictEqual([...orbital.faces.keys()].sort(), ['77', 'x']);
+      orbital.loadSessions(null);
+      assert.strictEqual(orbital.faces.size, 2, 'the same faces, not fresh ones every load');
+    });
+  });
+
+  test('a state outside the table, or an inherited name, reads as idle', () => {
+    for (const bad of ['__proto__', 'constructor', 'toString', 'nonsense', 7]) {
+      const f = new MiniFace('s');
+      f.updateFromFile({ state: bad, timestamp: now }, now);
+      assert.strictEqual(f.state, 'idle', String(bad));
+    }
+    const { readState } = require('../renderer');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-rs-'));
+    try {
+      const fp = path.join(tmp, 's.json');
+      fs.writeFileSync(fp, JSON.stringify({ state: 'constructor', modelName: { x: 1 }, cwd: 'a\u001b[2Jb', timestamp: now }));
+      const r = readState(fp);
+      assert.strictEqual(r.state, 'idle');
+      assert.strictEqual(r.modelName, '');
+      assert.ok(!r.cwd.includes('\u001b'), 'no raw ESC reaches the terminal');
+      fs.writeFileSync(fp, 'null');
+      assert.strictEqual(readState(fp).state, 'idle');
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+});
+
+describe('grid.js -- round 3: live-renderer findings', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const RSRC = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+
+  // Below the list's minimum it draws nothing: `l` opened an invisible list
+  // that swallowed the next key (an Enter silently pinned).
+  test('the list opens, and is offered, only where it can draw', () => {
+    const { sessionListFits, MIN_SESSION_LIST_COLS, MIN_SESSION_LIST_ROWS } = require('../lib/grid');
+    const { fitKeyHints } = require('../lib/face');
+    assert.strictEqual(sessionListFits(MIN_SESSION_LIST_COLS, MIN_SESSION_LIST_ROWS), true);
+    assert.strictEqual(sessionListFits(MIN_SESSION_LIST_COLS - 1, 40), false);
+    assert.strictEqual(sessionListFits(120, MIN_SESSION_LIST_ROWS - 1), false);
+    assert.ok(fitKeyHints(200).some(h => h[0] === 'l'));
+    assert.ok(!fitKeyHints(200, ['l']).some(h => h[0] === 'l'), 'the hint bar drops it');
+    assert.ok(/key === 'l'\) \{[\s\S]{0,200}?if \(sessionListFits\(/.test(RSRC), 'the key is gated');
+    assert.ok(/if \(face\.showSessionList && !sessionListFits\(/.test(RSRC), 'a resize below it closes it');
+  });
+
+  // Caffeine history belonged to the session that left: the incoming face
+  // went "hyperdrive!" 67ms after arriving, having done nothing.
+  test('a swap clears the caffeine history after its own forceState', () => {
+    assert.ok(/face\.forceState\(newData\.state[\s\S]{0,1600}?face\.stateChangeTimes = \[\];/.test(RSRC));
+  });
+
+  // A swap restarted "still running … Ns" at 0, and the 10-minute hold with it.
+  test('a swap keeps a running tool\'s age', () => {
+    assert.ok(/ACTIVE_WORK_STATES\.has\(newData\.state\) \|\| newData\.state === 'waiting'\)[\s\S]{0,200}?face\.lastStateChange = ts;/.test(RSRC));
+  });
+
+  // A dead editor's agents are not running: counting them lifted the rescued
+  // face back to conducting, round and round every ~12s.
+  test('a dead editor\'s children do not hold the face at conducting', () => {
+    assert.ok(/const liveChildren = \(minimal \|\| editorDead\) \? 0 : orbital\.liveChildCount\(\);/.test(RSRC));
+  });
+});
+
+// -- Round 3: wide characters ---------------------------------------------
+// A CJK folder, a Grep for a CJK phrase or an emoji detail takes two terminal
+// columns per character; `.length` counted one. Orbital rows came out 16
+// columns wide in the 8-column box and session-list rows pushed the right
+// border out (or wrapped at 50 columns). Combining marks were the reverse:
+// counted 1, drawn 0, so the row fell short.
+
+// Walk a frame as a terminal would: a cursor move starts a span, other escapes
+// paint nothing, and each code point advances by its display width.
+function paintedSpans(out) {
+  const { charWidth } = require('../lib/shared');
+  const spans = [];
+  const re = /\x1b\[(\d+);(\d+)H|\x1b\[[0-9;?]*[A-Za-z]|([\s\S])/gu;
+  let cur = null;
+  let m;
+  while ((m = re.exec(out))) {
+    if (m[1]) {
+      cur = { row: +m[1], col: +m[2], end: +m[2] - 1, text: '' };
+      spans.push(cur);
+    } else if (m[3] !== undefined && cur) {
+      cur.end += charWidth(m[3].codePointAt(0));
+      cur.text += m[3];
+    }
+  }
+  return spans;
+}
+
+describe('grid.js -- round 3: wide characters', () => {
+  const { strWidth } = require('../lib/shared');
+  const { orderSessionList } = require('../lib/grid');
+  const BOX = 8;
+  // Rows 5-7 of a MiniFace drawn at (1, 1): label, branch/cwd/model, detail.
+  const textRows = (f) => paintedSpans(f.render(1, 1, 0, PALETTES[0].themes)).filter(sp => sp.row >= 5);
+
+  test('a MiniFace with a CJK label, cwd and detail keeps every row exactly 8 columns', () => {
+    const f = new MiniFace('wide-1');
+    f.updateFromFile({
+      state: 'searching', detail: 'grep \u7528\u6237\u767b\u5f55\u5931\u8d25\u65f6\u663e\u793a\u9519\u8bef\u4fe1\u606f',
+      cwd: '/home/user/\u30d7\u30ed\u30b8\u30a7\u30af\u30c8', timestamp: Date.now(),
+    });
+    f.label = '\u8a2d\u8a08\u66f8\u306e\u30ec\u30d3\u30e5\u30fc';
+    const rows = textRows(f);
+    assert.strictEqual(rows.length, 3);
+    for (const sp of rows) {
+      assert.strictEqual(sp.end - sp.col + 1, BOX, `row ${sp.row} "${sp.text}" is ${sp.end - sp.col + 1} columns`);
+    }
+  });
+
+  test('a child with a CJK model and an emoji detail stays inside its box', () => {
+    const f = new MiniFace('par-agent-wide');
+    f.updateFromFile({
+      state: 'coding', parentSession: 'par', model: '\u901a\u7fa9\u5343\u554f-\u6700\u5927',
+      detail: '\ud83d\ude80 deploy \ud83d\ude80', gitBranch: 'feat/\u2728-sparkle', timestamp: Date.now(),
+    });
+    f.label = 'agent\ud83e\udd16x';
+    for (const sp of textRows(f)) {
+      assert.strictEqual(sp.end - sp.col + 1, BOX, `row ${sp.row} "${sp.text}" is ${sp.end - sp.col + 1} columns`);
+      assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])/.test(sp.text), 'no split surrogate pair');
+    }
+  });
+
+  test('combining marks no longer leave a MiniFace row short', () => {
+    const f = new MiniFace('marks');
+    f.updateFromFile({ state: 'reading', detail: 'e\u0301'.repeat(10), timestamp: Date.now() });
+    f.label = 'cafe\u0301';
+    for (const sp of textRows(f)) {
+      assert.strictEqual(sp.end - sp.col + 1, BOX, `row ${sp.row} "${sp.text}" is ${sp.end - sp.col + 1} columns`);
+    }
+  });
+
+  test('orbital labels are cut to 8 columns, not 8 characters', () => {
+    const os = new OrbitalSystem();
+    const a = new MiniFace('a'); a.taskDescription = '\u8a2d\u8a08\u66f8\u306e\u30ec\u30d3\u30e5\u30fc\u3092\u66f8\u304f';
+    const b = new MiniFace('b'); b.cwd = '/srv/\u30d7\u30ed\u30b8\u30a7\u30af\u30c8'; b.firstSeen = a.firstSeen + 1;
+    os.faces.set('a', a); os.faces.set('b', b);
+    os._assignLabels();
+    assert.strictEqual(a.label, '\u8a2d\u8a08\u66f8\u306e');
+    assert.strictEqual(b.label, '\u30d7\u30ed\u30b8\u30a7');
+  });
+
+  test('a CJK group label is cut to 12 columns and clamped inside the right edge', () => {
+    const os = new OrbitalSystem();
+    const team = '\u57fa\u76e4\u30c1\u30fc\u30e0\u306e\u7686\u3055\u3093\u5168\u54e1';
+    const f1 = new MiniFace('s1'); f1.teamName = team;
+    const f2 = new MiniFace('s2'); f2.teamName = team;
+    const positions = [{ col: 64, row: 5, face: f1 }, { col: 72, row: 5, face: f2 }];
+    assert.ok(strWidth(os._getGroupLabel(positions, positions)) <= 12);
+    const out = os._renderGroupLabels(positions, 30, 80, { col: 10, row: 20, w: 12, h: 8, centerX: 16, centerY: 24 });
+    const spans = paintedSpans(out).filter(sp => sp.text);
+    assert.ok(spans.length > 0, 'the label is drawn');
+    for (const sp of spans) assert.ok(sp.end <= 80, `group label "${sp.text}" ends at column ${sp.end}`);
+  });
+
+  // A main row, a top-level window and one of its agents, all carrying CJK or
+  // emoji text in every field the list draws.
+  function wideEntries() {
+    const now = Date.now();
+    const mainInfo = {
+      sessionId: 'main', state: 'thinking', detail: '\u8003\u3048\u4e2d', label: '\u30af\u30ed\u30fc\u30c9',
+      cwd: '/home/user/\u8a2d\u8a08\u66f8/\u30ea\u30dd\u30b8\u30c8\u30ea', gitBranch: 'feature/\u30e6\u30fc\u30b6\u30fc\u8a8d\u8a3c\u306e\u4fee\u6b63',
+      editor: 'claude', model: 'Opus', stopped: false, firstSeen: 0, isMain: true, isPinned: false,
+      toolCalls: 3, filesEdited: 1, lastUpdate: now,
+    };
+    const win = Object.assign(new MiniFace('win'), {
+      state: 'coding', detail: 'editing \u8a2d\u8a08\u66f8.md', label: '\u4e26\u884c\u7a93\u53e3\u306e\u4f5c\u696d',
+      taskDescription: '\u7528\u6237\u767b\u5f55\u5931\u8d25\u65f6\u663e\u793a\u9519\u8bef\u4fe1\u606f\u5e76\u8bb0\u5f55\u65e5\u5fd7\u5230\u670d\u52a1\u5668',
+      cwd: '/srv/\u30d7\u30ed\u30b8\u30a7\u30af\u30c8/\u8a2d\u8a08\u66f8\u306e\u30ea\u30dd\u30b8\u30c8\u30ea/\u30bd\u30fc\u30b9\u30b3\u30fc\u30c9\u306e\u30d5\u30a9\u30eb\u30c0',
+      gitBranch: '\u4fee\u6b63/\u30ed\u30b0\u30a4\u30f3\u753b\u9762\u306e\u4e0d\u5177\u5408',
+      editor: '\u7de8\u96c6\u8005\u540d\u524d', model: '\u901a\u7fa9\u5343\u554f-\u6700\u5927\u7248\u672c\u306e\u9577\u3044\u540d\u524d',
+      toolCalls: 12, filesEdited: 3, lastUpdate: now, isMainSession: true,
+    });
+    const child = Object.assign(new MiniFace('win-agent-1'), {
+      state: 'searching', detail: '\ud83d\udd0d grep \u9519\u8bef\u4fe1\u606f \ud83d\ude80', label: '\u8abf\u67fb\u30a8\u30fc\u30b8\u30a7\u30f3\u30c8',
+      parentSession: 'win', agentType: '\u8abf\u67fb\u62c5\u5f53\u306e\u30a8\u30fc\u30b8\u30a7\u30f3\u30c8',
+      cwd: '/srv/\u30d7\u30ed\u30b8\u30a7\u30af\u30c8', editor: 'claude', model: '\u4ff3\u53e5', lastUpdate: now,
+    });
+    return { mainInfo, entries: orderSessionList(mainInfo, [win, child]) };
+  }
+
+  for (const cols of [50, 120]) {
+    test(`renderSessionList(${cols}, 40) keeps every CJK row inside the box`, () => {
+      const { mainInfo, entries } = wideEntries();
+      const boxW = Math.min(cols - 4, 54);
+      const spans = paintedSpans(renderSessionList(cols, 40, entries, PALETTES[0].themes, mainInfo, 'win'));
+      assert.ok(spans.length >= 3 * 5, 'three entries drawn');
+      for (const sp of spans) {
+        assert.strictEqual(sp.end - sp.col + 1, boxW, `row ${sp.row} is ${sp.end - sp.col + 1} columns, box is ${boxW}: "${sp.text}"`);
+        assert.ok(sp.end <= cols, `row ${sp.row} ends at column ${sp.end} of ${cols}`);
+      }
+    });
+  }
+
+  test('a CJK path is shortened by columns, keeping its last two segments', () => {
+    // 33 characters but 60 columns: `.length` said it fit the 48-column body.
+    const f = Object.assign(new MiniFace('deep'), {
+      state: 'reading', label: 'deep', lastUpdate: Date.now(),
+      cwd: '/srv/\u30d7\u30ed\u30b8\u30a7\u30af\u30c8/\u8a2d\u8a08\u66f8\u306e\u30ea\u30dd\u30b8\u30c8\u30ea/\u30bd\u30fc\u30b9\u30b3\u30fc\u30c9\u306e\u30d5\u30a9\u30eb\u30c0',
+    });
+    const spans = paintedSpans(renderSessionList(120, 40, [{ face: f, depth: 0 }], PALETTES[0].themes, null, 'deep'));
+    const row2 = spans.find(sp => sp.text.includes('\u30d5\u30a9\u30eb\u30c0'));
+    assert.ok(row2, 'the last segment is drawn');
+    assert.ok(row2.text.slice(1).trim().startsWith('.../\u8a2d\u8a08\u66f8'), `row 2 is "${row2.text}"`);
+    assert.strictEqual(row2.end - row2.col + 1, 54, 'and the row stays 54 columns');
+  });
+});
+
+describe('grid.js -- round 4', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  // An object pid threw inside the async loader's fs callback (uncaught: the
+  // renderer died 2s after every boot), and the sync purge kept the file.
+  test.async('a non-numeric pid neither throws nor protects a stale file', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-pid-'));
+    try {
+      const fp = path.join(dir, 'bad.json');
+      fs.writeFileSync(fp, JSON.stringify({ session_id: 'bad', state: 'coding', pid: { toString: 1 }, timestamp: Date.now() }));
+      const orbital = new OrbitalSystem();
+      orbital._sessionsDir = dir;
+      let thrown = null;
+      const onErr = (e) => { thrown = e; };
+      process.once('uncaughtException', onErr);
+      orbital.loadSessionsAsync(null);
+      const until = Date.now() + 3000;
+      while (orbital._loadingInProgress && Date.now() < until) await new Promise(r => setTimeout(r, 10));
+      process.removeListener('uncaughtException', onErr);
+      assert.strictEqual(thrown, null, `the async pass threw: ${thrown && thrown.message}`);
+      const old = new Date(Date.now() - 3600000);
+      fs.utimesSync(fp, old, old);
+      const o2 = new OrbitalSystem();
+      o2._sessionsDir = dir;
+      assert.doesNotThrow(() => o2.loadSessions(null));
+      assert.ok(!fs.existsSync(fp), 'a stale file with a junk pid is purged');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 });
 

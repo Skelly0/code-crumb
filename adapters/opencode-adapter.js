@@ -92,7 +92,10 @@ function normaliseEvent(data) {
   // base-adapter -- this side just carries it.
   const model = data.model || '';
 
-  return { event, toolName, toolInput, toolOutput, isError, stderr, sessionId, model };
+  // Set on a task tool's child session (see the plugin's session.created).
+  const parentSession = textField(data.parentSession);
+
+  return { event, toolName, toolInput, toolOutput, isError, stderr, sessionId, model, parentSession };
 }
 
 // -- Custom event mapping -----------------------------------------------
@@ -110,7 +113,8 @@ function mapEvent(event, toolName, toolInput, toolOutput, isError, data) {
     return { state: 'waiting', detail: 'allow?' };
   }
   if (event === 'permission_reply') {
-    return { state: 'satisfied', detail: 'got your answer' };
+    // `answered`: the renderer drops the prompt if it is still queued.
+    return { state: 'satisfied', detail: 'got your answer', extra: { answered: true } };
   }
   if (event === 'message_update') {
     if (data.is_thinking) {

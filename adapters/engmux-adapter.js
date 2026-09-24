@@ -18,7 +18,14 @@ const { spawn } = require('child_process');
 const { writeSessionState, signalExitCode, exitWhenFlushed } = require('./base-adapter');
 
 const SESSION_ID = `engmux-${process.pid}-${Date.now()}`;
-const PARENT_SESSION = process.env.CLAUDE_SESSION_ID || String(process.ppid);
+// The dispatching session. Claude Code exports CLAUDE_CODE_SESSION_ID (the
+// hook payloads' session_id) to its tool processes, never CLAUDE_SESSION_ID,
+// so reading only the latter left every orbital parented to the shell's pid:
+// no conducting hold, and a stray top-level row in the session list.
+// CLAUDE_SESSION_ID still wins -- an engmux nested under engmux sets it.
+const PARENT_SESSION = process.env.CLAUDE_SESSION_ID
+  || process.env.CLAUDE_CODE_SESSION_ID
+  || String(process.ppid);
 const SUB_STATES = ['thinking', 'reading', 'coding', 'searching', 'executing'];
 const CYCLE_MS = 8000;
 

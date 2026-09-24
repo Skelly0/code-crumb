@@ -156,6 +156,32 @@ describe('platform -- buildRendererCommands lives in shared.js and quotes paths'
     assert.ok(cmds.xterm.args.includes(posixSpaced[0]));
     assert.ok(cmds['gnome-terminal'].args.includes(posixSpaced[0]));
   });
+  // A hook runs in the user's project, where cmd.exe finds a project's
+  // node.js / node.cmd before the PATH. The window is now started with the
+  // running node's absolute path, from HOME, through an absolute cmd.exe.
+  test('an explicit node binary, cwd and cmd.exe reach every platform', () => {
+    const nodeBin = 'C:\\Program Files\\nodejs\\node.exe';
+    const opts = { nodeBin, cwd: 'C:\\Users\\me', cmdExe: 'C:\\Windows\\System32\\cmd.exe' };
+    const win = shared.buildRendererCommands('win32', spaced, title, opts);
+    assert.strictEqual(win.cmd.cmd, opts.cmdExe);
+    assert.strictEqual(win.cmd.args[1], `start "Code Crumb" "${nodeBin}" "${spaced[0]}"`);
+    assert.ok(win.wt.args.includes(`"${nodeBin}"`), win.wt.args.join(' '));
+    assert.strictEqual(win.cmd.opts.cwd, opts.cwd);
+    assert.strictEqual(win.wt.opts.cwd, opts.cwd);
+
+    const posixNode = '/opt/my node/bin/node';
+    const lin = shared.buildRendererCommands('linux', posixSpaced, title, { nodeBin: posixNode, cwd: '/home/me' });
+    assert.ok(lin.xterm.args.includes(posixNode));
+    assert.ok(lin['xfce4-terminal'].args.includes(`'${posixNode}' '${posixSpaced[0]}'`));
+    assert.strictEqual(lin.xterm.opts.cwd, '/home/me');
+    const mac = shared.buildRendererCommands('darwin', posixSpaced, title, { nodeBin: '/usr/local/bin/node' });
+    assert.ok(mac.osascript.args[1].includes(`/usr/local/bin/node '${posixSpaced[0]}'; exit`), mac.osascript.args[1]);
+  });
+  test('without options the commands are unchanged (bare node, no cwd)', () => {
+    const win = shared.buildRendererCommands('win32', spaced, title);
+    assert.ok(!('cwd' in win.cmd.opts) && !('cwd' in win.wt.opts));
+    assert.ok(shared.buildRendererCommands('linux', posixSpaced, title).xterm.args.includes('node'));
+  });
 });
 
 describe('platform -- buildEditorSpawn (editor .cmd shims on Windows)', () => {
@@ -213,6 +239,111 @@ describe('platform -- writeJsonAtomic', () => {
   });
   test('returns false instead of throwing when the directory does not exist', () => {
     assert.strictEqual(shared.writeJsonAtomic(path.join(os.tmpdir(), 'no-such-dir-crumb', 'x.json'), {}), false);
+  });
+  // A Windows rename over a file a scanner or indexer holds fails EPERM for a
+  // few ms. Falling straight back to a direct write is a torn write.
+  test('a briefly refused rename is retried, never written in place', () => {
+    const dir = tmpDir('crumb-atomic-');
+    const realRename = fs.renameSync;
+    const realWrite = fs.writeFileSync;
+    let renames = 0;
+    const direct = [];
+    try {
+      const file = path.join(dir, 'state.json');
+      fs.renameSync = (a, b) => {
+        renames++;
+        if (renames <= 2) { const e = new Error('busy'); e.code = 'EPERM'; throw e; }
+        return realRename(a, b);
+      };
+      fs.writeFileSync = (f, ...rest) => {
+        if (f === file) direct.push(f);
+        return realWrite(f, ...rest);
+      };
+      assert.strictEqual(shared.writeJsonAtomic(file, { a: 3 }), true);
+      assert.strictEqual(renames, 3, 'two refusals, then the rename lands');
+      assert.deepStrictEqual(direct, [], 'no direct (tearable) write of the target');
+      assert.deepStrictEqual(readJSON(file), { a: 3 });
+      assert.deepStrictEqual(fs.readdirSync(dir), ['state.json']);
+    } finally {
+      fs.renameSync = realRename;
+      fs.writeFileSync = realWrite;
+      cleanup(dir);
+    }
+  });
+  test('a rename that keeps failing still falls back to a direct write', () => {
+    const dir = tmpDir('crumb-atomic-');
+    const realRename = fs.renameSync;
+    let renames = 0;
+    try {
+      const file = path.join(dir, 'state.json');
+      fs.renameSync = () => { renames++; const e = new Error('busy'); e.code = 'EBUSY'; throw e; };
+      assert.strictEqual(shared.writeJsonAtomic(file, { a: 4 }), true);
+      assert.ok(renames >= 2 && renames <= 5, `bounded retries (${renames})`);
+      assert.deepStrictEqual(readJSON(file), { a: 4 });
+      assert.deepStrictEqual(fs.readdirSync(dir), ['state.json'], 'the temp file is cleaned up');
+    } finally {
+      fs.renameSync = realRename;
+      cleanup(dir);
+    }
+  });
+});
+
+// The renderer rewrites its PID file every PID_HEARTBEAT_MS. A file older
+// than PID_STALE_MS belongs to a renderer that died without cleaning up (a
+// Windows logoff delivers no signal), whatever process now has that PID: an
+// EPERM there read as "running" for ever and autolaunch never fired again.
+describe('platform -- isRendererAlive', () => {
+  const { isRendererAlive, PID_STALE_MS, PID_HEARTBEAT_MS } = shared;
+  const withPidFile = (content, fn) => {
+    const dir = tmpDir('crumb-pid-');
+    const file = path.join(dir, 'pid');
+    try {
+      if (content !== null) fs.writeFileSync(file, content);
+      return fn(file);
+    } finally { cleanup(dir); }
+  };
+  test('a fresh file naming a live process is alive', () => {
+    withPidFile(String(process.pid), (f) => assert.strictEqual(isRendererAlive(f), true));
+  });
+  test('a missing file, pid 0 or garbage is not', () => {
+    withPidFile(null, (f) => assert.strictEqual(isRendererAlive(f), false));
+    withPidFile('0', (f) => assert.strictEqual(isRendererAlive(f), false, 'kill(0) would signal our own group'));
+    withPidFile('-1', (f) => assert.strictEqual(isRendererAlive(f), false));
+    withPidFile('abc', (f) => assert.strictEqual(isRendererAlive(f), false));
+  });
+  // Windows recycles PIDs onto the same user's processes and a logoff leaves
+  // the file: there a stale file is dead, whatever answers kill(0). On POSIX
+  // a signalable pid is trusted -- the heartbeat's monotonic timer stops
+  // during a suspend, and after resume a stale-looking file started a
+  // second renderer beside the live one (round 4).
+  test('a stale file is dead on win32, but a signalable pid is trusted on POSIX', () => {
+    withPidFile(String(process.pid), (f) => {
+      const now = Date.now();
+      assert.strictEqual(isRendererAlive(f, now + PID_STALE_MS + 1000, 'win32'), false);
+      assert.strictEqual(isRendererAlive(f, now + PID_STALE_MS - 1000, 'win32'), true);
+      assert.strictEqual(isRendererAlive(f, now + PID_STALE_MS + 1000, 'linux'), true, 'after a suspend');
+      assert.strictEqual(isRendererAlive(f, now + PID_STALE_MS + 1000, 'darwin'), true);
+    });
+    assert.ok(PID_HEARTBEAT_MS * 3 <= PID_STALE_MS, 'several heartbeats fit in the staleness bound');
+  });
+  test('EPERM needs a fresh heartbeat everywhere', () => {
+    const realKill = process.kill;
+    try {
+      process.kill = () => { const e = new Error('perm'); e.code = 'EPERM'; throw e; };
+      withPidFile('424242', (f) => {
+        const now = Date.now();
+        assert.strictEqual(isRendererAlive(f, now, 'linux'), true);
+        assert.strictEqual(isRendererAlive(f, now + PID_STALE_MS + 1000, 'linux'), false, 'a recycled pid');
+      });
+    } finally { process.kill = realKill; }
+  });
+  test('the renderer heartbeats its PID file and launch.js asks the same question', () => {
+    const r = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8');
+    assert.ok(/setInterval\(heartbeat, PID_HEARTBEAT_MS\)/.test(r), 'the renderer refreshes its PID file');
+    assert.ok(/fs\.utimesSync\(PID_FILE, t, t\)/.test(r), 'by touching it, never rewriting it (a mid-rewrite read was empty)');
+    assert.ok(/now - lastBeat > PID_HEARTBEAT_MS\) heartbeat\(now\)/.test(r), 'and the render loop beats after a wall-clock jump');
+    const l = fs.readFileSync(path.join(ROOT, 'launch.js'), 'utf8');
+    assert.ok(/isRendererAlive\(PID_FILE\)/.test(l), 'launch.js shares the liveness check');
   });
 });
 
@@ -448,8 +579,8 @@ describe('platform -- normalizeStats fills any missing shape', () => {
     assert.strictEqual(s.session.id, '');
     assert.deepStrictEqual(s.session.filesEdited, []);
     assert.strictEqual(s.records.longestSession, 0);
-    assert.deepStrictEqual(s.frequentFiles, {});
-    assert.deepStrictEqual(s.topLevelSessions, {});
+    assert.deepStrictEqual({ ...s.frequentFiles }, {});
+    assert.deepStrictEqual({ ...s.topLevelSessions }, {});
   });
   test('null / array / string fall back to defaults', () => {
     assert.strictEqual(sm.normalizeStats(null).streak, 0);
@@ -633,7 +764,12 @@ describe('platform -- update-state.js autolaunch uses the shared helpers', () =>
     assert.ok(src.includes('acquireSpawnLock('));
   });
   test('builds terminal commands through shared buildRendererCommands', () => {
-    assert.ok(src.includes('buildRendererCommands('));
+    // update-state.js and launch.js share spawnRendererWindow, which builds
+    // its commands with buildRendererCommands.
+    assert.ok(src.includes('spawnRendererWindow('));
+    const sharedSrc = fs.readFileSync(path.join(ROOT, 'lib', 'shared.js'), 'utf8');
+    const i = sharedSrc.indexOf('function spawnRendererWindow(');
+    assert.ok(i > 0 && sharedSrc.slice(i, i + 2500).includes('buildRendererCommands('));
     assert.ok(!src.includes("spawn('cmd', ['/c', 'start'"), 'no hand-rolled cmd /c start');
   });
   test('reads prefs through loadPrefs', () => {
@@ -653,7 +789,7 @@ describe('platform -- renderer.js source-level fixes', () => {
   test('resize handler forces a redraw (prevFrame reset)', () => {
     const i = src.indexOf("process.stdout.on('resize'");
     assert.ok(i > 0);
-    assert.ok(src.slice(i, i + 800).includes('prevFrame = null'), 'resize must reset prevFrame or the cleared screen stays blank');
+    assert.ok(src.slice(i, i + 1400).includes('prevFrame = null'), 'resize must reset prevFrame or the cleared screen stays blank');
   });
   test('prefs palette index is normalized', () => {
     assert.ok(src.includes('normalizePaletteIndex(prefs.paletteIndex'));
@@ -901,11 +1037,12 @@ describe('platform -- setupCodex installs codex native hooks', () => {
     assert.ok(Array.isArray(setup.CODEX_HOOK_EVENTS));
   });
 
-  test('CODEX_HOOK_EVENTS is exactly what codex 0.146 supports', () => {
+  test('CODEX_HOOK_EVENTS is exactly what codex 0.156 supports', () => {
+    // Interrupt is codex's Esc (it runs no Stop then); PostCompact came with it.
     assert.deepStrictEqual(setup.CODEX_HOOK_EVENTS, [
-      'PreToolUse', 'PostToolUse', 'PermissionRequest', 'PreCompact',
+      'PreToolUse', 'PostToolUse', 'PermissionRequest', 'PreCompact', 'PostCompact',
       'SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop',
-      'UserPromptSubmit', 'Stop',
+      'UserPromptSubmit', 'Stop', 'Interrupt',
     ]);
     assert.ok(!setup.CODEX_HOOK_EVENTS.includes('Notification'),
       'codex has no Notification hook');
@@ -1564,6 +1701,15 @@ describe('platform -- third review pass: launchers', () => {
       } finally { cleanup(dir); }
     });
   }
+
+  // cmd.exe resolves a bare `node` in the current folder first, trying
+  // PATHEXT (.JS included), so a project's node.js ran in Windows Script Host.
+  test('source: code-crumb.cmd runs node.exe, never a bare node, and keeps CRLF', () => {
+    const raw = fs.readFileSync(path.join(ROOT, 'code-crumb.cmd'), 'utf8');
+    const lines = raw.split('\r\n').filter(l => l && !/^(::|@echo)/i.test(l));
+    assert.deepStrictEqual(lines, ['node.exe "%~dp0launch.js" %*']);
+    assert.ok(!/[^\r]\n/.test(raw), 'every line ends in CRLF');
+  });
 });
 
 module.exports = suite;

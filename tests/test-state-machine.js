@@ -31,6 +31,7 @@ const {
   MILESTONES,
   updateStreak,
   defaultStats,
+  normalizeStats,
   MAX_FREQUENT_FILES,
   pruneFrequentFiles,
   topFrequentFiles,
@@ -1533,15 +1534,38 @@ describe('state-machine.js -- pruneFrequentFiles', () => {
     assert.strictEqual(Object.keys(ff).length, MAX_FREQUENT_FILES);
   });
 
-  test('keeps highest-count entries when pruning', () => {
+  test('keeps highest-count entries when pruning (every survivor ages by one)', () => {
     const ff = {};
     for (let i = 0; i < 60; i++) {
       ff[`file${i}.js`] = i + 2;
     }
     pruneFrequentFiles(ff);
-    // file59.js (count=61) should survive, file0.js (count=2) should not
-    assert.strictEqual(ff['file59.js'], 61);
+    // file59.js (count=61) survives, aged to 60; file0.js (count=2) does not
+    assert.strictEqual(ff['file59.js'], 60);
     assert.strictEqual(ff['file0.js'], undefined);
+  });
+
+  test('the file just touched always gets in, and does not age (third review pass)', () => {
+    const ff = {};
+    for (let i = 0; i < 50; i++) ff[`old${i}.js`] = 40;
+    ff['new.js'] = 1;
+    pruneFrequentFiles(ff, 'new.js');
+    assert.strictEqual(ff['new.js'], 1, 'a full map used to reject every newcomer');
+    assert.strictEqual(Object.keys(ff).length, MAX_FREQUENT_FILES);
+  });
+
+  test('stale files age out so a file used now can overtake them', () => {
+    const ff = {};
+    for (let i = 0; i < 50; i++) ff[`old${i}.js`] = 3;
+    let hot = 0;
+    for (let n = 0; n < 5; n++) {
+      ff['hot.js'] = (ff['hot.js'] || 0) + 1; hot++;
+      pruneFrequentFiles(ff, 'hot.js');
+      ff[`fresh${n}.js`] = 1;                     // a different newcomer each time
+      pruneFrequentFiles(ff, `fresh${n}.js`);
+    }
+    assert.ok(ff['hot.js'] >= 1, 'hot.js survived the churn');
+    assert.ok(Object.values(ff).every(v => v >= 1));
   });
 
   test('under-cap object is not truncated', () => {
@@ -3322,7 +3346,8 @@ describe('state-machine.js -- pruneTopLevelSessions (#134)', () => {
   });
 
   test('defaultStats includes empty topLevelSessions registry', () => {
-    assert.deepStrictEqual(defaultStats().topLevelSessions, {});
+    assert.deepStrictEqual({ ...defaultStats().topLevelSessions }, {});
+    assert.strictEqual(Object.getPrototypeOf(defaultStats().topLevelSessions), null, 'no inherited keys');
   });
 });
 
@@ -3849,6 +3874,47 @@ describe('update-state -- review round: a session counts once per day', () => {
   });
 });
 
+describe('update-state -- round 3: session time and totals', () => {
+  test('an ended session is not credited up to the next session\'s start', () => {
+    const { tmp, statsFile, env } = makeTempEnv('next-1');
+    try {
+      const now = Date.now();
+      const { localDay } = require('../lib/state-machine');
+      const stats = defaultStats();
+      // A ran 17:00-18:00 "yesterday" (15h ago) and got SessionEnd, which credited it.
+      const start = now - 16 * 3600000, end = now - 15 * 3600000;
+      stats.session = { id: 'ended-A', start, toolCalls: 3, filesEdited: [], subagentCount: 0, commitCount: 0, activeSubagents: [] };
+      stats.daily = { date: localDay(now), sessionCount: 1, cumulativeMs: end - start };
+      stats.records.longestSession = end - start;
+      stats.sessionCounters = { 'ended-A': { toolCalls: 3, filesEdited: [], start, commitCount: 0, creditedMs: end - start, lastSeen: end, countedDay: localDay(now) } };
+      fsMod.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+      runUpdateState('SessionStart', { session_id: 'next-1', source: 'startup' }, env);
+      const after = readJSON(statsFile);
+      assert.strictEqual(after.daily.cumulativeMs, end - start, 'the overnight gap used to be credited to A');
+      assert.strictEqual(after.records.longestSession, end - start);
+    } finally { cleanup(tmp); }
+  });
+
+  test('a parallel window\'s edits count in the lifetime totals while the owner conducts', () => {
+    const { tmp, statsFile, env } = makeTempEnv('par-B');
+    try {
+      const stats = conductingStats('ownerP', 'ownerP-sub-1', Date.now() - 1000, { 'par-B': Date.now() });
+      fsMod.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+      runUpdateState('PreToolUse', { session_id: 'par-B', tool_name: 'Edit', tool_input: { file_path: '/r/b.js' } }, env);
+      const after = readJSON(statsFile);
+      assert.strictEqual(after.session.id, 'ownerP', 'the parallel window did not take the owner slot');
+      assert.strictEqual(after.totalToolCalls, 6);
+      assert.strictEqual(after.frequentFiles['b.js'], 1);
+    } finally { cleanup(tmp); }
+  });
+
+  test('localDay is the local calendar day', () => {
+    const { localDay } = require('../lib/state-machine');
+    const d = new Date(2026, 0, 2, 23, 30);              // local 23:30
+    assert.strictEqual(localDay(d.getTime()), '2026-01-02');
+  });
+});
+
 describe('update-state -- third review pass: autolaunch quit flag', () => {
   // The renderer writes ~/.code-crumb-quit on every exit and nothing removed
   // it, so after the first closed window no hook ever launched a renderer
@@ -3899,6 +3965,203 @@ describe('update-state -- third review pass: autolaunch quit flag', () => {
       'the unlink must come before the access check');
     assert.ok(src.includes("/^(startup|resume)$/.test(_rawField(input, 'source'))"),
       'only an editor start clears it: compact and clear happen inside a running session');
+  });
+});
+
+// -- Round 3 (Windows) -------------------------------------------------------
+// Codex on Windows runs every command as `pwsh -Command <script>`, and on
+// POSIX as `/bin/zsh -lc '<script>'`: the wrapper, not the script, was the
+// first word, so nothing inside was recognised -- a Get-Content's content
+// read as a failure and broke the streak, and npm test never showed testing.
+
+describe('state-machine -- round 3: wrapped and Windows shells', () => {
+  const SCARY = 'Error: ENOENT something failed';
+  const post = (cmd) => classifyToolResult('Bash', { command: cmd }, { stdout: SCARY, stderr: '', exitCode: 0 });
+  const pre = (cmd) => toolToState('Bash', { command: cmd }).state;
+
+  test('PowerShell and cmd reads print content, not verdicts', () => {
+    for (const cmd of [
+      'Get-Content src/x.js', 'gc x | Select-String ENOENT', 'Get-ChildItem -Recurse',
+      'findstr /s ENOENT *.js', 'Test-Path x; Write-Output done',
+    ]) assert.strictEqual(post(cmd).state, 'relieved', cmd);
+  });
+
+  test('a wrapped read is still a read', () => {
+    for (const cmd of [
+      'pwsh -Command "Get-Content x"',
+      'powershell.exe -NoProfile -NonInteractive -Command "gc x"',
+      '"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -NoProfile -Command "Get-Content x"',
+      'C:\\Windows\\System32\\cmd.exe /d /c type x',
+      "bash -lc 'grep -rn ENOENT src'",
+      "/bin/zsh -lc 'cat build.log'",
+    ]) assert.strictEqual(post(cmd).state, 'relieved', cmd);
+  });
+
+  test('a wrapped acting command is still judged, and its intent is seen', () => {
+    assert.strictEqual(post('pwsh -Command "npm run build"').state, 'error');
+    assert.strictEqual(pre('"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -NoProfile -Command "npm test"'), 'testing');
+    assert.strictEqual(pre('/usr/bin/bash -lc "npm install"'), 'installing');
+    assert.strictEqual(pre('/bin/zsh -lc \'git commit -m "fix the build"\''), 'committing');
+  });
+
+  test('an unknown wrapper is not unwrapped', () => {
+    assert.strictEqual(post('fish -c ls').state, 'error', 'fish is not in the table');
+    assert.strictEqual(post('mybash -c "cat x"').state, 'error', 'a name only ending in sh is not a shell');
+  });
+});
+
+describe('state-machine -- round 3: background agents', () => {
+  // Checked against the 2.1.281 binary: a background Agent (the default)
+  // returns {status: 'async_launched', isAsync, agentId, ...} at once.
+  test('an async-launched agent is launched, not done', () => {
+    const launched = normalizeToolResponse({ tool_response: { status: 'async_launched', isAsync: true, agentId: 'a1' } });
+    assert.strictEqual(launched.status, 'async_launched');
+    const r = classifyToolResult('Agent', { description: 'explore' }, launched, false);
+    assert.deepStrictEqual([r.state, r.detail], ['satisfied', 'agent launched']);
+    const done = classifyToolResult('Agent', {}, normalizeToolResponse({ tool_response: { status: 'completed' } }), false);
+    assert.deepStrictEqual([done.state, done.detail], ['happy', 'agent done'], 'a foreground agent still finishes');
+    assert.strictEqual(normalizeToolResponse({ tool_response: { status: 7 } }).status, undefined, 'only a string status');
+  });
+});
+
+describe('state-machine -- round 3: a read prints content, not verdicts (fuzz)', () => {
+  const post = (cmd, stdout) => classifyToolResult('Bash', { command: cmd }, { stdout, stderr: '' }, false);
+  test('exit codes named in a read-only command\'s content are content', () => {
+    assert.strictEqual(post('grep -n "Exit code" tests/x.js', '12:  test("Exit code: 1")\n13: foo').state, 'relieved');
+    assert.strictEqual(post('git log --oneline', 'abc1234 exit code 1 when x').state, 'relieved');
+    assert.strictEqual(post('tail ci.log', 'step 3\nProcess exited with code 1\ndone').state, 'relieved');
+  });
+  test('an editor\'s own exit trailer still counts for a read', () => {
+    assert.strictEqual(post('grep x y', 'Exit code 2').state, 'error');
+    assert.strictEqual(post('grep x y', 'a\nb\nExit code 2').state, 'error');
+    assert.strictEqual(post('npm test', 'blah exit code 1 blah').state, 'error', 'an acting command is unchanged');
+  });
+  test('merge conflicts and cd failures only count where they can be the command\'s own', () => {
+    assert.strictEqual(post('git grep "CONFLICT ("', 'a.js: CONFLICT (content): x').state, 'relieved');
+    assert.strictEqual(post('git merge main', 'CONFLICT (content): Merge conflict in a.js').detail, 'merge conflict!');
+    assert.strictEqual(post('tail deploy.log', 'cd: /x: No such file or directory').state, 'relieved');
+    assert.strictEqual(post('cd /nope && ls', 'bash: cd: /nope: No such file or directory').state, 'error');
+  });
+});
+
+describe('state-machine -- round 3: linear-time patterns (fuzz)', () => {
+  // 60,000 digits took ~1.4s in "\d+\s+failed" (quadratic backtracking);
+  // the hook's whole budget is ~50ms. The bound is loose on purpose.
+  test('a long run of digits does not stall the error patterns', () => {
+    const big = '7'.repeat(60000);
+    const t0 = Date.now();
+    looksLikeError(big, stdoutErrorPatterns);
+    errorDetail(big, '');
+    assert.ok(Date.now() - t0 < 250, `took ${Date.now() - t0}ms`);
+    assert.strictEqual(looksLikeError('3 failed, 2 passed', stdoutErrorPatterns), true, 'still matches');
+    assert.strictEqual(errorDetail('12 failing', ''), 'tests failed');
+  });
+  test('OSC sequences ending in ST are stripped, quickly', () => {
+    assert.strictEqual(stripAnsi('\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\'), 'link');
+    assert.strictEqual(stripAnsi('a\x1b]0;title\x07b'), 'ab', 'BEL still ends one');
+    const many = '\x1b]8;;http://x\x1b\\l\x1b]8;;\x1b\\'.repeat(20000);
+    const t0 = Date.now();
+    assert.strictEqual(stripAnsi(many), 'l'.repeat(20000));
+    assert.ok(Date.now() - t0 < 250, `took ${Date.now() - t0}ms`);
+  });
+});
+
+describe('state-machine -- round 3: a stats file that lies (fuzz)', () => {
+  const fs = require('fs');
+  test('a session named __proto__ keeps its own counters', () => {
+    const t = makeTempEnv('__proto__');
+    try {
+      for (let i = 0; i < 2; i++) {
+        runUpdateState('PreToolUse', { session_id: '__proto__', tool_name: 'Bash', tool_input: { command: 'ls' } }, t.env);
+      }
+      const raw = JSON.parse(fs.readFileSync(t.statsFile, 'utf8'));
+      assert.ok(Object.prototype.hasOwnProperty.call(raw.sessionCounters, '__proto__'), 'persisted as its own key');
+      assert.strictEqual(raw.sessionCounters['__proto__'].toolCalls, 2);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a file named toString counts as a number', () => {
+    const t = makeTempEnv('fname');
+    try {
+      for (let i = 0; i < 2; i++) {
+        runUpdateState('PreToolUse', { session_id: 'fname', tool_name: 'Edit', tool_input: { file_path: '/r/toString' } }, t.env);
+      }
+      assert.strictEqual(readJSON(t.statsFile).frequentFiles.toString, 2);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('wrongly typed fields are repaired instead of breaking every hook', () => {
+    const n = normalizeStats({ streak: '5', totalToolCalls: null, session: { id: 7, activeSubagents: [null, 3, { id: 'a' }], toolCalls: '2' }, daily: 'x' });
+    assert.strictEqual(n.streak, 0);
+    assert.strictEqual(n.totalToolCalls, 0);
+    assert.strictEqual(n.session.id, '');
+    assert.strictEqual(n.session.toolCalls, 0);
+    assert.deepStrictEqual(n.session.activeSubagents, [{ id: 'a' }]);
+    assert.strictEqual(n.daily.sessionCount, 0);
+
+    const t = makeTempEnv('s1');
+    try {
+      fs.writeFileSync(t.statsFile, JSON.stringify({ streak: '5', session: { id: 's1', activeSubagents: [null] } }));
+      runUpdateState('PreToolUse', { session_id: 's1', tool_name: 'Bash', tool_input: { command: 'npm test' } }, t.env);
+      assert.strictEqual(readJSON(t.stateFile).state, 'testing', 'the hook ran its real path, not the fallback');
+      const st = readJSON(t.statsFile);
+      assert.strictEqual(typeof st.streak, 'number', 'and the file is repaired');
+      assert.deepStrictEqual(st.session.activeSubagents || [], []);
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('state-machine -- round 3: a build is a command, not an argument', () => {
+  const post = (cmd) => classifyToolResult('Bash', { command: cmd }, { stdout: 'ok', stderr: '' }, false).detail;
+  test('a folder named build is not a build', () => {
+    for (const c of ['rm -rf build', 'mkdir -p build', 'cp -r build/ dist', 'echo x > build.log']) {
+      assert.strictEqual(post(c), 'command succeeded', c);
+    }
+  });
+  test('build tools and build subcommands still are', () => {
+    for (const c of ['npm run build', 'npm run build:prod', 'yarn build', 'pnpm --filter web build',
+      'yarn workspace web build', 'go build ./...', 'docker build -t x .', 'make -j8 all', 'npx tsc -p .',
+      './node_modules/.bin/webpack', 'vite build', 'dotnet build', 'mvn compile']) {
+      assert.strictEqual(post(c), 'build succeeded', c);
+    }
+  });
+});
+
+describe('state-machine -- round 4', () => {
+  const sm = require('../lib/state-machine');
+  const post = (cmd, stdout = 'ok') => classifyToolResult('Bash', { command: cmd }, { stdout, stderr: '' }, false);
+
+  // The same window left open Friday to Monday credited the whole weekend at
+  // its next turn end; only a session losing ownership was covered before.
+  test('a gap a session sat silent through is not session time', () => {
+    const H = 3600000;
+    const T0 = 1e12;
+    const stats = defaultStats();
+    const c = sm.freshCounter(T0);
+    c.start = T0; c.lastSeen = T0 + 2 * H;
+    sm.touchCounter(c, T0 + 64 * H);                  // Monday: 62h of silence
+    assert.strictEqual(c.idleMs, 62 * H);
+    sm.creditSession(stats, c, T0 + 64 * H + 60000);
+    assert.strictEqual(stats.daily.cumulativeMs, 2 * H + 60000, 'only the active time');
+    assert.strictEqual(stats.records.longestSession, 2 * H + 60000);
+    const d = sm.freshCounter(T0);
+    d.lastSeen = T0;
+    sm.touchCounter(d, T0 + sm.IDLE_GAP_MS - 1000);
+    assert.ok(!d.idleMs, 'a long silent tool call is still work');
+  });
+
+  test('a shell wrapper loses only a quote pair that spans the whole script', () => {
+    assert.strictEqual(post('bash -lc "cat package.json" && bash -lc "npm install"', 'npm ERR! code E404').state, 'error');
+    assert.strictEqual(post("sh -c 'cat a' || sh -c 'rm -rf build'", 'Error: EACCES').state, 'error');
+    assert.strictEqual(post('bash -lc "cat package.json"', 'Error: x').state, 'relieved', 'a whole-script pair still unwraps');
+  });
+
+  test('a build tool run through a manager, a runner or compose is a build', () => {
+    for (const c of ['pnpm vite build', 'yarn tsc', 'pnpm exec tsc -p .', 'npm exec -- webpack',
+      'npx -p typescript tsc', 'docker compose build', '(cd x && npm run build)', 'pnpm dlx vite build']) {
+      assert.strictEqual(post(c).detail, 'build succeeded', c);
+    }
+    assert.strictEqual(post('npx eslint .').detail, 'command succeeded');
   });
 });
 

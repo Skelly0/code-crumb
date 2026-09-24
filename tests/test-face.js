@@ -3034,4 +3034,151 @@ describe('face.js -- third review pass: streak loss', () => {
   });
 });
 
+// -- Round 3: prompts in the queue ---------------------------------------------
+
+describe('face.js -- round 3: prompts in the queue', () => {
+  // A reward on screen (inside its guaranteed window) with a prompt queued behind it.
+  function rewardWithQueuedWait() {
+    const f = new ClaudeFace();
+    f.setState('happy', 'done');
+    f.setState('waiting', 'allow?');
+    assert.strictEqual(f.state, 'happy');
+    assert.strictEqual(f.pendingState, 'waiting', 'fixture: the prompt is queued');
+    return f;
+  }
+
+  test('an error keeps a queued prompt (a new error face)', () => {
+    const f = rewardWithQueuedWait();
+    f.setState('error', 'boom');
+    assert.strictEqual(f.state, 'error');
+    assert.strictEqual(f.pendingState, 'waiting', 'the prompt still wants an answer');
+  });
+
+  test('a newer same-state error keeps it too, and drops everything else', () => {
+    const f = new ClaudeFace();
+    f.setState('error', 'first');
+    f.setState('waiting', 'allow?');                 // buffered behind the error's 4s
+    assert.strictEqual(f.pendingState, 'waiting');
+    f.setState('error', 'second');
+    assert.strictEqual(f.stateDetail, 'second');
+    assert.strictEqual(f.pendingState, 'waiting', 'the same-state branch used to clear it');
+    const g = new ClaudeFace();
+    g.setState('error', 'first');
+    g.setState('happy', 'x');                        // a reward queued behind the error
+    g.setState('error', 'second');
+    assert.strictEqual(g.pendingState, null, 'an older reward is still dropped');
+  });
+
+  test('an answer spends the queued or remembered prompt', () => {
+    const f = rewardWithQueuedWait();
+    f.dropWait();
+    assert.strictEqual(f.pendingState, null);
+    const g = new ClaudeFace();
+    g.setState('coding', 'x');
+    g.setState('happy', 'done');                     // queued behind the work
+    g.setState('waiting', 'allow?');                 // remembered behind that reward
+    assert.strictEqual(g.pendingWork && g.pendingWork.state, 'waiting', 'fixture: remembered');
+    g.dropWait();
+    assert.strictEqual(g.pendingWork, null);
+    assert.strictEqual(g.pendingState, 'happy', 'the reward itself stays');
+  });
+});
+
+// -- Round 3: wide characters ---------------------------------------------
+// The detail, status, indicators and project rows (and the thought bubble,
+// which can name a frequent file) were measured with `.length`, so a CJK
+// detail or folder -- two columns per character -- passed the right edge at
+// the 38x20 minimum and wrapped the detail line onto the project row at 44x30.
+
+describe('face.js -- round 3: wide characters', () => {
+  const { charWidth, strWidth } = require('../lib/shared');
+  // Walk a frame as a terminal would: a cursor move starts a span, other
+  // escapes paint nothing, and each code point advances by its display width.
+  function paintedSpans(out) {
+    const spans = [];
+    const re = /\x1b\[(\d+);(\d+)H|\x1b\[[0-9;?]*[A-Za-z]|([\s\S])/gu;
+    let cur = null;
+    let m;
+    while ((m = re.exec(out))) {
+      if (m[1]) {
+        cur = { row: +m[1], col: +m[2], end: +m[2] - 1, text: '' };
+        spans.push(cur);
+      } else if (m[3] !== undefined && cur) {
+        cur.end += charWidth(m[3].codePointAt(0));
+        cur.text += m[3];
+      }
+    }
+    return spans;
+  }
+  function renderAt(cols, rows, face) {
+    const oc = process.stdout.columns, or = process.stdout.rows;
+    process.stdout.columns = cols; process.stdout.rows = rows;
+    try { return face.render(); } finally { process.stdout.columns = oc; process.stdout.rows = or; }
+  }
+  function wideFace() {
+    const face = new ClaudeFace();
+    face.showStats = true;
+    face.forceState('searching', 'grep \u7528\u6237\u767b\u5f55\u5931\u8d25\u65f6\u663e\u793a\u9519\u8bef\u4fe1\u606f');
+    face.cwd = '/home/user/\u8a2d\u8a08\u66f8\u306e\u30ea\u30dd\u30b8\u30c8\u30ea';
+    face.gitBranch = 'feature/\u30e6\u30fc\u30b6\u30fc\u8a8d\u8a3c';
+    face.model = '\u901a\u7fa9\u5343\u554f\u6700\u5927\u7248\u672c\u9577\u3044\u540d\u524d';
+    face.editor = '\u30a8\u30c7\u30a3\u30bf\u540d\u524d\u3067\u3059';
+    face.thoughtText = '';
+    face.particles.particles = [];
+    return face;
+  }
+  const assertInside = (spans, cols, rows) => {
+    for (const sp of spans) {
+      const limit = sp.row === rows ? cols - 1 : cols;
+      assert.ok(sp.end <= limit, `${cols}x${rows}: row ${sp.row} "${sp.text}" ends at column ${sp.end}`);
+    }
+  };
+
+  for (const [cols, rows] of [[38, 20], [44, 30]]) {
+    test(`${cols}x${rows}: a CJK detail, folder, branch, model and editor stay inside the window`, () => {
+      const face = wideFace();
+      assertInside(paintedSpans(renderAt(cols, rows, face)), cols, rows);
+    });
+  }
+
+  test('44x30: the detail line fits its budget instead of wrapping onto the project row', () => {
+    const face = wideFace();
+    const out = renderAt(44, 30, face);
+    const detailRow = face.lastPos.row + 10;
+    const spans = paintedSpans(out).filter(sp => sp.row === detailRow && sp.text.trim());
+    assert.strictEqual(spans.length, 1);
+    assert.ok(spans[0].text.includes('\u7528\u6237'), 'the detail is drawn');
+    assert.ok(spans[0].text.endsWith('...'), 'and truncated by columns');
+    assert.ok(strWidth(spans[0].text.trim()) <= 28, 'within maxDetailWidth (28 at 44 columns)');
+    assert.ok(spans[0].end <= 44, `ends at column ${spans[0].end}`);
+  });
+
+  test('displayDetail truncates by columns and keeps the escalation suffix', () => {
+    const face = new ClaudeFace();
+    face.forceState('reading', '\u8a2d\u8a08\u66f8\u306e\u30ec\u30d3\u30e5\u30fc\u8cc7\u6599.md');
+    let d = face.displayDetail(12);
+    assert.ok(strWidth(d) <= 12, `"${d}" is ${strWidth(d)} columns`);
+    face.lastStateChange = Date.now() - 20000;
+    d = face.displayDetail(30);
+    assert.ok(/still running/.test(d), 'the suffix survives');
+    assert.ok(strWidth(d) <= 30, `"${d}" is ${strWidth(d)} columns`);
+  });
+
+  for (const accessories of [false, true]) {
+    test(`a thought naming a CJK file draws a closed bubble (accessories ${accessories ? 'on' : 'off'})`, () => {
+      const face = wideFace();
+      face.accessoriesEnabled = accessories;
+      face.thoughtText = 'back to \u8a2d\u8a08\u66f8\u306e\u30ec\u30d3\u30e5\u30fc.md again...';
+      const out = renderAt(100, 30, face);
+      const b = face.lastPos.bubble;
+      assert.ok(b, 'the bubble is drawn');
+      const spans = paintedSpans(out).filter(sp => /^[\u256d\u2502\u2570]/.test(sp.text) && sp.row >= b.row && sp.row < b.row + 3);
+      assert.strictEqual(spans.length, 3, 'top, text and bottom rows');
+      const widths = new Set(spans.map(sp => sp.end - sp.col + 1));
+      assert.strictEqual(widths.size, 1, `bubble rows disagree: ${spans.map(sp => sp.end - sp.col + 1).join(', ')}`);
+      assertInside(spans, 100, 30);
+    });
+  }
+});
+
 module.exports = suite;

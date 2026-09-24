@@ -17,11 +17,10 @@
 // |    code-crumb --dangerously-skip-permissions                   |
 // +================================================================+
 
-const { spawn, execSync } = require('child_process');
-const fs = require('fs');
+const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
-const { PID_FILE, buildRendererCommands, quoteArg } = require('./lib/shared');
+const { PID_FILE, buildRendererCommands, quoteArg, isRendererAlive, spawnRendererWindow } = require('./lib/shared');
 
 const WINDOW_TITLE = 'Code Crumb';
 
@@ -89,53 +88,16 @@ function buildEditorSpawn(platform, cmd, args) {
 
 // -- Side-effecting runtime -----------------------------------------------
 
+// Same liveness rule as the hook's autolaunch and the renderer's own guard.
 function isRendererRunning() {
-  try {
-    const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
-    if (isNaN(pid)) return false;
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  return isRendererAlive(PID_FILE);
 }
 
 function startRenderer() {
-  const platform = process.platform;
   const rendererPath = path.resolve(__dirname, 'renderer.js');
-  const rendererArgs = [rendererPath];
-
-  if (platform === 'win32') {
-    let hasWt = false;
-    try { execSync('where wt', { stdio: 'ignore' }); hasWt = true; } catch {}
-
-    const cmds = buildRendererCommands(platform, rendererArgs, WINDOW_TITLE);
-    if (hasWt) {
-      spawn(cmds.wt.cmd, cmds.wt.args, cmds.wt.opts).unref();
-    } else {
-      spawn(cmds.cmd.cmd, cmds.cmd.args, cmds.cmd.opts).unref();
-    }
-  } else if (platform === 'darwin') {
-    const cmds = buildRendererCommands(platform, rendererArgs, WINDOW_TITLE);
-    spawn(cmds.osascript.cmd, cmds.osascript.args, cmds.osascript.opts).unref();
-  } else {
-    const cmds = buildRendererCommands(platform, rendererArgs, WINDOW_TITLE);
-    let launched = false;
-    for (const key of Object.keys(cmds)) {
-      try {
-        execSync(`command -v ${cmds[key].cmd}`, { stdio: 'ignore' });
-        spawn(cmds[key].cmd, cmds[key].args, cmds[key].opts).unref();
-        launched = true;
-        break;
-      } catch {
-        continue;
-      }
-    }
-
-    if (!launched) {
-      console.error('  Could not find a terminal emulator to launch the face.');
-      console.error('  Start it manually: node ' + rendererPath);
-    }
+  if (!spawnRendererWindow(rendererPath, WINDOW_TITLE)) {
+    console.error('  Could not find a terminal emulator to launch the face.');
+    console.error('  Start it manually: node ' + rendererPath);
   }
 }
 

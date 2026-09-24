@@ -44,6 +44,30 @@ function nodeBinary() {
 // text for the error forensics.
 const MAX_OUTPUT = 4000;
 
+// The adapter reads at most 1 MB of stdin, and anything over it is judged
+// from the raw text alone: a batch over the cap lost every event in it. So
+// no single argument may be huge (a Write's whole file), and a batch is cut
+// before it reaches the cap. A long argument keeps its line count -- the
+// adapter counts a write's lines for the "+N" thought -- as bare newlines.
+const MAX_FIELD = 64 * 1024;
+const MAX_BATCH_BYTES = 900 * 1024;
+
+function capText(v) {
+  if (typeof v !== 'string' || v.length <= MAX_FIELD) return v;
+  let lines = 0;
+  for (let i = v.indexOf('\n', MAX_FIELD); i !== -1; i = v.indexOf('\n', i + 1)) lines++;
+  return v.slice(0, MAX_FIELD) + '\n'.repeat(lines);
+}
+
+function capInput(v, depth = 0) {
+  if (typeof v === 'string') return capText(v);
+  if (!v || typeof v !== 'object' || depth > 3) return v;
+  if (Array.isArray(v)) return v.map(x => capInput(x, depth + 1));
+  const out = {};
+  for (const [k, x] of Object.entries(v)) out[k] = capInput(x, depth + 1);
+  return out;
+}
+
 // -- Pure translation ---------------------------------------------------
 // One OpenCode hook call or bus event -> one adapter stdin payload, or null
 // when there is nothing worth showing.
@@ -60,8 +84,15 @@ function translate(hook, input, output) {
     if (!ev) return null;
     const p = ev.properties || {};
     switch (ev.type) {
-      case 'session.created':
-        return { type: 'session.created', sessionId: p.info && p.info.id };
+      // The task tool runs each delegated task in a child session
+      // (sessions.create({ parentID })). This is the only event that names
+      // the parent; `send` remembers it for the child's later payloads.
+      case 'session.created': {
+        const info = p.info || {};
+        return typeof info.parentID === 'string' && info.parentID
+          ? { type: 'session.created', sessionId: info.id, parentSession: info.parentID }
+          : { type: 'session.created', sessionId: info.id };
+      }
       case 'session.idle':
         return { type: 'session.idle', sessionId: p.sessionID };
       case 'session.error':
@@ -99,7 +130,7 @@ function translate(hook, input, output) {
             sessionId: part.sessionID,
             callID: part.callID,
             tool: part.tool,
-            toolInput: part.state.input || {},
+            toolInput: capInput(part.state.input || {}),
             error: errorText(part.state.error),
           };
         }
@@ -117,7 +148,7 @@ function translate(hook, input, output) {
       sessionId: i.sessionID,
       callID: i.callID,
       tool: i.tool,
-      toolInput: o.args || {},
+      toolInput: capInput(o.args || {}),
     };
   }
   if (hook === 'tool.execute.after') {
@@ -126,7 +157,7 @@ function translate(hook, input, output) {
       sessionId: i.sessionID,
       callID: i.callID,
       tool: i.tool,
-      toolInput: i.args || {},
+      toolInput: capInput(i.args || {}),
       title: o.title,
       output: typeof o.output === 'string' ? o.output.slice(0, MAX_OUTPUT) : '',
     };
@@ -192,6 +223,12 @@ function throttled(payload, now) {
 const lastModelBySession = new Map();
 const MAX_MODEL_KEYS = 64;
 
+// Child session -> its parent, from session.created. The adapter also keeps
+// it on the child's session file, so a plugin restart (or a cleared map)
+// costs nothing once the child has written once.
+const parentBySession = new Map();
+const MAX_PARENT_KEYS = 256;
+
 // Per-session delivery order for the async payloads. Each one used to be its
 // own node process and nothing ordered two of them: for a fast tool the
 // `after` child could take the stats lock and write before the `before` child
@@ -207,7 +244,11 @@ const MAX_MODEL_KEYS = 64;
 // and undo it -- a late tool.execute.before re-opened the turn, re-stamped
 // attention and cleared `stopped`.
 const CHAIN_WAIT_MS = 3000;
-const queues = new Map(); // sessionId -> { running, pending: [{ json, node }] }
+const queues = new Map(); // sessionId -> { running, pending: [{ json, node, bytes }] }
+
+// This plugin instance, and the order it reported events in.
+const PLUGIN_ID = `${process.pid}-${Date.now().toString(36)}`;
+let sequence = 0;
 
 // Resolves when the child is done (or CHAIN_WAIT_MS passes); never rejects,
 // whatever spawn does -- under EMFILE a child comes back with no stdin, and a
@@ -238,11 +279,23 @@ function batchInput(items) {
   return items.length === 1 ? items[0].json : `[${items.map(i => i.json).join(',')}]`;
 }
 
+// The first items of `pending` that fit in one adapter's stdin (always at
+// least one), taken out of it.
+function takeBatch(pending) {
+  let bytes = 2;
+  let n = 0;
+  while (n < pending.length && (n === 0 || bytes + pending[n].bytes + 1 <= MAX_BATCH_BYTES)) {
+    bytes += pending[n].bytes + 1;
+    n++;
+  }
+  return pending.splice(0, n);
+}
+
 function pump(key) {
   const q = queues.get(key);
   if (!q || q.running) return;
   if (!q.pending.length) { queues.delete(key); return; }
-  const batch = q.pending.splice(0);
+  const batch = takeBatch(q.pending);
   q.running = true;
   spawnAdapter(batch[0].node, batchInput(batch)).then(() => {
     q.running = false;
@@ -253,8 +306,12 @@ function pump(key) {
 function sendInOrder(key, node, json) {
   let q = queues.get(key);
   if (!q) { q = { running: false, pending: [] }; queues.set(key, q); }
-  q.pending.push({ json, node });
+  q.pending.push(item(json, node));
   pump(key);
+}
+
+function item(json, node) {
+  return { json, node, bytes: Buffer.byteLength(json) };
 }
 
 // Everything still queued for this session, taken out of the queue.
@@ -276,20 +333,32 @@ function send(payload) {
       }
       return false;
     }
+    if (payload.parentSession && payload.sessionId) {
+      if (parentBySession.size >= MAX_PARENT_KEYS) parentBySession.clear();
+      parentBySession.set(payload.sessionId, payload.parentSession);
+    }
     if (throttled(payload, Date.now())) return false;
     const known = lastModelBySession.get(payload.sessionId || '');
     if (known && !payload.model) payload = { ...payload, model: known };
+    const parent = parentBySession.get(payload.sessionId || '');
+    if (parent && !payload.parentSession) payload = { ...payload, parentSession: parent };
+    // Numbered in the order OpenCode reported them (see the adapter's
+    // straggler rule): a child can land after a later synchronous turn end.
+    payload = { ...payload, seq: ++sequence, pluginId: PLUGIN_ID };
     const json = JSON.stringify(payload);
     const node = nodeBinary();
     if (SYNC_TYPES.has(payload.type)) {
       const batch = takeQueued(payload.sessionId || '');
-      batch.push({ json, node });
-      spawnSync(node, [ADAPTER], {
-        input: batchInput(batch),
-        stdio: ['pipe', 'ignore', 'ignore'],
-        windowsHide: true,
-        timeout: SYNC_CAP_MS,
-      });
+      batch.push(item(json, node));
+      // In order, each within the stdin cap; the turn end is in the last.
+      while (batch.length) {
+        spawnSync(node, [ADAPTER], {
+          input: batchInput(takeBatch(batch)),
+          stdio: ['pipe', 'ignore', 'ignore'],
+          windowsHide: true,
+          timeout: SYNC_CAP_MS,
+        });
+      }
       return true;
     }
     sendInOrder(payload.sessionId || '', node, json);
@@ -321,5 +390,6 @@ export const CodeCrumbPlugin = async () => ({
   'permission.ask': async (input, output) => dispatch('permission.ask', input, output),
 });
 
-// Test seam: a static property is invisible to the plugin loader.
+// Test seams: a static property is invisible to the plugin loader.
 CodeCrumbPlugin.translate = translate;
+CodeCrumbPlugin.takeBatch = takeBatch;

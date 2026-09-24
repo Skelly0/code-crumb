@@ -20,6 +20,7 @@
 
 const {
   writeSessionState, guardedWriteState, readStats, writeStats, initSession, buildExtra,
+  creditOwnerSession,
 } = require('./base-adapter');
 const { withStatsLock } = require('../lib/shared');
 
@@ -54,6 +55,8 @@ try {
   withStatsLock(() => {
     const stats = readStats();
     initSession(stats, sessionId);
+    // The turn is over: fold its time into today's total and the records.
+    if (turnEnded) creditOwnerSession(stats);
     const extra = buildExtra(stats, sessionId, modelName, editor);
     // A turn end, on the adapter contract: `stopped` on the global file (tmux
     // and the ownership guard read it), `turnEnded` on the session file --

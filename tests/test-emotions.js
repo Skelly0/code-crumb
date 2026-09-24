@@ -952,11 +952,11 @@ describe('emotions -- a dead editor stays dead after the center moves away', () 
 // s1_startup / s5_resume cover them end to end).
 describe('emotions -- renderer closure fixes (source lint)', () => {
   test('a startup-gated write is recorded as applied, not just skipped', () => {
-    assert.ok(/if \(gate === 'record'\) \{[\s\S]{0,400}?lastAppliedTimestamp = ts;\s*lastAppliedState = stateData\.state;[\s\S]{0,400}?\}\s*return;/.test(RENDERER_SRC));
+    assert.ok(/if \(gate === 'record'\) \{[\s\S]{0,700}?lastAppliedTimestamp = ts;\s*lastAppliedState = stateData\.state;[\s\S]{0,400}?\}\s*return;/.test(RENDERER_SRC));
   });
 
   test('a newer write under a new pid retires the armed pid and clears editorDead', () => {
-    assert.ok(/stateData\.pid && lastEditorPid && stateData\.pid !== lastEditorPid\s*&& ts > lastAppliedTimestamp\) \{\s*lastEditorPid = 0;\s*editorDead = false;/.test(RENDERER_SRC));
+    assert.ok(/stateData\.pid && lastEditorPid && stateData\.pid !== lastEditorPid\s*&& isNewerWrite\(ts, lastAppliedTimestamp, now\)\) \{\s*lastEditorPid = 0;\s*editorDead = false;/.test(RENDERER_SRC));
   });
 
   test('resize runs the swap only while it is still pending', () => {
@@ -964,7 +964,7 @@ describe('emotions -- renderer closure fixes (source lint)', () => {
   });
 
   test('the status-line subagent count is the main session’s live children', () => {
-    assert.ok(/face\.subagentCount = minimal \? 0 : orbital\.liveChildCount\(\);/.test(RENDERER_SRC));
+    assert.ok(/face\.subagentCount = \(minimal \|\| editorDead\) \? 0 : orbital\.liveChildCount\(\);/.test(RENDERER_SRC));
     assert.ok(!/face\.subagentCount = orbital\.getSortedFaces\(\)\.length/.test(RENDERER_SRC));
   });
 
