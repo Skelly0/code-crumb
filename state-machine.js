@@ -133,9 +133,14 @@ function unwrapShell(cmd) {
     const m = SHELL_WRAPPER_RE.exec(s);
     if (!m) break;
     s = m[1].trim();
-    if (s.length >= 2 && ((s[0] === '"' && s.endsWith('"')) || (s[0] === "'" && s.endsWith("'")))) {
-      s = s.slice(1, -1);
-    }
+    // Only a quote pair that spans the whole script: `bash -lc "cat a" &&
+    // bash -lc "npm install"` starts and ends with a quote that closes two
+    // different strings, and stripping those joined the segments -- the
+    // install then read as part of a read-only chain.
+    const dq = /^"((?:[^"\\]|\\[\s\S])*)"$/.exec(s);
+    const sq = /^'([^']*)'$/.exec(s);
+    if (dq) s = dq[1];
+    else if (sq) s = sq[1];
   }
   return s;
 }
@@ -206,8 +211,17 @@ const SUBCOMMAND_TOOLS = /^(?:npm|yarn|pnpm|bun|deno|go|cargo|docker|podman|dotn
 const RUNNERS = /^(?:npx|bunx|pnpx)$/i;
 function isBuildCommand(intent) {
   for (const segment of intent.split(' ; ')) {
-    let words = segmentWords(segment);
-    if (words.length && RUNNERS.test(words[0])) words = words.slice(1).filter(w => !w.startsWith('-'));
+    // A subshell's closing paren rides on the last word: `(cd x && npm run build)`.
+    let words = segmentWords(segment).map(w => w.replace(/\)+$/, '')).filter(Boolean);
+    if (words.length && RUNNERS.test(words[0])) {
+      // Past the runner's flags, and the package a `-p`/`--package` names.
+      const rest = [];
+      for (let i = 1; i < words.length; i++) {
+        if (/^(?:-p|--package)$/.test(words[i])) { i++; continue; }
+        if (!words[i].startsWith('-')) rest.push(words[i]);
+      }
+      words = rest;
+    }
     if (!words.length) continue;
     const cmd = words[0].replace(/^.*[\\/]/, '').replace(/\.(?:exe|cmd|bat)$/i, '');
     if (BUILD_TOOLS.test(cmd)) return true;
@@ -223,6 +237,12 @@ function isBuildCommand(intent) {
     }
     const sub = rest[0] === 'run' ? rest[1] : rest[0];
     if (sub && /^(?:build|compile)(?:[:\-].*)?$/i.test(sub)) return true;
+    // A build tool run through the manager (`yarn tsc`, `pnpm vite build`,
+    // `pnpm exec tsc`, `npm exec -- webpack`), or one level down (`docker
+    // compose build`).
+    const next = /^(?:exec|dlx|x|compose)$/i.test(sub || '') ? rest[1] : sub;
+    if (next && BUILD_TOOLS.test(next)) return true;
+    if (/^compose$/i.test(sub || '') && /^build$/i.test(rest[1] || '')) return true;
   }
   return false;
 }
@@ -1132,6 +1152,7 @@ function normalizeCounter(c, now) {
   c.start = num(c.start, now) || now;
   c.commitCount = num(c.commitCount, 0);
   c.creditedMs = num(c.creditedMs, 0);
+  c.idleMs = num(c.idleMs, 0);
   c.lastSeen = num(c.lastSeen, now);
   // A pre-countedDay entry that was counted is taken as counted today:
   // counting it again right after an upgrade would be the worse error.
@@ -1201,7 +1222,9 @@ function pruneCounters(map, keepIds, now) {
 // adapters (which used to credit nothing at all).
 function creditSession(stats, c, end) {
   if (!c || !c.start || !stats || !stats.records || !stats.daily) return;
-  const dur = end - c.start;
+  // Active time: a gap the session sat silent through (touchCounter) is
+  // neither today's time nor part of how long it ran.
+  const dur = end - c.start - (c.idleMs || 0);
   if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
   const files = Array.isArray(c.filesEdited) ? c.filesEdited.length : 0;
   if (files > (stats.records.mostFilesEdited || 0)) stats.records.mostFilesEdited = files;
@@ -1219,6 +1242,19 @@ function creditSession(stats, c, end) {
 // still counted, by its own next turn end.
 function creditEndFor(c, now) {
   return Math.min(now, (c && c.lastSeen) || now);
+}
+
+// A session seen again after IDLE_GAP_MS of silence was not being worked in
+// meanwhile: the gap goes to idleMs, which creditSession leaves out. Without
+// it the same window, left open Friday to Monday, credited the whole weekend
+// at its next turn end ("62h today", longestSession 64h) -- creditEndFor only
+// covered a session losing ownership. Long enough that a silent tool call
+// (a 40-minute build writes nothing between its Pre and Post) still counts.
+const IDLE_GAP_MS = 2 * 60 * 60 * 1000;
+function touchCounter(c, now) {
+  if (!c) return;
+  if (c.lastSeen && now - c.lastSeen > IDLE_GAP_MS) c.idleMs = (c.idleMs || 0) + (now - c.lastSeen);
+  c.lastSeen = now;
 }
 
 // -- Parallel Session Classification (pure logic) -------------------------
@@ -1269,6 +1305,8 @@ module.exports = {
   localDay,
   creditSession,
   creditEndFor,
+  touchCounter,
+  IDLE_GAP_MS,
   COUNTER_MAX_AGE_MS,
   COUNTER_MAX_ENTRIES,
   COUNTER_MAX_FILES,

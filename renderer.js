@@ -89,7 +89,7 @@ const FRESH_READ_STATES = new Set(['thinking', ...ACTIVE_WORK_STATES, ...COMPLET
 //   fileAgeMs     how long since the main session produced a NEW write
 //                 (0 when unknown -- treated as fresh)
 //   liveChildren  live subagent orbitals belonging to this session (0 = none)
-function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState, fileAgeMs, liveChildren = 0 }) {
+function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState, fileAgeMs, liveChildren = 0, fileWaiting = false }) {
   // Conducting hold. A Claude Code subagent's hooks write only that agent's
   // own orbital file, so between SubagentStart and SubagentStop nothing
   // refreshes global state and the face would fall idle -> sleeping while its
@@ -133,7 +133,9 @@ function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState,
   // silence bound does expire, hold() turns that 'idle' into conducting if
   // agents are still writing, which is the honest reading: the global write
   // clock has gone quiet but the family demonstrably has not.
-  if (state === 'waiting' && fileState === 'waiting') {
+  // (`fileWaiting`: the file's last write still names a permission prompt
+  // not yet answered -- a wait kept through a later error is still owed.)
+  if (state === 'waiting' && (fileState === 'waiting' || fileWaiting)) {
     return (fileAgeMs || 0) > WAIT_HOLD_STALE_MS ? hold('idle') : null;
   }
   // The state file still names this same unfinished tool: hold the work face.
@@ -395,6 +397,8 @@ function readState(filePath = STATE_FILE) {
       workDetail: detailText(data.workDetail),
       workSince: typeof data.workSince === 'number' ? data.workSince : 0,
       answered: !!data.answered,
+      waitingOn: !!data.waitingOn,
+      compacting: !!data.compacting,
       pid: Number.isInteger(data.pid) && data.pid > 0 ? data.pid : 0,
       editor: text(data.editor),
       lastPromptAt: typeof data.lastPromptAt === 'number' ? data.lastPromptAt : 0,
@@ -414,6 +418,24 @@ function isAlreadyRunning() {
 function writePid() {
   try { fs.writeFileSync(PID_FILE, String(process.pid), 'utf8'); } catch {}
 }
+
+// The heartbeat refreshes the PID file's mtime -- it never rewrites it: a
+// hook reading the file mid-rewrite saw it empty, took the renderer for
+// dead, and opened a window that said "already running". A file naming some
+// other renderer is left alone; a missing one is written again.
+let lastBeat = 0;
+function heartbeat(now = Date.now()) {
+  lastBeat = now;
+  try {
+    if (fs.readFileSync(PID_FILE, 'utf8').trim() !== String(process.pid)) return;
+    const t = new Date(now);
+    fs.utimesSync(PID_FILE, t, t);
+  } catch (e) {
+    if (e && e.code === 'ENOENT') writePid();
+  }
+}
+
+let heartbeatFromLoop = false;  // set once this renderer owns the PID file
 
 function removePid() {
   try { fs.unlinkSync(PID_FILE); } catch {}
@@ -467,6 +489,8 @@ function runUnifiedMode() {
   let lastStopped = false;    // Track if Stop hook has fired (turn ended)
   let lastTurnOver = false;   // Turn over, but on a face that is not rescued (see readState)
   let lastSessionEnded = false; // The main's file says SessionEnd (the list's ended marker)
+  let lastCompacting = false;   // The main's file is a compaction this session is running
+  let lastWaitingOn = false;    // The main's last applied write still names an unanswered prompt
   let lastForceReadTime = 0;  // Track periodic forced re-reads (bypasses mtime race)
   let lastEditorPid = 0;      // Validated (armed) PID of the editor process
   let candidatePid = 0;       // PID from the latest state write, pending validation
@@ -501,6 +525,8 @@ function runUnifiedMode() {
     lastStopped = false;
     lastTurnOver = false;
     lastSessionEnded = false;
+    lastCompacting = false;
+    lastWaitingOn = false;
     editorDead = false;
     lastEditorPid = 0;
     candidatePid = 0;
@@ -593,7 +619,7 @@ function runUnifiedMode() {
         // It is demoted by staleness instead (the policy drops a stale session
         // and picks another), which is the honest reading: a session waiting
         // for its next prompt looks exactly like one whose window was closed.
-        if (lastEditorPid && !editorDead && !lastStopped && !lastTurnOver && !RESCUE_EXCLUDE.has(face.state)) {
+        if (lastEditorPid && !editorDead && !lastStopped && !RESCUE_EXCLUDE.has(face.state)) {
           if (!isProcessAlive(lastEditorPid)) markMainDead();
         }
       }
@@ -617,6 +643,7 @@ function runUnifiedMode() {
           lastStopped = !!stateData.stopped;
           lastTurnOver = !!stateData.turnOver;
           lastSessionEnded = !!stateData.sessionEnded;
+          lastCompacting = !!stateData.compacting;
           if (isNewerWrite(ts, lastAppliedTimestamp, now)) {
             lastAppliedTimestamp = ts;
             lastAppliedState = stateData.state;
@@ -640,6 +667,7 @@ function runUnifiedMode() {
         lastStopped = !!stateData.stopped;
         lastTurnOver = !!stateData.turnOver;
         lastSessionEnded = !!stateData.sessionEnded;
+        lastCompacting = !!stateData.compacting;
         // Same session id, new editor process (e.g. `claude --resume` after a
         // crash): a NEWER write reporting a different PID retires the armed
         // one at once. Otherwise the death check kept testing the old, dead
@@ -708,8 +736,12 @@ function runUnifiedMode() {
             face.setState(stateData.workState, stateData.workDetail || '');
           }
 
-          // A write that answers a prompt spends any wait still queued.
-          if (stateData.answered) face.dropWait();
+          // A write that answers a prompt spends any wait still queued -- and
+          // so does a turn end: a prompt cannot outlive its turn, and one kept
+          // through an Interrupt or a StopFailure flushed after the error and
+          // was rescued straight into "wrapping up" -> done!.
+          if (stateData.answered || stateData.stopped) face.dropWait();
+          lastWaitingOn = !!stateData.waitingOn;
           face.setState(stateData.state, stateData.detail);
           face.setStats(stateData);
         }
@@ -749,6 +781,7 @@ function runUnifiedMode() {
           lastAppliedState = freshData.state;
           lastStopped = stoppedNow;
           lastTurnOver = false;
+          lastCompacting = false;
           // If the file says responding, apply it; otherwise
           // we just set lastStopped so the rescue block above fires next frame.
           if (freshData.state === 'responding') {
@@ -763,7 +796,10 @@ function runUnifiedMode() {
 
     // Session is active until Stop hook fires (writes stopped: true)
     // or the armed editor PID is found dead
-    const sessionActive = !lastStopped && !lastTurnOver && !editorDead;
+    // A compaction this session is running (a manual /compact, Codex's own
+    // pre-turn one) is active even between turns: it held thinking for its
+    // whole run before, and dropped to idle after 8s once it carried turnOver.
+    const sessionActive = !lastStopped && (!lastTurnOver || lastCompacting) && !editorDead;
 
     // Timeout-driven transitions: starting → idle, responding → happy once the
     // session ended, a completion's linger, thinking/idle timeouts, and the
@@ -785,6 +821,7 @@ function runUnifiedMode() {
       fileState: lastAppliedState,
       fileAgeMs: lastNewWriteAt ? now - lastNewWriteAt : 0,
       liveChildren,
+      fileWaiting: lastWaitingOn,
     });
     if (next === 'subagent' && liveChildren > 0) face.setState(next, `conducting ${liveChildren}`);
     else if (next) face.setState(next);
@@ -820,7 +857,7 @@ function runUnifiedMode() {
     sessionWatcher = fs.watch(SESSIONS_DIR, () => {
       if (sessionWatchTimer) clearTimeout(sessionWatchTimer);
       sessionWatchTimer = setTimeout(() => {
-        orbital.loadSessionsAsync(mainSessionId);
+        try { orbital.loadSessionsAsync(mainSessionId); } catch {}
       }, 80);
     });
     sessionWatcher.on('error', (err) => {
@@ -964,6 +1001,8 @@ function runUnifiedMode() {
         lastStopped = !!newData.stopped;
         lastTurnOver = !!newData.turnOver;
         lastSessionEnded = !!newData.sessionEnded;
+        lastCompacting = !!newData.compacting;
+        lastWaitingOn = !!newData.waitingOn;
         // forceState, not setState: a materialized face must show its own
         // session at once. Any leftover minDisplayUntil belongs to the session
         // that just left, and setState would buffer this behind it. No third
@@ -991,8 +1030,8 @@ function runUnifiedMode() {
     face.particles.spawn(8, 'sparkle');
     face.particles.spawn(4, 'push');
 
-    // Reload orbital sessions
-    orbital.loadSessions(mainSessionId);
+    // Reload orbital sessions (guarded like every loader call)
+    try { orbital.loadSessions(mainSessionId); } catch {}
   }
 
   let lastTime = Date.now();
@@ -1000,6 +1039,7 @@ function runUnifiedMode() {
     const now = Date.now();
     const dt = now - lastTime;
     lastTime = now;
+    if (heartbeatFromLoop && now - lastBeat > PID_HEARTBEAT_MS) heartbeat(now);
 
     face.update(dt);
     try { orbital.update(dt); } catch {}
@@ -1027,7 +1067,7 @@ function runUnifiedMode() {
     }
 
     // Periodically reload sessions
-    if (orbital.frame % (FPS * 2) === 0) orbital.loadSessionsAsync(mainSessionId);
+    if (orbital.frame % (FPS * 2) === 0) { try { orbital.loadSessionsAsync(mainSessionId); } catch {} }
 
     // Periodically rescan team configs (~every 10s)
 
@@ -1191,9 +1231,13 @@ function main() {
       process.exit(0);
     }
     writePid();
-    // Heartbeat: rewrite the PID file so a stale one (a renderer that died
-    // without cleanup) can be told from a live one -- see isRendererAlive.
-    setInterval(writePid, PID_HEARTBEAT_MS).unref();
+    // Heartbeat, so a stale PID file (a renderer that died without cleanup)
+    // can be told from a live one -- see isRendererAlive. The render loop
+    // beats too, as soon as the wall clock says one is due: after a system
+    // suspend the interval's monotonic timer is up to PID_HEARTBEAT_MS late.
+    lastBeat = Date.now();
+    setInterval(heartbeat, PID_HEARTBEAT_MS).unref();
+    heartbeatFromLoop = true;
   }
 
   // NO_COLOR compliance (https://no-color.org)

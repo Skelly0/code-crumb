@@ -274,6 +274,13 @@ function isOwnedByLiveProcess(pid, lastWriteMs, aliveFn = isProcessAlive) {
   return Date.now() - (lastWriteMs || 0) < PID_PROTECT_CAP_MS; // both unknowns
 }
 
+// A pid from a file is only a pid if it is a positive integer: an object
+// `pid` threw inside the async loader's fs callback -- an uncaught exception
+// that took the renderer down 2s after every boot.
+function validPid(pid) {
+  return Number.isInteger(pid) && pid > 0;
+}
+
 // PID protection for one session. A child's pid is its PARENT's editor, so
 // that process living proves nothing about the agent: an agent whose
 // SubagentStop was missed (an Esc) stood on the ring for as long as the
@@ -281,7 +288,7 @@ function isOwnedByLiveProcess(pid, lastWriteMs, aliveFn = isProcessAlive) {
 // keeps the protection only for CHILD_ORPHAN_TIMEOUT past its last write,
 // the same window a silent agent in a live family gets anyway.
 function pidProtects(pid, lastWriteMs, isChild, now = Date.now()) {
-  if (!pid || !isOwnedByLiveProcess(pid, lastWriteMs)) return false;
+  if (!validPid(pid) || !isOwnedByLiveProcess(pid, lastWriteMs)) return false;
   return !isChild || now - lastWriteMs <= CHILD_ORPHAN_TIMEOUT;
 }
 
@@ -1041,7 +1048,7 @@ class OrbitalSystem {
         // Keep start-time resolution warm for every session PID — on the
         // renderer's synchronous boot scan this enqueues all PIDs at once,
         // so one batched exec resolves them before the next purge cycle.
-        if (data.pid) requestPidStartTime(data.pid);
+        if (validPid(data.pid)) requestPidStartTime(data.pid);
 
         seenIds.add(id);
 
@@ -1103,7 +1110,7 @@ class OrbitalSystem {
       if (err) { this._loadingInProgress = false; return; }
       const files = allFiles.filter(f => f.endsWith('.json'));
       if (files.length === 0) {
-        try { this._applySessionResults(excludeId, []); }
+        try { this._applySessionResults(excludeId, []); } catch {}
         finally { this._loadingInProgress = false; }
         return;
       }
@@ -1114,7 +1121,8 @@ class OrbitalSystem {
 
       const onComplete = () => {
         if (--pending > 0) return;
-        try { this._applySessionResults(excludeId, results); }
+        // In an fs callback a throw is uncaught: it would end the renderer.
+        try { this._applySessionResults(excludeId, results); } catch {}
         finally { this._loadingInProgress = false; }
       };
 
@@ -1243,7 +1251,7 @@ class OrbitalSystem {
       }
 
       const id = sessionIdOf(r.data, r.file);
-      if (r.data.pid) requestPidStartTime(r.data.pid); // keep start-time cache warm
+      if (validPid(r.data.pid)) requestPidStartTime(r.data.pid); // keep start-time cache warm
       seenIds.add(id);
 
       if (!this.faces.has(id)) {

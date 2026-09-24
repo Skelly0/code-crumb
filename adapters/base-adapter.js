@@ -31,7 +31,7 @@ const {
   EDIT_TOOLS,
   pruneFrequentFiles, topFrequentFiles, prettyModelName, toText,
   COUNTER_MAX_FILES, freshCounter, normalizeCounter, parkAgents, unparkAgents, pruneCounters,
-  creditSession, creditEndFor, localDay,
+  creditSession, creditEndFor, touchCounter, localDay,
 } = require('../state-machine');
 
 // -- State file writing ------------------------------------------------
@@ -110,7 +110,7 @@ function syncSessionCounter(stats, now = Date.now()) {
     .filter(f => typeof f === 'string').slice(0, COUNTER_MAX_FILES);
   if (stats.session.start) c.start = stats.session.start;
   c.commitCount = stats.session.commitCount || 0;
-  c.lastSeen = now;
+  touchCounter(c, now);
   pruneCounters(counters, id, now);
 }
 
@@ -213,7 +213,7 @@ function initSession(stats, sessionId) {
   }
   let counter = normalizeCounter(counters[sessionId], now);
   if (!counter) counter = counters[sessionId] = freshCounter(now);
-  counter.lastSeen = now;
+  touchCounter(counter, now);
   // Once per session per day -- a session running across midnight counts in
   // the new day too (see freshCounter's countedDay).
   if (counter.countedDay !== stats.daily.date) {
@@ -250,7 +250,8 @@ function buildExtra(stats, sessionId, modelName, editor, model) {
   // Restoring the session's original start made that time count twice.
   const counter = stats.sessionCounters && stats.sessionCounters[sessionId];
   const credited = counter && typeof counter.creditedMs === 'number' ? counter.creditedMs : 0;
-  const currentSessionMs = stats.session.start ? Math.max(0, Date.now() - stats.session.start - credited) : 0;
+  const idle = counter && typeof counter.idleMs === 'number' ? counter.idleMs : 0;
+  const currentSessionMs = stats.session.start ? Math.max(0, Date.now() - stats.session.start - idle - credited) : 0;
   return {
     sessionId,
     modelName,
@@ -346,8 +347,8 @@ function exitWhenFlushed(code, stream = process.stdout) {
 // batch (the OpenCode plugin queues a session's events while its previous
 // child runs): each element is handled in order, as if it had been its own
 // process, and one element's throw does not stop the rest.
-// On parse failure, fallbackFn(err) is called if provided; on input over
-// MAX_INPUT, fallbackFn(null, { override, raw }) -- override is the
+// On parse failure, fallbackFn(err, { raw }) is called if provided; on input
+// over MAX_INPUT, fallbackFn(null, { override, raw }) -- override is the
 // classifyTruncatedInput result, raw the truncated text. A throw inside
 // handler() is swallowed on its own -- it must NOT be reported as
 // "unparseable stdin", or every mapping bug would hide behind the fallback's
@@ -384,8 +385,10 @@ function processStdinEvent(handler, fallbackFn, opts = {}) {
     try {
       data = JSON.parse(input);
     } catch (err) {
+      // The raw text rides along: a cut-off payload usually still names its
+      // session, and the fallback must not mint a phantom one instead.
       if (fallbackFn) {
-        try { fallbackFn(err); } catch {}
+        try { fallbackFn(err, { raw: input }); } catch {}
       }
       exit(0);
       return;
@@ -487,40 +490,6 @@ function runStdinAdapter(options) {
     // Prettified here so every adapter can just forward the provider's raw id.
     const model = prettyModelName(norm.model || data.model || '');
 
-    // The session file is the only memory an adapter has (each event is its
-    // own process): the attention stamp, the model and the parent below all
-    // come from it.
-    let prevSession = null;
-    try {
-      prevSession = JSON.parse(fs.readFileSync(
-        path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
-    } catch {}
-    if (!prevSession || typeof prevSession !== 'object') prevSession = null;
-
-    // A child session -- OpenCode's task tool runs one per delegated task --
-    // is an orbital of its parent, like a Claude Code subagent: it never
-    // stamps attention (every task used to take the center from the session
-    // that launched it), never owns the global file, counts its tool calls
-    // toward its parent, and its turn end retires it. Only session.created
-    // names the parent, so later events take it from the session file.
-    let parentSession = toText(norm.parentSession) || toText(data.parentSession)
-      || (prevSession ? toText(prevSession.parentSession) : '');
-    if (parentSession === sessionId) parentSession = '';
-    const statsId = parentSession || sessionId;
-
-    // Delivery order. The OpenCode plugin numbers every payload (`seq`, per
-    // plugin instance `pluginId`), and a turn end records its number on the
-    // session file. A payload numbered BEFORE the recorded end reached us
-    // after it: a child already spawned when the turn-end write blocked the
-    // plugin's event loop delivered its batch late and re-opened the turn --
-    // attention re-stamped, the turn end erased. It still counts; it just
-    // does not draw. (A late tool end is left alone: it has its own rule.)
-    const seq = typeof data.seq === 'number' ? data.seq : 0;
-    const pluginId = toText(data.pluginId);
-    const recordedEnd = prevSession && pluginId && prevSession.pluginId === pluginId
-      && typeof prevSession.endSeq === 'number' ? prevSession.endSeq : 0;
-    const straggler = !!(seq && recordedEnd && seq < recordedEnd
-      && event !== 'tool_end' && event !== 'PostToolUse');
 
     // Read -> mutate -> write of the shared stats file, serialized: several
     // adapter processes can run at once and the last writer would otherwise
@@ -528,6 +497,57 @@ function runStdinAdapter(options) {
     // unlocked -- the lock must never cost the adapter its event.
     const releaseStats = acquireFileLock(STATS_LOCK_FILE);
     try {
+      // The session file is the only memory an adapter has (each event is its
+      // own process): the attention stamp, the model, the parent and the
+      // delivery order below all come from it. It is read under the lock:
+      // read before it, a process waiting on the lock while a synchronous
+      // turn end wrote `turnEnded`/`endSeq` acted on the older file -- and
+      // erased the very turn end the straggler rule protects.
+      let prevSession = null;
+      try {
+        prevSession = JSON.parse(fs.readFileSync(
+          path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
+      } catch {}
+      if (!prevSession || typeof prevSession !== 'object') prevSession = null;
+
+      // A child session -- OpenCode's task tool runs one per delegated task --
+      // is an orbital of its parent, like a Claude Code subagent: it never
+      // stamps attention (every task used to take the center from the session
+      // that launched it), never owns the global file, counts its tool calls
+      // toward its parent, and its turn end retires it. Only session.created
+      // names the parent, so later events take it from the session file.
+      let parentSession = toText(norm.parentSession) || toText(data.parentSession)
+        || (prevSession ? toText(prevSession.parentSession) : '');
+      if (parentSession === sessionId) parentSession = '';
+      // Counters go to the ROOT session: a task can run a task of its own,
+      // and a grandchild pointing at its direct parent made that child the
+      // stats owner -- counted as a session of its own, the root credited
+      // and its time counted twice.
+      let statsId = parentSession || sessionId;
+      for (let depth = 0; parentSession && depth < 4; depth++) {
+        let up = '';
+        try {
+          const f = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, safeFilename(statsId) + '.json'), 'utf8'));
+          up = f && typeof f === 'object' ? toText(f.parentSession) : '';
+        } catch {}
+        if (!up || up === statsId || up === sessionId) break;
+        statsId = up;
+      }
+
+      // Delivery order. The OpenCode plugin numbers every payload (`seq`, per
+      // plugin instance `pluginId`), and a turn end records its number on the
+      // session file. A payload numbered BEFORE the recorded end reached us
+      // after it: a child already spawned when the turn-end write blocked the
+      // plugin's event loop delivered its batch late and re-opened the turn --
+      // attention re-stamped, the turn end erased. It still counts; it just
+      // does not draw. (A late tool end is left alone: it has its own rule.)
+      const seq = typeof data.seq === 'number' ? data.seq : 0;
+      const pluginId = toText(data.pluginId);
+      const recordedEnd = prevSession && pluginId && prevSession.pluginId === pluginId
+        && typeof prevSession.endSeq === 'number' ? prevSession.endSeq : 0;
+      const straggler = !!(seq && recordedEnd && seq < recordedEnd
+        && event !== 'tool_end' && event !== 'PostToolUse');
+
       const stats = readStats();
       initSession(stats, statsId);
 
@@ -649,20 +669,26 @@ function runStdinAdapter(options) {
     // id as the main path so the session never splits. The id rides in extra
     // too: a write without one erased the owner's sessionId from the global
     // file, and the next event from any other window took it over.
-    const rawId = trunc
-      ? ((/"session_?id"\s*:\s*"([^"\\]{1,256})"/i.exec(trunc.raw) || [])[1] || '') : '';
+    const raw = trunc && typeof trunc.raw === 'string' ? trunc.raw : '';
+    const oversized = !err && !!trunc;
+    const rawId = (/"session_?id"\s*:\s*"([^"\\]{1,256})"/i.exec(raw) || [])[1] || '';
     const sessionId = rawId || process.env.CLAUDE_SESSION_ID || `${defaultEditor}-${process.ppid}`;
     // What the oversized payload was. Only a tool END is judged for errors:
     // judging any event as one read a huge Write's content ("exit code 2")
     // as a failure. A tool start shows its tool; anything else, thinking.
-    const raw = trunc ? trunc.raw : '';
     const rawType = (/"(?:type|event)"\s*:\s*"([^"\\]{1,64})"/.exec(raw) || [])[1] || '';
     const rawTool = (/"(?:tool_name|toolName|tool)"\s*:\s*"([^"\\]{1,128})"/.exec(raw) || [])[1] || '';
-    const toolEnd = TRUNC_TOOL_END_RE.test(rawType);
+    // The adapter's own mapping names the event (OpenCode's
+    // tool.execute.after, OpenClaw's tool_execution_end...): a second list
+    // here missed OpenClaw's, and a late oversized tool end re-opened a turn.
+    let kind = '';
+    try { kind = toText((normaliseEvent({ type: rawType, event: rawType }) || {}).event); } catch {}
+    const toolEnd = kind === 'tool_end' || kind === 'PostToolUse';
+    const toolStart = kind === 'tool_start' || kind === 'PreToolUse';
     let shown;
-    if (!trunc) shown = { state: 'thinking', detail: '' };
+    if (!oversized) shown = { state: 'thinking', detail: '' };
     else if (toolEnd || !rawType) shown = classifyTruncatedInput(toolEnd ? 'PostToolUse' : '', raw);
-    else if (TRUNC_TOOL_START_RE.test(rawType) && rawTool) shown = toolToState(rawTool, {});
+    else if (toolStart && rawTool) shown = toolToState(rawTool, {});
     else shown = { state: 'thinking', detail: 'large input' };
 
     // The session file too, like update-state.js's fallback: without it the
@@ -678,13 +704,20 @@ function runStdinAdapter(options) {
       modelName: (prev && toText(prev.modelName)) || process.env.CODE_CRUMB_MODEL || defaultModel,
       editor: (prev && toText(prev.editor)) || defaultEditor,
     };
-    for (const k of ['lastPromptAt', 'model', 'parentSession', 'taskDescription']) {
-      if (prev && prev[k]) extra[k] = prev[k];
+    // Sticky fields and the counters: the face's stats rows read every one,
+    // and a write without them showed zeros until the next normal write.
+    for (const k of ['lastPromptAt', 'model', 'parentSession', 'taskDescription',
+      'toolCalls', 'filesEdited', 'commitCount', 'sessionStart', 'streak', 'bestStreak',
+      'brokenStreak', 'brokenStreakAt', 'dailySessions', 'dailyCumulativeMs', 'frequentFiles']) {
+      if (prev && prev[k] !== undefined && prev[k] !== null) extra[k] = prev[k];
     }
     if (!extra.parentSession) {
       guardedWriteState(sessionId, shown.state, shown.detail, { ...extra }, { toolEnd });
     }
-    if (!(prev && prev.stopped)) {
+    // Only under an id the payload itself named: the synthetic
+    // `<editor>-<ppid>` of an unparseable payload is no session, and a file
+    // under it was a live phantom orbital (`opencode-1` once OpenCode exited).
+    if (rawId && !(prev && prev.stopped)) {
       const sessionExtra = { ...extra };
       if (prev && (prev.turnEnded || prev.turnOver) && toolEnd) sessionExtra.turnEnded = true;
       writeSessionState(sessionId, shown.state, shown.detail, false, sessionExtra);
@@ -692,10 +725,6 @@ function runStdinAdapter(options) {
   });
 }
 
-// Event types in an oversized adapter payload (OpenCode plugin, OpenClaw,
-// generic), read out of the raw text by the fallback above.
-const TRUNC_TOOL_END_RE = /^(?:tool\.execute\.after|tool\.error|tool_end|tool_result|PostToolUse|PostToolUseFailure)$/;
-const TRUNC_TOOL_START_RE = /^(?:tool\.execute\.before|tool_start|tool_call|PreToolUse)$/;
 
 module.exports = {
   pidField,

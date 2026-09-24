@@ -1577,7 +1577,8 @@ describe('round 3 -- cross-writer contract', () => {
       assert.strictEqual(readState(f).turnOver, false, 'a real turn end wins');
     } finally { cleanup(t.tmp); }
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-    assert.ok(/const sessionActive = !lastStopped && !lastTurnOver && !editorDead;/.test(src));
+    assert.ok(/const sessionActive = !lastStopped && \(!lastTurnOver \|\| lastCompacting\) && !editorDead;/.test(src),
+      'turnOver is not active -- unless the session is running its own compaction');
     assert.ok(/&& !stateData\.stopped\s*\n\s*&& stateData\.workSince > prevAppliedTs\s*\n\s*&& !ACTIVE_WORK_STATES\.has\(face\.state\)/.test(src),
       'a finished turn never re-injects its tool, and an applied Pre is never replayed');
   });
@@ -1655,7 +1656,7 @@ describe('round 3 -- cross-writer contract', () => {
       assert.strictEqual(readState(f).answered, true);
     } finally { cleanup(t2.tmp); }
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-    assert.ok(/if \(stateData\.answered\) face\.dropWait\(\);\s*face\.setState\(stateData\.state/.test(src));
+    assert.ok(/if \(stateData\.answered \|\| stateData\.stopped\) face\.dropWait\(\);[\s\S]{0,80}?face\.setState\(stateData\.state/.test(src));
     const oc = require('../adapters/opencode-adapter');
     assert.deepStrictEqual(oc.mapEvent('permission_reply', '', {}, '', false, {}).extra, { answered: true },
       'OpenCode\'s permission.replied too');
@@ -1694,6 +1695,83 @@ describe('round 3 -- cross-writer contract', () => {
       const r = setup.uninstallCodex({ hooksPath, log: () => {} });
       assert.strictEqual(r.removed, 2, 'an Interrupt command is recognised as ours');
     } finally { cleanup(t.tmp); }
+  });
+});
+
+// -- Round 4: review of the round-3 hook and renderer changes ------------------
+
+describe('round 4 -- hooks and renderer', () => {
+  // Codex runs SubagentStart/Stop inside the child, so their `model` is the
+  // child's; taken from any payload, it replaced the parent's for good.
+  test('an agent\'s lifecycle event never sets its parent\'s model', () => {
+    const t = makeTempEnv('cx-sub');
+    const env = { ...t.env, CODE_CRUMB_EDITOR: 'codex' };
+    try {
+      runUpdateState('SessionStart', { session_id: 'cx-sub', source: 'startup', model: 'gpt-5.1-codex' }, env);
+      runUpdateState('SubagentStart', { session_id: 'cx-sub', agent_id: 'a1', agent_type: 'worker', model: 'gpt-5.1-codex-mini' }, env);
+      runUpdateState('PreCompact', { session_id: 'cx-sub', agent_id: 'a1', trigger: 'auto', model: 'gpt-5.1-codex-mini' }, env);
+      runUpdateState('SubagentStop', { session_id: 'cx-sub', agent_id: 'a1', model: 'gpt-5.1-codex-mini' }, env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'cx-sub')).model, 'gpt-5.1-codex');
+      assert.strictEqual(readJSON(t.stateFile).model, 'gpt-5.1-codex');
+    } finally { cleanup(t.tmp); }
+  });
+
+  // Codex compacts at the START of a turn, before UserPromptSubmit; a manual
+  // /compact is this session's work too. Both stay active while they run; a
+  // Claude Code auto-compaction after a Stop is a background agent's.
+  test('a compaction this session runs is marked compacting, an agent\'s is not', () => {
+    const t = makeTempEnv('cmp');
+    try {
+      const turn = (id, env) => {
+        runUpdateState('UserPromptSubmit', { session_id: id, prompt: 'x' }, env);
+        runUpdateState('Stop', { session_id: id }, env);
+      };
+      const cx = { ...t.env, CODE_CRUMB_EDITOR: 'codex' };
+      turn('cmp-cx', cx);
+      runUpdateState('PreCompact', { session_id: 'cmp-cx', trigger: 'auto' }, cx);
+      let f = readJSON(sessionFile(t.sessionsDir, 'cmp-cx'));
+      assert.strictEqual(f.compacting, true, 'codex pre-turn');
+      assert.strictEqual(f.turnOver, true, 'still remembering the turn end for PostCompact');
+      turn('cmp-man', t.env);
+      runUpdateState('PreCompact', { session_id: 'cmp-man', trigger: 'manual' }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'cmp-man')).compacting, true, 'manual /compact');
+      turn('cmp-bg', t.env);
+      runUpdateState('PreCompact', { session_id: 'cmp-bg', trigger: 'auto' }, t.env);
+      assert.ok(!readJSON(sessionFile(t.sessionsDir, 'cmp-bg')).compacting, 'a background agent\'s');
+      runUpdateState('PostCompact', { session_id: 'cmp-man', trigger: 'manual' }, t.env);
+      assert.ok(!readJSON(sessionFile(t.sessionsDir, 'cmp-man')).compacting, 'not sticky');
+    } finally { cleanup(t.tmp); }
+    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    assert.ok(/compacting: !!data\.compacting/.test(src), 'readState exposes it');
+  });
+
+  test('the empty-stdin path re-stamps stopped for an ambient event and marks an answer', () => {
+    const t = makeTempEnv('fb-amb');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'fb-amb', prompt: 'x' }, t.env);
+      runUpdateState('Stop', { session_id: 'fb-amb' }, t.env);
+      runUpdateState('PreCompact', '', t.env);
+      assert.strictEqual(readJSON(t.stateFile).stopped, true, 'tmux still sees a finished turn');
+      runUpdateState('UserPromptSubmit', '', t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'fb-amb')).answered, true, 'a big paste answers too');
+    } finally { cleanup(t.tmp); }
+  });
+
+  // A wait kept through a later error: the file's last write is the error,
+  // but it still names the unanswered prompt.
+  test('a wait is held while the file still names its prompt', () => {
+    const { idleCascade } = require('../renderer');
+    const base = { state: 'waiting', sinceChangeMs: 9000, sessionActive: true, lingerMs: 0, fileState: 'error', fileAgeMs: 9000 };
+    assert.strictEqual(idleCascade(base), 'thinking', 'fixture: without it the wait degrades');
+    assert.strictEqual(idleCascade({ ...base, fileWaiting: true }), null, 'held');
+  });
+
+  // A dead editor sitting on an idle_prompt wait (turnOver) is rescued again,
+  // and a turn end spends a queued wait instead of flushing it into done!.
+  test('the renderer rescues a dead editor\'s wait and drops waits at a turn end', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+    assert.ok(/if \(lastEditorPid && !editorDead && !lastStopped && !RESCUE_EXCLUDE\.has\(face\.state\)\)/.test(src));
+    assert.ok(/fileWaiting: lastWaitingOn,/.test(src));
   });
 });
 

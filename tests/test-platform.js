@@ -311,17 +311,37 @@ describe('platform -- isRendererAlive', () => {
     withPidFile('-1', (f) => assert.strictEqual(isRendererAlive(f), false));
     withPidFile('abc', (f) => assert.strictEqual(isRendererAlive(f), false));
   });
-  test('a file older than the staleness bound is not, even for a live pid', () => {
+  // Windows recycles PIDs onto the same user's processes and a logoff leaves
+  // the file: there a stale file is dead, whatever answers kill(0). On POSIX
+  // a signalable pid is trusted -- the heartbeat's monotonic timer stops
+  // during a suspend, and after resume a stale-looking file started a
+  // second renderer beside the live one (round 4).
+  test('a stale file is dead on win32, but a signalable pid is trusted on POSIX', () => {
     withPidFile(String(process.pid), (f) => {
       const now = Date.now();
-      assert.strictEqual(isRendererAlive(f, now + PID_STALE_MS + 1000), false);
-      assert.strictEqual(isRendererAlive(f, now + PID_STALE_MS - 1000), true);
+      assert.strictEqual(isRendererAlive(f, now + PID_STALE_MS + 1000, 'win32'), false);
+      assert.strictEqual(isRendererAlive(f, now + PID_STALE_MS - 1000, 'win32'), true);
+      assert.strictEqual(isRendererAlive(f, now + PID_STALE_MS + 1000, 'linux'), true, 'after a suspend');
+      assert.strictEqual(isRendererAlive(f, now + PID_STALE_MS + 1000, 'darwin'), true);
     });
     assert.ok(PID_HEARTBEAT_MS * 3 <= PID_STALE_MS, 'several heartbeats fit in the staleness bound');
   });
+  test('EPERM needs a fresh heartbeat everywhere', () => {
+    const realKill = process.kill;
+    try {
+      process.kill = () => { const e = new Error('perm'); e.code = 'EPERM'; throw e; };
+      withPidFile('424242', (f) => {
+        const now = Date.now();
+        assert.strictEqual(isRendererAlive(f, now, 'linux'), true);
+        assert.strictEqual(isRendererAlive(f, now + PID_STALE_MS + 1000, 'linux'), false, 'a recycled pid');
+      });
+    } finally { process.kill = realKill; }
+  });
   test('the renderer heartbeats its PID file and launch.js asks the same question', () => {
     const r = fs.readFileSync(path.join(ROOT, 'renderer.js'), 'utf8');
-    assert.ok(/setInterval\(writePid, PID_HEARTBEAT_MS\)/.test(r), 'the renderer refreshes its PID file');
+    assert.ok(/setInterval\(heartbeat, PID_HEARTBEAT_MS\)/.test(r), 'the renderer refreshes its PID file');
+    assert.ok(/fs\.utimesSync\(PID_FILE, t, t\)/.test(r), 'by touching it, never rewriting it (a mid-rewrite read was empty)');
+    assert.ok(/now - lastBeat > PID_HEARTBEAT_MS\) heartbeat\(now\)/.test(r), 'and the render loop beats after a wall-clock jump');
     const l = fs.readFileSync(path.join(ROOT, 'launch.js'), 'utf8');
     assert.ok(/isRendererAlive\(PID_FILE\)/.test(l), 'launch.js shares the liveness check');
   });

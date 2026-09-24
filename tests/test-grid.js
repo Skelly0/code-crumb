@@ -4721,4 +4721,35 @@ describe('grid.js -- round 3: wide characters', () => {
   });
 });
 
+describe('grid.js -- round 4', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  // An object pid threw inside the async loader's fs callback (uncaught: the
+  // renderer died 2s after every boot), and the sync purge kept the file.
+  test.async('a non-numeric pid neither throws nor protects a stale file', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-pid-'));
+    try {
+      const fp = path.join(dir, 'bad.json');
+      fs.writeFileSync(fp, JSON.stringify({ session_id: 'bad', state: 'coding', pid: { toString: 1 }, timestamp: Date.now() }));
+      const orbital = new OrbitalSystem();
+      orbital._sessionsDir = dir;
+      let thrown = null;
+      const onErr = (e) => { thrown = e; };
+      process.once('uncaughtException', onErr);
+      orbital.loadSessionsAsync(null);
+      const until = Date.now() + 3000;
+      while (orbital._loadingInProgress && Date.now() < until) await new Promise(r => setTimeout(r, 10));
+      process.removeListener('uncaughtException', onErr);
+      assert.strictEqual(thrown, null, `the async pass threw: ${thrown && thrown.message}`);
+      const old = new Date(Date.now() - 3600000);
+      fs.utimesSync(fp, old, old);
+      const o2 = new OrbitalSystem();
+      o2._sessionsDir = dir;
+      assert.doesNotThrow(() => o2.loadSessions(null));
+      assert.ok(!fs.existsSync(fp), 'a stale file with a junk pid is purged');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
 module.exports = suite;

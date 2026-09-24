@@ -4143,4 +4143,42 @@ describe('state-machine -- round 3: a build is a command, not an argument', () =
   });
 });
 
+describe('state-machine -- round 4', () => {
+  const sm = require('../state-machine');
+  const post = (cmd, stdout = 'ok') => classifyToolResult('Bash', { command: cmd }, { stdout, stderr: '' }, false);
+
+  // The same window left open Friday to Monday credited the whole weekend at
+  // its next turn end; only a session losing ownership was covered before.
+  test('a gap a session sat silent through is not session time', () => {
+    const H = 3600000;
+    const T0 = 1e12;
+    const stats = defaultStats();
+    const c = sm.freshCounter(T0);
+    c.start = T0; c.lastSeen = T0 + 2 * H;
+    sm.touchCounter(c, T0 + 64 * H);                  // Monday: 62h of silence
+    assert.strictEqual(c.idleMs, 62 * H);
+    sm.creditSession(stats, c, T0 + 64 * H + 60000);
+    assert.strictEqual(stats.daily.cumulativeMs, 2 * H + 60000, 'only the active time');
+    assert.strictEqual(stats.records.longestSession, 2 * H + 60000);
+    const d = sm.freshCounter(T0);
+    d.lastSeen = T0;
+    sm.touchCounter(d, T0 + sm.IDLE_GAP_MS - 1000);
+    assert.ok(!d.idleMs, 'a long silent tool call is still work');
+  });
+
+  test('a shell wrapper loses only a quote pair that spans the whole script', () => {
+    assert.strictEqual(post('bash -lc "cat package.json" && bash -lc "npm install"', 'npm ERR! code E404').state, 'error');
+    assert.strictEqual(post("sh -c 'cat a' || sh -c 'rm -rf build'", 'Error: EACCES').state, 'error');
+    assert.strictEqual(post('bash -lc "cat package.json"', 'Error: x').state, 'relieved', 'a whole-script pair still unwraps');
+  });
+
+  test('a build tool run through a manager, a runner or compose is a build', () => {
+    for (const c of ['pnpm vite build', 'yarn tsc', 'pnpm exec tsc -p .', 'npm exec -- webpack',
+      'npx -p typescript tsc', 'docker compose build', '(cd x && npm run build)', 'pnpm dlx vite build']) {
+      assert.strictEqual(post(c).detail, 'build succeeded', c);
+    }
+    assert.strictEqual(post('npx eslint .').detail, 'command succeeded');
+  });
+});
+
 module.exports = suite;

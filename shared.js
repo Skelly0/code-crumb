@@ -285,7 +285,17 @@ function acquireSpawnLock(lockFile, staleMs = 5000) {
 // window that printed "already running" and closed, forever.
 const PID_HEARTBEAT_MS = 10000;
 const PID_STALE_MS = 60000;
-function isRendererAlive(pidFile = PID_FILE, now = Date.now()) {
+//
+// Staleness only overrides what the PID says where it has to. EPERM (a
+// process we may not signal -- another user's, on a recycled PID) needs a
+// fresh heartbeat everywhere. A process we CAN signal is trusted on POSIX:
+// the heartbeat runs on a monotonic timer that stops during a system suspend,
+// so after any sleep over a minute a live renderer's file read as stale until
+// its next beat -- and a hook firing in that window started a second
+// renderer beside it. On Windows PIDs recycle onto the same user's
+// processes within minutes, and a logoff leaves the file behind, so there a
+// stale file is a dead renderer's whatever answers kill(0).
+function isRendererAlive(pidFile = PID_FILE, now = Date.now(), platform = process.platform) {
   let pid, mtimeMs;
   try {
     pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
@@ -295,13 +305,13 @@ function isRendererAlive(pidFile = PID_FILE, now = Date.now()) {
   }
   // kill(0) would signal our own process group.
   if (!Number.isInteger(pid) || pid <= 0) return false;
-  if (now - mtimeMs > PID_STALE_MS) return false;
+  const stale = now - mtimeMs > PID_STALE_MS;
   try {
     process.kill(pid, 0);
-    return true;
   } catch (e) {
-    return !!e && e.code === 'EPERM';
+    return !!e && e.code === 'EPERM' && !stale;
   }
+  return !(stale && platform === 'win32');
 }
 
 // Block this thread for ms without a busy loop. Hooks are short-lived

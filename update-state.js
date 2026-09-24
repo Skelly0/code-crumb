@@ -34,7 +34,7 @@ const {
   COUNTER_MAX_FILES,
   freshCounter: _freshCounter, normalizeCounter: _normalizeCounter,
   parkAgents: _parkAgents, unparkAgents: _unparkAgents, pruneCounters: _pruneCounters,
-  creditSession: _creditSession, creditEndFor, localDay,
+  creditSession: _creditSession, creditEndFor, touchCounter, localDay,
 } = require('./state-machine');
 
 // Safety net for a missed SubagentStop: an activeSubagents entry older than
@@ -465,6 +465,7 @@ function writeFallback(ids, override) {
     fallbackState = 'thinking';
     fallbackDetail = 'reading your message';
     fallbackExtra.lastPromptAt = Date.now();
+    fallbackExtra.answered = true;   // the user spoke (a big paste lands here)
   } else if (hookEvent === 'TeammateIdle') {
     fallbackState = 'waiting';
     fallbackDetail = 'teammate idle';
@@ -514,6 +515,7 @@ function writeFallback(ids, override) {
   } else if (hookEvent === 'ElicitationResult') {
     fallbackState = 'satisfied';
     fallbackDetail = 'input received';
+    fallbackExtra.answered = true;
   } else if (hookEvent === 'ConfigChange') {
     fallbackState = 'reading';
     fallbackDetail = 'config updated';
@@ -566,7 +568,8 @@ function writeFallback(ids, override) {
     }
   }
   const globalExtra = (!fallbackExtra.stopped && globalWasOurStop
-    && carriesTurnEnd(hookEvent) && fallbackState !== 'waiting')
+    && (carriesTurnEnd(hookEvent) || (AMBIENT_EVENTS.has(hookEvent) && hookEvent !== 'SessionStart'))
+    && fallbackState !== 'waiting')
     ? { ...fallbackExtra, stopped: true } : fallbackExtra;
   if (shouldWriteGlobal) writeState(fallbackState, fallbackDetail, globalExtra);
 
@@ -628,6 +631,7 @@ process.stdin.on('end', () => {
   let workState = null;
   let workDetail = null;
   let waitingOn = null; // set by a PermissionRequest (see toolCallKey)
+  let compacting = false; // a PreCompact that is real work on this session
   // A compaction restart normally carries lastPromptAt forward off its own
   // session file. Set when that file is gone, so there is nothing to carry.
   let compactWithoutPredecessor = false;
@@ -783,7 +787,7 @@ process.stdin.on('end', () => {
     }
     let counter = _normalizeCounter(counters[sessionId], now);
     if (!counter) counter = counters[sessionId] = _freshCounter(now);
-    counter.lastSeen = now;
+    touchCounter(counter, now);
     // daily.sessionCount counts sessions, once per id -- not once per switch
     // of stats.session ownership, which two alternating windows did on every
     // hook. An agent event does not count its parent (the parent's own events
@@ -841,7 +845,12 @@ process.stdin.on('end', () => {
     // Every transcript-backed path needs one, and only Claude Code sends it:
     // checking first keeps Codex and the adapters at zero extra reads.
     const transcriptPath = toText(data.transcript_path);
-    const payloadModel = toText(hookEvent === 'PostModelSwitch' ? data.to_model : data.model);
+    // Not from a lifecycle event an agent fires into its PARENT's records:
+    // Codex runs SubagentStart/Stop (and an agent's compaction) inside the
+    // child, so their `model` is the child's, and it replaced the parent's on
+    // the status line for as long as the child ran.
+    const payloadModel = (agentId && !isAgentEvent)
+      ? '' : toText(hookEvent === 'PostModelSwitch' ? data.to_model : data.model);
     let rawModel = '';
     if (payloadModel) {
       rawModel = payloadModel;
@@ -1190,6 +1199,13 @@ process.stdin.on('end', () => {
       state = 'thinking';
       const trigger = toText(data.trigger) || 'auto';
       detail = trigger === 'manual' ? 'compacting memory' : 'auto-compacting';
+      // Between turns a PreCompact keeps the turn's end (turnOver, see
+      // AMBIENT_EVENTS) so PostCompact can close it again -- but when the
+      // compaction is this session's own work the face stays active while
+      // it runs: a manual /compact, and Codex, which compacts at the START of
+      // a turn, before UserPromptSubmit. An auto one after a Claude Code Stop
+      // is a background agent's, sent with the parent's id and no agent_id.
+      compacting = !agentId && (trigger !== 'auto' || EDITOR !== 'claude');
     }
     else if (hookEvent === 'PostCompact') {
       state = 'satisfied';
@@ -1291,7 +1307,7 @@ process.stdin.on('end', () => {
     }
 
     // Build extra data for state files -- this session's OWN counters.
-    const currentSessionMs = Math.max(0, now - counter.start - counter.creditedMs);
+    const currentSessionMs = Math.max(0, now - counter.start - (counter.idleMs || 0) - counter.creditedMs);
     const extra = {
       sessionId,
       modelName,
@@ -1318,6 +1334,7 @@ process.stdin.on('end', () => {
     if (stopped) extra.stopped = true;
     if (workState) { extra.workState = workState; extra.workDetail = workDetail; }
     if (waitingOn) extra.waitingOn = waitingOn;
+    if (compacting) extra.compacting = true;
     // This write answers whatever the face was asked to wait on: the user
     // spoke (UserPromptSubmit), an elicitation came back, an AskUserQuestion
     // returned. The renderer drops a wait still queued behind a reward, which

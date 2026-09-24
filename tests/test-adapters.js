@@ -948,6 +948,51 @@ describe('adapters -- opencode-adapter (plugin payloads)', () => {
     } finally { cleanup(tmp); }
   });
 
+  // Round 4: the session file must be read under the stats lock. Read before
+  // it, a process that waited on the lock while the synchronous turn end
+  // wrote turnEnded/endSeq acted on the older file and re-opened the turn.
+  // A preload holds the late process just before its lock acquire.
+  test.async('a process waiting on the stats lock sees the turn end written meanwhile', async () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('oc-toctou');
+    try {
+      delete env.CLAUDE_SESSION_ID;
+      const ready = path.join(tmp, 'ready'), go = path.join(tmp, 'go');
+      const gate = path.join(tmp, 'gate.js');
+      fs.writeFileSync(gate, [
+        "'use strict';",
+        "const fs = require('fs');",
+        `const shared = require(${JSON.stringify(path.join(__dirname, '..', 'shared.js'))});`,
+        'const orig = shared.acquireFileLock;',
+        'let first = true;',
+        'shared.acquireFileLock = function (...a) {',
+        '  if (first) {',
+        '    first = false;',
+        `    fs.writeFileSync(${JSON.stringify(ready)}, 'x');`,
+        '    const until = Date.now() + 10000;',
+        `    while (!fs.existsSync(${JSON.stringify(go)}) && Date.now() < until) { const t = Date.now(); while (Date.now() - t < 2); }`,
+        '  }',
+        '  return orig.apply(this, a);',
+        '};',
+        '',
+      ].join('\n'));
+      const base = { sessionId: 'ses_lk', pluginId: 'PL' };
+      runStdinAdapter(ADAPTER, { ...base, seq: 1, type: 'tool.execute.before', tool: 'bash', toolInput: { command: 'ls' } }, env);
+      const late = spawn(NODE, ['-r', gate, ADAPTER], { env, stdio: ['pipe', 'ignore', 'ignore'] });
+      const closed = new Promise(r => late.on('close', r));
+      late.stdin.end(JSON.stringify({ ...base, seq: 2, type: 'tool.execute.before', tool: 'read', toolInput: { filePath: 'x.js' } }));
+      const until = Date.now() + 10000;
+      while (!fs.existsSync(ready) && Date.now() < until) await new Promise(r => setTimeout(r, 5));
+      runStdinAdapter(ADAPTER, { ...base, seq: 3, type: 'session.idle' }, env);
+      const ended = readJSON(path.join(sessionsDir, 'ses_lk.json'));
+      fs.writeFileSync(go, 'x');
+      await closed;
+      const after = readJSON(path.join(sessionsDir, 'ses_lk.json'));
+      assert.strictEqual(after.turnEnded, true, `the turn end survives (${after.state} / ${after.detail})`);
+      assert.strictEqual(after.endSeq, 3);
+      assert.strictEqual(after.timestamp, ended.timestamp, 'the straggler did not draw');
+    } finally { cleanup(tmp); }
+  });
+
   test('adapter timestamps are strictly increasing within a process', () => {
     const { nextTimestamp } = require('../adapters/base-adapter');
     const a = nextTimestamp(), b = nextTimestamp(), c = nextTimestamp();
@@ -3569,7 +3614,7 @@ describe('editor PID liveness tracking', () => {
       'PID death should set editorDead');
     assert.ok(rendererSrc.includes('(lastStopped || editorDead) && !RESCUE_EXCLUDE.has(face.state)'),
       'rescue block should fire on lastStopped OR editorDead');
-    assert.ok(/sessionActive = !lastStopped && (?:!lastTurnOver && )?!editorDead/.test(rendererSrc),
+    assert.ok(/sessionActive = !lastStopped && (?:\(!lastTurnOver \|\| lastCompacting\) && )?!editorDead/.test(rendererSrc),
       'sessionActive should account for editorDead');
     assert.ok(!rendererSrc.match(/isProcessAlive\(lastEditorPid\)\)\s*\{\s*lastStopped = true/),
       'PID death must not be stored in lastStopped (clobbered by forced re-read)');
@@ -4651,6 +4696,73 @@ describe('adapters -- third review pass: the OpenClaw snippets name their sessio
       assert.ok(src.includes('execFileSync'), 'no shell, so the adapter\'s parent is Pi itself');
       assert.ok(/openclaw-\$\{process\.pid\}|openclaw-\\\$\{process\.pid\}/.test(src), 'one id per Pi process');
     }
+  });
+});
+
+// -- Round 4: review of the round-3 adapter changes --------------------------
+
+describe('adapters -- round 4', () => {
+  const OPENCODE = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+  const OPENCLAW = path.join(ADAPTERS_DIR, 'openclaw-adapter.js');
+  const rawRun = (adapter, input, env) => {
+    try { execFileSync(NODE, [adapter], { input, env, timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] }); }
+    catch (e) { if (e.status !== 0 && e.status !== null) throw e; }
+  };
+
+  // The fallback kept its own list of tool-end names, which missed
+  // OpenClaw's: a late oversized tool_execution_end re-opened a finished turn.
+  test('an oversized OpenClaw tool end is judged as one, and keeps a turn end', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('pi-big');
+    try {
+      runStdinAdapter(OPENCLAW, { event: 'tool_call', session_id: 'pi-1', toolName: 'bash', input: { command: 'make' } }, env);
+      runStdinAdapter(OPENCLAW, { event: 'turn_end', session_id: 'pi-1' }, env);
+      assert.strictEqual(readJSON(path.join(sessionsDir, 'pi-1.json')).turnEnded, true, 'fixture');
+      const big = 'x'.repeat(1100000);
+      rawRun(OPENCLAW, JSON.stringify({ event: 'tool_execution_end', session_id: 'pi-1', toolName: 'bash',
+        input: { command: 'make' }, output: 'make: *** [all] Error 2\nexit code 2\n' + big }), env);
+      const f = readJSON(path.join(sessionsDir, 'pi-1.json'));
+      assert.strictEqual(f.turnEnded, true, `the late tool end kept the turn end (${f.state} / ${f.detail})`);
+      assert.strictEqual(f.state, 'error', 'and was judged as a tool end');
+      assert.strictEqual(readJSON(stateFile).stopped, true, 'the global file too');
+    } finally { cleanup(tmp); }
+  });
+
+  // An unparseable payload wrote a session file under the synthetic
+  // <editor>-<ppid> id: a live phantom orbital. And the fallback's write
+  // carried no counters, so the stats rows read zero.
+  test('the fallback writes a session file only under the payload\'s own id, with its counters', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('oc-fb');
+    try {
+      delete env.CLAUDE_SESSION_ID;
+      runStdinAdapter(OPENCODE, { type: 'tool.execute.before', sessionId: 'ses_fb', tool: 'edit', toolInput: { filePath: 'a.js' } }, env);
+      const before = readJSON(path.join(sessionsDir, 'ses_fb.json'));
+      rawRun(OPENCODE, '{"type":"tool.execute.after","sessionId":"ses_fb","tool":"edit","toolInput":{"filePath":"a.js","content":"xx', env);
+      assert.deepStrictEqual(fs.readdirSync(sessionsDir).sort(), ['ses_fb.json'], 'no phantom opencode-<ppid> session');
+      const after = readJSON(path.join(sessionsDir, 'ses_fb.json'));
+      assert.strictEqual(after.toolCalls, before.toolCalls, 'counters carried');
+      assert.strictEqual(after.filesEdited, before.filesEdited);
+      assert.strictEqual(after.sessionStart, before.sessionStart);
+      rawRun(OPENCODE, 'not json at all', env);
+      assert.deepStrictEqual(fs.readdirSync(sessionsDir).sort(), ['ses_fb.json'], 'an id-less payload writes no session file');
+    } finally { cleanup(tmp); }
+  });
+
+  // A task can run a task: the grandchild's direct parent is itself a child,
+  // and it became the stats owner (a second session, the root credited).
+  test('a nested OpenCode child counts toward the root session', () => {
+    const { tmp, statsFile, env } = makeTempEnv('oc-nest');
+    try {
+      delete env.CLAUDE_SESSION_ID;
+      runStdinAdapter(OPENCODE, { type: 'tool.execute.before', sessionId: 'ses_root', tool: 'task', toolInput: {} }, env);
+      runStdinAdapter(OPENCODE, { type: 'session.created', sessionId: 'ses_kid', parentSession: 'ses_root' }, env);
+      runStdinAdapter(OPENCODE, { type: 'session.created', sessionId: 'ses_grand', parentSession: 'ses_kid' }, env);
+      runStdinAdapter(OPENCODE, { type: 'tool.execute.before', sessionId: 'ses_grand', tool: 'read', toolInput: { filePath: 'a.js' } }, env);
+      const st = readJSON(statsFile);
+      assert.strictEqual(st.session.id, 'ses_root');
+      assert.strictEqual(st.daily.sessionCount, 1);
+      assert.deepStrictEqual(Object.keys(st.sessionCounters), ['ses_root']);
+      assert.strictEqual(st.session.toolCalls, 2);
+    } finally { cleanup(tmp); }
   });
 });
 
