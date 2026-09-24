@@ -20,7 +20,11 @@ const { getAccessory, ACCESSORIES } = require('./accessories');
 
 // Active tool states (real work happening NOW), completion (reward) states,
 // and the states work may interrupt -- shared with grid.js and renderer.js.
-const { ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES } = require('./shared');
+// Text from a file or a tool (detail, model, cwd, branch, editor) is measured
+// in terminal columns (strWidth / sliceToWidth): CJK and emoji draw two wide.
+const {
+  ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES, strWidth, sliceToWidth,
+} = require('./shared');
 const { sessionListFits } = require('./grid');
 // Low-activity states used for timeline compression and consecutive-entry capping
 const LOW_ACTIVITY_STATES = new Set(['idle', 'sleeping', 'waiting']);
@@ -289,14 +293,14 @@ class ClaudeFace {
     const suffix = this._escalationSuffix();
     let base = this.stateDetail || '';
     if (!suffix) {
-      if (maxWidth && base.length > maxWidth) base = base.slice(0, maxWidth - 3) + '...';
+      if (maxWidth && strWidth(base) > maxWidth) base = sliceToWidth(base, maxWidth - 3) + '...';
       return base;
     }
     if (!base) return suffix;
     if (maxWidth) {
       const room = maxWidth - suffix.length - 3; // 3 = the ' · ' separator
       if (room < 4) return suffix;
-      if (base.length > room) base = base.slice(0, room - 3) + '...';
+      if (strWidth(base) > room) base = sliceToWidth(base, room - 3) + '...';
     }
     return `${base} \u00b7 ${suffix}`;
   }
@@ -1281,9 +1285,9 @@ class ClaudeFace {
     // room the rest of the line leaves before the right edge (never below 3).
     const statusRest = `${emoji}   is ${theme.status}${statusSuffix}  ${emoji}`.length;
     const statusRoom = Math.max(3, cols - startCol + 1 - statusRest);
-    const who = (this.model || this.modelName).slice(0, Math.min(MAX_STATUS_NAME, statusRoom));
+    const who = sliceToWidth(this.model || this.modelName, Math.min(MAX_STATUS_NAME, statusRoom));
     const statusText = `${emoji}  ${who} is ${theme.status}${statusSuffix}  ${emoji}`;
-    const statusPad = Math.floor((faceW - statusText.length) / 2);
+    const statusPad = Math.floor((faceW - strWidth(statusText)) / 2);
     // A long unanswered wait pulses the status line (~0.5s each way at 15 FPS).
     const statusPulse = this.waitEscalated() && Math.floor(this.frame / 8) % 2 === 0;
     const statusColor = statusPulse
@@ -1296,7 +1300,7 @@ class ClaudeFace {
     const maxDetailWidth = Math.min(Math.max(10, cols - startCol - 8), MAX_DETAIL_W);
     const detailText = this.displayDetail(maxDetailWidth);
     if (detailText) {
-      const detailPad = Math.floor((faceW - detailText.length) / 2);
+      const detailPad = Math.floor((faceW - strWidth(detailText)) / 2);
       buf += ansi.to(startRow + 10, startCol);
       buf += `${ansi.fg(...dimColor(theme.label, 0.65))}${' '.repeat(Math.max(0, detailPad))}${detailText}${r}`;
     }
@@ -1315,8 +1319,8 @@ class ClaudeFace {
 
         if (maxTextW >= 6) {
           let txt = this.thoughtText;
-          if (txt.length > maxTextW) txt = txt.slice(0, maxTextW - 3) + '...';
-          const bubbleInner = txt.length + 2;
+          if (strWidth(txt) > maxTextW) txt = sliceToWidth(txt, maxTextW - 3) + '...';
+          const bubbleInner = strWidth(txt) + 2;
 
           buf += ansi.to(startRow + 2, bubbleCol);
           buf += `${bc}\u256d${'\u2500'.repeat(bubbleInner)}\u256e${r}`;
@@ -1331,7 +1335,7 @@ class ClaudeFace {
       } else if (startRow >= 5) {
         // Above-face bubble (original position, no accessory conflict)
         const txt = this.thoughtText;
-        const bubbleInner = txt.length + 2;
+        const bubbleInner = strWidth(txt) + 2;
         const bubbleLeft = startCol + Math.floor(faceW / 2);
 
         if (bubbleLeft + bubbleInner + 2 < cols) {
@@ -1447,11 +1451,11 @@ class ClaudeFace {
       const eTag = this.model ? this.editor : '';
       let rightText = [pName, eTag].filter(Boolean).join('  ');
       const rightRoom = faceW - leftText.length - 2;
-      if (rightText.length > rightRoom) rightText = eTag.slice(0, Math.max(0, rightRoom));
+      if (strWidth(rightText) > rightRoom) rightText = sliceToWidth(eTag, rightRoom);
 
       buf += ansi.to(startRow + 8, startCol) + `${dc}${leftText}${r}`;
       if (rightText) {
-        buf += ansi.to(startRow + 8, startCol + faceW - rightText.length);
+        buf += ansi.to(startRow + 8, startCol + faceW - strWidth(rightText));
         buf += `${dc}${rightText}${r}`;
       }
     }
@@ -1474,26 +1478,26 @@ class ClaudeFace {
           const overhead = 2 + 2 + sep.length + commitsStr.length; // "⌂ " + "X " + sep + commits
           const available = faceW - overhead;
           const maxF = Math.max(3, Math.floor(available / 2));
-          const f = folder.length > maxF ? folder.slice(0, maxF - 1) + '\u2026' : folder;
-          const maxB = available - f.length;
-          const b = this.gitBranch.length > maxB
-            ? this.gitBranch.slice(0, Math.max(1, maxB - 1)) + '\u2026'
+          const f = strWidth(folder) > maxF ? sliceToWidth(folder, maxF - 1) + '\u2026' : folder;
+          const maxB = available - strWidth(f);
+          const b = strWidth(this.gitBranch) > maxB
+            ? sliceToWidth(this.gitBranch, Math.max(1, maxB - 1)) + '\u2026'
             : this.gitBranch;
           folderPart = `\u2302 ${f}`;
           branchPart = `${branchIcon} ${b}${commitsStr}`;
         } else if (folder) {
           const maxF = faceW - 2; // "⌂ "
-          folderPart = `\u2302 ${folder.length > maxF ? folder.slice(0, maxF - 1) + '\u2026' : folder}`;
+          folderPart = `\u2302 ${strWidth(folder) > maxF ? sliceToWidth(folder, maxF - 1) + '\u2026' : folder}`;
         } else if (this.gitBranch) {
           const maxB = faceW - 2 - commitsStr.length; // "X " + commits
-          const b = this.gitBranch.length > maxB
-            ? this.gitBranch.slice(0, maxB - 1) + '\u2026'
+          const b = strWidth(this.gitBranch) > maxB
+            ? sliceToWidth(this.gitBranch, maxB - 1) + '\u2026'
             : this.gitBranch;
           branchPart = `${branchIcon} ${b}${commitsStr}`;
         }
 
         const ctx = folderPart + sep + branchPart;
-        const ctxPad = Math.floor((faceW - ctx.length) / 2);
+        const ctxPad = Math.floor((faceW - strWidth(ctx)) / 2);
         buf += ansi.to(startRow + 11, startCol + ctxPad) + `${dc}${ctx}${r}`;
       }
     }

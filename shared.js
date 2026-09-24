@@ -98,6 +98,100 @@ function savePrefs(updates) {
   } catch {}
 }
 
+// -- Display width ---------------------------------------------------
+// Terminal columns, not UTF-16 code units. `.length` counted a CJK folder
+// name or an emoji as one column per unit while the terminal drew two per
+// character, so an orbital's 8-column row came out 16 wide and a session-list
+// row pushed its right border out -- or wrapped, and a wrap on the last row
+// scrolls the whole screen. Combining marks were the opposite error: counted
+// 1, drawn 0, leaving a row one column short. wcwidth-style rules, over code
+// points: 0 for marks, ZWJ, variation selectors and controls; 2 for East
+// Asian Wide/Fullwidth and default-emoji-presentation emoji; 1 otherwise --
+// which keeps every glyph the app draws itself (● ★ ⎇ ✦, box drawing) at 1.
+
+const ASCII_PRINTABLE = /^[\x20-\x7e]*$/;
+const MARK = /\p{M}/u;
+// Inclusive [lo, hi] ranges, sorted, non-overlapping (binary searched).
+const WIDE_RANGES = [
+  [0x1100, 0x115f], [0x231a, 0x231b], [0x23e9, 0x23ec], [0x23f0, 0x23f0],
+  [0x23f3, 0x23f3], [0x25fd, 0x25fe], [0x2614, 0x2615], [0x2648, 0x2653],
+  [0x267f, 0x267f], [0x2693, 0x2693], [0x26a1, 0x26a1], [0x26aa, 0x26ab],
+  [0x26bd, 0x26be], [0x26c4, 0x26c5], [0x26ce, 0x26ce], [0x26d4, 0x26d4],
+  [0x26ea, 0x26ea], [0x26f2, 0x26f3], [0x26f5, 0x26f5], [0x26fa, 0x26fa],
+  [0x26fd, 0x26fd], [0x2705, 0x2705], [0x270a, 0x270b], [0x2728, 0x2728],
+  [0x274c, 0x274c], [0x274e, 0x274e], [0x2753, 0x2755], [0x2757, 0x2757],
+  [0x2795, 0x2797], [0x27b0, 0x27b0], [0x27bf, 0x27bf], [0x2b1b, 0x2b1c],
+  [0x2b50, 0x2b50], [0x2b55, 0x2b55], [0x2e80, 0x303e], [0x3041, 0x33ff],
+  [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xac00, 0xd7a3],
+  [0xf900, 0xfaff], [0xfe30, 0xfe4f], [0xff00, 0xff60], [0xffe0, 0xffe6],
+  [0x1f300, 0x1f64f], [0x1f680, 0x1f6ff], [0x1f900, 0x1f9ff], [0x1fa70, 0x1faff],
+  [0x20000, 0x2fffd], [0x30000, 0x3fffd],
+];
+
+function charWidth(cp) {
+  if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) return 0;
+  if (cp < 0x300) return 1;
+  if (cp === 0x200d || (cp >= 0xfe00 && cp <= 0xfe0f)) return 0;
+  if (MARK.test(String.fromCodePoint(cp))) return 0;
+  let lo = 0;
+  let hi = WIDE_RANGES.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (cp < WIDE_RANGES[mid][0]) hi = mid - 1;
+    else if (cp > WIDE_RANGES[mid][1]) lo = mid + 1;
+    else return 2;
+  }
+  return 1;
+}
+
+function strWidth(s) {
+  const str = s == null ? '' : String(s);
+  if (ASCII_PRINTABLE.test(str)) return str.length;
+  let w = 0;
+  for (const ch of str) w += charWidth(ch.codePointAt(0));
+  return w;
+}
+
+// The longest prefix of s that fits in maxCols columns. Iterates by code
+// point, so a surrogate pair is never split; a wide character that would
+// straddle the limit is dropped rather than half-drawn (the result may be one
+// column short -- callers pad with strWidth). Zero-width marks that follow
+// the last kept character stay with it.
+function sliceToWidth(s, maxCols) {
+  const str = s == null ? '' : String(s);
+  const max = Math.max(0, Math.floor(maxCols) || 0);
+  if (ASCII_PRINTABLE.test(str)) return str.slice(0, max);
+  let w = 0;
+  let out = '';
+  for (const ch of str) {
+    const cw = charWidth(ch.codePointAt(0));
+    if (w + cw > max) break;
+    w += cw;
+    out += ch;
+  }
+  return out;
+}
+
+// The longest suffix of s that fits in maxCols columns (for paths, whose end
+// is the part worth keeping). Same guarantees as sliceToWidth; a mark left at
+// the front with its base character cut off is dropped too.
+function sliceFromEndToWidth(s, maxCols) {
+  const str = s == null ? '' : String(s);
+  const max = Math.max(0, Math.floor(maxCols) || 0);
+  if (ASCII_PRINTABLE.test(str)) return max ? str.slice(-max) : '';
+  const chars = Array.from(str);
+  let w = 0;
+  let i = chars.length;
+  while (i > 0) {
+    const cw = charWidth(chars[i - 1].codePointAt(0));
+    if (w + cw > max) break;
+    w += cw;
+    i--;
+  }
+  while (i < chars.length && charWidth(chars[i].codePointAt(0)) === 0) i++;
+  return chars.slice(i).join('');
+}
+
 // -- Atomic writes, spawn lock and stats lock ------------------------
 
 // Write JSON (or a pre-serialized string) atomically: temp file + rename, so
@@ -536,6 +630,7 @@ module.exports = {
   STATS_LOCK_FILE, LOCK_WAIT_MS, LOCK_STALE_MS, LOCK_SPIN_MS,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   safeFilename, detailText, loadPrefs, savePrefs, getGitBranch, getIsWorktree,
+  charWidth, strWidth, sliceToWidth, sliceFromEndToWidth,
   writeJsonAtomic, acquireSpawnLock, sleepSync, acquireFileLock, withStatsLock,
   quoteArg, shQuote, buildRendererCommands, spawnRendererWindow,
 };

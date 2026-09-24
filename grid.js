@@ -9,7 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  HOME, SESSIONS_DIR, safeFilename, detailText,
+  HOME, SESSIONS_DIR, safeFilename, detailText, strWidth, sliceToWidth, sliceFromEndToWidth,
   ACTIVE_WORK_STATES, INTERRUPTIBLE_STATES, COMPLETION_STATES,
 } = require('./shared');
 const { ansi, breathe, dimColor, themes, COMPLETION_LINGER, knownState } = require('./themes');
@@ -621,7 +621,7 @@ class MiniFace {
   }
 
   _cycleDetail() {
-    if (this.taskDescription) return this.taskDescription.slice(0, 8);
+    if (this.taskDescription) return sliceToWidth(this.taskDescription, 8);
     switch (this.state) {
       case 'reading':   return 'reading';
       case 'searching': return 'looking';
@@ -781,30 +781,35 @@ class MiniFace {
     buf += ansi.to(startRow + 3, startCol);
     buf += `${fc}\u2570${'\u2500'.repeat(BOX_INNER)}\u256f${r}`;
 
-    const lbl = (this.label || '?').slice(0, BOX_W);
-    const lPad = Math.max(0, Math.floor((BOX_W - lbl.length) / 2));
+    // Rows 4-6 hold file text (label, branch, cwd, model, detail): measured
+    // in columns, not code units, or a CJK name draws 16 wide in the 8 box.
+    const lbl = sliceToWidth(this.label || '?', BOX_W);
+    const lW = strWidth(lbl);
+    const lPad = Math.max(0, Math.floor((BOX_W - lW) / 2));
     buf += ansi.to(startRow + 4, startCol);
-    buf += `${lc}${' '.repeat(lPad)}${lbl}${' '.repeat(BOX_W - lPad - lbl.length)}${r}`;
+    buf += `${lc}${' '.repeat(lPad)}${lbl}${' '.repeat(BOX_W - lPad - lW)}${r}`;
 
     const cwdBase = this.cwdBasename;
     // A child shares its parent's repo and folder, so branch/cwd on this row
     // is pure redundancy -- the model is the one thing you cannot read
     // anywhere else. A TOP-LEVEL orbital keeps the branch: a parallel editor
     // window may genuinely be somewhere else.
-    const modelRow = (this.parentSession && this.model) ? this.model.slice(0, BOX_W) : '';
+    const modelRow = (this.parentSession && this.model) ? sliceToWidth(this.model, BOX_W) : '';
     const statusStr = modelRow || (this.gitBranch
-      ? ('\u2387 ' + this.gitBranch).slice(0, BOX_W)   // ⎇ branchname
+      ? sliceToWidth('\u2387 ' + this.gitBranch, BOX_W)   // ⎇ branchname
       : cwdBase
-        ? cwdBase.slice(0, BOX_W)
+        ? sliceToWidth(cwdBase, BOX_W)
         : (theme.status || '').slice(0, BOX_W));
-    const sPad = Math.max(0, Math.floor((BOX_W - statusStr.length) / 2));
+    const sW = strWidth(statusStr);
+    const sPad = Math.max(0, Math.floor((BOX_W - sW) / 2));
     buf += ansi.to(startRow + 5, startCol);
-    buf += `${dc}${' '.repeat(sPad)}${statusStr}${' '.repeat(BOX_W - sPad - statusStr.length)}${r}`;
+    buf += `${dc}${' '.repeat(sPad)}${statusStr}${' '.repeat(BOX_W - sPad - sW)}${r}`;
 
-    const detailStr = (this.detail || '').slice(0, BOX_W);
-    const dPad = Math.max(0, Math.floor((BOX_W - detailStr.length) / 2));
+    const detailStr = sliceToWidth(this.detail || '', BOX_W);
+    const dW = strWidth(detailStr);
+    const dPad = Math.max(0, Math.floor((BOX_W - dW) / 2));
     buf += ansi.to(startRow + 6, startCol);
-    buf += `${dc}${' '.repeat(dPad)}${detailStr}${' '.repeat(BOX_W - dPad - detailStr.length)}${r}`;
+    buf += `${dc}${' '.repeat(dPad)}${detailStr}${' '.repeat(BOX_W - dPad - dW)}${r}`;
 
     return buf;
   }
@@ -1296,7 +1301,7 @@ class OrbitalSystem {
 
       // Team members use their designated teammate name
       if (face.teammateName) {
-        face.label = face.teammateName.slice(0, 8);
+        face.label = sliceToWidth(face.teammateName, 8);
         continue;
       }
 
@@ -1308,17 +1313,17 @@ class OrbitalSystem {
       // `claude`. It is now only the fallback when the folder cannot tell
       // this face apart (no cwd, or a basename shared with another face).
       if (face.taskDescription) {
-        face.label = face.taskDescription.slice(0, 8);
+        face.label = sliceToWidth(face.taskDescription, 8);
       } else if (sorted.length === 1) {
-        face.label = base ? base.slice(0, 8) : (face.modelName || 'sub').slice(0, 8);
+        face.label = sliceToWidth(base || face.modelName || 'sub', 8);
       } else if (base && cwdCounts[base] === 1) {
-        face.label = base.slice(0, 8);
+        face.label = sliceToWidth(base, 8);
       } else if (face.isMainSession && face.modelName) {
-        face.label = face.modelName.slice(0, 8);
+        face.label = sliceToWidth(face.modelName, 8);
       } else if (face.parentSession && face.agentType) {
         // A child's modelName is its agent type only when one is known (a
         // legacy child carries the editor name), so read agentType directly.
-        face.label = face.agentType.slice(0, 8);
+        face.label = sliceToWidth(face.agentType, 8);
       } else {
         cwdIndex[base] = (cwdIndex[base] || 0) + 1;
         face.label = 'sub-' + (i + 1);
@@ -1574,14 +1579,14 @@ class OrbitalSystem {
 
     // Team groups: always use teamName
     const teamName = members[0].face.teamName;
-    if (teamName) return teamName.slice(0, 12);
+    if (teamName) return sliceToWidth(teamName, 12);
 
     // Priority 1: shared non-default git branch
     const branches = stable.map(m => m.face.gitBranch).filter(Boolean);
     if (branches.length === stable.length && branches.length > 0) {
       const first = branches[0];
       if (!DEFAULT_BRANCHES.has(first) && branches.every(b => b === first)) {
-        return first.slice(0, 12);
+        return sliceToWidth(first, 12);
       }
     }
 
@@ -1590,16 +1595,16 @@ class OrbitalSystem {
     if (cwds.length === stable.length && cwds.length > 0) {
       const first = cwds[0];
       if (cwds.every(c => c === first)) {
-        return first.slice(0, 12);
+        return sliceToWidth(first, 12);
       }
     }
 
     // Priority 3: first member's taskDescription
     const desc = stable[0].face.taskDescription;
-    if (desc) return desc.slice(0, 12);
+    if (desc) return sliceToWidth(desc, 12);
 
     // Priority 4: first member's face label
-    return (stable[0].face.label || '').slice(0, 12);
+    return sliceToWidth(stable[0].face.label || '', 12);
   }
 
   _renderGroupLabels(positions, rows, cols, mainPos) {
@@ -1634,16 +1639,17 @@ class OrbitalSystem {
       }
       const labelRow = bottomRow; // just below group
       const centroid = sumCol / stable.length;
-      let labelCol = Math.round(centroid - label.length / 2);
+      const labelW = strWidth(label);
+      let labelCol = Math.round(centroid - labelW / 2);
 
       // Clamp to terminal bounds
-      labelCol = Math.max(1, Math.min(cols - label.length, labelCol));
+      labelCol = Math.max(1, Math.min(cols - labelW, labelCol));
       if (labelRow < 1 || labelRow >= rows) continue;
 
       // Skip if label overlaps main face area
       if (mainPos) {
         let hit = false;
-        for (let c = labelCol; c < labelCol + label.length && !hit; c++) hit = this._inMainZone(mainPos, labelRow, c);
+        for (let c = labelCol; c < labelCol + labelW && !hit; c++) hit = this._inMainZone(mainPos, labelRow, c);
         if (hit) continue;
       }
 
@@ -1904,12 +1910,13 @@ function _truncatePath(fullPath, maxLen, foldCase = process.platform === 'win32'
   const fp = fold(p);
   const underHome = !!home && (fp === fold(home) || fp.startsWith(fold(home) + '/'));
   const display = underHome ? '~' + p.slice(home.length) : p;
-  if (display.length <= maxLen) return display;
+  // maxLen is in terminal columns: a CJK folder is two per character.
+  if (strWidth(display) <= maxLen) return display;
   // Show .../<last two segments>
   const parts = display.split('/');
-  if (parts.length <= 2) return '...' + display.slice(display.length - maxLen + 3);
+  if (parts.length <= 2) return '...' + sliceFromEndToWidth(display, maxLen - 3);
   const tail = parts.slice(-2).join('/');
-  if (tail.length + 4 > maxLen) return '...' + tail.slice(tail.length - maxLen + 3);
+  if (strWidth(tail) + 4 > maxLen) return '...' + sliceFromEndToWidth(tail, maxLen - 3);
   return '.../' + tail;
 }
 
@@ -1927,7 +1934,7 @@ function _infoLine(face, labelById, now) {
   } else {
     parts.push(`${face.toolCalls || 0} tools`, `${face.filesEdited || 0} files`);
   }
-  // Pushed into parts BEFORE the join, so the caller's slice(0, body) still
+  // Pushed into parts BEFORE the join, so the caller's slice to `body` still
   // bounds the whole row -- appending after it would overrun the box.
   if (face.model) parts.push(face.model);
   if (face.lastUpdate) parts.push(formatAge(now - face.lastUpdate));
@@ -1961,7 +1968,7 @@ function renderSessionList(cols, rows, entriesOrFaces, paletteThemes, mainInfo, 
   const count = entries.length;
 
   const labelById = new Map();
-  for (const e of entries) if (e.face.sessionId) labelById.set(e.face.sessionId, (e.face.label || '?').slice(0, 14));
+  for (const e of entries) if (e.face.sessionId) labelById.set(e.face.sessionId, sliceToWidth(e.face.label || '?', 14));
 
   let selIdx = -1;
   if (typeof selected === 'number') selIdx = selected;
@@ -2027,7 +2034,7 @@ function renderSessionList(cols, rows, entriesOrFaces, paletteThemes, mainInfo, 
       const dotC = ansi.fg(...dotColor);
       const stateTheme = themeMap[face.state] || themeMap.idle;
       const stateName = (stateTheme.status || face.state).slice(0, 12);
-      const label = (face.label || '?').slice(0, 14);
+      const label = sliceToWidth(face.label || '?', 14);
       const selMarker = isSel ? '\u25b8' : ' ';
       const rowTc = isSel ? ansi.fg(...dimColor([240, 250, 255], 1.0)) : tc;
       const rowDc = isSel ? ansi.fg(...dimColor([180, 200, 220], 0.8)) : dc;
@@ -2035,7 +2042,8 @@ function renderSessionList(cols, rows, entriesOrFaces, paletteThemes, mainInfo, 
       // Row 1: " ▸● statename  editor      ⊛/★/☆ label". A child gets a tree
       // marker before the dot. Width priority: the label (with its marker, the
       // promote UX) is never sliced; the editor tag drops first; the state
-      // name truncates last.
+      // name truncates last. Label and tag are file text, so measured in
+      // columns (strWidth), not code units.
       const mainTag = face.isMain
         ? (face.isPinned ? '\u229b ' : '\u2605 ')
         : (face.isMainSession ? '\u2606 ' : '');
@@ -2043,16 +2051,18 @@ function renderSessionList(cols, rows, entriesOrFaces, paletteThemes, mainInfo, 
       const prefix = ` ${selMarker}${treeMark}`;           // before the dot
       const row1Prefix = prefix.length + 2;                  // + dot + space
       const fullLabel = mainTag + label;
+      const labelW = strWidth(fullLabel);
       const avail = innerW - row1Prefix;
-      const tagRaw = (face.editor || '').slice(0, 8);
+      const tagRaw = sliceToWidth(face.editor || '', 8);
       let stateSeg = stateName;
-      const tagSeg = (tagRaw && stateSeg.length + 2 + tagRaw.length + 2 + fullLabel.length <= avail)
+      const tagSeg = (tagRaw && stateSeg.length + 2 + strWidth(tagRaw) + 2 + labelW <= avail)
         ? tagRaw : '';
-      const maxState = avail - fullLabel.length - 2 - (tagSeg ? tagSeg.length + 2 : 0);
+      const tagW = strWidth(tagSeg);
+      const maxState = avail - labelW - 2 - (tagSeg ? tagW + 2 : 0);
       if (stateSeg.length > maxState) stateSeg = stateSeg.slice(0, Math.max(0, maxState));
-      const usedLeft = stateSeg.length + (tagSeg ? 2 + tagSeg.length : 0);
-      const labelGap = Math.max(2, avail - usedLeft - fullLabel.length);
-      const r1Pad = Math.max(0, avail - usedLeft - labelGap - fullLabel.length);
+      const usedLeft = stateSeg.length + (tagSeg ? 2 + tagW : 0);
+      const labelGap = Math.max(2, avail - usedLeft - labelW);
+      const r1Pad = Math.max(0, avail - usedLeft - labelGap - labelW);
       buf += line(row, `${r}${rowTc}${prefix}${dotC}${dot}${r} ${rowTc}${stateSeg}${tagSeg ? `  ${rowDc}${tagSeg}` : ''}${' '.repeat(labelGap)}${rowTc}${fullLabel}${' '.repeat(r1Pad)}`);
       row++;
 
@@ -2063,26 +2073,26 @@ function renderSessionList(cols, rows, entriesOrFaces, paletteThemes, mainInfo, 
       const branchRaw = face.gitBranch || '';
       let row2Text;
       if (branchRaw) {
-        const branchDisplay = ('\u2387 ' + branchRaw).slice(0, 20);
-        const pathSpace = body - branchDisplay.length - 2;
+        const branchDisplay = sliceToWidth('\u2387 ' + branchRaw, 20);
+        const pathSpace = body - strWidth(branchDisplay) - 2;
         row2Text = branchDisplay + '  ' + _truncatePath(face.cwd, Math.max(8, pathSpace));
       } else {
         row2Text = _truncatePath(face.cwd, body);
       }
-      const row2Full = indent + row2Text.slice(0, body);
-      buf += line(row, `${rowDc}${row2Full}${' '.repeat(Math.max(0, innerW - row2Full.length))}`);
+      const row2Full = indent + sliceToWidth(row2Text, body);
+      buf += line(row, `${rowDc}${row2Full}${' '.repeat(Math.max(0, innerW - strWidth(row2Full)))}`);
       row++;
 
       // Row 3: "    task/detail text" — full task description preferred
-      const row3Text = (face.taskDescription || face.detail || 'waiting...').slice(0, body);
+      const row3Text = sliceToWidth(face.taskDescription || face.detail || 'waiting...', body);
       const row3Full = indent + row3Text;
-      buf += line(row, `${rowDc}${row3Full}${' '.repeat(Math.max(0, innerW - row3Full.length))}`);
+      buf += line(row, `${rowDc}${row3Full}${' '.repeat(Math.max(0, innerW - strWidth(row3Full)))}`);
       row++;
 
       // Row 4: "    Explore · 3s · ↳ parent" / "    12 tools · 3 files · 3s"
-      const infoText = _infoLine(face, labelById, now).slice(0, body);
+      const infoText = sliceToWidth(_infoLine(face, labelById, now), body);
       const row4Full = indent + infoText;
-      buf += line(row, `${rowDc}${row4Full}${' '.repeat(Math.max(0, innerW - row4Full.length))}`);
+      buf += line(row, `${rowDc}${row4Full}${' '.repeat(Math.max(0, innerW - strWidth(row4Full)))}`);
       row++;
 
       if (i < visible.length - 1) {

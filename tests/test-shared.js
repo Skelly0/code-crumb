@@ -9,7 +9,10 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { safeFilename, PREFS_FILE, loadPrefs, savePrefs, getGitBranch, getIsWorktree } = require('../shared');
+const {
+  safeFilename, PREFS_FILE, loadPrefs, savePrefs, getGitBranch, getIsWorktree,
+  charWidth, strWidth, sliceToWidth, sliceFromEndToWidth,
+} = require('../shared');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
@@ -279,6 +282,96 @@ describe('shared.js -- getGitBranch walks up parent directories', () => {
     } finally {
       try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
     }
+  });
+});
+
+// -- Round 3: wide characters ---------------------------------------------
+// Layout is measured in terminal columns. `.length` counted a CJK or emoji
+// character as one column (the terminal draws two) and a combining mark as
+// one (it draws none), so rows overran or fell short of their boxes.
+
+describe('shared.js -- round 3: wide characters', () => {
+  test('ASCII is one column per character (fast path)', () => {
+    assert.strictEqual(strWidth(''), 0);
+    assert.strictEqual(strWidth('editing foo.js'), 14);
+    assert.strictEqual(charWidth(0x41), 1);
+    assert.strictEqual(sliceToWidth('abcdef', 3), 'abc');
+    assert.strictEqual(sliceToWidth('abc', 10), 'abc');
+    assert.strictEqual(sliceFromEndToWidth('abcdef', 3), 'def');
+    assert.strictEqual(sliceFromEndToWidth('abcdef', 0), '');
+  });
+
+  test('CJK, Hangul, kana and fullwidth forms are two columns', () => {
+    assert.strictEqual(strWidth('\u7528\u6237\u767b\u5f55'), 8);  // 用户登录
+    assert.strictEqual(strWidth('\u8a2d\u8a08\u66f8.md'), 9);  // 設計書.md
+    assert.strictEqual(strWidth('\ud55c\uad6d\uc5b4'), 6);  // 한국어
+    assert.strictEqual(strWidth('\u30d7\u30ed\u30b8\u30a7\u30af\u30c8'), 12);  // プロジェクト
+    assert.strictEqual(strWidth('\uff21\uff22'), 4);  // fullwidth AB
+    assert.strictEqual(charWidth(0x20000), 2);  // CJK Ext. B
+  });
+
+  test('default-presentation emoji are two columns, astral and BMP alike', () => {
+    assert.strictEqual(strWidth('\ud83d\ude00'), 2);  // 😀 U+1F600
+    assert.strictEqual(strWidth('\ud83d\ude80'), 2);  // 🚀 U+1F680
+    assert.strictEqual(strWidth('\ud83e\udd16'), 2);  // 🤖 U+1F916
+    assert.strictEqual(strWidth('\u2705\u274c\u2b50'), 6);  // ✅ ❌ ⭐
+    assert.strictEqual(strWidth('\u231a'), 2);  // ⌚
+  });
+
+  test('combining marks, ZWJ, variation selectors and controls are zero columns', () => {
+    assert.strictEqual(strWidth('e\u0301'), 1);  // e + combining acute
+    assert.strictEqual(strWidth('cafe\u0301 ok'), 7);
+    assert.strictEqual(strWidth('\u0915\u094d\u0937'), 2);  // क्ष: virama is a mark
+    assert.strictEqual(charWidth(0x200d), 0);
+    assert.strictEqual(charWidth(0xfe0f), 0);
+    assert.strictEqual(charWidth(0x07), 0);
+    assert.strictEqual(charWidth(0x9b), 0);  // C1 CSI
+    assert.strictEqual(strWidth('\u2764\ufe0f'), 1);  // text-default heart + VS16
+  });
+
+  test('every glyph the app draws itself stays one column', () => {
+    // A layout built on these would shift if the table ever made one wide.
+    for (const g of ['\u2726', '\u25cf', '\u25cb', '\u2605', '\u2606', '\u229b', '\u2715',
+      '\u2387', '\u21b3', '\u2191', '\u2193', '\u23ce', '\u2302', '\u25c4', '\u25b8', '\u2514',
+      '\u2500', '\u2502', '\u256d', '\u256e', '\u2570', '\u256f', '\u251c', '\u2524', '\u00b7',
+      '\u2026', '\u2588', '\u2593', '\u2592', '\u25e1', '\u25e0', '\u25c6', '\u25c8', '\u25c9',
+      '\u29eb', '\u25bc', '\u25b2', '\u2218', '\u00d7']) {
+      assert.strictEqual(strWidth(g), 1, `U+${g.codePointAt(0).toString(16)} must stay 1 column`);
+    }
+  });
+
+  test('sliceToWidth never splits a surrogate pair', () => {
+    const s = 'a\ud83d\ude00b';
+    for (let w = 0; w <= 5; w++) {
+      const out = sliceToWidth(s, w);
+      assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])/.test(out), `width ${w}: lone high surrogate in ${JSON.stringify(out)}`);
+      assert.ok(strWidth(out) <= w, `width ${w}: ${JSON.stringify(out)} overruns`);
+    }
+    assert.strictEqual(sliceToWidth(s, 3), 'a\ud83d\ude00');
+    const tail = sliceFromEndToWidth('x\ud83d\ude00y', 3);
+    assert.strictEqual(tail, '\ud83d\ude00y');
+  });
+
+  test('a wide character straddling the limit is dropped, not half-drawn', () => {
+    assert.strictEqual(sliceToWidth('ab\u7528\u6237', 3), 'ab');  // ab用 would be 4
+    assert.strictEqual(sliceToWidth('ab\u7528\u6237', 4), 'ab\u7528');
+    assert.strictEqual(sliceToWidth('\u7528\u6237\u767b', 5), '\u7528\u6237');
+    assert.strictEqual(sliceFromEndToWidth('\u7528\u6237\u767b', 5), '\u6237\u767b');
+    assert.strictEqual(sliceToWidth('\u7528', 1), '');
+    assert.strictEqual(sliceToWidth('\u7528', -2), '');
+  });
+
+  test('a mark stays with its base character and never leads a tail', () => {
+    assert.strictEqual(sliceToWidth('e\u0301x', 1), 'e\u0301');
+    assert.strictEqual(sliceFromEndToWidth('ae\u0301', 1), 'e\u0301');
+    assert.strictEqual(sliceFromEndToWidth('\u7528e\u0301', 1), 'e\u0301');
+  });
+
+  test('non-string input is coerced, never thrown on', () => {
+    assert.strictEqual(strWidth(null), 0);
+    assert.strictEqual(strWidth(12345), 5);
+    assert.strictEqual(sliceToWidth(undefined, 4), '');
+    assert.strictEqual(sliceFromEndToWidth(null, 4), '');
   });
 });
 
