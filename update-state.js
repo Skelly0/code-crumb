@@ -78,7 +78,10 @@ function carriesTurnEnd(event) {
 }
 
 // Sticky session-file fields: set once, preserved across every later write.
-const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'editor', 'lastPromptAt', 'model'];
+// `editor` is deliberately absent: every write stamps it fresh (EDITOR is
+// never empty), so a copy-if-missing loop could never fire for it. The owner's
+// provenance is kept by the global owner guard instead.
+const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'lastPromptAt', 'model'];
 
 // Per-session counters, and the parking of a non-owner's agents, live in
 // state-machine.js (see "Per-Session Counters") -- the adapters share them.
