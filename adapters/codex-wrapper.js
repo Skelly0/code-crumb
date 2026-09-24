@@ -29,9 +29,9 @@ const {
 } = require('./base-adapter');
 const {
   toolToState, humanizeToolName, updateStreak, pruneFrequentFiles, prettyModelName,
-} = require('../state-machine');
+} = require('../lib/state-machine');
 const { buildEditorSpawn } = require('../launch');
-const shared = require('../shared');
+const shared = require('../lib/shared');
 const { withStatsLock } = shared;
 
 // -- Session setup -----------------------------------------------------

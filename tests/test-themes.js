@@ -12,7 +12,7 @@ const {
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
   PALETTES, PALETTE_NAMES,
   setNoColor, isNoColor, ansi, BREATH_PERIOD,
-} = require('../themes');
+} = require('../lib/themes');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;

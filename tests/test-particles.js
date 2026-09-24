@@ -8,8 +8,8 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { ParticleSystem } = require('../particles');
-const { ansi, dimColor, setNoColor, isNoColor } = require('../themes');
+const { ParticleSystem } = require('../lib/particles');
+const { ansi, dimColor, setNoColor, isNoColor } = require('../lib/themes');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
@@ -573,7 +573,7 @@ describe('particles.js -- bigquestion style', () => {
   });
 
   test('the header comment counts the style', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'particles.js'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'particles.js'), 'utf8');
     const header = src.slice(0, src.indexOf('const { ansi'));
     assert.ok(header.includes('16 particle styles'), 'header should say 16 particle styles');
     assert.ok(header.includes('bigquestion'), 'header should list bigquestion');

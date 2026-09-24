@@ -25,13 +25,13 @@ const { StringDecoder } = require('string_decoder');
 const {
   STATE_FILE, SESSIONS_DIR, STATS_FILE, STATS_LOCK_FILE,
   safeFilename, writeJsonAtomic, acquireFileLock, detailText,
-} = require('../shared');
+} = require('../lib/shared');
 const {
   toolToState, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
   EDIT_TOOLS,
   pruneFrequentFiles, topFrequentFiles, prettyModelName, toText,
   COUNTER_MAX_FILES, freshCounter, normalizeCounter, parkAgents, unparkAgents, pruneCounters,
-} = require('../state-machine');
+} = require('../lib/state-machine');
 
 // -- State file writing ------------------------------------------------
 

@@ -22,15 +22,15 @@ const { describe, test } = suite;
 
 const {
   subagentSessionId, subagentLabel,
-} = require('../state-machine');
-const { writeJsonAtomic } = require('../shared');
+} = require('../lib/state-machine');
+const { writeJsonAtomic } = require('../lib/shared');
 const {
   MiniFace, OrbitalSystem, CHILD_ORPHAN_TIMEOUT, ORPHAN_TIMEOUT, STALE_MS,
-} = require('../grid');
+} = require('../lib/grid');
 const {
   idleCascade, SLEEP_TIMEOUT, THINKING_TIMEOUT, WAIT_HOLD_STALE_MS,
 } = require('../renderer');
-const { ClaudeFace } = require('../face');
+const { ClaudeFace } = require('../lib/face');
 
 // The detail-line separator face.js uses, built without a literal glyph.
 const DETAIL_SEP = ' ' + String.fromCharCode(0x00b7) + ' ';

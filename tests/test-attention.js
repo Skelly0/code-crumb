@@ -254,7 +254,7 @@ describe('update-state -- attention fields', () => {
     const t = makeTempEnv('att-6b');
     try {
       // Another session owns the global file and is fresh.
-      const { writeJsonAtomic } = require('../shared');
+      const { writeJsonAtomic } = require('../lib/shared');
       writeJsonAtomic(t.stateFile, { state: 'coding', detail: '', timestamp: Date.now(), sessionId: 'owner' });
       runUpdateState('Stop', { session_id: 'att-6b' }, t.env);
       assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'att-6b')).turnEnded, true);
@@ -297,7 +297,7 @@ const CODEX_WRAPPER = path.join(__dirname, '..', 'adapters', 'codex-wrapper.js')
 // nothing. test.js redirected HOME before loading this file, so shared.js has
 // already fixed SESSIONS_DIR inside the runner's throwaway home.
 const wrapper = require('../adapters/codex-wrapper');
-const { SESSIONS_DIR, safeFilename } = require('../shared');
+const { SESSIONS_DIR, safeFilename } = require('../lib/shared');
 
 function runAdapter(script, payload, env) {
   try {
@@ -401,7 +401,7 @@ describe('adapters -- lastPromptAt', () => {
     // leave the window unaddressable for the rest of the turn.
     const t = makeTempEnv();
     try {
-      const { writeJsonAtomic } = require('../shared');
+      const { writeJsonAtomic } = require('../lib/shared');
       fs.mkdirSync(t.sessionsDir, { recursive: true });
       writeJsonAtomic(sessionFile(t.sessionsDir, 'ses_d'), {
         session_id: 'ses_d', state: 'coding', detail: '', timestamp: Date.now(), stopped: false,
@@ -466,8 +466,8 @@ describe('adapters -- lastPromptAt', () => {
 
 // -- grid.js: ordering, age, main-in-faces ---------------------------------
 
-const { MiniFace, OrbitalSystem, orderSessionList, listNavigableIds, formatAge } = require('../grid');
-const { writeJsonAtomic, STATE_FILE } = require('../shared');
+const { MiniFace, OrbitalSystem, orderSessionList, listNavigableIds, formatAge } = require('../lib/grid');
+const { writeJsonAtomic, STATE_FILE } = require('../lib/shared');
 
 function mf(id, over = {}) {
   const f = new MiniFace(id);
@@ -655,8 +655,8 @@ describe('grid -- the main session is loaded but kept off the ring', () => {
 
 // -- grid.js: the list itself ------------------------------------------------
 
-const { renderSessionList, MIN_SESSION_LIST_ROWS } = require('../grid');
-const { PALETTES } = require('../themes');
+const { renderSessionList, MIN_SESSION_LIST_ROWS } = require('../lib/grid');
+const { PALETTES } = require('../lib/themes');
 const THEMES = PALETTES[0].themes;
 // The list is absolute-positioned: rows are separated by cursor moves, not
 // newlines. Split on those first, then strip the colour codes.
@@ -1190,7 +1190,7 @@ describe('review fixes -- renderer and face', () => {
   });
 
   test('the status line never runs past the right edge', () => {
-    const { ClaudeFace } = require('../face');
+    const { ClaudeFace } = require('../lib/face');
     const origCols = process.stdout.columns, origRows = process.stdout.rows;
     try {
       for (const cols of [38, 40, 50, 60]) {
@@ -1331,7 +1331,7 @@ describe('review round 2 -- degraded payloads keep their session', () => {
   test('a >1 MB payload writes its own session file and leaves a foreign owner alone', () => {
     const t = makeTempEnv('r2-env');
     try {
-      const { writeJsonAtomic } = require('../shared');
+      const { writeJsonAtomic } = require('../lib/shared');
       const owner = { state: 'coding', detail: 'x', timestamp: Date.now(), sessionId: 'r2-owner' };
       writeJsonAtomic(t.stateFile, owner);
       runUpdateState('UserPromptSubmit', { session_id: 'r2-big', prompt: 'hi' }, t.env);

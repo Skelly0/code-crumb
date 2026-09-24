@@ -14,8 +14,8 @@
     "launch:codex": "node launch.js --editor codex",
     "launch:opencode": "node launch.js --editor opencode",
     "launch:openclaw": "node launch.js --editor openclaw",
-    "demo": "node demo.js",
-    "demo:orbital": "node grid-demo.js",
+    "demo": "node demo/single.js",
+    "demo:orbital": "node demo/orbital.js",
     "setup": "node setup.js",
     "setup:claude": "node setup.js claude",
     "setup:codex": "node setup.js codex",
@@ -23,7 +23,7 @@
     "setup:openclaw": "node setup.js openclaw",
     "setup:uninstall": "node setup.js uninstall",
     "tmux": "node renderer.js --tmux",
-    "test": "node test.js"
+    "test": "node tests/run.js"
   },
   "keywords": [
     "claude-code",
@@ -56,15 +56,17 @@
     "url": "https://github.com/Skelly0/code-crumb/issues"
   },
   "files": [
-    "*.js",
-    "!test.js",
-    "!demo.js",
-    "!grid-demo.js",
+    "renderer.js",
+    "launch.js",
+    "setup.js",
+    "update-state.js",
+    "lib/",
     "adapters/",
     "hooks/",
     "code-crumb.sh",
     "code-crumb.cmd",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ]
 }

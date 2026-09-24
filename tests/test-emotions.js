@@ -22,12 +22,12 @@ const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
 const { makeTempEnv, cleanup, readJSON } = require('./_harness');
 
-const sm = require('../state-machine');
-const shared = require('../shared');
-const face = require('../face');
+const sm = require('../lib/state-machine');
+const shared = require('../lib/shared');
+const face = require('../lib/face');
 const renderer = require('../renderer');
-const grid = require('../grid');
-const { STATE_THOUGHTS } = require('../themes');
+const grid = require('../lib/grid');
+const { STATE_THOUGHTS } = require('../lib/themes');
 
 const ROOT = path.join(__dirname, '..');
 const UPDATE_STATE = path.join(ROOT, 'update-state.js');

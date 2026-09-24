@@ -6,7 +6,7 @@
 // +================================================================+
 
 const assert = require('assert');
-const { mouths, eyes, gridMouths } = require('../animations');
+const { mouths, eyes, gridMouths } = require('../lib/animations');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;

@@ -41,7 +41,7 @@ const {
   TOP_LEVEL_REGISTRY_TTL_MS,
   prettyModelName,
   agentTranscriptPath,
-} = require('../state-machine');
+} = require('../lib/state-machine');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
@@ -3827,7 +3827,7 @@ describe('update-state -- third review pass: hook bookkeeping', () => {
   });
 
   test('the counter helpers are shared from state-machine.js', () => {
-    const sm = require('../state-machine');
+    const sm = require('../lib/state-machine');
     for (const k of ['freshCounter', 'normalizeCounter', 'parkAgents', 'unparkAgents', 'pruneCounters']) {
       assert.strictEqual(typeof sm[k], 'function', k);
     }
@@ -3858,7 +3858,7 @@ describe('update-state -- review round: a session counts once per day', () => {
   });
 
   test('a legacy `counted: true` entry is not counted again on upgrade', () => {
-    const { normalizeCounter } = require('../state-machine');
+    const { normalizeCounter } = require('../lib/state-machine');
     const c = normalizeCounter({ toolCalls: 1, counted: true }, Date.now());
     assert.strictEqual(c.countedDay, new Date().toISOString().slice(0, 10));
     assert.strictEqual(c.counted, undefined);

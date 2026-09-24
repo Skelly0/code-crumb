@@ -98,7 +98,7 @@ function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
 // into the throwaway home) holding `data`, then put back whatever was there.
 // For in-process readers -- shared.js fixes its paths at first require, so a
 // per-test temp dir is only usable by subprocesses.
-const SHARED = require(path.join(__dirname, '..', 'shared'));
+const SHARED = require(path.join(__dirname, '..', 'lib', 'shared'));
 
 function withStateFile(data, fn) {
   let saved = null;
@@ -2126,8 +2126,8 @@ describe('bug fix regressions', () => {
   test('petSpamLevel 3 changes the eyes on a happy face', () => {
     // The counter was once petCount and the threshold once `> 3`, so level 3
     // never reached the reward eyes. Assert the level actually drives them.
-    const { ClaudeFace } = require(path.join(__dirname, '..', 'face.js'));
-    const { eyes } = require(path.join(__dirname, '..', 'animations.js'));
+    const { ClaudeFace } = require(path.join(__dirname, '..', 'lib', 'face.js'));
+    const { eyes } = require(path.join(__dirname, '..', 'lib', 'animations.js'));
     const calm = new ClaudeFace();
     calm.state = 'happy';
     const spam = new ClaudeFace();
@@ -2141,13 +2141,13 @@ describe('bug fix regressions', () => {
   });
 
   test('particles.js has TTY fallbacks for rows/columns', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'particles.js'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'particles.js'), 'utf8');
     assert.ok(src.includes('process.stdout.rows || 24'));
     assert.ok(src.includes('process.stdout.columns || 80'));
   });
 
   test('grid.js spawn scale starts at 0.3 minimum', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'grid.js'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'grid.js'), 'utf8');
     assert.ok(src.includes('Math.max(0.3,'));
   });
 
@@ -2388,7 +2388,7 @@ describe('bug fix regressions', () => {
   test('forceState applies the state at once and holds it for the given minimum (#67)', () => {
     // The renderer's responding rescues call forceState(..., 3000). This is the
     // half of that contract that lives in face.js and can be observed.
-    const { ClaudeFace } = require(path.join(__dirname, '..', 'face.js'));
+    const { ClaudeFace } = require(path.join(__dirname, '..', 'lib', 'face.js'));
     const face = new ClaudeFace();
     face.setState('coding', 'editing app.js');
     const before = Date.now();
@@ -2624,7 +2624,7 @@ describe('update-state.js parallel sessions orbital visibility fix', () => {
 
 describe('base-adapter guardedWriteState modelName preservation (#78)', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const sharedMod = require(path.join(__dirname, '..', 'shared'));
+  const sharedMod = require(path.join(__dirname, '..', 'lib', 'shared'));
   const STATE_FILE = sharedMod.STATE_FILE;
 
   // Save and restore state file (tests write to the real file)
@@ -2706,7 +2706,7 @@ describe('base-adapter guardedWriteState modelName preservation (#78)', () => {
 
 describe('base-adapter -- guardedWriteState unit tests', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const sharedMod = require(path.join(__dirname, '..', 'shared'));
+  const sharedMod = require(path.join(__dirname, '..', 'lib', 'shared'));
   const STATE_FILE = sharedMod.STATE_FILE;
 
   // Save and restore state file
@@ -2775,7 +2775,7 @@ describe('base-adapter -- guardedWriteState unit tests', () => {
 
 describe('base-adapter -- initSession unit tests', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const { defaultStats } = require(path.join(__dirname, '..', 'state-machine'));
+  const { defaultStats } = require(path.join(__dirname, '..', 'lib', 'state-machine'));
 
   test('creates daily bucket on first call', () => {
     const stats = defaultStats();
@@ -2828,7 +2828,7 @@ describe('base-adapter -- initSession unit tests', () => {
 
 describe('base-adapter -- buildExtra unit tests', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const { defaultStats } = require(path.join(__dirname, '..', 'state-machine'));
+  const { defaultStats } = require(path.join(__dirname, '..', 'lib', 'state-machine'));
 
   test('returns object with all expected fields', () => {
     const stats = defaultStats();
@@ -2874,7 +2874,7 @@ describe('base-adapter -- buildExtra unit tests', () => {
 
 describe('base-adapter -- trackEditedFile unit tests', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const { defaultStats } = require(path.join(__dirname, '..', 'state-machine'));
+  const { defaultStats } = require(path.join(__dirname, '..', 'lib', 'state-machine'));
 
   test('detects edit tools and extracts file path', () => {
     const stats = defaultStats();
@@ -2969,7 +2969,7 @@ describe('bug fix structural tests', () => {
   const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
   const BASE_ADAPTER = path.join(ADAPTERS_DIR, 'base-adapter.js');
   const OPENCODE_ADAPTER = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
-  const PARTICLES = path.join(__dirname, '..', 'particles.js');
+  const PARTICLES = path.join(__dirname, '..', 'lib', 'particles.js');
 
   // Bug #1 -- Windows Terminal fallback probes with execSync('where wt')
   test('update-state.js probes for wt with "where wt" before spawning', () => {
@@ -3084,7 +3084,7 @@ describe('bug fix structural tests', () => {
   // Bug #7 -- every particle is closed with a reset, or its colour bleeds
   test('every rendered particle is followed by a reset', () => {
     const { ParticleSystem } = require(PARTICLES);
-    const { ansi } = require(path.join(__dirname, '..', 'themes.js'));
+    const { ansi } = require(path.join(__dirname, '..', 'lib', 'themes.js'));
     assert.ok(ansi.reset.length > 0, 'colour is on, so a reset is observable');
     const ps = new ParticleSystem();
     ps.spawn(20, 'float');
@@ -3102,7 +3102,7 @@ describe('bug fix structural tests', () => {
   // Bug #10 -- base-adapter initSession includes commitCount and activeSubagents
   test('initSession gives a new session commitCount 0 and an empty activeSubagents', () => {
     const baseAdapter = require(BASE_ADAPTER);
-    const { defaultStats } = require(path.join(__dirname, '..', 'state-machine.js'));
+    const { defaultStats } = require(path.join(__dirname, '..', 'lib', 'state-machine.js'));
     const stats = defaultStats();
     baseAdapter.initSession(stats, 'fresh-session');
     assert.strictEqual(stats.session.id, 'fresh-session');
@@ -3687,7 +3687,7 @@ describe('update-state.js -- parallel hooks keep every stats increment', () => {
 
 describe('adapters -- buildExtra carries model', () => {
   const { buildExtra } = require('../adapters/base-adapter');
-  const { defaultStats } = require('../state-machine');
+  const { defaultStats } = require('../lib/state-machine');
 
   test('emits the model when given one', () => {
     const e = buildExtra(defaultStats(), 's1', 'codex', 'codex', 'Opus');
@@ -4015,25 +4015,25 @@ describe('setup -- the demo hint only names a demo that exists', () => {
     return lines.join('\n');
   }
 
-  test('an npm install (no demo.js) is not told to run one', () => {
+  test('an npm install (no demo/) is not told to run one', () => {
     const t = makeTempEnv('setup-nodemo');
     try {
       const out = usage(t.tmp);
-      assert.ok(!out.includes('demo.js'), 'the npm tarball excludes demo.js');
+      assert.ok(!out.includes('demo/single.js'), 'the npm tarball excludes demo/');
       assert.ok(out.includes('renderer.js'), 'the rest of the usage is still printed');
     } finally { cleanup(t.tmp); }
   });
 
-  test('a clone (demo.js present) still gets the hint', () => {
+  test('a clone (demo/ present) still gets the hint', () => {
     const out = usage(path.join(__dirname, '..'));
-    assert.ok(out.includes('demo.js'));
+    assert.ok(out.includes('demo/single.js'));
     assert.ok(out.includes('preview all expressions'));
   });
 });
 
 describe('demos -- clean up demo-main on every terminating signal', () => {
   // POSIX only: a win32 kill terminates without running handlers.
-  for (const script of ['demo.js', 'grid-demo.js']) {
+  for (const script of ['demo/single.js', 'demo/orbital.js']) {
     for (const sig of ['SIGTERM', 'SIGHUP']) {
       if (!POSIX) continue;
       test.async(`${script}: ${sig} unlinks the demo-main session file`, async () => {
@@ -4132,7 +4132,7 @@ describe('adapters -- third review pass: per-session counters', () => {
 
   test('an adapter event parks a conducting owner\'s agents instead of wiping them', () => {
     const base = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-    const { defaultStats } = require('../state-machine');
+    const { defaultStats } = require('../lib/state-machine');
     const stats = defaultStats();
     base.initSession(stats, 'claude-A');
     stats.session.activeSubagents = [{ id: 'claude-A-sub-1', startedAt: Date.now() }];
@@ -4226,7 +4226,7 @@ describe('adapters -- third review pass: the OpenCode plugin keeps a session in 
 
 describe('adapters -- review round: batches, turn ends and counters', () => {
   const base = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const { defaultStats } = require('../state-machine');
+  const { defaultStats } = require('../lib/state-machine');
   const OPENCODE = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
 
   test.async('processStdinEvent applies a JSON array in order, one handler call each', async () => {
@@ -4286,7 +4286,7 @@ describe('adapters -- review round: batches, turn ends and counters', () => {
   });
 
   test('pruneCounters evicts throwaway ids before a busy window', () => {
-    const { pruneCounters, freshCounter } = require('../state-machine');
+    const { pruneCounters, freshCounter } = require('../lib/state-machine');
     const now = Date.now();
     const map = { busy: { ...freshCounter(now - 100000), toolCalls: 3 } };
     for (let i = 0; i < 60; i++) map[`flood-${i}`] = { ...freshCounter(now - i), toolCalls: 1 };
@@ -4296,7 +4296,7 @@ describe('adapters -- review round: batches, turn ends and counters', () => {
   });
 
   test('pruneCounters never evicts parked agents', () => {
-    const { pruneCounters, freshCounter } = require('../state-machine');
+    const { pruneCounters, freshCounter } = require('../lib/state-machine');
     const now = Date.now();
     const map = { owner: { ...freshCounter(now - 100000), activeSubagents: [{ id: 'owner-sub-1' }] } };
     for (let i = 0; i < 60; i++) map[`flood-${i}`] = freshCounter(now - i);

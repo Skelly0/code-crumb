@@ -7,12 +7,12 @@
 
 const assert = require('assert');
 const fs = require('fs');
-const { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS, ACTIVE_WORK_STATES: FACE_ACTIVE_WORK_STATES, COMPLETION_STATES: FACE_COMPLETION_STATES } = require('../face');
+const { ClaudeFace, LOW_ACTIVITY_STATES, COMPRESS_LOW_CAP, MAX_SEGMENT_BLOCKS, ACTIVE_WORK_STATES: FACE_ACTIVE_WORK_STATES, COMPLETION_STATES: FACE_COMPLETION_STATES } = require('../lib/face');
 const { readState, ACTIVE_WORK_STATES: RENDERER_ACTIVE_WORK_STATES, COMPLETION_STATES: RENDERER_COMPLETION_STATES } = require('../renderer');
-const { ParticleSystem } = require('../particles');
-const { themes, PALETTES, ansi, setNoColor, isNoColor } = require('../themes');
-const { mouths, eyes } = require('../animations');
-const { STATE_FILE } = require('../shared');
+const { ParticleSystem } = require('../lib/particles');
+const { themes, PALETTES, ansi, setNoColor, isNoColor } = require('../lib/themes');
+const { mouths, eyes } = require('../lib/animations');
+const { STATE_FILE } = require('../lib/shared');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
@@ -992,7 +992,7 @@ describe('face.js -- project context row in render', () => {
     face.paletteIndex = 1;
     face.setStats({ cwd: '/home/user/my-project', gitBranch: 'feat' });
     const out = renderStripped(face);
-    const { PALETTE_NAMES } = require('../themes');
+    const { PALETTE_NAMES } = require('../lib/themes');
     assert.ok(out.includes(PALETTE_NAMES[1]), 'palette name should appear');
     assert.ok(out.includes('\u2302 my-project'), 'folder should appear');
     assert.ok(out.includes('\u2387 feat'), 'branch should appear');
@@ -2482,7 +2482,7 @@ describe('face.js -- long-running tool escalation', () => {
   });
 
   test('the escalation constants are exported', () => {
-    const { LONG_TOOL_ESCALATE_MS, LONG_TOOL_SWEAT_MS } = require('../face');
+    const { LONG_TOOL_ESCALATE_MS, LONG_TOOL_SWEAT_MS } = require('../lib/face');
     assert.strictEqual(LONG_TOOL_ESCALATE_MS, 8000);
     assert.strictEqual(LONG_TOOL_SWEAT_MS, 20000);
   });
@@ -2586,7 +2586,7 @@ describe('face.js -- waiting escalation after 30s', () => {
   });
 
   test('WAIT_ESCALATE_MS is exported', () => {
-    const { WAIT_ESCALATE_MS } = require('../face');
+    const { WAIT_ESCALATE_MS } = require('../lib/face');
     assert.strictEqual(WAIT_ESCALATE_MS, 30000);
   });
 });

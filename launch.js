@@ -21,7 +21,7 @@ const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { PID_FILE, buildRendererCommands, quoteArg } = require('./shared');
+const { PID_FILE, buildRendererCommands, quoteArg } = require('./lib/shared');
 
 const WINDOW_TITLE = 'Code Crumb';
 

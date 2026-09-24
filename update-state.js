@@ -22,7 +22,7 @@ const {
   STATE_FILE, SESSIONS_DIR, STATS_FILE, PID_FILE, QUIT_FLAG_FILE, SPAWN_LOCK_FILE, STATS_LOCK_FILE,
   safeFilename, getGitBranch, getIsWorktree, loadPrefs,
   writeJsonAtomic, acquireSpawnLock, acquireFileLock, buildRendererCommands,
-} = require('./shared');
+} = require('./lib/shared');
 const {
   toolToState, normalizeToolResponse, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
   EDIT_TOOLS, SUBAGENT_TOOLS, toText,
@@ -33,7 +33,7 @@ const {
   COUNTER_MAX_FILES,
   freshCounter: _freshCounter, normalizeCounter: _normalizeCounter,
   parkAgents: _parkAgents, unparkAgents: _unparkAgents, pruneCounters: _pruneCounters,
-} = require('./state-machine');
+} = require('./lib/state-machine');
 
 // Safety net for a missed SubagentStop: an activeSubagents entry older than
 // this is dropped. Not a lifetime -- an agent may legitimately run for hours,

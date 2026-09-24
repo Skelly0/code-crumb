@@ -23,12 +23,12 @@ const { describe, test } = suite;
 const { makeTempEnv, cleanup, readJSON } = require('./_harness');
 
 const ROOT = path.join(__dirname, '..');
-const shared = require('../shared');
-const sm = require('../state-machine');
+const shared = require('../lib/shared');
+const sm = require('../lib/state-machine');
 const launch = require('../launch');
-const themes = require('../themes');
-const { ClaudeFace } = require('../face');
-const grid = require('../grid');
+const themes = require('../lib/themes');
+const { ClaudeFace } = require('../lib/face');
+const grid = require('../lib/grid');
 const base = require('../adapters/base-adapter');
 
 // Requiring setup.js must be side-effect free (CLI lives behind require.main).
@@ -428,7 +428,7 @@ describe('shared.js -- the stats lock serializes parallel read-modify-write', ()
       ].join('\n'), 'utf8');
       fs.writeFileSync(statsFile, JSON.stringify({ n: 0 }), 'utf8');
 
-      const sharedPath = path.join(ROOT, 'shared.js');
+      const sharedPath = path.join(ROOT, 'lib', 'shared.js');
       await Promise.all(Array.from({ length: 6 }, () => new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [worker, sharedPath], { env, stdio: 'ignore' });
         child.on('error', reject);
@@ -1534,7 +1534,7 @@ describe('platform -- third review pass: shared helpers', () => {
         for (let trial = 0; trial < 5; trial++) {
           const lock = staleLock(dir);
           const at = Date.now() + 400;
-          const worker = `const s=require(${JSON.stringify(path.join(ROOT, 'shared.js'))});` +
+          const worker = `const s=require(${JSON.stringify(path.join(ROOT, 'lib', 'shared.js'))});` +
             `while(Date.now()<${at}){}process.stdout.write(s.acquireSpawnLock(${JSON.stringify(lock)},5000)?'1':'0')`;
           const outs = await Promise.all(Array.from({ length: 8 }, () => new Promise((resolve) => {
             const c = spawn(process.execPath, ['-e', worker], { stdio: ['ignore', 'pipe', 'ignore'] });

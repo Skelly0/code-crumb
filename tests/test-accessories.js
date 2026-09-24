@@ -6,7 +6,7 @@
 // +================================================================+
 
 const assert = require('assert');
-const { ACCESSORIES, STATE_ACCESSORIES, getAccessory } = require('../accessories');
+const { ACCESSORIES, STATE_ACCESSORIES, getAccessory } = require('../lib/accessories');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;

@@ -5,10 +5,10 @@
 // |  Code Crumb Test Suite                                         |
 // |  Zero-dependency tests using Node.js built-in assert           |
 // |                                                                |
-// |  Run: node test.js [--quiet] [filter...]  or  npm test         |
+// |  Run: node tests/run.js [--quiet] [filter...]  or  npm test    |
 // |    --quiet / -q   print only failures and the summary          |
 // |    filter         run only files whose name contains it        |
-// |                   (node test.js grid face)                     |
+// |                   (node tests/run.js grid face)                |
 // +================================================================+
 
 const fs = require('fs');
@@ -37,22 +37,22 @@ const filters = args.filter(a => !a.startsWith('-'));
 if (quiet) process.env.CRUMB_TEST_QUIET = '1';
 
 const testModules = [
-  './tests/test-shared.js',
-  './tests/test-state-machine.js',
-  './tests/test-themes.js',
-  './tests/test-animations.js',
-  './tests/test-particles.js',
-  './tests/test-face.js',
-  './tests/test-grid.js',
-  './tests/test-accessories.js',
-  './tests/test-teams.js',
-  './tests/test-launch.js',
-  './tests/test-adapters.js',
-  './tests/test-transition.js',
-  './tests/test-emotions.js',
-  './tests/test-platform.js',
-  './tests/test-subagents.js',
-  './tests/test-attention.js',
+  './test-shared.js',
+  './test-state-machine.js',
+  './test-themes.js',
+  './test-animations.js',
+  './test-particles.js',
+  './test-face.js',
+  './test-grid.js',
+  './test-accessories.js',
+  './test-teams.js',
+  './test-launch.js',
+  './test-adapters.js',
+  './test-transition.js',
+  './test-emotions.js',
+  './test-platform.js',
+  './test-subagents.js',
+  './test-attention.js',
 ];
 
 const GREEN = '\x1b[32m';
