@@ -1661,6 +1661,27 @@ describe('round 3 -- cross-writer contract', () => {
       'OpenCode\'s permission.replied too');
   });
 
+  // PermissionRequest carries no tool_use_id; allowing it produces only the
+  // asking tool's own PostToolUse, which must count as the answer.
+  test('allowing a permission prompt answers it; another tool does not', () => {
+    const t = makeTempEnv('perm-1');
+    try {
+      const ask = { session_id: 'perm-1', tool_name: 'Bash', tool_input: { command: 'rm -rf dist' } };
+      runUpdateState('PreToolUse', ask, t.env);
+      runUpdateState('PermissionRequest', ask, t.env);
+      assert.ok(readJSON(sessionFile(t.sessionsDir, 'perm-1')).waitingOn, 'the file names the asking call');
+      runUpdateState('PostToolUse', { session_id: 'perm-1', tool_name: 'Read', tool_input: { file_path: 'a.js' },
+        tool_response: { type: 'text' } }, t.env);
+      let f = readJSON(sessionFile(t.sessionsDir, 'perm-1'));
+      assert.ok(!f.answered, 'a parallel tool finishing is no answer');
+      assert.ok(f.waitingOn, 'and the question stays on the file');
+      runUpdateState('PostToolUse', { ...ask, tool_response: { stdout: '' } }, t.env);
+      f = readJSON(sessionFile(t.sessionsDir, 'perm-1'));
+      assert.strictEqual(f.answered, true, 'the asking tool ran: the user allowed it');
+      assert.ok(!f.waitingOn, 'and the question is gone');
+    } finally { cleanup(t.tmp); }
+  });
+
   test('setup registers the codex Interrupt and PostCompact hooks, and uninstall finds them', () => {
     const setup = require('../setup');
     const built = setup.buildCodexHooks(path.join(__dirname, '..'));

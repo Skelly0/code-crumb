@@ -99,6 +99,18 @@ const AMBIENT_EVENTS = new Set(['PreCompact', 'PostModelSwitch', 'SessionStart',
 // timeout) but never rescues -- `waiting` was the first such case.
 const TURN_END_SAFE_STATES = new Set([...COMPLETION_STATES, 'error']);
 
+// Which tool call a permission prompt is waiting on. PermissionRequest
+// carries no tool_use_id (checked against the 2.1.281 schema), only the
+// tool's name and input -- and so does the PostToolUse that answers it when
+// the user allows. A short digest keeps the session file small.
+function toolCallKey(name, input) {
+  let text = '';
+  try { text = JSON.stringify(input) || ''; } catch {}
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+  return `${toText(name)}:${h.toString(36)}:${text.length}`;
+}
+
 // What a write inherits from a session file that records a finished turn:
 // null, 'turnEnded' or 'turnOver'.
 function inheritedTurnEnd(event, state) {
@@ -615,6 +627,7 @@ process.stdin.on('end', () => {
   let diffInfo = null;
   let workState = null;
   let workDetail = null;
+  let waitingOn = null; // set by a PermissionRequest (see toolCallKey)
   // A compaction restart normally carries lastPromptAt forward off its own
   // session file. Set when that file is gone, so there is nothing to carry.
   let compactWithoutPredecessor = false;
@@ -1185,6 +1198,7 @@ process.stdin.on('end', () => {
     else if (hookEvent === 'PermissionRequest') {
       state = 'waiting';
       detail = toolName ? `allow ${toolName}?` : 'needs permission';
+      waitingOn = toolCallKey(toolName, toolInput);
     }
     else if (hookEvent === 'Setup') {
       state = 'starting';
@@ -1303,6 +1317,7 @@ process.stdin.on('end', () => {
 
     if (stopped) extra.stopped = true;
     if (workState) { extra.workState = workState; extra.workDetail = workDetail; }
+    if (waitingOn) extra.waitingOn = waitingOn;
     // This write answers whatever the face was asked to wait on: the user
     // spoke (UserPromptSubmit), an elicitation came back, an AskUserQuestion
     // returned. The renderer drops a wait still queued behind a reward, which
@@ -1490,6 +1505,17 @@ process.stdin.on('end', () => {
           if (!stopped && (existingSession.turnEnded || existingSession.turnOver)) {
             const inherit = inheritedTurnEnd(hookEvent, state);
             if (inherit) extra[inherit] = true;
+          }
+          // A permission prompt is answered by allowing it, too: then the only
+          // word is the asking tool's own PostToolUse. Until that (or the
+          // user's next prompt), the question stays on the file.
+          if (existingSession.waitingOn && !extra.waitingOn) {
+            const post = hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure';
+            if (post && existingSession.waitingOn === toolCallKey(toolName, toolInput)) {
+              extra.answered = true;
+            } else if (!extra.answered && !TURN_CLOSING_EVENTS.has(hookEvent)) {
+              extra.waitingOn = existingSession.waitingOn;
+            }
           }
           // The piggybacked work state is only worth injecting if the renderer
           // never saw the PreToolUse write. Name that write by its timestamp
