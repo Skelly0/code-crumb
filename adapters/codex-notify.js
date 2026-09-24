@@ -22,7 +22,7 @@ const {
   writeSessionState, guardedWriteState, readStats, writeStats, initSession, buildExtra,
   creditOwnerSession,
 } = require('./base-adapter');
-const { withStatsLock } = require('../shared');
+const { withStatsLock } = require('../lib/shared');
 
 // -- Parse the notify JSON argument ----------------------------------
 

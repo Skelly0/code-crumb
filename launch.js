@@ -20,7 +20,7 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
-const { PID_FILE, buildRendererCommands, quoteArg, isRendererAlive, spawnRendererWindow } = require('./shared');
+const { PID_FILE, buildRendererCommands, quoteArg, isRendererAlive, spawnRendererWindow } = require('./lib/shared');
 
 const WINDOW_TITLE = 'Code Crumb';
 

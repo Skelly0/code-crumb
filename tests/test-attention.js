@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const { createSuite, makeTempEnv, cleanup, readJSON } = require('./_harness');
+const { createSuite, makeTempEnv, cleanup, readJSON, runUpdateState, runFakeCodex } = require('./_harness');
 const suite = createSuite();
 const { describe, test } = suite;
 
@@ -104,18 +104,6 @@ describe('renderer -- pickMainSession', () => {
 // -- update-state.js: the fields the policy reads ------------------------
 
 const NODE = process.execPath;
-const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
-
-function runUpdateState(event, inputObj, env) {
-  try {
-    execFileSync(NODE, [UPDATE_STATE, event], {
-      input: typeof inputObj === 'string' ? inputObj : JSON.stringify(inputObj),
-      env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  } catch (e) {
-    if (e.status !== 0 && e.status !== null) throw e;
-  }
-}
 
 const sessionFile = (dir, id) => path.join(dir, `${id}.json`);
 
@@ -254,7 +242,7 @@ describe('update-state -- attention fields', () => {
     const t = makeTempEnv('att-6b');
     try {
       // Another session owns the global file and is fresh.
-      const { writeJsonAtomic } = require('../shared');
+      const { writeJsonAtomic } = require('../lib/shared');
       writeJsonAtomic(t.stateFile, { state: 'coding', detail: '', timestamp: Date.now(), sessionId: 'owner' });
       runUpdateState('Stop', { session_id: 'att-6b' }, t.env);
       assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'att-6b')).turnEnded, true);
@@ -291,13 +279,12 @@ describe('update-state -- attention fields', () => {
 // -- adapters: attention for non-Claude editors ---------------------------
 
 const OPENCODE_ADAPTER = path.join(__dirname, '..', 'adapters', 'opencode-adapter.js');
-const CODEX_WRAPPER = path.join(__dirname, '..', 'adapters', 'codex-wrapper.js');
 
 // The wrapper guards main() behind require.main, so requiring it spawns
-// nothing. test.js redirected HOME before loading this file, so shared.js has
+// nothing. run.js redirected HOME before loading this file, so shared.js has
 // already fixed SESSIONS_DIR inside the runner's throwaway home.
 const wrapper = require('../adapters/codex-wrapper');
-const { SESSIONS_DIR, safeFilename } = require('../shared');
+const { SESSIONS_DIR, safeFilename } = require('../lib/shared');
 
 function runAdapter(script, payload, env) {
   try {
@@ -307,52 +294,6 @@ function runAdapter(script, payload, env) {
   } catch (e) {
     if (e.status !== 0 && e.status !== null) throw e;
   }
-}
-
-// A stand-in `codex` on PATH that replays a JSONL fixture through the real
-// wrapper spawn path (the pattern lives in test-adapters.js; copied, not
-// imported). writeSync flushes each line rather than leaving it in a pipe.
-const FAKE_SRC = [
-  "'use strict';",
-  "const fs = require('fs');",
-  "const text = fs.readFileSync(process.env.CODEX_FAKE_FIXTURE, 'utf8');",
-  "for (const line of text.split('\\n')) {",
-  "  if (line.trim()) fs.writeSync(1, line + '\\n');",
-  "}",
-  '',
-].join('\n');
-
-function runFakeCodex(events) {
-  const base = makeTempEnv('codex-thread');
-  const binDir = path.join(base.tmp, 'bin');
-  fs.mkdirSync(binDir, { recursive: true });
-
-  const fixture = path.join(base.tmp, 'fixture.jsonl');
-  fs.writeFileSync(fixture, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
-  fs.writeFileSync(path.join(binDir, 'codex-fake.js'), FAKE_SRC, 'utf8');
-
-  if (process.platform === 'win32') {
-    fs.writeFileSync(path.join(binDir, 'codex.cmd'), '@node "%~dp0codex-fake.js" %*\r\n', 'utf8');
-  } else {
-    const sh = path.join(binDir, 'codex');
-    fs.writeFileSync(sh, '#!/bin/sh\nexec node "$(dirname "$0")/codex-fake.js" "$@"\n', 'utf8');
-    fs.chmodSync(sh, 0o755);
-  }
-
-  const env = { ...base.env, CODEX_FAKE_FIXTURE: fixture };
-  // Windows env keys are case-insensitive; a stray Path AND PATH confuses the child.
-  for (const k of Object.keys(env)) if (/^path$/i.test(k)) delete env[k];
-  env.PATH = binDir + path.delimiter + (process.env.PATH || '');
-  delete env.CLAUDE_SESSION_ID; // the codex thread id owns the session identity
-
-  try {
-    execFileSync(NODE, [CODEX_WRAPPER, 'a prompt'], {
-      env, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  } catch (e) {
-    if (e.status !== 0 && e.status !== null) throw e;
-  }
-  return base;
 }
 
 describe('adapters -- lastPromptAt', () => {
@@ -401,7 +342,7 @@ describe('adapters -- lastPromptAt', () => {
     // leave the window unaddressable for the rest of the turn.
     const t = makeTempEnv();
     try {
-      const { writeJsonAtomic } = require('../shared');
+      const { writeJsonAtomic } = require('../lib/shared');
       fs.mkdirSync(t.sessionsDir, { recursive: true });
       writeJsonAtomic(sessionFile(t.sessionsDir, 'ses_d'), {
         session_id: 'ses_d', state: 'coding', detail: '', timestamp: Date.now(), stopped: false,
@@ -466,8 +407,8 @@ describe('adapters -- lastPromptAt', () => {
 
 // -- grid.js: ordering, age, main-in-faces ---------------------------------
 
-const { MiniFace, OrbitalSystem, orderSessionList, listNavigableIds, formatAge } = require('../grid');
-const { writeJsonAtomic, STATE_FILE } = require('../shared');
+const { MiniFace, OrbitalSystem, orderSessionList, listNavigableIds, formatAge } = require('../lib/grid');
+const { writeJsonAtomic, STATE_FILE } = require('../lib/shared');
 
 function mf(id, over = {}) {
   const f = new MiniFace(id);
@@ -655,8 +596,8 @@ describe('grid -- the main session is loaded but kept off the ring', () => {
 
 // -- grid.js: the list itself ------------------------------------------------
 
-const { renderSessionList, MIN_SESSION_LIST_ROWS } = require('../grid');
-const { PALETTES } = require('../themes');
+const { renderSessionList, MIN_SESSION_LIST_ROWS } = require('../lib/grid');
+const { PALETTES } = require('../lib/themes');
 const THEMES = PALETTES[0].themes;
 // The list is absolute-positioned: rows are separated by cursor moves, not
 // newlines. Split on those first, then strip the colour codes.
@@ -1190,7 +1131,7 @@ describe('review fixes -- renderer and face', () => {
   });
 
   test('the status line never runs past the right edge', () => {
-    const { ClaudeFace } = require('../face');
+    const { ClaudeFace } = require('../lib/face');
     const origCols = process.stdout.columns, origRows = process.stdout.rows;
     try {
       for (const cols of [38, 40, 50, 60]) {
@@ -1331,7 +1272,7 @@ describe('review round 2 -- degraded payloads keep their session', () => {
   test('a >1 MB payload writes its own session file and leaves a foreign owner alone', () => {
     const t = makeTempEnv('r2-env');
     try {
-      const { writeJsonAtomic } = require('../shared');
+      const { writeJsonAtomic } = require('../lib/shared');
       const owner = { state: 'coding', detail: 'x', timestamp: Date.now(), sessionId: 'r2-owner' };
       writeJsonAtomic(t.stateFile, owner);
       runUpdateState('UserPromptSubmit', { session_id: 'r2-big', prompt: 'hi' }, t.env);

@@ -26,4 +26,4 @@ jobs:
         shell: bash
         run: "! git grep -n -E '[[:space:]]+$' -- '*.js' '*.mjs' '*.md' '*.json' '*.yml'"
       - name: Run test suite
-        run: node test.js --quiet
+        run: node tests/run.js --quiet

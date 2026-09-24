@@ -8,7 +8,7 @@
 // +================================================================+
 
 const assert = require('assert');
-const { MiniFace, OrbitalSystem, hashTeamColor } = require('../grid');
+const { MiniFace, OrbitalSystem, hashTeamColor } = require('../lib/grid');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;

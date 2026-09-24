@@ -27,7 +27,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, QUIT_FLAG_FILE, savePrefs, writeJsonAtomic } = require('./shared');
+const { HOME, QUIT_FLAG_FILE, savePrefs, writeJsonAtomic } = require('./lib/shared');
 
 const HOOK_SCRIPT = path.resolve(__dirname, 'update-state.js');
 
@@ -196,12 +196,12 @@ function writeSettings(settingsPath, settings, existed, raw, log) {
 }
 
 // `baseDir` is where the install lives (a test seam; production is __dirname).
-// The demo hint is printed only when demo.js is actually there: package.json's
-// "files" whitelist keeps the demos out of the npm tarball, so an npm install
-// was told to run a file it does not have (Cannot find module).
+// The demo hint is printed only when demo/single.js is actually there:
+// package.json's "files" whitelist keeps the demos out of the npm tarball, so
+// an npm install was told to run a file it does not have (Cannot find module).
 function printClaudeUsage(settingsPath, log, baseDir = __dirname) {
   const rendererPath = path.resolve(baseDir, 'renderer.js').replace(/\\/g, '/');
-  const demoFile = path.resolve(baseDir, 'demo.js');
+  const demoFile = path.resolve(baseDir, 'demo', 'single.js');
   const demoPath = demoFile.replace(/\\/g, '/');
   const demoHint = fs.existsSync(demoFile)
     ? `

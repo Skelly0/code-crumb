@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { HOME, STATE_FILE, SESSIONS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch, QUIT_FLAG_FILE, safeFilename, detailText, isRendererAlive, PID_HEARTBEAT_MS } = require('./shared');
+const { HOME, STATE_FILE, SESSIONS_DIR, TMUX_FILE, loadPrefs, savePrefs, getGitBranch, QUIT_FLAG_FILE, safeFilename, detailText, isRendererAlive, PID_HEARTBEAT_MS } = require('./lib/shared');
 
 // -- Modules -------------------------------------------------------
 const {
@@ -19,12 +19,12 @@ const {
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
   PALETTES, PALETTE_NAMES, normalizePaletteIndex,
   setNoColor, isNoColor, knownState,
-} = require('./themes');
-const { mouths, eyes, gridMouths } = require('./animations');
-const { ParticleSystem } = require('./particles');
-const { ClaudeFace } = require('./face');
-const { MiniFace, OrbitalSystem, renderSessionList, orderSessionList, listNavigableIds, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartStatus, sessionListFits } = require('./grid');
-const { SwapTransition } = require('./transition');
+} = require('./lib/themes');
+const { mouths, eyes, gridMouths } = require('./lib/animations');
+const { ParticleSystem } = require('./lib/particles');
+const { ClaudeFace } = require('./lib/face');
+const { MiniFace, OrbitalSystem, renderSessionList, orderSessionList, listNavigableIds, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartStatus, sessionListFits } = require('./lib/grid');
+const { SwapTransition } = require('./lib/transition');
 
 // -- Config --------------------------------------------------------
 const PID_FILE = path.join(HOME, '.code-crumb.pid');
@@ -53,7 +53,7 @@ const LONG_TOOL_HOLD_MS = 600000; // 10 min: the longest a single tool call can 
 const WAIT_HOLD_STALE_MS = 1800000;
 
 // -- Hoisted sets for checkState() hot path ---------------------------
-const { ACTIVE_WORK_STATES, COMPLETION_STATES } = require('./shared');
+const { ACTIVE_WORK_STATES, COMPLETION_STATES } = require('./lib/shared');
 // States the stopped/dead rescue must leave alone. `error` is here because it
 // decays by itself (idleCascade takes a non-active error to idle after
 // IDLE_TIMEOUT) and is the one face that must never be skipped: a late

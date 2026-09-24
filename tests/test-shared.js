@@ -12,7 +12,7 @@ const path = require('path');
 const {
   safeFilename, PREFS_FILE, loadPrefs, savePrefs, getGitBranch, getIsWorktree,
   charWidth, strWidth, sliceToWidth, sliceFromEndToWidth,
-} = require('../shared');
+} = require('../lib/shared');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
@@ -198,7 +198,7 @@ describe('shared.js -- getIsWorktree', () => {
 });
 
 describe('shared.js -- path constants', () => {
-  const { HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PID_FILE, QUIT_FLAG_FILE, TEAMS_DIR, TMUX_FILE } = require('../shared');
+  const { HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PID_FILE, QUIT_FLAG_FILE, TEAMS_DIR, TMUX_FILE } = require('../lib/shared');
 
   test('HOME is a non-empty string', () => {
     assert.ok(typeof HOME === 'string' && HOME.length > 0);

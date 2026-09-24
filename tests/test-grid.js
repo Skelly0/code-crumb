@@ -6,10 +6,10 @@
 // +================================================================+
 
 const assert = require('assert');
-const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _setPidResolver, STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS } = require('../grid');
-const { gridMouths, eyes, mouths } = require('../animations');
-const { PALETTES } = require('../themes');
-const { ParticleSystem } = require('../particles');
+const { MiniFace, OrbitalSystem, renderSessionList, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _setPidResolver, STALE_MS, ORPHAN_TIMEOUT, REPOSITION_MS, CYCLE_WORK_STATES, CYCLE_INTERVAL, CYCLE_STALE_MS } = require('../lib/grid');
+const { gridMouths, eyes, mouths } = require('../lib/animations');
+const { PALETTES } = require('../lib/themes');
+const { ParticleSystem } = require('../lib/particles');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
@@ -332,7 +332,7 @@ describe('grid.js -- OrbitalSystem session schema validation', () => {
     // They should now appear as orbitals (excluded only by matching excludeId).
     const fs = require('fs');
     const path = require('path');
-    const { SESSIONS_DIR } = require('../shared');
+    const { SESSIONS_DIR } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     // Create a session file WITHOUT parentSession or isTeammate
@@ -358,7 +358,7 @@ describe('grid.js -- OrbitalSystem session schema validation', () => {
     // and is excluded from the orbitals by its ID, not by missing fields
     const fs = require('fs');
     const path = require('path');
-    const { SESSIONS_DIR } = require('../shared');
+    const { SESSIONS_DIR } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -383,7 +383,7 @@ describe('grid.js -- OrbitalSystem session schema validation', () => {
   test('loadSessions includes sessions with parentSession', () => {
     const fs = require('fs');
     const path = require('path');
-    const { SESSIONS_DIR } = require('../shared');
+    const { SESSIONS_DIR } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -407,7 +407,7 @@ describe('grid.js -- OrbitalSystem session schema validation', () => {
   test('loadSessions includes sessions with isTeammate', () => {
     const fs = require('fs');
     const path = require('path');
-    const { SESSIONS_DIR } = require('../shared');
+    const { SESSIONS_DIR } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -541,13 +541,13 @@ describe('particles.js -- stream style', () => {
 
 describe('face.js -- orbital toggle', () => {
   test('showOrbitals defaults to true', () => {
-    const { ClaudeFace } = require('../face');
+    const { ClaudeFace } = require('../lib/face');
     const face = new ClaudeFace();
     assert.strictEqual(face.showOrbitals, true);
   });
 
   test('toggleOrbitals flips state', () => {
-    const { ClaudeFace } = require('../face');
+    const { ClaudeFace } = require('../lib/face');
     const face = new ClaudeFace();
     face.toggleOrbitals();
     assert.strictEqual(face.showOrbitals, false);
@@ -556,13 +556,13 @@ describe('face.js -- orbital toggle', () => {
   });
 
   test('subagentCount defaults to 0', () => {
-    const { ClaudeFace } = require('../face');
+    const { ClaudeFace } = require('../lib/face');
     const face = new ClaudeFace();
     assert.strictEqual(face.subagentCount, 0);
   });
 
   test('lastPos is null before first render', () => {
-    const { ClaudeFace } = require('../face');
+    const { ClaudeFace } = require('../lib/face');
     const face = new ClaudeFace();
     assert.strictEqual(face.lastPos, null);
   });
@@ -1302,7 +1302,7 @@ describe('grid.js -- isStale() uses PID liveness + ORPHAN_TIMEOUT fallback (Bug 
 describe('grid.js -- loadSessions mtime purge protects active faces (Bug #0)', () => {
   const fs = require('fs');
   const pathMod = require('path');
-  const { SESSIONS_DIR } = require('../shared');
+  const { SESSIONS_DIR } = require('../lib/shared');
 
   // Same file in all three tests, only the in-memory face differs: that is
   // what makes "the file survived" attributable to the face and not to luck.
@@ -1769,7 +1769,7 @@ describe('grid.js -- loadSessions transient read failure protection', () => {
   test('loadSessions protects existing face when file read returns empty', () => {
     const fs = require('fs');
     const path = require('path');
-    const { SESSIONS_DIR } = require('../shared');
+    const { SESSIONS_DIR } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -1797,7 +1797,7 @@ describe('grid.js -- loadSessions transient read failure protection', () => {
   test('loadSessions protects existing face when file parse fails', () => {
     const fs = require('fs');
     const path = require('path');
-    const { SESSIONS_DIR } = require('../shared');
+    const { SESSIONS_DIR } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -1825,7 +1825,7 @@ describe('grid.js -- loadSessions transient read failure protection', () => {
   test('loadSessions does not create phantom face on read failure', () => {
     const fs = require('fs');
     const path = require('path');
-    const { SESSIONS_DIR } = require('../shared');
+    const { SESSIONS_DIR } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -1870,7 +1870,7 @@ describe('grid.js -- session cleanup uses fileToFaceId and PID check', () => {
     // whose session_id differs from its safeFilename is correctly protected.
     const fs = require('fs');
     const path = require('path');
-    const { SESSIONS_DIR, safeFilename } = require('../shared');
+    const { SESSIONS_DIR, safeFilename } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -1911,7 +1911,7 @@ describe('grid.js -- session cleanup uses fileToFaceId and PID check', () => {
     // read the file's pid field and call isProcessAlive before deleting.
     const fs = require('fs');
     const path = require('path');
-    const { SESSIONS_DIR } = require('../shared');
+    const { SESSIONS_DIR } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -2031,7 +2031,7 @@ describe('grid.js -- face removal respects PID liveness when file is missing (Bu
   test('face with live PID stays in memory when its file disappears', () => {
     const fs = require('fs');
     const pathMod = require('path');
-    const { SESSIONS_DIR, safeFilename } = require('../shared');
+    const { SESSIONS_DIR, safeFilename } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -2062,7 +2062,7 @@ describe('grid.js -- face removal respects PID liveness when file is missing (Bu
   test('face with dead PID is removed when its file disappears', () => {
     const fs = require('fs');
     const pathMod = require('path');
-    const { SESSIONS_DIR, safeFilename } = require('../shared');
+    const { SESSIONS_DIR, safeFilename } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -2091,7 +2091,7 @@ describe('grid.js -- face removal respects PID liveness when file is missing (Bu
   test('stopped face is removed when its file disappears (regardless of PID)', () => {
     const fs = require('fs');
     const pathMod = require('path');
-    const { SESSIONS_DIR, safeFilename } = require('../shared');
+    const { SESSIONS_DIR, safeFilename } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -2131,7 +2131,7 @@ describe('grid.js -- face removal respects PID liveness when file is missing (Bu
   test('stopped session file does not create new face (prevents linger/respawn cycle)', () => {
     const fs = require('fs');
     const pathMod = require('path');
-    const { SESSIONS_DIR, safeFilename } = require('../shared');
+    const { SESSIONS_DIR, safeFilename } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -2160,7 +2160,7 @@ describe('grid.js -- file deletion protects on parse error (Bug B)', () => {
   test('corrupted JSON file is not deleted during mtime purge', () => {
     const fs = require('fs');
     const pathMod = require('path');
-    const { SESSIONS_DIR } = require('../shared');
+    const { SESSIONS_DIR } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -2190,7 +2190,7 @@ describe('grid.js -- completion-state face with live PID protected in file delet
   test('happy-state face with live PID is not deleted during mtime purge', () => {
     const fs = require('fs');
     const pathMod = require('path');
-    const { SESSIONS_DIR, safeFilename } = require('../shared');
+    const { SESSIONS_DIR, safeFilename } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -2231,7 +2231,7 @@ describe('grid.js -- completion-state face with live PID protected in file delet
   test('completion-state face with dead PID is deleted during mtime purge', () => {
     const fs = require('fs');
     const pathMod = require('path');
-    const { SESSIONS_DIR, safeFilename } = require('../shared');
+    const { SESSIONS_DIR, safeFilename } = require('../lib/shared');
     const orbital = new OrbitalSystem();
 
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
@@ -2748,8 +2748,8 @@ describe('grid.js -- _calculateGroupedAngles box-aware spacing', () => {
 });
 
 describe('grid.js -- layout invariants across terminal sizes', () => {
-  const { ClaudeFace, fitKeyHints } = require('../face');
-  const { computeOrbit, MINI_W, MINI_H } = require('../grid');
+  const { ClaudeFace, fitKeyHints } = require('../lib/face');
+  const { computeOrbit, MINI_W, MINI_H } = require('../lib/grid');
   const overlap = (a, b) => a.col < b.col + b.w && b.col < a.col + a.w && a.row < b.row + b.h && b.row < a.row + a.h;
   // Mini-face top-left corners, recognised by the box's top-left glyph.
   const boxes = (out) => {
@@ -3204,7 +3204,7 @@ describe('grid.js -- async face removal PID guard (Bug #2)', () => {
     // is junk -- the dedicated stale purge owns deletion, this loop owns memory.
     const fs = require('fs');
     const pathMod = require('path');
-    const { SESSIONS_DIR } = require('../shared');
+    const { SESSIONS_DIR } = require('../lib/shared');
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
     const id = 'async-removal-keeps-file';
     const fp = pathMod.join(SESSIONS_DIR, id + '.json');
@@ -3231,7 +3231,7 @@ describe('grid.js -- sync face removal no file deletion (Bug #4)', () => {
     // linger has expired: the removal loop must drop the face only.
     const fs = require('fs');
     const pathMod = require('path');
-    const { SESSIONS_DIR } = require('../shared');
+    const { SESSIONS_DIR } = require('../lib/shared');
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
     const id = 'sync-removal-keeps-file';
     const fp = pathMod.join(SESSIONS_DIR, id + '.json');
@@ -3940,7 +3940,7 @@ describe('grid.js -- recycled-PID purge integration', () => {
   // A child's pid is its parent's editor: alive, that proves nothing about
   // the agent. A missed SubagentStop left a ghost for the editor's lifetime.
   test('isStale: a child\'s pid protects only for CHILD_ORPHAN_TIMEOUT', () => {
-    const { CHILD_ORPHAN_TIMEOUT } = require('../grid');
+    const { CHILD_ORPHAN_TIMEOUT } = require('../lib/grid');
     _pidStartCache.clear();
     const mk = (quietMs) => {
       const f = new MiniFace('p-agent-x');
@@ -3962,7 +3962,7 @@ describe('grid.js -- recycled-PID purge integration', () => {
   test('loadSessions purges a stale file whose pid was recycled', () => {
     const fs = require('fs');
     const pathMod = require('path');
-    const { SESSIONS_DIR } = require('../shared');
+    const { SESSIONS_DIR } = require('../lib/shared');
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
     const id = 'recycled-pid-file';
     const fp = pathMod.join(SESSIONS_DIR, id + '.json');
@@ -3994,7 +3994,7 @@ describe('grid.js -- recycled-PID purge integration', () => {
   });
 
   test('source: purge paths use isOwnedByLiveProcess, not bare isProcessAlive', () => {
-    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'grid.js'), 'utf8');
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'lib', 'grid.js'), 'utf8');
     // Every site goes through pidProtects, which is isOwnedByLiveProcess plus
     // the child cap (round 3).
     assert.ok(/function pidProtects[\s\S]*?isOwnedByLiveProcess\(pid, lastWriteMs\)/.test(src), 'pidProtects gated');
@@ -4370,7 +4370,7 @@ describe('grid.js -- third review pass: stopped files are not kept by a live pid
 });
 
 describe('grid.js -- third review pass: session list and labels', () => {
-  const { HOME } = require('../shared');
+  const { HOME } = require('../lib/shared');
   const homeFwd = HOME.replace(/\\/g, '/').replace(/\/+$/, '');
 
   test('~ replaces HOME only on a path boundary', () => {
@@ -4386,7 +4386,7 @@ describe('grid.js -- third review pass: session list and labels', () => {
   });
 
   test('~ ignores case on Windows, where editors disagree about the drive letter', () => {
-    const { _truncatePath } = require('../grid');
+    const { _truncatePath } = require('../lib/grid');
     const flipped = homeFwd.replace(/[a-z]/i, (c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()));
     assert.notStrictEqual(flipped, homeFwd, 'the fixture HOME has a letter to flip');
     assert.strictEqual(_truncatePath(flipped + '/proj', 80, true), '~/proj', 'folded on win32');
@@ -4546,8 +4546,8 @@ describe('grid.js -- round 3: live-renderer findings', () => {
   // Below the list's minimum it draws nothing: `l` opened an invisible list
   // that swallowed the next key (an Enter silently pinned).
   test('the list opens, and is offered, only where it can draw', () => {
-    const { sessionListFits, MIN_SESSION_LIST_COLS, MIN_SESSION_LIST_ROWS } = require('../grid');
-    const { fitKeyHints } = require('../face');
+    const { sessionListFits, MIN_SESSION_LIST_COLS, MIN_SESSION_LIST_ROWS } = require('../lib/grid');
+    const { fitKeyHints } = require('../lib/face');
     assert.strictEqual(sessionListFits(MIN_SESSION_LIST_COLS, MIN_SESSION_LIST_ROWS), true);
     assert.strictEqual(sessionListFits(MIN_SESSION_LIST_COLS - 1, 40), false);
     assert.strictEqual(sessionListFits(120, MIN_SESSION_LIST_ROWS - 1), false);
@@ -4585,7 +4585,7 @@ describe('grid.js -- round 3: live-renderer findings', () => {
 // Walk a frame as a terminal would: a cursor move starts a span, other escapes
 // paint nothing, and each code point advances by its display width.
 function paintedSpans(out) {
-  const { charWidth } = require('../shared');
+  const { charWidth } = require('../lib/shared');
   const spans = [];
   const re = /\x1b\[(\d+);(\d+)H|\x1b\[[0-9;?]*[A-Za-z]|([\s\S])/gu;
   let cur = null;
@@ -4603,8 +4603,8 @@ function paintedSpans(out) {
 }
 
 describe('grid.js -- round 3: wide characters', () => {
-  const { strWidth } = require('../shared');
-  const { orderSessionList } = require('../grid');
+  const { strWidth } = require('../lib/shared');
+  const { orderSessionList } = require('../lib/grid');
   const BOX = 8;
   // Rows 5-7 of a MiniFace drawn at (1, 1): label, branch/cwd/model, detail.
   const textRows = (f) => paintedSpans(f.render(1, 1, 0, PALETTES[0].themes)).filter(sp => sp.row >= 5);

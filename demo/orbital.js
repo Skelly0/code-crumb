@@ -9,7 +9,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, writeJsonAtomic } = require('./shared');
+const { STATE_FILE, SESSIONS_DIR, writeJsonAtomic } = require('../lib/shared');
 
 // Ensure dir exists
 try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}

@@ -20,15 +20,15 @@ const { Readable } = require('stream');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
-const { makeTempEnv, cleanup, readJSON } = require('./_harness');
+const { makeTempEnv, cleanup, readJSON, runUpdateState } = require('./_harness');
 
 const ROOT = path.join(__dirname, '..');
-const shared = require('../shared');
-const sm = require('../state-machine');
+const shared = require('../lib/shared');
+const sm = require('../lib/state-machine');
 const launch = require('../launch');
-const themes = require('../themes');
-const { ClaudeFace } = require('../face');
-const grid = require('../grid');
+const themes = require('../lib/themes');
+const { ClaudeFace } = require('../lib/face');
+const grid = require('../lib/grid');
 const base = require('../adapters/base-adapter');
 
 // Requiring setup.js must be side-effect free (CLI lives behind require.main).
@@ -559,7 +559,7 @@ describe('shared.js -- the stats lock serializes parallel read-modify-write', ()
       ].join('\n'), 'utf8');
       fs.writeFileSync(statsFile, JSON.stringify({ n: 0 }), 'utf8');
 
-      const sharedPath = path.join(ROOT, 'shared.js');
+      const sharedPath = path.join(ROOT, 'lib', 'shared.js');
       await Promise.all(Array.from({ length: 6 }, () => new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [worker, sharedPath], { env, stdio: 'ignore' });
         child.on('error', reject);
@@ -714,10 +714,9 @@ describe('platform -- codex-notify reports stats like the other adapters', () =>
 // -- update-state.js robustness ----------------------------------------------
 
 const UPDATE_STATE = path.join(ROOT, 'update-state.js');
+// Strict: a failing hook throws with its stderr instead of being tolerated.
 function runHook(event, input, env) {
-  execFileSync(process.execPath, [UPDATE_STATE, event], {
-    input, env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  runUpdateState(event, input, env, { strict: true });
 }
 
 describe('platform -- update-state.js catch path does not hijack another session\'s orbital', () => {
@@ -768,7 +767,7 @@ describe('platform -- update-state.js autolaunch uses the shared helpers', () =>
     // update-state.js and launch.js share spawnRendererWindow, which builds
     // its commands with buildRendererCommands.
     assert.ok(src.includes('spawnRendererWindow('));
-    const sharedSrc = fs.readFileSync(path.join(ROOT, 'shared.js'), 'utf8');
+    const sharedSrc = fs.readFileSync(path.join(ROOT, 'lib', 'shared.js'), 'utf8');
     const i = sharedSrc.indexOf('function spawnRendererWindow(');
     assert.ok(i > 0 && sharedSrc.slice(i, i + 2500).includes('buildRendererCommands('));
     assert.ok(!src.includes("spawn('cmd', ['/c', 'start'"), 'no hand-rolled cmd /c start');
@@ -1153,20 +1152,12 @@ describe('platform -- setupCodex installs codex native hooks', () => {
 });
 
 describe('platform -- update-state.js --editor flag', () => {
-  const UPDATE_STATE = path.join(ROOT, 'update-state.js');
-
+  // `args` is the whole argv, event included (or left out on purpose).
   function runHook(args, payload, extraEnv) {
     const base = makeTempEnv('flag-test');
     delete base.env.CLAUDE_SESSION_ID;
     const env = { ...base.env, ...(extraEnv || {}) };
-    try {
-      execFileSync(process.execPath, [UPDATE_STATE, ...args], {
-        input: JSON.stringify(payload), env, timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
+    runUpdateState(null, payload, env, { args });
     return base;
   }
 
@@ -1671,7 +1662,7 @@ describe('platform -- third review pass: shared helpers', () => {
         for (let trial = 0; trial < 5; trial++) {
           const lock = staleLock(dir);
           const at = Date.now() + 400;
-          const worker = `const s=require(${JSON.stringify(path.join(ROOT, 'shared.js'))});` +
+          const worker = `const s=require(${JSON.stringify(path.join(ROOT, 'lib', 'shared.js'))});` +
             `while(Date.now()<${at}){}process.stdout.write(s.acquireSpawnLock(${JSON.stringify(lock)},5000)?'1':'0')`;
           const outs = await Promise.all(Array.from({ length: 8 }, () => new Promise((resolve) => {
             const c = spawn(process.execPath, ['-e', worker], { stdio: ['ignore', 'pipe', 'ignore'] });

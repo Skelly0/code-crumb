@@ -23,7 +23,7 @@ const {
   safeFilename, getGitBranch, getIsWorktree, loadPrefs,
   writeJsonAtomic, acquireSpawnLock, acquireFileLock, spawnRendererWindow, isRendererAlive,
   COMPLETION_STATES,
-} = require('./shared');
+} = require('./lib/shared');
 const {
   toolToState, normalizeToolResponse, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
   EDIT_TOOLS, SUBAGENT_TOOLS, ASK_TOOLS, toText,
@@ -35,7 +35,7 @@ const {
   freshCounter: _freshCounter, normalizeCounter: _normalizeCounter,
   parkAgents: _parkAgents, unparkAgents: _unparkAgents, pruneCounters: _pruneCounters,
   creditSession: _creditSession, creditEndFor, touchCounter, localDay,
-} = require('./state-machine');
+} = require('./lib/state-machine');
 
 // Safety net for a missed SubagentStop: an activeSubagents entry older than
 // this is dropped. Not a lifetime -- an agent may legitimately run for hours,
@@ -120,7 +120,10 @@ function inheritedTurnEnd(event, state) {
 }
 
 // Sticky session-file fields: set once, preserved across every later write.
-const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'editor', 'lastPromptAt', 'model'];
+// `editor` is deliberately absent: every write stamps it fresh (EDITOR is
+// never empty), so a copy-if-missing loop could never fire for it. The owner's
+// provenance is kept by the global owner guard instead.
+const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'lastPromptAt', 'model'];
 
 // Per-session counters, and the parking of a non-owner's agents, live in
 // state-machine.js (see "Per-Session Counters") -- the adapters share them.

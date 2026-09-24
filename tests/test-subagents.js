@@ -14,48 +14,28 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
 
-const { createSuite, makeTempEnv, cleanup, readJSON } = require('./_harness');
+const { createSuite, makeTempEnv, cleanup, readJSON, runUpdateState } = require('./_harness');
 const suite = createSuite();
 const { describe, test } = suite;
 
 const {
   subagentSessionId, subagentLabel,
-} = require('../state-machine');
-const { writeJsonAtomic } = require('../shared');
+} = require('../lib/state-machine');
+const { writeJsonAtomic } = require('../lib/shared');
 const {
   MiniFace, OrbitalSystem, CHILD_ORPHAN_TIMEOUT, ORPHAN_TIMEOUT, STALE_MS,
-} = require('../grid');
+} = require('../lib/grid');
 const {
   idleCascade, SLEEP_TIMEOUT, THINKING_TIMEOUT, WAIT_HOLD_STALE_MS,
 } = require('../renderer');
-const { ClaudeFace } = require('../face');
+const { ClaudeFace } = require('../lib/face');
 
 // The detail-line separator face.js uses, built without a literal glyph.
 const DETAIL_SEP = ' ' + String.fromCharCode(0x00b7) + ' ';
 
 // Horizontal ellipsis, built without a literal glyph so this file stays ASCII.
 const ELLIPSIS = String.fromCharCode(0x2026);
-
-const NODE = process.execPath;
-const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
-
-// Run the hook as a subprocess against an isolated temp home. update-state.js
-// calls process.exit(0), which execFileSync can still surface as an error on
-// some platforms -- only a real non-zero status is a failure.
-function runUpdateState(event, inputObj, env) {
-  try {
-    execFileSync(NODE, [UPDATE_STATE, event], {
-      input: JSON.stringify(inputObj),
-      env,
-      timeout: 10000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  } catch (e) {
-    if (e.status !== 0 && e.status !== null) throw e;
-  }
-}
 
 function sessionFile(sessionsDir, id) {
   return path.join(sessionsDir, `${id}.json`);

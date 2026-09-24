@@ -42,7 +42,7 @@ const {
   TOP_LEVEL_REGISTRY_TTL_MS,
   prettyModelName,
   agentTranscriptPath,
-} = require('../state-machine');
+} = require('../lib/state-machine');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
@@ -54,26 +54,10 @@ const { describe, test } = suite;
 
 const fsMod = require('fs');
 const pathMod = require('path');
-const { execFileSync } = require('child_process');
-const { makeTempEnv, cleanup, readJSON } = require('./_harness');
+const { makeTempEnv, cleanup, readJSON, runUpdateState, UPDATE_STATE } = require('./_harness');
 
-const UPDATE_STATE = pathMod.join(__dirname, '..', 'update-state.js');
-
-// Raw stdin. '' is not JSON, so the hook falls into its catch path -- that is
-// the only way to reach the fallback handlers.
-function runUpdateStateRaw(event, input, env) {
-  try {
-    execFileSync(process.execPath, [UPDATE_STATE, event], {
-      input, env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  } catch (e) {
-    if (e.status !== 0 && e.status !== null) throw e;
-  }
-}
-
-function runUpdateState(event, inputObj, env) {
-  runUpdateStateRaw(event, JSON.stringify(inputObj), env);
-}
+// runUpdateState passes a string to stdin raw: '' is not JSON, so the hook
+// falls into its catch path -- the only way to reach the fallback handlers.
 
 // Stats blob for an owner session conducting one subagent.
 function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
@@ -2408,7 +2392,7 @@ describe('update-state.js -- fallback SubagentStart creates orbital (Bug E)', ()
   test('unparseable stdin still writes a spawning orbital under the parent', () => {
     const { tmp, sessionsDir, env } = makeTempEnv('test-session');
     try {
-      runUpdateStateRaw('SubagentStart', '', env);
+      runUpdateState('SubagentStart', '', env);
 
       const files = fsMod.readdirSync(sessionsDir)
         .filter(f => f.startsWith('test-session-sub-') && f.endsWith('.json'));
@@ -3269,7 +3253,7 @@ describe('update-state.js -- new hook event handlers', () => {
     test(`empty stdin: ${event} -> ${state} / ${detail}`, () => {
       const { tmp, stateFile, env } = makeTempEnv('fb-' + event);
       try {
-        runUpdateStateRaw(event, '', env);
+        runUpdateState(event, '', env);
         const st = readJSON(stateFile);
         assert.strictEqual(st.state, state);
         assert.strictEqual(st.detail, detail);
@@ -3852,7 +3836,7 @@ describe('update-state -- third review pass: hook bookkeeping', () => {
   });
 
   test('the counter helpers are shared from state-machine.js', () => {
-    const sm = require('../state-machine');
+    const sm = require('../lib/state-machine');
     for (const k of ['freshCounter', 'normalizeCounter', 'parkAgents', 'unparkAgents', 'pruneCounters']) {
       assert.strictEqual(typeof sm[k], 'function', k);
     }
@@ -3883,7 +3867,7 @@ describe('update-state -- review round: a session counts once per day', () => {
   });
 
   test('a legacy `counted: true` entry is not counted again on upgrade', () => {
-    const { normalizeCounter } = require('../state-machine');
+    const { normalizeCounter } = require('../lib/state-machine');
     const c = normalizeCounter({ toolCalls: 1, counted: true }, Date.now());
     assert.strictEqual(c.countedDay, new Date().toISOString().slice(0, 10));
     assert.strictEqual(c.counted, undefined);
@@ -3895,7 +3879,7 @@ describe('update-state -- round 3: session time and totals', () => {
     const { tmp, statsFile, env } = makeTempEnv('next-1');
     try {
       const now = Date.now();
-      const { localDay } = require('../state-machine');
+      const { localDay } = require('../lib/state-machine');
       const stats = defaultStats();
       // A ran 17:00-18:00 "yesterday" (15h ago) and got SessionEnd, which credited it.
       const start = now - 16 * 3600000, end = now - 15 * 3600000;
@@ -3925,7 +3909,7 @@ describe('update-state -- round 3: session time and totals', () => {
   });
 
   test('localDay is the local calendar day', () => {
-    const { localDay } = require('../state-machine');
+    const { localDay } = require('../lib/state-machine');
     const d = new Date(2026, 0, 2, 23, 30);              // local 23:30
     assert.strictEqual(localDay(d.getTime()), '2026-01-02');
   });
@@ -4144,7 +4128,7 @@ describe('state-machine -- round 3: a build is a command, not an argument', () =
 });
 
 describe('state-machine -- round 4', () => {
-  const sm = require('../state-machine');
+  const sm = require('../lib/state-machine');
   const post = (cmd, stdout = 'ok') => classifyToolResult('Bash', { command: cmd }, { stdout, stderr: '' }, false);
 
   // The same window left open Friday to Monday credited the whole weekend at

@@ -13,7 +13,7 @@ const {
   TOTAL_FRAMES,
   DIM_MIN,
   DIM_MAX,
-} = require('../transition');
+} = require('../lib/transition');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;

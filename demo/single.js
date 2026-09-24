@@ -10,7 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { STATE_FILE, SESSIONS_DIR, safeFilename, writeJsonAtomic } = require('./shared');
+const { STATE_FILE, SESSIONS_DIR, safeFilename, writeJsonAtomic } = require('../lib/shared');
 
 // Ensure sessions dir exists for orbital demo
 try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}

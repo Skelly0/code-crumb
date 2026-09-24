@@ -23,7 +23,7 @@ const { execFileSync, spawn } = require('child_process');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
-const { makeTempEnv, cleanup, readJSON } = require('./_harness');
+const { makeTempEnv, cleanup, readJSON, runUpdateState, runFakeCodex } = require('./_harness');
 
 // -- Helpers ----------------------------------------------------------
 
@@ -43,24 +43,6 @@ function runStdinAdapter(adapterFile, inputObj, env) {
   } catch (e) {
     // Adapters call process.exit(0), which can throw in execFileSync
     // on some Node versions. That's fine as long as the state file was written.
-    if (e.status !== 0 && e.status !== null) throw e;
-  }
-}
-
-const UPDATE_STATE_JS = path.join(__dirname, '..', 'update-state.js');
-
-// Run one Claude Code hook against a temp home. `input` may be an object
-// (JSON encoded) or a raw string, so '' and 'not json' reach the catch path
-// that handles Stop/Notification/lifecycle events with no parsable stdin.
-function runUpdateState(event, input, env, extraArgs = []) {
-  try {
-    execFileSync(NODE, [UPDATE_STATE_JS, event, ...extraArgs], {
-      input: typeof input === 'string' ? input : JSON.stringify(input),
-      env,
-      timeout: 10000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  } catch (e) {
     if (e.status !== 0 && e.status !== null) throw e;
   }
 }
@@ -94,11 +76,11 @@ function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
   };
 }
 
-// Run `fn` with the shared STATE_FILE (which test.js has already redirected
+// Run `fn` with the shared STATE_FILE (which run.js has already redirected
 // into the throwaway home) holding `data`, then put back whatever was there.
 // For in-process readers -- shared.js fixes its paths at first require, so a
 // per-test temp dir is only usable by subprocesses.
-const SHARED = require(path.join(__dirname, '..', 'shared'));
+const SHARED = require(path.join(__dirname, '..', 'lib', 'shared'));
 
 function withStateFile(data, fn) {
   let saved = null;
@@ -961,7 +943,7 @@ describe('adapters -- opencode-adapter (plugin payloads)', () => {
       fs.writeFileSync(gate, [
         "'use strict';",
         "const fs = require('fs');",
-        `const shared = require(${JSON.stringify(path.join(__dirname, '..', 'shared.js'))});`,
+        `const shared = require(${JSON.stringify(path.join(__dirname, '..', 'lib', 'shared.js'))});`,
         'const orig = shared.acquireFileLock;',
         'let first = true;',
         'shared.acquireFileLock = function (...a) {',
@@ -1753,55 +1735,10 @@ describe('adapters -- codex-wrapper classifyItem (real ThreadEvent schema)', () 
 });
 
 describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
+  // runFakeCodex (tests/_harness.js) replays a fixture through the wrapper's
+  // real spawn path, including the Windows .cmd shim. The tests that need a
+  // hand-built fake spawn the wrapper themselves.
   const WRAPPER = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
-
-  // Replays a fixture through the wrapper's real spawn path: on Windows the
-  // fake is a .cmd shim, which only starts if the wrapper passes shell:true
-  // (Node refuses to spawn .cmd otherwise), so this also covers the Windows
-  // spawn fix.
-  const FAKE_SRC = [
-    "'use strict';",
-    "const fs = require('fs');",
-    "const text = fs.readFileSync(process.env.CODEX_FAKE_FIXTURE, 'utf8');",
-    "for (const line of text.split('\\n')) {",
-    "  if (line.trim()) process.stdout.write(line + '\\n');",
-    "}",
-    '',
-  ].join('\n');
-
-  function runFakeCodex(events, seedStats, extraArgs = []) {
-    const base = makeTempEnv('codex-thread');
-    const binDir = path.join(base.tmp, 'bin');
-    fs.mkdirSync(binDir, { recursive: true });
-    if (seedStats) fs.writeFileSync(base.statsFile, JSON.stringify(seedStats), 'utf8');
-
-    const fixture = path.join(base.tmp, 'fixture.jsonl');
-    fs.writeFileSync(fixture, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
-    fs.writeFileSync(path.join(binDir, 'codex-fake.js'), FAKE_SRC, 'utf8');
-
-    if (process.platform === 'win32') {
-      fs.writeFileSync(path.join(binDir, 'codex.cmd'), '@node "%~dp0codex-fake.js" %*\r\n', 'utf8');
-    } else {
-      const sh = path.join(binDir, 'codex');
-      fs.writeFileSync(sh, '#!/bin/sh\nexec node "$(dirname "$0")/codex-fake.js" "$@"\n', 'utf8');
-      fs.chmodSync(sh, 0o755);
-    }
-
-    const env = { ...base.env, CODEX_FAKE_FIXTURE: fixture };
-    // Windows env keys are case-insensitive; a stray Path AND PATH confuses the child.
-    for (const k of Object.keys(env)) if (/^path$/i.test(k)) delete env[k];
-    env.PATH = binDir + path.delimiter + (process.env.PATH || '');
-    delete env.CLAUDE_SESSION_ID; // the codex thread id owns the session identity
-
-    try {
-      execFileSync(NODE, [WRAPPER, ...extraArgs, 'a prompt'], {
-        env, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
-    return base;
-  }
 
   test('a running npm test shows the testing face', () => {
     const { tmp, stateFile } = runFakeCodex([
@@ -2395,8 +2332,8 @@ describe('bug fix regressions', () => {
   test('petSpamLevel 3 changes the eyes on a happy face', () => {
     // The counter was once petCount and the threshold once `> 3`, so level 3
     // never reached the reward eyes. Assert the level actually drives them.
-    const { ClaudeFace } = require(path.join(__dirname, '..', 'face.js'));
-    const { eyes } = require(path.join(__dirname, '..', 'animations.js'));
+    const { ClaudeFace } = require(path.join(__dirname, '..', 'lib', 'face.js'));
+    const { eyes } = require(path.join(__dirname, '..', 'lib', 'animations.js'));
     const calm = new ClaudeFace();
     calm.state = 'happy';
     const spam = new ClaudeFace();
@@ -2410,13 +2347,13 @@ describe('bug fix regressions', () => {
   });
 
   test('particles.js has TTY fallbacks for rows/columns', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'particles.js'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'particles.js'), 'utf8');
     assert.ok(src.includes('process.stdout.rows || 24'));
     assert.ok(src.includes('process.stdout.columns || 80'));
   });
 
   test('grid.js spawn scale starts at 0.3 minimum', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'grid.js'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'grid.js'), 'utf8');
     assert.ok(src.includes('Math.max(0.3,'));
   });
 
@@ -2438,17 +2375,7 @@ describe('bug fix regressions', () => {
     // 'thinking' after IDLE_TIMEOUT because 'waiting' is not in the exclusion
     // list. 'idle' is in the exclusion list and is semantically correct.
     const { tmp, stateFile, env } = makeTempEnv('ss-idle-1');
-    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
-    try {
-      execFileSync(NODE, [UPDATE_STATE, 'SessionStart'], {
-        input: JSON.stringify({ session_id: 'ss-idle-1' }),
-        env,
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
+    runUpdateState('SessionStart', { session_id: 'ss-idle-1' }, env);
     const state = readJSON(stateFile);
     assert.strictEqual(state.state, 'idle',
       `SessionStart should write 'idle', got '${state.state}'`);
@@ -2526,7 +2453,6 @@ describe('bug fix regressions', () => {
     // set fallbackSessionId = existing.sessionId, then compared them — always equal.
     // A subagent Stop with empty stdin would overwrite the main session's global state.
     const { tmp, stateFile, env } = makeTempEnv('sub-iso-1');
-    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
 
     // Pre-seed the global state file with an active main session
     fs.writeFileSync(stateFile, JSON.stringify({
@@ -2538,16 +2464,7 @@ describe('bug fix regressions', () => {
     // Run a Stop event with non-JSON stdin so it hits the catch block.
     // Use a different session ID (from env) than what's in the state file.
     const subEnv = { ...env, CLAUDE_SESSION_ID: 'sub-iso-1' };
-    try {
-      execFileSync(NODE, [UPDATE_STATE, 'Stop'], {
-        input: 'not valid json',
-        env: subEnv,
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
+    runUpdateState('Stop', 'not valid json', subEnv);
 
     // The global state file should still belong to the main session —
     // the subagent's Stop should NOT have overwritten it.
@@ -2563,7 +2480,6 @@ describe('bug fix regressions', () => {
     // Complementary test: when the fallback session ID matches the existing file,
     // it SHOULD write to the global state file.
     const { tmp, stateFile, env } = makeTempEnv('fallback-match-1');
-    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
 
     // Pre-seed with same session ID as the env will provide
     fs.writeFileSync(stateFile, JSON.stringify({
@@ -2572,16 +2488,7 @@ describe('bug fix regressions', () => {
       timestamp: Date.now(),
     }), 'utf8');
 
-    try {
-      execFileSync(NODE, [UPDATE_STATE, 'Stop'], {
-        input: 'not valid json',
-        env,
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
+    runUpdateState('Stop', 'not valid json', env);
 
     // The global state should have been updated to 'responding' (Stop event)
     const state = readJSON(stateFile);
@@ -2594,18 +2501,8 @@ describe('bug fix regressions', () => {
     // Bug: catch-block writes lacked modelName, so a stale wrong modelName
     // from a previous session could persist until a valid JSON event corrected it.
     const { tmp, stateFile, env } = makeTempEnv('model-fallback-1');
-    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
 
-    try {
-      execFileSync(NODE, [UPDATE_STATE, 'PreToolUse'], {
-        input: 'not valid json',
-        env,
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
+    runUpdateState('PreToolUse', 'not valid json', env);
 
     const state = readJSON(stateFile);
     assert.strictEqual(state.modelName, 'claude',
@@ -2615,19 +2512,9 @@ describe('bug fix regressions', () => {
 
   test('update-state.js fallback catch block respects CODE_CRUMB_MODEL env', () => {
     const { tmp, stateFile, env } = makeTempEnv('model-env-1');
-    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
     env.CODE_CRUMB_MODEL = 'opencode';
 
-    try {
-      execFileSync(NODE, [UPDATE_STATE, 'PreToolUse'], {
-        input: 'not valid json',
-        env,
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
+    runUpdateState('PreToolUse', 'not valid json', env);
 
     const state = readJSON(stateFile);
     assert.strictEqual(state.modelName, 'opencode',
@@ -2651,7 +2538,7 @@ describe('bug fix regressions', () => {
   test('renderer.js PID guard handles EPERM as running (#65)', () => {
     // The guard now lives in shared.isRendererAlive, which the renderer, the
     // hook and launch.js all share (they used to disagree about EPERM).
-    const { isRendererAlive } = require(path.join(__dirname, '..', 'shared.js'));
+    const { isRendererAlive } = require(path.join(__dirname, '..', 'lib', 'shared.js'));
     const tmp = fs.mkdtempSync(path.join(require('os').tmpdir(), 'cc-pid65-'));
     const pidFile = path.join(tmp, 'pid');
     const realKill = process.kill;
@@ -2673,7 +2560,7 @@ describe('bug fix regressions', () => {
   test('forceState applies the state at once and holds it for the given minimum (#67)', () => {
     // The renderer's responding rescues call forceState(..., 3000). This is the
     // half of that contract that lives in face.js and can be observed.
-    const { ClaudeFace } = require(path.join(__dirname, '..', 'face.js'));
+    const { ClaudeFace } = require(path.join(__dirname, '..', 'lib', 'face.js'));
     const face = new ClaudeFace();
     face.setState('coding', 'editing app.js');
     const before = Date.now();
@@ -2909,7 +2796,7 @@ describe('update-state.js parallel sessions orbital visibility fix', () => {
 
 describe('base-adapter guardedWriteState modelName preservation (#78)', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const sharedMod = require(path.join(__dirname, '..', 'shared'));
+  const sharedMod = require(path.join(__dirname, '..', 'lib', 'shared'));
   const STATE_FILE = sharedMod.STATE_FILE;
 
   // Save and restore state file (tests write to the real file)
@@ -2991,7 +2878,7 @@ describe('base-adapter guardedWriteState modelName preservation (#78)', () => {
 
 describe('base-adapter -- guardedWriteState unit tests', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const sharedMod = require(path.join(__dirname, '..', 'shared'));
+  const sharedMod = require(path.join(__dirname, '..', 'lib', 'shared'));
   const STATE_FILE = sharedMod.STATE_FILE;
 
   // Save and restore state file
@@ -3060,7 +2947,7 @@ describe('base-adapter -- guardedWriteState unit tests', () => {
 
 describe('base-adapter -- initSession unit tests', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const { defaultStats } = require(path.join(__dirname, '..', 'state-machine'));
+  const { defaultStats } = require(path.join(__dirname, '..', 'lib', 'state-machine'));
 
   test('creates daily bucket on first call', () => {
     const stats = defaultStats();
@@ -3113,7 +3000,7 @@ describe('base-adapter -- initSession unit tests', () => {
 
 describe('base-adapter -- buildExtra unit tests', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const { defaultStats } = require(path.join(__dirname, '..', 'state-machine'));
+  const { defaultStats } = require(path.join(__dirname, '..', 'lib', 'state-machine'));
 
   test('returns object with all expected fields', () => {
     const stats = defaultStats();
@@ -3159,7 +3046,7 @@ describe('base-adapter -- buildExtra unit tests', () => {
 
 describe('base-adapter -- trackEditedFile unit tests', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const { defaultStats } = require(path.join(__dirname, '..', 'state-machine'));
+  const { defaultStats } = require(path.join(__dirname, '..', 'lib', 'state-machine'));
 
   test('detects edit tools and extracts file path', () => {
     const stats = defaultStats();
@@ -3254,14 +3141,14 @@ describe('bug fix structural tests', () => {
   const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
   const BASE_ADAPTER = path.join(ADAPTERS_DIR, 'base-adapter.js');
   const OPENCODE_ADAPTER = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
-  const PARTICLES = path.join(__dirname, '..', 'particles.js');
+  const PARTICLES = path.join(__dirname, '..', 'lib', 'particles.js');
 
   // Bug #1 -- Windows Terminal fallback probes for wt before spawning. The
   // spawn moved to shared.spawnRendererWindow (launch.js shares it), and the
   // probe is System32's where.exe run from HOME, never a `where` that cmd.exe
   // would look up in the user's project folder first.
   test('the renderer spawn probes for wt with System32 where.exe before spawning', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'shared.js'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'shared.js'), 'utf8');
     const body = src.slice(src.indexOf('function spawnRendererWindow('));
     assert.ok(/execFileSync\(path\.join\(sysDir, 'where\.exe'\), \['wt'\]/.test(body),
       'probes with an absolute where.exe, not execSync("where wt")');
@@ -3272,7 +3159,7 @@ describe('bug fix structural tests', () => {
   });
 
   test('the renderer spawn falls back to cmd when the wt probe fails', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'shared.js'), 'utf8');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'shared.js'), 'utf8');
     const body = src.slice(src.indexOf('function spawnRendererWindow('));
     assert.ok(/hasWt \? cmds\.wt : cmds\.cmd/.test(body),
       'hasWt picks Windows Terminal, else a plain cmd window');
@@ -3378,7 +3265,7 @@ describe('bug fix structural tests', () => {
   // Bug #7 -- every particle is closed with a reset, or its colour bleeds
   test('every rendered particle is followed by a reset', () => {
     const { ParticleSystem } = require(PARTICLES);
-    const { ansi } = require(path.join(__dirname, '..', 'themes.js'));
+    const { ansi } = require(path.join(__dirname, '..', 'lib', 'themes.js'));
     assert.ok(ansi.reset.length > 0, 'colour is on, so a reset is observable');
     const ps = new ParticleSystem();
     ps.spawn(20, 'float');
@@ -3396,7 +3283,7 @@ describe('bug fix structural tests', () => {
   // Bug #10 -- base-adapter initSession includes commitCount and activeSubagents
   test('initSession gives a new session commitCount 0 and an empty activeSubagents', () => {
     const baseAdapter = require(BASE_ADAPTER);
-    const { defaultStats } = require(path.join(__dirname, '..', 'state-machine.js'));
+    const { defaultStats } = require(path.join(__dirname, '..', 'lib', 'state-machine.js'));
     const stats = defaultStats();
     baseAdapter.initSession(stats, 'fresh-session');
     assert.strictEqual(stats.session.id, 'fresh-session');
@@ -3702,7 +3589,7 @@ describe('adapters -- editor provenance field', () => {
     delete flag.env.CODE_CRUMB_EDITOR;
     runUpdateState('PreToolUse', {
       session_id: 'ed-flag', tool_name: 'Read', tool_input: { file_path: 'a.js' },
-    }, flag.env, ['--editor', 'opencode']);
+    }, flag.env, { args: ['--editor', 'opencode'] });
     assert.strictEqual(readJSON(flag.stateFile).editor, 'opencode', '--editor <name>');
     cleanup(flag.tmp);
 
@@ -3710,7 +3597,7 @@ describe('adapters -- editor provenance field', () => {
     env.env.CODE_CRUMB_EDITOR = 'foo';
     runUpdateState('PreToolUse', {
       session_id: 'ed-env', tool_name: 'Read', tool_input: { file_path: 'a.js' },
-    }, env.env, ['--editor', 'opencode']);
+    }, env.env, { args: ['--editor', 'opencode'] });
     assert.strictEqual(readJSON(env.stateFile).editor, 'foo', 'the env var outranks the flag');
     cleanup(env.tmp);
   });
@@ -3981,7 +3868,7 @@ describe('update-state.js -- parallel hooks keep every stats increment', () => {
 
 describe('adapters -- buildExtra carries model', () => {
   const { buildExtra } = require('../adapters/base-adapter');
-  const { defaultStats } = require('../state-machine');
+  const { defaultStats } = require('../lib/state-machine');
 
   test('emits the model when given one', () => {
     const e = buildExtra(defaultStats(), 's1', 'codex', 'codex', 'Opus');
@@ -4309,25 +4196,25 @@ describe('setup -- the demo hint only names a demo that exists', () => {
     return lines.join('\n');
   }
 
-  test('an npm install (no demo.js) is not told to run one', () => {
+  test('an npm install (no demo/) is not told to run one', () => {
     const t = makeTempEnv('setup-nodemo');
     try {
       const out = usage(t.tmp);
-      assert.ok(!out.includes('demo.js'), 'the npm tarball excludes demo.js');
+      assert.ok(!out.includes('demo/single.js'), 'the npm tarball excludes demo/');
       assert.ok(out.includes('renderer.js'), 'the rest of the usage is still printed');
     } finally { cleanup(t.tmp); }
   });
 
-  test('a clone (demo.js present) still gets the hint', () => {
+  test('a clone (demo/ present) still gets the hint', () => {
     const out = usage(path.join(__dirname, '..'));
-    assert.ok(out.includes('demo.js'));
+    assert.ok(out.includes('demo/single.js'));
     assert.ok(out.includes('preview all expressions'));
   });
 });
 
 describe('demos -- clean up demo-main on every terminating signal', () => {
   // POSIX only: a win32 kill terminates without running handlers.
-  for (const script of ['demo.js', 'grid-demo.js']) {
+  for (const script of ['demo/single.js', 'demo/orbital.js']) {
     for (const sig of ['SIGTERM', 'SIGHUP']) {
       if (!POSIX) continue;
       test.async(`${script}: ${sig} unlinks the demo-main session file`, async () => {
@@ -4426,7 +4313,7 @@ describe('adapters -- third review pass: per-session counters', () => {
 
   test('an adapter event parks a conducting owner\'s agents instead of wiping them', () => {
     const base = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-    const { defaultStats } = require('../state-machine');
+    const { defaultStats } = require('../lib/state-machine');
     const stats = defaultStats();
     base.initSession(stats, 'claude-A');
     stats.session.activeSubagents = [{ id: 'claude-A-sub-1', startedAt: Date.now() }];
@@ -4525,7 +4412,7 @@ describe('adapters -- third review pass: the OpenCode plugin keeps a session in 
 
 describe('adapters -- review round: batches, turn ends and counters', () => {
   const base = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const { defaultStats } = require('../state-machine');
+  const { defaultStats } = require('../lib/state-machine');
   const OPENCODE = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
 
   test.async('processStdinEvent applies a JSON array in order, one handler call each', async () => {
@@ -4585,7 +4472,7 @@ describe('adapters -- review round: batches, turn ends and counters', () => {
   });
 
   test('pruneCounters evicts throwaway ids before a busy window', () => {
-    const { pruneCounters, freshCounter } = require('../state-machine');
+    const { pruneCounters, freshCounter } = require('../lib/state-machine');
     const now = Date.now();
     const map = { busy: { ...freshCounter(now - 100000), toolCalls: 3 } };
     for (let i = 0; i < 60; i++) map[`flood-${i}`] = { ...freshCounter(now - i), toolCalls: 1 };
@@ -4624,7 +4511,7 @@ describe('adapters -- review round: batches, turn ends and counters', () => {
   });
 
   test('pruneCounters never evicts the session whose hook is running', () => {
-    const { pruneCounters, freshCounter } = require('../state-machine');
+    const { pruneCounters, freshCounter } = require('../lib/state-machine');
     const now = Date.now();
     const map = { owner: freshCounter(now), live: { ...freshCounter(now - 5000), toolCalls: 0 } };
     for (let i = 0; i < 60; i++) map[`busy-${i}`] = { ...freshCounter(now - i), toolCalls: 5 };
@@ -4633,7 +4520,7 @@ describe('adapters -- review round: batches, turn ends and counters', () => {
   });
 
   test('pruneCounters never evicts parked agents', () => {
-    const { pruneCounters, freshCounter } = require('../state-machine');
+    const { pruneCounters, freshCounter } = require('../lib/state-machine');
     const now = Date.now();
     const map = { owner: { ...freshCounter(now - 100000), activeSubagents: [{ id: 'owner-sub-1' }] } };
     for (let i = 0; i < 60; i++) map[`flood-${i}`] = freshCounter(now - i);

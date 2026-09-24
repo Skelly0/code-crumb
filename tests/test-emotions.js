@@ -16,21 +16,19 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
-const { makeTempEnv, cleanup, readJSON } = require('./_harness');
+const { makeTempEnv, cleanup, readJSON, runUpdateState } = require('./_harness');
 
-const sm = require('../state-machine');
-const shared = require('../shared');
-const face = require('../face');
+const sm = require('../lib/state-machine');
+const shared = require('../lib/shared');
+const face = require('../lib/face');
 const renderer = require('../renderer');
-const grid = require('../grid');
-const { STATE_THOUGHTS } = require('../themes');
+const grid = require('../lib/grid');
+const { STATE_THOUGHTS } = require('../lib/themes');
 
 const ROOT = path.join(__dirname, '..');
-const UPDATE_STATE = path.join(ROOT, 'update-state.js');
 
 // -- Tool -> state mapping ----------------------------------------------
 
@@ -444,25 +442,11 @@ describe('emotions -- thought pools exist for the quieter states', () => {
 
 // -- Hook plumbing -------------------------------------------------------
 
-function runHook(event, payload, env) {
-  try {
-    execFileSync(process.execPath, [UPDATE_STATE, event], {
-      input: JSON.stringify(payload),
-      env,
-      timeout: 10000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  } catch (e) {
-    throw new Error(`update-state.js ${event} failed: ${(e.stderr || '').toString() || e.message}`);
-  }
-}
-
-// Raw-stdin variant: runHook above JSON-stringifies, so '' arrives as '""'
-// and still parses. The catch path only opens for stdin that is not JSON.
-function runHookRaw(event, input, env) {
-  execFileSync(process.execPath, [UPDATE_STATE, event], {
-    input, env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
-  });
+// Strict: a failing hook throws with its stderr instead of being tolerated.
+// An object payload is JSON-encoded; a string ('' included) goes to stdin raw,
+// and only stdin that is not JSON opens the catch path.
+function runHook(event, input, env) {
+  runUpdateState(event, input, env, { strict: true });
 }
 
 describe('emotions -- UserPromptSubmit tells the face Claude has started thinking', () => {
@@ -573,7 +557,7 @@ describe('emotions -- catch-path parity for team events', () => {
     test(`empty stdin: ${event} -> ${state} / ${detail}`, () => {
       const { tmp, stateFile, env } = makeTempEnv('catch-' + event);
       try {
-        runHookRaw(event, '', env);
+        runHook(event, '', env);
         const st = readJSON(stateFile);
         assert.strictEqual(st.state, state);
         assert.strictEqual(st.detail, detail);
