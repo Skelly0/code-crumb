@@ -1549,15 +1549,38 @@ describe('state-machine.js -- pruneFrequentFiles', () => {
     assert.strictEqual(Object.keys(ff).length, MAX_FREQUENT_FILES);
   });
 
-  test('keeps highest-count entries when pruning', () => {
+  test('keeps highest-count entries when pruning (every survivor ages by one)', () => {
     const ff = {};
     for (let i = 0; i < 60; i++) {
       ff[`file${i}.js`] = i + 2;
     }
     pruneFrequentFiles(ff);
-    // file59.js (count=61) should survive, file0.js (count=2) should not
-    assert.strictEqual(ff['file59.js'], 61);
+    // file59.js (count=61) survives, aged to 60; file0.js (count=2) does not
+    assert.strictEqual(ff['file59.js'], 60);
     assert.strictEqual(ff['file0.js'], undefined);
+  });
+
+  test('the file just touched always gets in, and does not age (third review pass)', () => {
+    const ff = {};
+    for (let i = 0; i < 50; i++) ff[`old${i}.js`] = 40;
+    ff['new.js'] = 1;
+    pruneFrequentFiles(ff, 'new.js');
+    assert.strictEqual(ff['new.js'], 1, 'a full map used to reject every newcomer');
+    assert.strictEqual(Object.keys(ff).length, MAX_FREQUENT_FILES);
+  });
+
+  test('stale files age out so a file used now can overtake them', () => {
+    const ff = {};
+    for (let i = 0; i < 50; i++) ff[`old${i}.js`] = 3;
+    let hot = 0;
+    for (let n = 0; n < 5; n++) {
+      ff['hot.js'] = (ff['hot.js'] || 0) + 1; hot++;
+      pruneFrequentFiles(ff, 'hot.js');
+      ff[`fresh${n}.js`] = 1;                     // a different newcomer each time
+      pruneFrequentFiles(ff, `fresh${n}.js`);
+    }
+    assert.ok(ff['hot.js'] >= 1, 'hot.js survived the churn');
+    assert.ok(Object.values(ff).every(v => v >= 1));
   });
 
   test('under-cap object is not truncated', () => {
@@ -3862,6 +3885,47 @@ describe('update-state -- review round: a session counts once per day', () => {
     const c = normalizeCounter({ toolCalls: 1, counted: true }, Date.now());
     assert.strictEqual(c.countedDay, new Date().toISOString().slice(0, 10));
     assert.strictEqual(c.counted, undefined);
+  });
+});
+
+describe('update-state -- round 3: session time and totals', () => {
+  test('an ended session is not credited up to the next session\'s start', () => {
+    const { tmp, statsFile, env } = makeTempEnv('next-1');
+    try {
+      const now = Date.now();
+      const { localDay } = require('../state-machine');
+      const stats = defaultStats();
+      // A ran 17:00-18:00 "yesterday" (15h ago) and got SessionEnd, which credited it.
+      const start = now - 16 * 3600000, end = now - 15 * 3600000;
+      stats.session = { id: 'ended-A', start, toolCalls: 3, filesEdited: [], subagentCount: 0, commitCount: 0, activeSubagents: [] };
+      stats.daily = { date: localDay(now), sessionCount: 1, cumulativeMs: end - start };
+      stats.records.longestSession = end - start;
+      stats.sessionCounters = { 'ended-A': { toolCalls: 3, filesEdited: [], start, commitCount: 0, creditedMs: end - start, lastSeen: end, countedDay: localDay(now) } };
+      fsMod.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+      runUpdateState('SessionStart', { session_id: 'next-1', source: 'startup' }, env);
+      const after = readJSON(statsFile);
+      assert.strictEqual(after.daily.cumulativeMs, end - start, 'the overnight gap used to be credited to A');
+      assert.strictEqual(after.records.longestSession, end - start);
+    } finally { cleanup(tmp); }
+  });
+
+  test('a parallel window\'s edits count in the lifetime totals while the owner conducts', () => {
+    const { tmp, statsFile, env } = makeTempEnv('par-B');
+    try {
+      const stats = conductingStats('ownerP', 'ownerP-sub-1', Date.now() - 1000, { 'par-B': Date.now() });
+      fsMod.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');
+      runUpdateState('PreToolUse', { session_id: 'par-B', tool_name: 'Edit', tool_input: { file_path: '/r/b.js' } }, env);
+      const after = readJSON(statsFile);
+      assert.strictEqual(after.session.id, 'ownerP', 'the parallel window did not take the owner slot');
+      assert.strictEqual(after.totalToolCalls, 6);
+      assert.strictEqual(after.frequentFiles['b.js'], 1);
+    } finally { cleanup(tmp); }
+  });
+
+  test('localDay is the local calendar day', () => {
+    const { localDay } = require('../state-machine');
+    const d = new Date(2026, 0, 2, 23, 30);              // local 23:30
+    assert.strictEqual(localDay(d.getTime()), '2026-01-02');
   });
 });
 

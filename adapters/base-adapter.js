@@ -31,6 +31,7 @@ const {
   EDIT_TOOLS,
   pruneFrequentFiles, topFrequentFiles, prettyModelName, toText,
   COUNTER_MAX_FILES, freshCounter, normalizeCounter, parkAgents, unparkAgents, pruneCounters,
+  creditSession, creditEndFor, localDay,
 } = require('../state-machine');
 
 // -- State file writing ------------------------------------------------
@@ -103,6 +104,18 @@ function syncSessionCounter(stats, now = Date.now()) {
   pruneCounters(counters, id, now);
 }
 
+// Fold the owner's elapsed time into today's total and the records, as
+// update-state.js does at Stop/SessionEnd. Adapters never did, so an
+// OpenCode/OpenClaw/Codex session's time only reached daily.cumulativeMs when
+// another session took ownership away from it.
+function creditOwnerSession(stats, now = Date.now()) {
+  try {
+    syncSessionCounter(stats, now);
+    const c = stats.sessionCounters && stats.sessionCounters[stats.session.id];
+    if (c) creditSession(stats, c, now);
+  } catch {}
+}
+
 function sessionCounters(stats) {
   if (!stats.sessionCounters || typeof stats.sessionCounters !== 'object'
       || Array.isArray(stats.sessionCounters)) {
@@ -171,7 +184,7 @@ function guardedWriteState(sessionId, state, detail, extra, opts = {}) {
 // -- leaving its synthetic orbitals nothing to retire them.
 function initSession(stats, sessionId) {
   const now = Date.now();
-  const today = new Date(now).toISOString().slice(0, 10);
+  const today = localDay(now);
   if (!stats.daily || stats.daily.date !== today) {
     stats.daily = { date: today, sessionCount: 0, cumulativeMs: 0 };
   }
@@ -199,6 +212,9 @@ function initSession(stats, sessionId) {
   }
   if (stats.session.id !== sessionId) {
     const outgoing = stats.session.id ? normalizeCounter(counters[stats.session.id], now) : null;
+    // Credit the outgoing owner up to its own last activity (creditEndFor),
+    // as update-state.js does on a switch.
+    if (outgoing) creditSession(stats, outgoing, creditEndFor(outgoing, now));
     if (outgoing) parkAgents(outgoing, stats.session);
     stats.session = {
       id: sessionId, start: counter.start,
@@ -232,6 +248,9 @@ function buildExtra(stats, sessionId, modelName, editor, model) {
     editor: editor || '',
     toolCalls: stats.session.toolCalls,
     filesEdited: stats.session.filesEdited.length,
+    // Without it the face never showed the commit marker for an adapter
+    // session, though update-state.js writes it for Claude/Codex hooks.
+    commitCount: stats.session.commitCount || 0,
     sessionStart: stats.session.start,
     streak: stats.streak,
     bestStreak: stats.bestStreak,
@@ -255,7 +274,10 @@ function trackEditedFile(stats, toolName, toolInput) {
     if (base && !stats.session.filesEdited.includes(base)) {
       stats.session.filesEdited.push(base);
     }
-    if (base) stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
+    if (base) {
+      stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
+      pruneFrequentFiles(stats.frequentFiles, base);
+    }
   }
 }
 
@@ -272,6 +294,10 @@ function handleToolStart(stats, toolName, toolInput) {
 function handleToolEnd(stats, toolName, toolInput, toolResponse, isError) {
   const result = classifyToolResult(toolName, toolInput, toolResponse, isError);
   updateStreak(stats, result.state === 'error');
+  // Same rule as update-state.js: a commit counts for this session.
+  if (result.state === 'proud' && result.detail === 'committed') {
+    stats.session.commitCount = (stats.session.commitCount || 0) + 1;
+  }
   return result;
 }
 
@@ -534,6 +560,12 @@ function runStdinAdapter(options) {
       extra.filesEdited = stats.session.filesEdited.length;
       if (stopped) extra.stopped = true;
 
+      // A turn (or session) end folds this session's time into today's
+      // total and the records. (extra's dailyCumulativeMs already counts
+      // that time as the running session's, so it reads the same.)
+      if (stopped) creditOwnerSession(stats);
+      // Built before the tool end was classified, so refresh the commit count.
+      extra.commitCount = stats.session.commitCount || 0;
       guardedWriteState(sessionId, state, detail, extra, { toolEnd: isToolEnd });
       // A turn end is not a session end. On the session file `stopped` is
       // reserved for session_end (the update-state.js contract): the orbital
@@ -592,4 +624,5 @@ module.exports = {
   runStdinAdapter,
   signalExitCode,
   exitWhenFlushed,
+  creditOwnerSession,
 };

@@ -1755,6 +1755,16 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     cleanup(tmp);
   });
 
+  test('codex failing before it says anything counts no session', () => {
+    const { tmp, statsFile, sessionsDir } = runFakeCodex([]);
+    try {
+      const stats = fs.existsSync(statsFile) ? readJSON(statsFile) : null;
+      assert.ok(!stats || (stats.daily.sessionCount || 0) === 0, 'the placeholder id is not a session');
+      const files = fs.existsSync(sessionsDir) ? fs.readdirSync(sessionsDir) : [];
+      assert.deepStrictEqual(files, [], 'and leaves no orbital behind');
+    } finally { cleanup(tmp); }
+  });
+
   test('a failed turn breaks the streak once, not twice', () => {
     // Codex reports one failure as BOTH a top-level error and a turn.failed.
     // Breaking the streak on each would leave brokenStreak at 0 (face.js only
@@ -4293,6 +4303,44 @@ describe('adapters -- review round: batches, turn ends and counters', () => {
     pruneCounters(map, 'flood-0', now);
     assert.ok(map.busy, 'the least recently seen, but busy, window keeps its counters');
     assert.strictEqual(Object.keys(map).length, 50);
+  });
+
+  test('an adapter turn end credits the session\'s time and records', () => {
+    const OPENCODE = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+    const t = makeTempEnv('oc-time');
+    try {
+      runStdinAdapter(OPENCODE, { type: 'tool.execute.before', sessionId: 'ses_t', callID: 'c1', tool: 'read', toolInput: { filePath: 'a.js' } }, t.env);
+      const s = readJSON(t.statsFile);
+      const back = Date.now() - 40 * 60000;               // the session began 40 minutes ago
+      s.session.start = back;
+      s.sessionCounters.ses_t.start = back;
+      fs.writeFileSync(t.statsFile, JSON.stringify(s));
+      runStdinAdapter(OPENCODE, { type: 'session.idle', sessionId: 'ses_t' }, t.env);
+      const after = readJSON(t.statsFile);
+      assert.ok(after.daily.cumulativeMs >= 39 * 60000, `${after.daily.cumulativeMs}ms: adapters credited nothing`);
+      assert.ok(after.records.longestSession >= 39 * 60000);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('an adapter counts a git commit for its session', () => {
+    const OPENCLAW = path.join(ADAPTERS_DIR, 'openclaw-adapter.js');
+    const t = makeTempEnv('claw-commit');
+    try {
+      runStdinAdapter(OPENCLAW, { event: 'tool_result', session_id: 'claw-c', toolName: 'bash',
+        input: { command: 'git commit -m "x"' }, output: '[main abc123] x' }, t.env);
+      const sf = readJSON(path.join(t.sessionsDir, 'claw-c.json'));
+      assert.deepStrictEqual([sf.state, sf.detail], ['proud', 'committed']);
+      assert.strictEqual(sf.commitCount, 1);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('pruneCounters never evicts the session whose hook is running', () => {
+    const { pruneCounters, freshCounter } = require('../state-machine');
+    const now = Date.now();
+    const map = { owner: freshCounter(now), live: { ...freshCounter(now - 5000), toolCalls: 0 } };
+    for (let i = 0; i < 60; i++) map[`busy-${i}`] = { ...freshCounter(now - i), toolCalls: 5 };
+    pruneCounters(map, ['owner', 'live'], now);
+    assert.ok(map.owner && map.live, 'evicting it re-counted it as a new session on every event');
   });
 
   test('pruneCounters never evicts parked agents', () => {

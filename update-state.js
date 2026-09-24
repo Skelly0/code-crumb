@@ -33,6 +33,7 @@ const {
   COUNTER_MAX_FILES,
   freshCounter: _freshCounter, normalizeCounter: _normalizeCounter,
   parkAgents: _parkAgents, unparkAgents: _unparkAgents, pruneCounters: _pruneCounters,
+  creditSession: _creditSession, creditEndFor, localDay,
 } = require('./state-machine');
 
 // Safety net for a missed SubagentStop: an activeSubagents entry older than
@@ -83,23 +84,8 @@ const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeamm
 // Per-session counters, and the parking of a non-owner's agents, live in
 // state-machine.js (see "Per-Session Counters") -- the adapters share them.
 
-// Fold a session's elapsed time into the records and today's cumulative
-// total. `creditedMs` remembers how much was already added, so crediting the
-// same session at every turn end and every ownership switch never counts a
-// millisecond twice.
-function _creditSession(stats, c, now) {
-  if (!c || !c.start) return;
-  const dur = now - c.start;
-  if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
-  if (c.filesEdited.length > (stats.records.mostFilesEdited || 0)) {
-    stats.records.mostFilesEdited = c.filesEdited.length;
-  }
-  const delta = dur - (c.creditedMs || 0);
-  if (delta > 0) {
-    stats.daily.cumulativeMs += delta;
-    c.creditedMs = dur;
-  }
-}
+// Session time and records are credited by state-machine.js's creditSession
+// (shared with the adapters) -- see creditEndFor for an outgoing owner.
 
 // Read a session file, or null.
 function _readSessionFile(id) {
@@ -678,7 +664,7 @@ process.stdin.on('end', () => {
     const stats = readStats();
 
     // Daily tracking -- reset counters on new day
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDay();
     if (!stats.daily || stats.daily.date !== today) {
       stats.daily = { date: today, sessionCount: 0, cumulativeMs: 0 };
     }
@@ -795,7 +781,7 @@ process.stdin.on('end', () => {
       // Credit the outgoing owner's records, then adopt this session with its
       // OWN counters -- a switch is not a new session.
       const outgoing = stats.session.id ? counters[stats.session.id] : null;
-      if (outgoing) _creditSession(stats, outgoing, now);
+      if (outgoing) _creditSession(stats, outgoing, creditEndFor(outgoing, now));
       if ((stats.session.subagentCount || 0) > (stats.records.mostSubagents || 0)) {
         stats.records.mostSubagents = stats.session.subagentCount;
       }
@@ -872,9 +858,8 @@ process.stdin.on('end', () => {
     if (hookEvent === 'PreToolUse') {
       ({ state, detail } = toolToState(toolName, toolInput));
 
-      // Every session counts its own tool calls (see COUNTER_MAX_AGE_MS). The
-      // global lifetime totals stay owner-only, as before: subagent and
-      // parallel-window calls must not inflate them twice over.
+      // Every session counts its own tool calls (see COUNTER_MAX_AGE_MS in
+      // state-machine.js); the lifetime totals are handled below.
       counter.toolCalls++;
       const fp = EDIT_TOOLS.test(toolName)
         ? toText(toolInput.file_path || toolInput.notebook_path || toolInput.path || toolInput.target_file) : '';
@@ -882,9 +867,16 @@ process.stdin.on('end', () => {
       if (base && !counter.filesEdited.includes(base) && counter.filesEdited.length < COUNTER_MAX_FILES) {
         counter.filesEdited.push(base);
       }
-      if (!isKnownSubagent && !isParallelSession) {
+      // Lifetime totals: every top-level window counts once. A parallel
+      // window used to be left out only while the owner was conducting (the
+      // one time it is classified), though its calls are counted nowhere
+      // else. A legacy subagent's calls are its parent's work, not a window's.
+      if (!isKnownSubagent) {
         stats.totalToolCalls = (stats.totalToolCalls || 0) + 1;
-        if (base) stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
+        if (base) {
+          stats.frequentFiles[base] = (stats.frequentFiles[base] || 0) + 1;
+          pruneFrequentFiles(stats.frequentFiles, base);
+        }
       }
 
       // Propagate tool state to the most recently started LEGACY subagent
@@ -1497,7 +1489,7 @@ process.stdin.on('end', () => {
       if (isAgentEvent) _touchSessionFile(sessionId);
     }
     pruneFrequentFiles(stats.frequentFiles);
-    _pruneCounters(counters, stats.session.id, now);
+    _pruneCounters(counters, [stats.session.id, sessionId], now);
     writeStats(stats);
     } finally { if (releaseStats) releaseStats(); }
   } catch {

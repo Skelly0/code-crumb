@@ -24,7 +24,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const {
   writeState, writeSessionState, readStats, writeStats, guardedWriteState,
-  initSession, buildExtra, trackEditedFile,
+  initSession, buildExtra, trackEditedFile, creditOwnerSession,
   handleToolStart, handleToolEnd, processJsonlStream, signalExitCode, exitWhenFlushed,
 } = require('./base-adapter');
 const {
@@ -38,6 +38,12 @@ const { withStatsLock } = shared;
 
 // thread.started replaces this with the real codex thread id.
 let sessionId = process.env.CLAUDE_SESSION_ID || `codex-${process.pid}`;
+let threadStarted = false;
+let committedAny = false; // a stats cycle has run under the current id
+// A real identity: the caller's CLAUDE_SESSION_ID, or codex's own thread id.
+function ownsRealId() {
+  return threadStarted || !!process.env.CLAUDE_SESSION_ID;
+}
 const modelName = process.env.CODE_CRUMB_MODEL || 'codex';
 const EDITOR = 'codex';
 // Real model identity, from the `-m` this wrapper forwards to codex. Filled in
@@ -247,12 +253,15 @@ function writeGlobal(state, detail, extra) {
 // the ownership guard), `turnEnded` on the session file -- `stopped` there
 // would retire the orbital and drop the session from the main-face policy.
 function commit(decide) {
+  committedAny = true;
   withStatsLock(() => {
     const stats = readStats();
     initSession(stats, sessionId);
     const out = decide(stats);
     if (out && out.state) {
       const detail = out.detail === undefined ? lastDetail : out.detail;
+      // A turn or session end folds this session's time into today's total.
+      if (out.stopped || out.turnEnded) creditOwnerSession(stats);
       const extra = { ...buildExtra(stats, sessionId, modelName, EDITOR, codexModel), pid: process.pid };
       if (out.diffInfo) extra.diffInfo = out.diffInfo;
       if (out.stopped || out.turnEnded) extra.stopped = true;
@@ -321,6 +330,7 @@ function handleEvent(event) {
         sessionId = `codex-${event.thread_id}`;
         ownIds.add(sessionId);
       }
+      threadStarted = true;
       lastPromptAt = Date.now();
       commit(() => ({ state: 'starting', detail: 'codex is waking up' }));
     }
@@ -392,7 +402,17 @@ function finishSession(outcome) {
   if (finished) return false;
   finished = true;
   try {
-    commit(() => ({ state: outcome.state, detail: outcome.detail, stopped: true }));
+    if (!ownsRealId() && !committedAny) {
+      // Codex ended (or was interrupted) before saying anything: the id is
+      // still the placeholder, which must not become a session of its own --
+      // a full commit counted it in daily.sessionCount and left an orbital.
+      writeGlobal(outcome.state, outcome.detail, {
+        sessionId, modelName, ...(codexModel ? { model: codexModel } : {}),
+        editor: EDITOR, pid: process.pid, stopped: true,
+      });
+    } else {
+      commit(() => ({ state: outcome.state, detail: outcome.detail, stopped: true }));
+    }
   } catch {}
   return true;
 }

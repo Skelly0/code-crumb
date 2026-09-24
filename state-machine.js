@@ -800,19 +800,23 @@ function updateStreak(stats, isError) {
 const MAX_FREQUENT_FILES = 50;
 
 // Prunes the frequentFiles map in-place to stay within bounds.
-// Only acts when the map exceeds MAX_FREQUENT_FILES entries.
-// Filters out count < 2 (single-touch noise), then keeps the top N by count.
-function pruneFrequentFiles(frequentFiles) {
+// Only acts when the map exceeds MAX_FREQUENT_FILES entries: every other
+// entry ages by one (so a count of 1 -- single-touch noise -- goes), then the
+// top N by count are kept. `keep` is the file just touched: it neither ages
+// nor is cut. Without both, a full map of files at 2+ rejected every newcomer
+// in the same write that added it, and lifetime counts that never decayed
+// kept weeks-old files on top for good.
+function pruneFrequentFiles(frequentFiles, keep) {
   if (!frequentFiles) return frequentFiles;
   const keys = Object.keys(frequentFiles);
   if (keys.length <= MAX_FREQUENT_FILES) return frequentFiles;
-  const sorted = keys
-    .map(k => [k, frequentFiles[k]])
-    .filter(([, count]) => count >= 2)
-    .sort((a, b) => b[1] - a[1])
+  const kept = keys
+    .map(k => [k, k === keep ? frequentFiles[k] : frequentFiles[k] - 1])
+    .filter(([k, count]) => k === keep || count >= 1)
+    .sort((a, b) => (b[0] === keep) - (a[0] === keep) || b[1] - a[1])
     .slice(0, MAX_FREQUENT_FILES);
   for (const k of keys) delete frequentFiles[k];
-  for (const [k, v] of sorted) frequentFiles[k] = v;
+  for (const [k, v] of kept) frequentFiles[k] = v;
   return frequentFiles;
 }
 
@@ -971,7 +975,16 @@ const COUNTER_MAX_AGE_MS = 24 * 3600000;
 const COUNTER_MAX_ENTRIES = 50;
 const COUNTER_MAX_FILES = 200;
 
-// `countedDay` is the daily bucket (YYYY-MM-DD, UTC like stats.daily.date) in
+// The daily bucket a moment falls in: the LOCAL calendar day, YYYY-MM-DD.
+// It used to be the UTC day (toISOString), so "session N today" and "Xh Ym
+// today" reset at 10:00 in Sydney and 17:00 in California.
+function localDay(ms = Date.now()) {
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// `countedDay` is the daily bucket (localDay, like stats.daily.date) in
 // which this session last counted toward daily.sessionCount. It replaced a
 // `counted` boolean that never reset, so a session running across midnight
 // was never counted in the new day at all.
@@ -992,7 +1005,7 @@ function normalizeCounter(c, now) {
   // A pre-countedDay entry that was counted is taken as counted today:
   // counting it again right after an upgrade would be the worse error.
   if (typeof c.countedDay !== 'string') {
-    c.countedDay = c.counted ? new Date(now).toISOString().slice(0, 10) : '';
+    c.countedDay = c.counted ? localDay(now) : '';
   }
   delete c.counted;
   c.filesEdited = Array.isArray(c.filesEdited)
@@ -1025,11 +1038,15 @@ function unparkAgents(c, session) {
   delete c.subagentCount;
 }
 
-function pruneCounters(map, keepId, now) {
+// `keepIds` (one id or an array) are never removed: the owner, and the
+// session whose hook is running -- evicting that one re-counted it as a new
+// session on every event.
+function pruneCounters(map, keepIds, now) {
+  const keep = new Set([].concat(keepIds || []));
   for (const id of Object.keys(map)) {
     const c = map[id];
     if (!c || typeof c !== 'object') { delete map[id]; continue; }
-    if (id !== keepId && now - (c.lastSeen || 0) > COUNTER_MAX_AGE_MS) delete map[id];
+    if (!keep.has(id) && now - (c.lastSeen || 0) > COUNTER_MAX_AGE_MS) delete map[id];
   }
   const ids = Object.keys(map);
   if (ids.length <= COUNTER_MAX_ENTRIES) return;
@@ -1042,8 +1059,35 @@ function pruneCounters(map, keepId, now) {
   for (const id of ids.slice(COUNTER_MAX_ENTRIES)) {
     // Never evict parked agents: their SubagentStops would match nothing
     // and their orbitals would be ghosts.
-    if (id !== keepId && !Array.isArray(map[id].activeSubagents)) delete map[id];
+    if (!keep.has(id) && !Array.isArray(map[id].activeSubagents)) delete map[id];
   }
+}
+
+// Fold a session's elapsed time, up to `end`, into the records and today's
+// cumulative total. `creditedMs` remembers how much was already added, so
+// crediting the same session at every turn end and every ownership switch
+// never counts a millisecond twice. Shared by update-state.js and the
+// adapters (which used to credit nothing at all).
+function creditSession(stats, c, end) {
+  if (!c || !c.start || !stats || !stats.records || !stats.daily) return;
+  const dur = end - c.start;
+  if (dur > (stats.records.longestSession || 0)) stats.records.longestSession = dur;
+  const files = Array.isArray(c.filesEdited) ? c.filesEdited.length : 0;
+  if (files > (stats.records.mostFilesEdited || 0)) stats.records.mostFilesEdited = files;
+  const delta = dur - (c.creditedMs || 0);
+  if (delta > 0) {
+    stats.daily.cumulativeMs += delta;
+    c.creditedMs = dur;
+  }
+}
+
+// Where to stop crediting a session that is losing ownership: its own last
+// activity. Crediting it up to "now" -- the moment ANOTHER session took over
+// -- added a session that ended at 18:00 to the next morning's total (a
+// Friday-to-Monday gap read "62h 59m today"). A live window's idle time is
+// still counted, by its own next turn end.
+function creditEndFor(c, now) {
+  return Math.min(now, (c && c.lastSeen) || now);
 }
 
 // -- Parallel Session Classification (pure logic) -------------------------
@@ -1091,6 +1135,9 @@ function pruneTopLevelSessions(registry, now) {
 }
 
 module.exports = {
+  localDay,
+  creditSession,
+  creditEndFor,
   COUNTER_MAX_AGE_MS,
   COUNTER_MAX_ENTRIES,
   COUNTER_MAX_FILES,
