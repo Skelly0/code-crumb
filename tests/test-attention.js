@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const { createSuite, makeTempEnv, cleanup, readJSON } = require('./_harness');
+const { createSuite, makeTempEnv, cleanup, readJSON, runUpdateState, runFakeCodex } = require('./_harness');
 const suite = createSuite();
 const { describe, test } = suite;
 
@@ -104,18 +104,6 @@ describe('renderer -- pickMainSession', () => {
 // -- update-state.js: the fields the policy reads ------------------------
 
 const NODE = process.execPath;
-const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
-
-function runUpdateState(event, inputObj, env) {
-  try {
-    execFileSync(NODE, [UPDATE_STATE, event], {
-      input: typeof inputObj === 'string' ? inputObj : JSON.stringify(inputObj),
-      env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  } catch (e) {
-    if (e.status !== 0 && e.status !== null) throw e;
-  }
-}
 
 const sessionFile = (dir, id) => path.join(dir, `${id}.json`);
 
@@ -291,7 +279,6 @@ describe('update-state -- attention fields', () => {
 // -- adapters: attention for non-Claude editors ---------------------------
 
 const OPENCODE_ADAPTER = path.join(__dirname, '..', 'adapters', 'opencode-adapter.js');
-const CODEX_WRAPPER = path.join(__dirname, '..', 'adapters', 'codex-wrapper.js');
 
 // The wrapper guards main() behind require.main, so requiring it spawns
 // nothing. run.js redirected HOME before loading this file, so shared.js has
@@ -307,52 +294,6 @@ function runAdapter(script, payload, env) {
   } catch (e) {
     if (e.status !== 0 && e.status !== null) throw e;
   }
-}
-
-// A stand-in `codex` on PATH that replays a JSONL fixture through the real
-// wrapper spawn path (the pattern lives in test-adapters.js; copied, not
-// imported). writeSync flushes each line rather than leaving it in a pipe.
-const FAKE_SRC = [
-  "'use strict';",
-  "const fs = require('fs');",
-  "const text = fs.readFileSync(process.env.CODEX_FAKE_FIXTURE, 'utf8');",
-  "for (const line of text.split('\\n')) {",
-  "  if (line.trim()) fs.writeSync(1, line + '\\n');",
-  "}",
-  '',
-].join('\n');
-
-function runFakeCodex(events) {
-  const base = makeTempEnv('codex-thread');
-  const binDir = path.join(base.tmp, 'bin');
-  fs.mkdirSync(binDir, { recursive: true });
-
-  const fixture = path.join(base.tmp, 'fixture.jsonl');
-  fs.writeFileSync(fixture, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
-  fs.writeFileSync(path.join(binDir, 'codex-fake.js'), FAKE_SRC, 'utf8');
-
-  if (process.platform === 'win32') {
-    fs.writeFileSync(path.join(binDir, 'codex.cmd'), '@node "%~dp0codex-fake.js" %*\r\n', 'utf8');
-  } else {
-    const sh = path.join(binDir, 'codex');
-    fs.writeFileSync(sh, '#!/bin/sh\nexec node "$(dirname "$0")/codex-fake.js" "$@"\n', 'utf8');
-    fs.chmodSync(sh, 0o755);
-  }
-
-  const env = { ...base.env, CODEX_FAKE_FIXTURE: fixture };
-  // Windows env keys are case-insensitive; a stray Path AND PATH confuses the child.
-  for (const k of Object.keys(env)) if (/^path$/i.test(k)) delete env[k];
-  env.PATH = binDir + path.delimiter + (process.env.PATH || '');
-  delete env.CLAUDE_SESSION_ID; // the codex thread id owns the session identity
-
-  try {
-    execFileSync(NODE, [CODEX_WRAPPER, 'a prompt'], {
-      env, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  } catch (e) {
-    if (e.status !== 0 && e.status !== null) throw e;
-  }
-  return base;
 }
 
 describe('adapters -- lastPromptAt', () => {

@@ -20,7 +20,7 @@ const { Readable } = require('stream');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
-const { makeTempEnv, cleanup, readJSON } = require('./_harness');
+const { makeTempEnv, cleanup, readJSON, runUpdateState } = require('./_harness');
 
 const ROOT = path.join(__dirname, '..');
 const shared = require('../lib/shared');
@@ -583,10 +583,9 @@ describe('platform -- codex-notify reports stats like the other adapters', () =>
 // -- update-state.js robustness ----------------------------------------------
 
 const UPDATE_STATE = path.join(ROOT, 'update-state.js');
+// Strict: a failing hook throws with its stderr instead of being tolerated.
 function runHook(event, input, env) {
-  execFileSync(process.execPath, [UPDATE_STATE, event], {
-    input, env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  runUpdateState(event, input, env, { strict: true });
 }
 
 describe('platform -- update-state.js catch path does not hijack another session\'s orbital', () => {
@@ -1016,20 +1015,12 @@ describe('platform -- setupCodex installs codex native hooks', () => {
 });
 
 describe('platform -- update-state.js --editor flag', () => {
-  const UPDATE_STATE = path.join(ROOT, 'update-state.js');
-
+  // `args` is the whole argv, event included (or left out on purpose).
   function runHook(args, payload, extraEnv) {
     const base = makeTempEnv('flag-test');
     delete base.env.CLAUDE_SESSION_ID;
     const env = { ...base.env, ...(extraEnv || {}) };
-    try {
-      execFileSync(process.execPath, [UPDATE_STATE, ...args], {
-        input: JSON.stringify(payload), env, timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
+    runUpdateState(null, payload, env, { args });
     return base;
   }
 

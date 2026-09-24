@@ -23,7 +23,7 @@ const { execFileSync, spawn } = require('child_process');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
-const { makeTempEnv, cleanup, readJSON } = require('./_harness');
+const { makeTempEnv, cleanup, readJSON, runUpdateState, runFakeCodex } = require('./_harness');
 
 // -- Helpers ----------------------------------------------------------
 
@@ -43,24 +43,6 @@ function runStdinAdapter(adapterFile, inputObj, env) {
   } catch (e) {
     // Adapters call process.exit(0), which can throw in execFileSync
     // on some Node versions. That's fine as long as the state file was written.
-    if (e.status !== 0 && e.status !== null) throw e;
-  }
-}
-
-const UPDATE_STATE_JS = path.join(__dirname, '..', 'update-state.js');
-
-// Run one Claude Code hook against a temp home. `input` may be an object
-// (JSON encoded) or a raw string, so '' and 'not json' reach the catch path
-// that handles Stop/Notification/lifecycle events with no parsable stdin.
-function runUpdateState(event, input, env, extraArgs = []) {
-  try {
-    execFileSync(NODE, [UPDATE_STATE_JS, event, ...extraArgs], {
-      input: typeof input === 'string' ? input : JSON.stringify(input),
-      env,
-      timeout: 10000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  } catch (e) {
     if (e.status !== 0 && e.status !== null) throw e;
   }
 }
@@ -1592,55 +1574,8 @@ describe('adapters -- codex-wrapper classifyItem (real ThreadEvent schema)', () 
 });
 
 describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
-  const WRAPPER = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
-
-  // Replays a fixture through the wrapper's real spawn path: on Windows the
-  // fake is a .cmd shim, which only starts if the wrapper passes shell:true
-  // (Node refuses to spawn .cmd otherwise), so this also covers the Windows
-  // spawn fix.
-  const FAKE_SRC = [
-    "'use strict';",
-    "const fs = require('fs');",
-    "const text = fs.readFileSync(process.env.CODEX_FAKE_FIXTURE, 'utf8');",
-    "for (const line of text.split('\\n')) {",
-    "  if (line.trim()) process.stdout.write(line + '\\n');",
-    "}",
-    '',
-  ].join('\n');
-
-  function runFakeCodex(events, seedStats, extraArgs = []) {
-    const base = makeTempEnv('codex-thread');
-    const binDir = path.join(base.tmp, 'bin');
-    fs.mkdirSync(binDir, { recursive: true });
-    if (seedStats) fs.writeFileSync(base.statsFile, JSON.stringify(seedStats), 'utf8');
-
-    const fixture = path.join(base.tmp, 'fixture.jsonl');
-    fs.writeFileSync(fixture, events.map(e => JSON.stringify(e)).join('\n') + '\n', 'utf8');
-    fs.writeFileSync(path.join(binDir, 'codex-fake.js'), FAKE_SRC, 'utf8');
-
-    if (process.platform === 'win32') {
-      fs.writeFileSync(path.join(binDir, 'codex.cmd'), '@node "%~dp0codex-fake.js" %*\r\n', 'utf8');
-    } else {
-      const sh = path.join(binDir, 'codex');
-      fs.writeFileSync(sh, '#!/bin/sh\nexec node "$(dirname "$0")/codex-fake.js" "$@"\n', 'utf8');
-      fs.chmodSync(sh, 0o755);
-    }
-
-    const env = { ...base.env, CODEX_FAKE_FIXTURE: fixture };
-    // Windows env keys are case-insensitive; a stray Path AND PATH confuses the child.
-    for (const k of Object.keys(env)) if (/^path$/i.test(k)) delete env[k];
-    env.PATH = binDir + path.delimiter + (process.env.PATH || '');
-    delete env.CLAUDE_SESSION_ID; // the codex thread id owns the session identity
-
-    try {
-      execFileSync(NODE, [WRAPPER, ...extraArgs, 'a prompt'], {
-        env, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
-    return base;
-  }
+  // runFakeCodex (tests/_harness.js) replays a fixture through the wrapper's
+  // real spawn path, including the Windows .cmd shim.
 
   test('a running npm test shows the testing face', () => {
     const { tmp, stateFile } = runFakeCodex([
@@ -2169,17 +2104,7 @@ describe('bug fix regressions', () => {
     // 'thinking' after IDLE_TIMEOUT because 'waiting' is not in the exclusion
     // list. 'idle' is in the exclusion list and is semantically correct.
     const { tmp, stateFile, env } = makeTempEnv('ss-idle-1');
-    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
-    try {
-      execFileSync(NODE, [UPDATE_STATE, 'SessionStart'], {
-        input: JSON.stringify({ session_id: 'ss-idle-1' }),
-        env,
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
+    runUpdateState('SessionStart', { session_id: 'ss-idle-1' }, env);
     const state = readJSON(stateFile);
     assert.strictEqual(state.state, 'idle',
       `SessionStart should write 'idle', got '${state.state}'`);
@@ -2257,7 +2182,6 @@ describe('bug fix regressions', () => {
     // set fallbackSessionId = existing.sessionId, then compared them — always equal.
     // A subagent Stop with empty stdin would overwrite the main session's global state.
     const { tmp, stateFile, env } = makeTempEnv('sub-iso-1');
-    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
 
     // Pre-seed the global state file with an active main session
     fs.writeFileSync(stateFile, JSON.stringify({
@@ -2269,16 +2193,7 @@ describe('bug fix regressions', () => {
     // Run a Stop event with non-JSON stdin so it hits the catch block.
     // Use a different session ID (from env) than what's in the state file.
     const subEnv = { ...env, CLAUDE_SESSION_ID: 'sub-iso-1' };
-    try {
-      execFileSync(NODE, [UPDATE_STATE, 'Stop'], {
-        input: 'not valid json',
-        env: subEnv,
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
+    runUpdateState('Stop', 'not valid json', subEnv);
 
     // The global state file should still belong to the main session —
     // the subagent's Stop should NOT have overwritten it.
@@ -2294,7 +2209,6 @@ describe('bug fix regressions', () => {
     // Complementary test: when the fallback session ID matches the existing file,
     // it SHOULD write to the global state file.
     const { tmp, stateFile, env } = makeTempEnv('fallback-match-1');
-    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
 
     // Pre-seed with same session ID as the env will provide
     fs.writeFileSync(stateFile, JSON.stringify({
@@ -2303,16 +2217,7 @@ describe('bug fix regressions', () => {
       timestamp: Date.now(),
     }), 'utf8');
 
-    try {
-      execFileSync(NODE, [UPDATE_STATE, 'Stop'], {
-        input: 'not valid json',
-        env,
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
+    runUpdateState('Stop', 'not valid json', env);
 
     // The global state should have been updated to 'responding' (Stop event)
     const state = readJSON(stateFile);
@@ -2325,18 +2230,8 @@ describe('bug fix regressions', () => {
     // Bug: catch-block writes lacked modelName, so a stale wrong modelName
     // from a previous session could persist until a valid JSON event corrected it.
     const { tmp, stateFile, env } = makeTempEnv('model-fallback-1');
-    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
 
-    try {
-      execFileSync(NODE, [UPDATE_STATE, 'PreToolUse'], {
-        input: 'not valid json',
-        env,
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
+    runUpdateState('PreToolUse', 'not valid json', env);
 
     const state = readJSON(stateFile);
     assert.strictEqual(state.modelName, 'claude',
@@ -2346,19 +2241,9 @@ describe('bug fix regressions', () => {
 
   test('update-state.js fallback catch block respects CODE_CRUMB_MODEL env', () => {
     const { tmp, stateFile, env } = makeTempEnv('model-env-1');
-    const UPDATE_STATE = path.join(__dirname, '..', 'update-state.js');
     env.CODE_CRUMB_MODEL = 'opencode';
 
-    try {
-      execFileSync(NODE, [UPDATE_STATE, 'PreToolUse'], {
-        input: 'not valid json',
-        env,
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      if (e.status !== 0 && e.status !== null) throw e;
-    }
+    runUpdateState('PreToolUse', 'not valid json', env);
 
     const state = readJSON(stateFile);
     assert.strictEqual(state.modelName, 'opencode',
@@ -3408,7 +3293,7 @@ describe('adapters -- editor provenance field', () => {
     delete flag.env.CODE_CRUMB_EDITOR;
     runUpdateState('PreToolUse', {
       session_id: 'ed-flag', tool_name: 'Read', tool_input: { file_path: 'a.js' },
-    }, flag.env, ['--editor', 'opencode']);
+    }, flag.env, { args: ['--editor', 'opencode'] });
     assert.strictEqual(readJSON(flag.stateFile).editor, 'opencode', '--editor <name>');
     cleanup(flag.tmp);
 
@@ -3416,7 +3301,7 @@ describe('adapters -- editor provenance field', () => {
     env.env.CODE_CRUMB_EDITOR = 'foo';
     runUpdateState('PreToolUse', {
       session_id: 'ed-env', tool_name: 'Read', tool_input: { file_path: 'a.js' },
-    }, env.env, ['--editor', 'opencode']);
+    }, env.env, { args: ['--editor', 'opencode'] });
     assert.strictEqual(readJSON(env.stateFile).editor, 'foo', 'the env var outranks the flag');
     cleanup(env.tmp);
   });

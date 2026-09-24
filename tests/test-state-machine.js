@@ -53,26 +53,10 @@ const { describe, test } = suite;
 
 const fsMod = require('fs');
 const pathMod = require('path');
-const { execFileSync } = require('child_process');
-const { makeTempEnv, cleanup, readJSON } = require('./_harness');
+const { makeTempEnv, cleanup, readJSON, runUpdateState, UPDATE_STATE } = require('./_harness');
 
-const UPDATE_STATE = pathMod.join(__dirname, '..', 'update-state.js');
-
-// Raw stdin. '' is not JSON, so the hook falls into its catch path -- that is
-// the only way to reach the fallback handlers.
-function runUpdateStateRaw(event, input, env) {
-  try {
-    execFileSync(process.execPath, [UPDATE_STATE, event], {
-      input, env, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  } catch (e) {
-    if (e.status !== 0 && e.status !== null) throw e;
-  }
-}
-
-function runUpdateState(event, inputObj, env) {
-  runUpdateStateRaw(event, JSON.stringify(inputObj), env);
-}
+// runUpdateState passes a string to stdin raw: '' is not JSON, so the hook
+// falls into its catch path -- the only way to reach the fallback handlers.
 
 // Stats blob for an owner session conducting one subagent.
 function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
@@ -2384,7 +2368,7 @@ describe('update-state.js -- fallback SubagentStart creates orbital (Bug E)', ()
   test('unparseable stdin still writes a spawning orbital under the parent', () => {
     const { tmp, sessionsDir, env } = makeTempEnv('test-session');
     try {
-      runUpdateStateRaw('SubagentStart', '', env);
+      runUpdateState('SubagentStart', '', env);
 
       const files = fsMod.readdirSync(sessionsDir)
         .filter(f => f.startsWith('test-session-sub-') && f.endsWith('.json'));
@@ -3245,7 +3229,7 @@ describe('update-state.js -- new hook event handlers', () => {
     test(`empty stdin: ${event} -> ${state} / ${detail}`, () => {
       const { tmp, stateFile, env } = makeTempEnv('fb-' + event);
       try {
-        runUpdateStateRaw(event, '', env);
+        runUpdateState(event, '', env);
         const st = readJSON(stateFile);
         assert.strictEqual(st.state, state);
         assert.strictEqual(st.detail, detail);
