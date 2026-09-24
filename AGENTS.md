@@ -13,4 +13,4 @@ Quick reference:
 - `npm test` — run the suite (isolated from your real `~/.code-crumb*` files)
 - `npm start` + `npm run demo` — see every face state
 - Hook code (`update-state.js`, `adapters/`) must never throw and must finish in ~50ms
-- Never write state files directly; use `writeJsonAtomic` from `shared.js`
+- Never write state files directly; use `writeJsonAtomic` from `lib/shared.js`

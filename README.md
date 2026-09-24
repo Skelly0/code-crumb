@@ -98,8 +98,8 @@ node code-crumb/launch.js --editor openclaw            # OpenClaw/Pi
 ### Try the demo
 
 ```bash
-node code-crumb/demo.js          # Cycles through all 23 states
-node code-crumb/grid-demo.js     # Orbital subagent constellation
+node code-crumb/demo/single.js    # Cycles through all 23 states
+node code-crumb/demo/orbital.js   # Orbital subagent constellation
 ```
 
 ## Features
@@ -408,6 +408,10 @@ Or: `cd code-crumb && npm link`
 > [!WARNING]
 > Legacy `cmd.exe` does not support ANSI escape codes and will not render the face. Use Windows Terminal, VS Code terminal, or any modern terminal emulator instead.
 
+## Project Layout
+
+The root holds only what gets run by path. Your installed hooks point at `update-state.js` here, and the shell wrappers point at `launch.js`.
+
 <details>
 <summary>Project files reference</summary>
 
@@ -417,15 +421,16 @@ Or: `cd code-crumb && npm link`
 | `update-state.js` | Hook script — maps tool events to face states |
 | `launch.js` | Auto-starts renderer and launches editor |
 | `setup.js` | Installs hooks for any supported editor |
-| `face.js` | ClaudeFace class — state machine and rendering |
-| `grid.js` | MiniFace + OrbitalSystem — subagent orbits |
-| `animations.js` | Eye/mouth animation functions |
-| `particles.js` | ParticleSystem — 16 visual effect styles |
-| `themes.js` | ANSI codes, palettes, color math, thought bubbles |
-| `state-machine.js` | Tool mapping, error detection, streaks |
-| `shared.js` | Shared constants, paths, utilities |
-| `transition.js` | SwapTransition — dissolve/swap/materialize animations |
-| `accessories.js` | Accessory definitions (hats, glasses, ears) and rendering |
+| `code-crumb.sh` / `code-crumb.cmd` | Shell wrappers around `launch.js` |
+| `lib/face.js` | ClaudeFace class — state machine and rendering |
+| `lib/grid.js` | MiniFace + OrbitalSystem — subagent orbits |
+| `lib/animations.js` | Eye/mouth animation functions |
+| `lib/particles.js` | ParticleSystem — 16 visual effect styles |
+| `lib/themes.js` | ANSI codes, palettes, color math, thought bubbles |
+| `lib/state-machine.js` | Tool mapping, error detection, streaks |
+| `lib/shared.js` | Shared constants, paths, utilities |
+| `lib/transition.js` | SwapTransition — dissolve/swap/materialize animations |
+| `lib/accessories.js` | Accessory definitions (hats, glasses, ears) and rendering |
 | `adapters/base-adapter.js` | Base adapter class with shared functionality |
 | `adapters/codex-wrapper.js` | Wraps `codex exec --json` for tool-level events |
 | `adapters/codex-notify.js` | Handles Codex's legacy `notify` config events |
@@ -434,10 +439,9 @@ Or: `cd code-crumb && npm link`
 | `adapters/openclaw-adapter.js` | OpenClaw/Pi event adapter |
 | `adapters/engmux-adapter.js` | engmux agent dispatcher event adapter |
 | `hooks/hooks.json` | Hook registrations used by the Claude Code plugin |
-| `code-crumb.sh` / `code-crumb.cmd` | Shell wrappers around `launch.js` |
-| `demo.js` | Cycles through all 23 states |
-| `grid-demo.js` | Orbital subagent demo |
-| `test.js`, `tests/` | Test runner and suite (`npm test`) |
+| `demo/single.js` | Cycles through all 23 states (`npm run demo`) |
+| `demo/orbital.js` | Orbital subagent demo (`npm run demo:orbital`) |
+| `tests/run.js`, `tests/` | Test runner and suite (`npm test`) |
 
 </details>
 

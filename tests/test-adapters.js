@@ -94,7 +94,7 @@ function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
   };
 }
 
-// Run `fn` with the shared STATE_FILE (which test.js has already redirected
+// Run `fn` with the shared STATE_FILE (which run.js has already redirected
 // into the throwaway home) holding `data`, then put back whatever was there.
 // For in-process readers -- shared.js fixes its paths at first require, so a
 // per-test temp dir is only usable by subprocesses.

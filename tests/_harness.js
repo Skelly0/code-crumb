@@ -4,7 +4,7 @@
 // |  Test Harness -- shared describe/test runner for tests/*.js    |
 // |                                                                |
 // |  Every test file calls createSuite() for its own counters and  |
-// |  exports the suite; test.js awaits suite.done() so async tests |
+// |  exports the suite; run.js awaits suite.done() so async tests  |
 // |  (test.async, or a test that returns a promise) are counted    |
 // |  only after they settle.                                       |
 // |                                                                |

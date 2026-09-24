@@ -294,7 +294,7 @@ const OPENCODE_ADAPTER = path.join(__dirname, '..', 'adapters', 'opencode-adapte
 const CODEX_WRAPPER = path.join(__dirname, '..', 'adapters', 'codex-wrapper.js');
 
 // The wrapper guards main() behind require.main, so requiring it spawns
-// nothing. test.js redirected HOME before loading this file, so shared.js has
+// nothing. run.js redirected HOME before loading this file, so shared.js has
 // already fixed SESSIONS_DIR inside the runner's throwaway home.
 const wrapper = require('../adapters/codex-wrapper');
 const { SESSIONS_DIR, safeFilename } = require('../lib/shared');
