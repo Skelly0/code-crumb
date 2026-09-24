@@ -3937,6 +3937,28 @@ describe('grid.js -- recycled-PID purge integration', () => {
     assert.strictEqual(face.isStale(), false);
   });
 
+  // A child's pid is its parent's editor: alive, that proves nothing about
+  // the agent. A missed SubagentStop left a ghost for the editor's lifetime.
+  test('isStale: a child\'s pid protects only for CHILD_ORPHAN_TIMEOUT', () => {
+    const { CHILD_ORPHAN_TIMEOUT } = require('../grid');
+    _pidStartCache.clear();
+    const mk = (quietMs) => {
+      const f = new MiniFace('p-agent-x');
+      f.pid = process.pid;
+      f.state = 'executing';
+      f.parentSession = 'p';
+      f.parentAlive = false;
+      f.lastUpdate = Date.now() - quietMs;
+      _pidStartCache.set(process.pid, { value: f.lastUpdate - 3600 * 1000, resolvedAt: Date.now() });
+      return f;
+    };
+    assert.strictEqual(mk(5 * 60 * 1000).isStale(), false, 'a quiet agent inside the window is kept');
+    assert.strictEqual(mk(CHILD_ORPHAN_TIMEOUT + 60000).isStale(), true, 'a ghost past it is not');
+    const top = mk(CHILD_ORPHAN_TIMEOUT + 60000);
+    top.parentSession = null;
+    assert.strictEqual(top.isStale(), false, 'a top-level session keeps its editor\'s protection');
+  });
+
   test('loadSessions purges a stale file whose pid was recycled', () => {
     const fs = require('fs');
     const pathMod = require('path');
@@ -3973,9 +3995,12 @@ describe('grid.js -- recycled-PID purge integration', () => {
 
   test('source: purge paths use isOwnedByLiveProcess, not bare isProcessAlive', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'grid.js'), 'utf8');
-    assert.ok(src.includes('isOwnedByLiveProcess(this.pid, this.lastUpdate)'), 'isStale gated');
-    assert.ok(src.includes('isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)'), 'face-pid purge gated');
-    assert.ok(src.includes('isOwnedByLiveProcess(face.pid, face.lastUpdate)'), 'keep-alive gated');
+    // Every site goes through pidProtects, which is isOwnedByLiveProcess plus
+    // the child cap (round 3).
+    assert.ok(/function pidProtects[\s\S]*?isOwnedByLiveProcess\(pid, lastWriteMs\)/.test(src), 'pidProtects gated');
+    assert.ok(src.includes('pidProtects(this.pid, this.lastUpdate'), 'isStale gated');
+    assert.ok(src.includes('pidProtects(knownFace.pid, knownFace.lastUpdate'), 'face-pid purge gated');
+    assert.ok(src.includes('pidProtects(face.pid, face.lastUpdate'), 'keep-alive gated');
     assert.ok(!src.includes('knownFace.pid && isProcessAlive(knownFace.pid)'), 'old face-pid call removed');
   });
 });
@@ -4412,6 +4437,136 @@ describe('grid.js -- third review pass: session list and labels', () => {
     orbital.faces.set('obj', new MiniFace('obj'));
     orbital.faces.get('obj').updateFromFile({ state: 'error', detail: { code: 1 }, timestamp: 3 });
     assert.doesNotThrow(() => orbital.render(120, 60, { row: 20, col: 40, w: 30, h: 12, centerX: 55, centerY: 26 }, null));
+  });
+});
+
+// -- Round 3: hostile session files (fuzz) ----------------------------------
+// Session files are written by any adapter, and README documents model_name
+// as a free-form adapter input. Each of these crashed the renderer or blanked
+// the ring before.
+
+describe('grid.js -- round 3: hostile session files', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const withDir = (files, fn) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-hostile-'));
+    try {
+      for (const [name, body] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), body);
+      const orbital = new OrbitalSystem();
+      orbital._sessionsDir = dir;
+      return fn(orbital, dir);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  };
+  const now = Date.now();
+
+  test('non-string text fields are dropped, and labelling and rendering survive', () => {
+    withDir({
+      'a.json': JSON.stringify({ session_id: 'a', state: 'coding', timestamp: now,
+        modelName: { provider: 'x', id: 'y' }, cwd: 5, taskDescription: ['t'], teammateName: {}, gitBranch: null }),
+      'b.json': JSON.stringify({ session_id: 'b', state: 'reading', timestamp: now, cwd: '/r/b' }),
+    }, (orbital) => {
+      orbital.loadSessions(null);
+      const a = orbital.faces.get('a');
+      assert.ok(a, 'the session still loads');
+      for (const k of ['modelName', 'cwd', 'taskDescription', 'teammateName', 'gitBranch']) {
+        assert.ok(a[k] == null || typeof a[k] === 'string', `${k} is text or unset (${typeof a[k]})`);
+      }
+      assert.doesNotThrow(() => orbital._assignLabels());
+      assert.doesNotThrow(() => a.update && a.update(16));
+      assert.doesNotThrow(() => renderSessionList(120, 40, [...orbital.faces.values()], PALETTES[0].themes));
+    });
+  });
+
+  test.async('a file holding null, a number or an array is skipped, sync and async', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-hostile-'));
+    try {
+      for (const [name, body] of Object.entries({
+        'n.json': 'null', 'k.json': '5', 'arr.json': '[1,2]',
+        'ok.json': JSON.stringify({ session_id: 'ok', state: 'idle', timestamp: now }),
+      })) fs.writeFileSync(path.join(dir, name), body);
+      const orbital = new OrbitalSystem();
+      orbital._sessionsDir = dir;
+      assert.doesNotThrow(() => orbital.loadSessions(null));
+      assert.deepStrictEqual([...orbital.faces.keys()], ['ok']);
+      // The async pass applies its results inside an fs callback, where a
+      // throw is uncaught: catch it here instead of letting it kill the run.
+      let thrown = null;
+      const onErr = (e) => { thrown = e; };
+      process.once('uncaughtException', onErr);
+      orbital.faces.clear();
+      orbital.loadSessionsAsync(null);
+      const until = Date.now() + 3000;
+      while (orbital._loadingInProgress && Date.now() < until) await new Promise(r => setTimeout(r, 10));
+      process.removeListener('uncaughtException', onErr);
+      assert.strictEqual(thrown, null, `the async pass threw: ${thrown && thrown.message}`);
+      assert.ok(!orbital._loadingInProgress, 'the async pass finished');
+      assert.deepStrictEqual([...orbital.faces.keys()], ['ok']);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('an object session_id keys by file name, a numeric one by its string', () => {
+    withDir({
+      'x.json': JSON.stringify({ session_id: { a: 1 }, state: 'idle', timestamp: now }),
+      'y.json': JSON.stringify({ session_id: 77, state: 'idle', timestamp: now }),
+    }, (orbital) => {
+      orbital.loadSessions(null);
+      assert.deepStrictEqual([...orbital.faces.keys()].sort(), ['77', 'x']);
+      orbital.loadSessions(null);
+      assert.strictEqual(orbital.faces.size, 2, 'the same faces, not fresh ones every load');
+    });
+  });
+
+  test('a state outside the table, or an inherited name, reads as idle', () => {
+    for (const bad of ['__proto__', 'constructor', 'toString', 'nonsense', 7]) {
+      const f = new MiniFace('s');
+      f.updateFromFile({ state: bad, timestamp: now }, now);
+      assert.strictEqual(f.state, 'idle', String(bad));
+    }
+    const { readState } = require('../renderer');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-rs-'));
+    try {
+      const fp = path.join(tmp, 's.json');
+      fs.writeFileSync(fp, JSON.stringify({ state: 'constructor', modelName: { x: 1 }, cwd: 'a\u001b[2Jb', timestamp: now }));
+      const r = readState(fp);
+      assert.strictEqual(r.state, 'idle');
+      assert.strictEqual(r.modelName, '');
+      assert.ok(!r.cwd.includes('\u001b'), 'no raw ESC reaches the terminal');
+      fs.writeFileSync(fp, 'null');
+      assert.strictEqual(readState(fp).state, 'idle');
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+  });
+});
+
+describe('grid.js -- round 3: live-renderer findings', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const RSRC = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
+
+  // Below the list's minimum it draws nothing: `l` opened an invisible list
+  // that swallowed the next key (an Enter silently pinned).
+  test('the list opens, and is offered, only where it can draw', () => {
+    const { sessionListFits, MIN_SESSION_LIST_COLS, MIN_SESSION_LIST_ROWS } = require('../grid');
+    const { fitKeyHints } = require('../face');
+    assert.strictEqual(sessionListFits(MIN_SESSION_LIST_COLS, MIN_SESSION_LIST_ROWS), true);
+    assert.strictEqual(sessionListFits(MIN_SESSION_LIST_COLS - 1, 40), false);
+    assert.strictEqual(sessionListFits(120, MIN_SESSION_LIST_ROWS - 1), false);
+    assert.ok(fitKeyHints(200).some(h => h[0] === 'l'));
+    assert.ok(!fitKeyHints(200, ['l']).some(h => h[0] === 'l'), 'the hint bar drops it');
+    assert.ok(/key === 'l'\) \{[\s\S]{0,200}?if \(sessionListFits\(/.test(RSRC), 'the key is gated');
+    assert.ok(/if \(face\.showSessionList && !sessionListFits\(/.test(RSRC), 'a resize below it closes it');
+  });
+
+  // Caffeine history belonged to the session that left: the incoming face
+  // went "hyperdrive!" 67ms after arriving, having done nothing.
+  test('a swap clears the caffeine history after its own forceState', () => {
+    assert.ok(/face\.forceState\(newData\.state[\s\S]{0,600}?face\.stateChangeTimes = \[\];/.test(RSRC));
+  });
+
+  // A dead editor's agents are not running: counting them lifted the rescued
+  // face back to conducting, round and round every ~12s.
+  test('a dead editor\'s children do not hold the face at conducting', () => {
+    assert.ok(/const liveChildren = \(minimal \|\| editorDead\) \? 0 : orbital\.liveChildCount\(\);/.test(RSRC));
   });
 });
 

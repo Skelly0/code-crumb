@@ -418,7 +418,7 @@ describe('adapters -- lastPromptAt', () => {
     // A unique thread id per run: the wrapper is a module, so its lastPromptAt
     // and sessionId are shared with any other in-process user of it.
     const threadId = `att-wrap-${Date.now()}`;
-    const file = path.join(SESSIONS_DIR, safeFilename(`codex-${threadId}`) + '.json');
+    const file = path.join(SESSIONS_DIR, safeFilename(threadId) + '.json');
     const spin = () => { const until = Date.now() + 3; while (Date.now() < until) { /* 3ms */ } };
 
     wrapper.handleEvent({ type: 'thread.started', thread_id: threadId });
@@ -456,7 +456,7 @@ describe('adapters -- lastPromptAt', () => {
       { type: 'turn.completed' },
     ]);
     try {
-      const s = readJSON(sessionFile(t.sessionsDir, 'codex-t1'));
+      const s = readJSON(sessionFile(t.sessionsDir, 't1'));
       assert.ok(s.lastPromptAt > 0, 'stamped');
       assert.ok(s.lastPromptAt <= s.timestamp, 'never later than the write carrying it');
       assert.strictEqual(s.stopped, true, 'the run ended stopped');
@@ -827,7 +827,7 @@ describe('renderer -- source invariants of the session-file main', () => {
   });
 
   test('a fresh turnEnded write is shown as responding before the reward cascade', () => {
-    assert.ok(rendererSrc.includes("stateData.state === 'idle' && stateData.stopped && ts > lastAppliedTimestamp"));
+    assert.ok(rendererSrc.includes("stateData.state === 'idle' && stateData.stopped && isNewerWrite(ts, lastAppliedTimestamp, now)"));
   });
 
   test('promotion resolves by session id and pins; the policy does the swap', () => {
@@ -1430,7 +1430,8 @@ describe('renderer -- third review pass', () => {
   });
 
   test('source: the main row\'s dot reads the real SessionEnd flag, not a turn end', () => {
-    assert.ok(rendererSrc.includes('stopped: !!(mainFace && mainFace.stopped),'));
+    assert.ok(rendererSrc.includes('stopped: lastSessionEnded || !!(mainFace && mainFace.stopped),'));
+    assert.ok(rendererSrc.includes('sessionEnded: !!data.stopped,'), 'from the file\'s own SessionEnd flag, never the folded turn end');
     assert.ok(!rendererSrc.includes('stopped: lastStopped,'));
   });
 });
@@ -1577,8 +1578,58 @@ describe('round 3 -- cross-writer contract', () => {
     } finally { cleanup(t.tmp); }
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
     assert.ok(/const sessionActive = !lastStopped && !lastTurnOver && !editorDead;/.test(src));
-    assert.ok(/&& !stateData\.stopped\s*\n\s*&& !ACTIVE_WORK_STATES\.has\(face\.state\)/.test(src),
-      'a finished turn never re-injects its tool');
+    assert.ok(/&& !stateData\.stopped\s*\n\s*&& stateData\.workSince > prevAppliedTs\s*\n\s*&& !ACTIVE_WORK_STATES\.has\(face\.state\)/.test(src),
+      'a finished turn never re-injects its tool, and an applied Pre is never replayed');
+  });
+
+  // One write stamped in the future (a clock stepping back) froze the face:
+  // nothing afterwards was "newer" until the wall clock caught up.
+  test('a write from the future does not freeze the face', () => {
+    const { isNewerWrite, noteNewWrite } = require('../renderer');
+    const now = 1_000_000_000_000;
+    assert.strictEqual(isNewerWrite(now + 5, now, now), true, 'newer is newer');
+    assert.strictEqual(isNewerWrite(now - 5, now, now), false, 'an out-of-order older write is not');
+    const future = now + 3600000;
+    assert.strictEqual(isNewerWrite(future, future, now), false, 're-reading the same write is not new');
+    assert.strictEqual(isNewerWrite(now + 1000, future, now), true, 'after a future write, a real one is new');
+    assert.strictEqual(isNewerWrite(0, future, now), false, 'an unstamped file never is');
+    assert.strictEqual(isNewerWrite(now + 30000, now + 40000, now), false, 'small skew keeps the ordering');
+    assert.strictEqual(noteNewWrite(now + 1000, future, now, 7), now, 'and the write clock moves');
+  });
+
+  // The Post carries the Pre's timestamp so the renderer injects the work
+  // state only when it never applied that write.
+  test('a PostToolUse names its PreToolUse write by timestamp', () => {
+    const t = makeTempEnv('ws-1');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'ws-1', prompt: 'x' }, t.env);
+      runUpdateState('PreToolUse', { session_id: 'ws-1', tool_name: 'Bash', tool_input: { command: 'npm test' } }, t.env);
+      const pre = readJSON(sessionFile(t.sessionsDir, 'ws-1'));
+      runUpdateState('PostToolUse', { session_id: 'ws-1', tool_name: 'Bash', tool_input: { command: 'npm test' },
+        tool_response: { stdout: '3 passed' } }, t.env);
+      const post = readJSON(sessionFile(t.sessionsDir, 'ws-1'));
+      assert.strictEqual(post.workState, 'testing');
+      assert.strictEqual(post.workSince, pre.timestamp);
+      // A Task finishing after its SubagentStop: the file holds the reward,
+      // not the Pre, so there is nothing to name (and nothing to replay).
+      runUpdateState('PostToolUse', { session_id: 'ws-1', tool_name: 'Bash', tool_input: { command: 'npm test' },
+        tool_response: { stdout: '3 passed' } }, t.env);
+      assert.ok(!readJSON(sessionFile(t.sessionsDir, 'ws-1')).workSince, 'no Pre in the file, no workSince');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('the global file keeps the model when ownership comes back', () => {
+    const t = makeTempEnv('gm-a');
+    try {
+      runUpdateState('SessionStart', { session_id: 'gm-a', source: 'startup', model: 'claude-sonnet-5' }, t.env);
+      assert.strictEqual(readJSON(t.stateFile).model, 'Sonnet');
+      runUpdateState('SessionStart', { session_id: 'gm-b', source: 'startup' }, t.env);   // takes the global file
+      runUpdateState('SessionEnd', { session_id: 'gm-b' }, t.env);                        // and releases it
+      runUpdateState('PreToolUse', { session_id: 'gm-a', tool_name: 'Read', tool_input: { file_path: 'a.js' } }, t.env);
+      const g = readJSON(t.stateFile);
+      assert.strictEqual(g.sessionId, 'gm-a');
+      assert.strictEqual(g.model, 'Sonnet', 'tmux mode shows the model again');
+    } finally { cleanup(t.tmp); }
   });
 
   test('setup registers the codex Interrupt and PostCompact hooks, and uninstall finds them', () => {

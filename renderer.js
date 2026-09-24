@@ -18,12 +18,12 @@ const {
   COMPLETION_LINGER,
   IDLE_THOUGHTS, THINKING_THOUGHTS, COMPLETION_THOUGHTS, STATE_THOUGHTS,
   PALETTES, PALETTE_NAMES, normalizePaletteIndex,
-  setNoColor, isNoColor,
+  setNoColor, isNoColor, knownState,
 } = require('./themes');
 const { mouths, eyes, gridMouths } = require('./animations');
 const { ParticleSystem } = require('./particles');
 const { ClaudeFace } = require('./face');
-const { MiniFace, OrbitalSystem, renderSessionList, orderSessionList, listNavigableIds, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartStatus } = require('./grid');
+const { MiniFace, OrbitalSystem, renderSessionList, orderSessionList, listNavigableIds, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartStatus, sessionListFits } = require('./grid');
 const { SwapTransition } = require('./transition');
 
 // -- Config --------------------------------------------------------
@@ -159,7 +159,18 @@ function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState,
 // Returns the stamp to keep. 0 means "no write seen yet" -- callers treat that
 // as fresh rather than infinitely stale.
 function noteNewWrite(ts, lastTs, now, lastAt) {
-  return ts > lastTs ? now : lastAt;
+  return isNewerWrite(ts, lastTs, now) ? now : lastAt;
+}
+
+// Whether a write is newer than the last one applied. Normally its timestamp
+// must be greater -- parallel hooks can land out of order, and the older one
+// must not overwrite the newer. But a timestamp from the future (a clock that
+// stepped back: NTP, a resumed VM) froze the face: nothing written afterwards
+// was "newer" until the wall clock caught up, possibly hours. Once the last
+// applied write is from the future, any write with a different stamp is new.
+const FUTURE_SLACK_MS = 60000;
+function isNewerWrite(ts, lastTs, now = Date.now()) {
+  return ts > lastTs || (lastTs > now + FUTURE_SLACK_MS && ts !== lastTs && ts > 0);
 }
 
 // -- Main session policy ---------------------------------------------
@@ -345,13 +356,17 @@ function readState(filePath = STATE_FILE) {
     const raw = fs.readFileSync(filePath, 'utf8').trim();
     if (!raw) return { state: 'idle', detail: '' };
     const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return { state: 'idle', detail: '' };
+    // Text fields are one-line strings, whatever the file holds (see
+    // MiniFace.updateFromFile); a state outside the table is idle.
+    const text = (v) => detailText(typeof v === 'string' ? v : '');
     return {
-      state: data.state || 'idle',
+      state: knownState(data.state),
       detail: detailText(data.detail),
-      timestamp: data.timestamp || 0,
-      sessionId: data.sessionId || data.session_id || '',
-      modelName: data.modelName || '',
-      model: data.model || '',
+      timestamp: typeof data.timestamp === 'number' ? data.timestamp : 0,
+      sessionId: text(data.sessionId) || text(data.session_id),
+      modelName: text(data.modelName),
+      model: text(data.model),
       toolCalls: data.toolCalls || 0,
       filesEdited: data.filesEdited || 0,
       sessionStart: data.sessionStart || 0,
@@ -363,21 +378,25 @@ function readState(filePath = STATE_FILE) {
       diffInfo: data.diffInfo || null,
       dailySessions: data.dailySessions || 0,
       dailyCumulativeMs: data.dailyCumulativeMs || 0,
-      frequentFiles: data.frequentFiles || {},
+      frequentFiles: (data.frequentFiles && typeof data.frequentFiles === 'object'
+        && !Array.isArray(data.frequentFiles)) ? data.frequentFiles : {},
       stopped: !!(data.stopped || data.turnEnded),
+      // The session itself is over (SessionEnd), not just its turn.
+      sessionEnded: !!data.stopped,
       // The turn is over but the face is one the rescue would replace (a
       // wait, a /compact between turns): not active, never rescued.
       turnOver: !!data.turnOver && !(data.stopped || data.turnEnded),
-      cwd: data.cwd || null,
+      cwd: text(data.cwd) || null,
       isWorktree: data.isWorktree || false,
-      gitBranch: data.gitBranch || null,
+      gitBranch: text(data.gitBranch) || null,
       commitCount: data.commitCount || 0,
       isSessionStart: data.isSessionStart || false,
-      workState: data.workState || null,
+      workState: data.workState ? knownState(data.workState, null) : null,
       workDetail: detailText(data.workDetail),
-      pid: data.pid || 0,
-      editor: data.editor || '',
-      lastPromptAt: data.lastPromptAt || 0,
+      workSince: typeof data.workSince === 'number' ? data.workSince : 0,
+      pid: Number.isInteger(data.pid) && data.pid > 0 ? data.pid : 0,
+      editor: text(data.editor),
+      lastPromptAt: typeof data.lastPromptAt === 'number' ? data.lastPromptAt : 0,
     };
   } catch {
     return { state: 'idle', detail: '' };
@@ -446,6 +465,7 @@ function runUnifiedMode() {
   let lastMtime = 0;
   let lastStopped = false;    // Track if Stop hook has fired (turn ended)
   let lastTurnOver = false;   // Turn over, but on a face that is not rescued (see readState)
+  let lastSessionEnded = false; // The main's file says SessionEnd (the list's ended marker)
   let lastForceReadTime = 0;  // Track periodic forced re-reads (bypasses mtime race)
   let lastEditorPid = 0;      // Validated (armed) PID of the editor process
   let candidatePid = 0;       // PID from the latest state write, pending validation
@@ -479,6 +499,7 @@ function runUnifiedMode() {
     lastAppliedTimestamp = 0;
     lastStopped = false;
     lastTurnOver = false;
+    lastSessionEnded = false;
     editorDead = false;
     lastEditorPid = 0;
     candidatePid = 0;
@@ -594,7 +615,8 @@ function runUnifiedMode() {
           // the startup window closes and is shown after all.
           lastStopped = !!stateData.stopped;
           lastTurnOver = !!stateData.turnOver;
-          if (ts > lastAppliedTimestamp) {
+          lastSessionEnded = !!stateData.sessionEnded;
+          if (isNewerWrite(ts, lastAppliedTimestamp, now)) {
             lastAppliedTimestamp = ts;
             lastAppliedState = stateData.state;
             // The counters are not the state: take them, or the stats rows
@@ -609,13 +631,14 @@ function runUnifiedMode() {
         // "idle / between turns". The main face's is responding -> happy ->
         // idle, so a NEW turn-end write is shown as responding first and the
         // existing cascade does the rest.
-        if (stateData.state === 'idle' && stateData.stopped && ts > lastAppliedTimestamp) {
+        if (stateData.state === 'idle' && stateData.stopped && isNewerWrite(ts, lastAppliedTimestamp, now)) {
           stateData.state = 'responding';
           stateData.detail = 'wrapping up';
         }
 
         lastStopped = !!stateData.stopped;
         lastTurnOver = !!stateData.turnOver;
+        lastSessionEnded = !!stateData.sessionEnded;
         // Same session id, new editor process (e.g. `claude --resume` after a
         // crash): a NEWER write reporting a different PID retires the armed
         // one at once. Otherwise the death check kept testing the old, dead
@@ -623,7 +646,7 @@ function runUnifiedMode() {
         // an already-applied write set editorDead again -- a false responding
         // flash, and possibly a swap away from a perfectly live session.
         if (stateData.pid && lastEditorPid && stateData.pid !== lastEditorPid
-            && ts > lastAppliedTimestamp) {
+            && isNewerWrite(ts, lastAppliedTimestamp, now)) {
           lastEditorPid = 0;
           editorDead = false;
           if (mainSessionId) deadSessions.delete(mainSessionId);
@@ -640,7 +663,7 @@ function runUnifiedMode() {
         // alive — overrides a false PID death (e.g. PID reuse).
         // (The main's deadSessions record exists only while editorDead is set,
         // so it is dropped here too.)
-        if (editorDead && ts > lastAppliedTimestamp) {
+        if (editorDead && isNewerWrite(ts, lastAppliedTimestamp, now)) {
           editorDead = false;
           if (mainSessionId) deadSessions.delete(mainSessionId);
         }
@@ -652,7 +675,8 @@ function runUnifiedMode() {
         // swap frame's adoptMain resets this clock for the new session.)
         lastNewWriteAt = noteNewWrite(ts, lastAppliedTimestamp, now, lastNewWriteAt);
 
-        if (ts > lastAppliedTimestamp) {
+        if (isNewerWrite(ts, lastAppliedTimestamp, now)) {
+          const prevAppliedTs = lastAppliedTimestamp;
           lastAppliedTimestamp = ts;
           lastAppliedState = stateData.state;
           // Force-apply stopped state (session ended) — bypass minimum display time
@@ -671,9 +695,14 @@ function runUnifiedMode() {
           // for a finished turn: a late PostToolUse after Stop then showed its
           // tool, the rescue saw a work face on a stopped turn, and forceState
           // replaced the queued reward with a second "wrapping up" -> done!.
+          // And only when it WAS missed: `workSince` is the PreToolUse write's
+          // own timestamp, so a Pre this renderer already applied is never
+          // replayed -- a Task's PostToolUse after its SubagentStop re-showed
+          // "spawning" for 8s over the "agent done" reward.
           if (ACTIVE_WORK_STATES.has(stateData.workState)
               && COMPLETION_STATES.has(stateData.state)
               && !stateData.stopped
+              && stateData.workSince > prevAppliedTs
               && !ACTIVE_WORK_STATES.has(face.state)) {
             face.setState(stateData.workState, stateData.workDetail || '');
           }
@@ -712,7 +741,7 @@ function runUnifiedMode() {
         const freshTs = freshData.timestamp || 0;
         // Detect stopped transition: false->true only (the primary reset is in the apply block above, plus session adoption)
         const stoppedNow = freshData.stopped || false;
-        if (stoppedNow && !lastStopped && freshTs > lastAppliedTimestamp) {
+        if (stoppedNow && !lastStopped && isNewerWrite(freshTs, lastAppliedTimestamp, now)) {
           lastAppliedTimestamp = freshTs;
           lastAppliedState = freshData.state;
           lastStopped = stoppedNow;
@@ -740,7 +769,11 @@ function runUnifiedMode() {
     // its detail line instead).
     // Live subagent orbitals hold the main face at "conducting N" instead of
     // letting it fall idle while agent hooks write only their own files.
-    const liveChildren = minimal ? 0 : orbital.liveChildCount();
+    // A dead editor's agents are not running either (needsRescue says so):
+    // counting them here lifted the rescued face straight back to conducting,
+    // and it went round responding -> done! -> conducting every ~12s until
+    // the children went stale.
+    const liveChildren = (minimal || editorDead) ? 0 : orbital.liveChildCount();
     const next = idleCascade({
       state: face.state,
       sinceChangeMs: now - face.lastStateChange,
@@ -793,7 +826,9 @@ function runUnifiedMode() {
   } catch {}
 
   // Boot: load every session file, let the policy pick the main, read it.
-  orbital.loadSessions(null);
+  // Guarded like every other call into the loader: one bad file crashing
+  // here would crash every boot until it went stale, cursor left hidden.
+  try { orbital.loadSessions(null); } catch {}
   applyMainPolicy();
   checkState();
 
@@ -875,7 +910,10 @@ function runUnifiedMode() {
       else if (key === 's') { face.toggleStats(); persistPrefs(); }
       else if (key === 'a') { face.toggleAccessories(); persistPrefs(); }
       else if (key === 'o') { face.toggleOrbitals(); persistPrefs(); }
-      else if (key === 'l') face.toggleSessionList();
+      else if (key === 'l') {
+        // Too small to draw it: an invisible list would eat the next key.
+        if (sessionListFits(process.stdout.columns || 80, process.stdout.rows || 24)) face.toggleSessionList();
+      }
       else if (key === 'h' || key === '?') face.toggleHelp();
     }
   }
@@ -891,6 +929,12 @@ function runUnifiedMode() {
       swapTransition.cancel();
     }
     face.particles.fadeAll(5);
+    // Shrunk below the list's minimum while it was open: close it rather than
+    // leave an invisible list waiting to swallow a key.
+    if (face.showSessionList && !sessionListFits(process.stdout.columns || 80, process.stdout.rows || 24)) {
+      face.showSessionList = false;
+      face.sessionListSelectedId = null;
+    }
     prevFrame = null;  // the screen is about to be cleared -- force the next frame out even if identical
     process.stdout.write(ansi.syncEnd + ansi.clear);
   });
@@ -916,16 +960,29 @@ function runUnifiedMode() {
         lastAppliedState = newData.state;
         lastStopped = !!newData.stopped;
         lastTurnOver = !!newData.turnOver;
+        lastSessionEnded = !!newData.sessionEnded;
         // forceState, not setState: a materialized face must show its own
         // session at once. Any leftover minDisplayUntil belongs to the session
         // that just left, and setState would buffer this behind it. No third
         // argument, so the new state's own table minimum applies from here.
         face.forceState(newData.state || 'idle', newData.detail || '');
+        // A tool (or a wait) that was already running before the swap keeps
+        // its age: "still running … Ns" restarted at 0 on the incoming face,
+        // and so did the 10-minute long-tool hold. The write's own timestamp
+        // is when the tool started, as far as this session's file can say.
+        if ((ACTIVE_WORK_STATES.has(newData.state) || newData.state === 'waiting')
+            && newData.state !== 'responding' && ts <= Date.now()) {
+          face.lastStateChange = ts;
+        }
         face.setStats(newData);
       }
     } catch {
       // No readable file yet: the id is adopted and checkState reads it next cycle
     }
+    // Caffeine counts state changes in the last 10s, and those belonged to
+    // the session that just left -- with the swap's own forceState on top,
+    // a face that had done nothing went "hyperdrive!" 67ms after arriving.
+    face.stateChangeTimes = [];
 
     // Spawn celebration particles
     face.particles.spawn(8, 'sparkle');
@@ -942,7 +999,7 @@ function runUnifiedMode() {
     lastTime = now;
 
     face.update(dt);
-    orbital.update(dt);
+    try { orbital.update(dt); } catch {}
 
     // -- Transition tick --
     if (swapTransition.active) {
@@ -976,7 +1033,7 @@ function runUnifiedMode() {
     // Tell face how many subagents are active (for status line). Only the
     // main session's own live children: the ring also holds parallel windows,
     // other sessions' children and lingering stopped faces.
-    face.subagentCount = minimal ? 0 : orbital.liveChildCount();
+    face.subagentCount = (minimal || editorDead) ? 0 : orbital.liveChildCount();
 
     const cols = process.stdout.columns || 80;
     const rows = process.stdout.rows || 24;
@@ -1019,8 +1076,10 @@ function runUnifiedMode() {
         model: face.model || '',
         // The real SessionEnd flag, not lastStopped: that one folds a plain
         // turn end in, and drew the live main row as an ended session (a grey
-        // cross) every time the list was opened between turns.
-        stopped: !!(mainFace && mainFace.stopped),
+        // cross) every time the list was opened between turns. Read from the
+        // main's own file too: the stopped MiniFace is purged after its 10s
+        // linger, and the ended row then came back as live, offering a pin.
+        stopped: lastSessionEnded || !!(mainFace && mainFace.stopped),
         isMain: true,
         isPinned: pinnedSessionId === mainSessionId,
         toolCalls: face.toolCallCount,
@@ -1167,7 +1226,7 @@ if (require.main === module) {
     PALETTES, PALETTE_NAMES,
     readState, ACTIVE_WORK_STATES, COMPLETION_STATES, FRESH_READ_STATES,
     idleCascade, buildTitle, noteNewWrite, pickMainSession,
-    RESCUE_EXCLUDE, needsRescue, policySessions, splitKeys, tmuxDisplayState,
+    RESCUE_EXCLUDE, needsRescue, policySessions, splitKeys, tmuxDisplayState, isNewerWrite,
     startupGate,
     IDLE_TIMEOUT, THINKING_TIMEOUT, SLEEP_TIMEOUT,
     LONG_TOOL_HOLD_MS, WAIT_HOLD_STALE_MS,

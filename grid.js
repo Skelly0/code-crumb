@@ -12,7 +12,7 @@ const {
   HOME, SESSIONS_DIR, safeFilename, detailText,
   ACTIVE_WORK_STATES, INTERRUPTIBLE_STATES, COMPLETION_STATES,
 } = require('./shared');
-const { ansi, breathe, dimColor, themes, COMPLETION_LINGER } = require('./themes');
+const { ansi, breathe, dimColor, themes, COMPLETION_LINGER, knownState } = require('./themes');
 const { gridMouths } = require('./animations');
 
 // -- Config --------------------------------------------------------
@@ -274,7 +274,28 @@ function isOwnedByLiveProcess(pid, lastWriteMs, aliveFn = isProcessAlive) {
   return Date.now() - (lastWriteMs || 0) < PID_PROTECT_CAP_MS; // both unknowns
 }
 
+// PID protection for one session. A child's pid is its PARENT's editor, so
+// that process living proves nothing about the agent: an agent whose
+// SubagentStop was missed (an Esc) stood on the ring for as long as the
+// editor ran -- and held the main face at "conducting 1" with it. A child
+// keeps the protection only for CHILD_ORPHAN_TIMEOUT past its last write,
+// the same window a silent agent in a live family gets anyway.
+function pidProtects(pid, lastWriteMs, isChild, now = Date.now()) {
+  if (!pid || !isOwnedByLiveProcess(pid, lastWriteMs)) return false;
+  return !isChild || now - lastWriteMs <= CHILD_ORPHAN_TIMEOUT;
+}
+
 // -- MiniFace (compact, for grid) ----------------------------------
+// A session file's id: its own session_id when that is text, else the file
+// name. An object id keyed the faces map by a fresh object on every load --
+// the face respawned, and the center swap-animated, every 2s.
+function sessionIdOf(data, file) {
+  const v = data && data.session_id;
+  if (typeof v === 'string' && v) return v;
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+  return path.basename(file, '.json');
+}
+
 class MiniFace {
   constructor(sessionId) {
     this.sessionId = sessionId;
@@ -356,7 +377,7 @@ class MiniFace {
     }
     this._lastDataTimestamp = dataTs;
 
-    const newState = data.state || 'idle';
+    const newState = knownState(data.state);
     const now = Date.now();
     if (newState !== this.state) {
       // Minimum display time: don't flicker between states too rapidly
@@ -394,10 +415,16 @@ class MiniFace {
     // This breaks the deadlock where polling refreshed lastUpdate and
     // prevented isStale() from ever firing on orphaned sessions.
     this.lastUpdate = fileMtimeMs || Date.now();
-    if (data.cwd) this.cwd = data.cwd;
-    if (data.modelName) this.modelName = data.modelName;
-    if (data.model) this.model = data.model;
-    if (data.editor) this.editor = data.editor;
+    // Every text field is a string on one line, whatever the file says: a
+    // model_name object (a documented adapter input) crashed the renderer at
+    // `.slice` in _assignLabels -- at boot, every boot, until the file went
+    // stale -- and a newline or ESC in a folder or branch name reached the
+    // terminal raw. (detailText strips control characters, C1 included.)
+    const text = (v) => detailText(typeof v === 'string' ? v : '');
+    if (text(data.cwd)) this.cwd = text(data.cwd);
+    if (text(data.modelName)) this.modelName = text(data.modelName);
+    if (text(data.model)) this.model = text(data.model);
+    if (text(data.editor)) this.editor = text(data.editor);
     else if (!this.editor) {
       // Best-effort legacy derivation: modelName-as-editor, then ID prefix
       if (KNOWN_EDITORS.has(data.modelName)) this.editor = data.modelName;
@@ -406,7 +433,7 @@ class MiniFace {
         if (m && KNOWN_EDITORS.has(m[1])) this.editor = m[1];
       }
     }
-    if (data.parentSession) this.parentSession = data.parentSession;
+    if (text(data.parentSession)) this.parentSession = text(data.parentSession);
     else if (this.parentSession && !data.isTeammate && !this.isTeammate) {
       // update-state.js heals a window falsely stamped as a subagent (#134)
       // by dropping parentSession/taskDescription from its file. Every child
@@ -414,19 +441,19 @@ class MiniFace {
       // the face stayed a "child" -- never the center, counted as a live
       // child of its old parent -- for as long as the renderer ran.
       this.parentSession = null;
-      this.taskDescription = data.taskDescription || '';
+      this.taskDescription = text(data.taskDescription);
     }
-    if (data.agentType) this.agentType = data.agentType;
-    if (data.teamName) {
-      this.teamName = data.teamName;
-      this.teamColor = hashTeamColor(data.teamName);
+    if (text(data.agentType)) this.agentType = text(data.agentType);
+    if (text(data.teamName)) {
+      this.teamName = text(data.teamName);
+      this.teamColor = hashTeamColor(this.teamName);
     }
-    if (data.teammateName) this.teammateName = data.teammateName;
+    if (text(data.teammateName)) this.teammateName = text(data.teammateName);
     if (data.isTeammate) this.isTeammate = true;
-    if (data.gitBranch) this.gitBranch = data.gitBranch;
-    if (data.taskDescription) this.taskDescription = data.taskDescription;
-    if (data.pid) this.pid = data.pid;
-    if (data.lastPromptAt) this.lastPromptAt = data.lastPromptAt;
+    if (text(data.gitBranch)) this.gitBranch = text(data.gitBranch);
+    if (text(data.taskDescription)) this.taskDescription = text(data.taskDescription);
+    if (Number.isInteger(data.pid) && data.pid > 0) this.pid = data.pid;
+    if (typeof data.lastPromptAt === 'number') this.lastPromptAt = data.lastPromptAt;
     if (typeof data.toolCalls === 'number') this.toolCalls = data.toolCalls;
     if (typeof data.filesEdited === 'number') this.filesEdited = data.filesEdited;
     // Classify: independent session = no parentSession and not a teammate
@@ -445,7 +472,7 @@ class MiniFace {
     }
     // Non-stopped: if the owning process is alive AND actually ours
     // (start time predates our last write — recycled PIDs fail), never stale
-    if (this.pid && isOwnedByLiveProcess(this.pid, this.lastUpdate)) return false;
+    if (pidProtects(this.pid, this.lastUpdate, !!this.parentSession)) return false;
     // No pid or dead process: a completion state on an ORPHANED child gets the
     // short timeout -- an agent that reported `happy` and went quiet while its
     // parent shows no sign of life is finished.
@@ -959,7 +986,7 @@ class OrbitalSystem {
           const knownFace = this.faces.get(faceId);
           if (knownFace && !knownFace.stopped) {
             if (!COMPLETION_STATES.has(knownFace.state)) continue;  // Active non-completion: always protect
-            if (knownFace.pid && isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)) continue;  // Completion with owning PID: protect
+            if (pidProtects(knownFace.pid, knownFace.lastUpdate, !!knownFace.parentSession)) continue;  // Completion with owning PID: protect
           }
           // No protecting face — check file PID identity before deleting
           // (mtime fallback matches the async purge path for legacy files
@@ -976,7 +1003,7 @@ class OrbitalSystem {
             // editor living on must not keep it on disk, or every retired
             // agent piled up -- read and parsed on each load -- for the
             // editor's whole lifetime (Unix only; win32 writes no pid).
-            if (!data.stopped && data.pid && isOwnedByLiveProcess(data.pid, data.timestamp || fileMtimeMs)) continue;
+            if (!data.stopped && pidProtects(data.pid, data.timestamp || fileMtimeMs, !!data.parentSession)) continue;
           } catch {
             continue; // Parse failure = mid-write race — protect the file
           }
@@ -1002,7 +1029,9 @@ class OrbitalSystem {
           continue;
         }
         const data = JSON.parse(raw);
-        const id = data.session_id || path.basename(file, '.json');
+        // `null`, a number or an array parses fine and is not a session.
+        if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
+        const id = sessionIdOf(data, file);
 
         // Keep start-time resolution warm for every session PID — on the
         // renderer's synchronous boot scan this enqueues all PIDs at once,
@@ -1034,7 +1063,7 @@ class OrbitalSystem {
     for (const [id, face] of this.faces) {
       if (!seenIds.has(id) || face.isStale()) {
         // File gone but process alive? Keep face — file may reappear on next hook write.
-        if (!seenIds.has(id) && !face.stopped && face.pid && isOwnedByLiveProcess(face.pid, face.lastUpdate)) continue;
+        if (!seenIds.has(id) && !face.stopped && pidProtects(face.pid, face.lastUpdate, !!face.parentSession)) continue;
         this.faces.delete(id);
         // Don't delete session files here — the dedicated file stale purge above
         // handles cleanup with proper PID and face-state protection.
@@ -1098,7 +1127,9 @@ class OrbitalSystem {
             }
             try {
               const data = JSON.parse(trimmed);
-              results.push({ file, data, mtimeMs: stats.mtimeMs });
+              // A file holding `null` crashed the renderer 2s after boot.
+              if (!data || typeof data !== 'object' || Array.isArray(data)) results.push({ file, error: true });
+              else results.push({ file, data, mtimeMs: stats.mtimeMs });
             } catch {
               results.push({ file, error: true });
             }
@@ -1151,7 +1182,7 @@ class OrbitalSystem {
     for (const r of results) {
       if (r.error || r.empty || !r.data) continue;
       if (now - r.mtimeMs <= STALE_MS) {
-        freshIds.add(r.data.session_id || path.basename(r.file, '.json'));
+        freshIds.add(sessionIdOf(r.data, r.file));
       }
     }
 
@@ -1170,7 +1201,7 @@ class OrbitalSystem {
             survivingResults.push(r); // Protected — active non-completion face
             continue;
           }
-          if (knownFace.pid && isOwnedByLiveProcess(knownFace.pid, knownFace.lastUpdate)) {
+          if (pidProtects(knownFace.pid, knownFace.lastUpdate, !!knownFace.parentSession)) {
             survivingResults.push(r); // Protected — completion with owning PID
             continue;
           }
@@ -1184,8 +1215,8 @@ class OrbitalSystem {
           survivingResults.push(r); // Protected — subagent in a long model turn
           continue;
         }
-        if (r.data && !r.data.stopped && r.data.pid &&
-            isOwnedByLiveProcess(r.data.pid, r.data.timestamp || r.mtimeMs)) {
+        if (r.data && !r.data.stopped &&
+            pidProtects(r.data.pid, r.data.timestamp || r.mtimeMs, !!r.data.parentSession)) {
           survivingResults.push(r); // Protected — owning process alive
           continue;
         }
@@ -1206,7 +1237,7 @@ class OrbitalSystem {
         continue;
       }
 
-      const id = r.data.session_id || path.basename(r.file, '.json');
+      const id = sessionIdOf(r.data, r.file);
       if (r.data.pid) requestPidStartTime(r.data.pid); // keep start-time cache warm
       seenIds.add(id);
 
@@ -1227,7 +1258,7 @@ class OrbitalSystem {
     for (const [id, face] of this.faces) {
       if (!seenIds.has(id) || face.isStale()) {
         // File gone but process alive? Keep face — file may reappear on next hook write.
-        if (!seenIds.has(id) && !face.stopped && face.pid && isOwnedByLiveProcess(face.pid, face.lastUpdate)) continue;
+        if (!seenIds.has(id) && !face.stopped && pidProtects(face.pid, face.lastUpdate, !!face.parentSession)) continue;
         this.faces.delete(id);
         // Don't delete session files here — the dedicated file stale purge above
         // handles cleanup with proper PID and face-state protection.
@@ -1797,6 +1828,14 @@ class OrbitalSystem {
 
 const MIN_SESSION_LIST_COLS = 50;
 const MIN_SESSION_LIST_ROWS = 12;      // chrome + footer + both overflow marks + one entry
+
+// Whether the session list can draw at all at this size. Below it the list
+// draws nothing -- so the `l` key must not open it (an invisible list then
+// swallowed the next key; an Enter would silently pin) and the hint bar must
+// not offer it.
+function sessionListFits(cols, rows) {
+  return cols >= MIN_SESSION_LIST_COLS && rows >= MIN_SESSION_LIST_ROWS;
+}
 const SESSION_LIST_ENTRY_ROWS = 4;     // state row, path row, detail row, info row
 
 // Age of a write as the list shows it: 3s, 2m, 1h.
@@ -1903,7 +1942,7 @@ function _infoLine(face, labelById, now) {
 // entriesOrFaces: [{ face, depth }] from orderSessionList, or a plain array of
 // faces (all depth 0). selected: a session id, or a legacy row index.
 function renderSessionList(cols, rows, entriesOrFaces, paletteThemes, mainInfo, selected) {
-  if (cols < MIN_SESSION_LIST_COLS || rows < MIN_SESSION_LIST_ROWS) return '';
+  if (!sessionListFits(cols, rows)) return '';
   const themeMap = paletteThemes || themes;
   const r = ansi.reset;
   const now = Date.now();
@@ -2073,7 +2112,7 @@ function renderSessionList(cols, rows, entriesOrFaces, paletteThemes, mainInfo, 
 module.exports = {
   MiniFace, OrbitalSystem, hashTeamColor, renderSessionList, isProcessAlive,
   orderSessionList, listNavigableIds, formatAge,
-  MIN_SESSION_LIST_ROWS, SESSION_LIST_ENTRY_ROWS,
+  MIN_SESSION_LIST_ROWS, MIN_SESSION_LIST_COLS, SESSION_LIST_ENTRY_ROWS, sessionListFits,
   ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES,
   isOwnedByLiveProcess, requestPidStartTime, _pidStartCache, _pidStartStatus, _sweepPidCache,
   _setPidResolver, KNOWN_EDITORS, _truncatePath,

@@ -671,11 +671,11 @@ process.stdin.on('end', () => {
     if (!stats.daily || stats.daily.date !== today) {
       stats.daily = { date: today, sessionCount: 0, cumulativeMs: 0 };
     }
-    if (!stats.frequentFiles) stats.frequentFiles = {};
+    if (!stats.frequentFiles) stats.frequentFiles = Object.create(null);
     // Registry of known top-level sessions (#134) — populated at SessionStart,
     // which real subagents never fire. Used to tell parallel editor windows
     // apart from subagents when their hooks interleave.
-    if (!stats.topLevelSessions) stats.topLevelSessions = {};
+    if (!stats.topLevelSessions) stats.topLevelSessions = Object.create(null);
     // A user prompt is proof of a top-level session, and so is a Stop that
     // carries no agent_id (a subagent's turn ends in SubagentStop, or in a
     // Stop WITH agent_id). Registering here, before classification, rescues a
@@ -754,7 +754,7 @@ process.stdin.on('end', () => {
     const now = Date.now();
     if (!stats.sessionCounters || typeof stats.sessionCounters !== 'object'
         || Array.isArray(stats.sessionCounters)) {
-      stats.sessionCounters = {};
+      stats.sessionCounters = Object.create(null);
     }
     const counters = stats.sessionCounters;
     // Seed the owner's entry from stats.session when it has none (a stats
@@ -1423,6 +1423,13 @@ process.stdin.on('end', () => {
         const mySession = JSON.parse(fs.readFileSync(
           path.join(SESSIONS_DIR, safeFilename(writeSessionId) + '.json'), 'utf8'));
         if (mySession.parentSession) shouldWriteGlobal = false;
+        // The model is carried above only while the global file already
+        // names this session. Taking it back from another window found the
+        // other's file there, so tmux mode lost the model for good; the
+        // session's own file still has it.
+        if (!isAgentEvent && !extra.model && typeof mySession.model === 'string' && mySession.model) {
+          extra.model = mySession.model;
+        }
       } catch {}
     }
 
@@ -1475,6 +1482,13 @@ process.stdin.on('end', () => {
           if (!stopped && (existingSession.turnEnded || existingSession.turnOver)) {
             const inherit = inheritedTurnEnd(hookEvent, state);
             if (inherit) extra[inherit] = true;
+          }
+          // The piggybacked work state is only worth injecting if the renderer
+          // never saw the PreToolUse write. Name that write by its timestamp
+          // (when the file still holds it) so the renderer can tell.
+          if (extra.workState && existingSession.state === extra.workState
+              && typeof existingSession.timestamp === 'number') {
+            extra.workSince = existingSession.timestamp;
           }
           for (const field of STICKY_FIELDS) {
             if (existingSession[field] && !extra[field]) {

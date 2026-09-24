@@ -60,8 +60,15 @@ function translate(hook, input, output) {
     if (!ev) return null;
     const p = ev.properties || {};
     switch (ev.type) {
-      case 'session.created':
-        return { type: 'session.created', sessionId: p.info && p.info.id };
+      // The task tool runs each delegated task in a child session
+      // (sessions.create({ parentID })). This is the only event that names
+      // the parent; `send` remembers it for the child's later payloads.
+      case 'session.created': {
+        const info = p.info || {};
+        return typeof info.parentID === 'string' && info.parentID
+          ? { type: 'session.created', sessionId: info.id, parentSession: info.parentID }
+          : { type: 'session.created', sessionId: info.id };
+      }
       case 'session.idle':
         return { type: 'session.idle', sessionId: p.sessionID };
       case 'session.error':
@@ -192,6 +199,12 @@ function throttled(payload, now) {
 const lastModelBySession = new Map();
 const MAX_MODEL_KEYS = 64;
 
+// Child session -> its parent, from session.created. The adapter also keeps
+// it on the child's session file, so a plugin restart (or a cleared map)
+// costs nothing once the child has written once.
+const parentBySession = new Map();
+const MAX_PARENT_KEYS = 256;
+
 // Per-session delivery order for the async payloads. Each one used to be its
 // own node process and nothing ordered two of them: for a fast tool the
 // `after` child could take the stats lock and write before the `before` child
@@ -276,9 +289,15 @@ function send(payload) {
       }
       return false;
     }
+    if (payload.parentSession && payload.sessionId) {
+      if (parentBySession.size >= MAX_PARENT_KEYS) parentBySession.clear();
+      parentBySession.set(payload.sessionId, payload.parentSession);
+    }
     if (throttled(payload, Date.now())) return false;
     const known = lastModelBySession.get(payload.sessionId || '');
     if (known && !payload.model) payload = { ...payload, model: known };
+    const parent = parentBySession.get(payload.sessionId || '');
+    if (parent && !payload.parentSession) payload = { ...payload, parentSession: parent };
     const json = JSON.stringify(payload);
     const node = nodeBinary();
     if (SYNC_TYPES.has(payload.type)) {

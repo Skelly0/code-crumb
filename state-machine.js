@@ -197,6 +197,36 @@ function shellIntent(cmd) {
 
 const GIT_WRITE_RE = /\bgit\s+(commit|push|tag)\b/i;
 
+// A build, judged by the command and its subcommand -- never its arguments:
+// `rm -rf build`, `mkdir -p build` and `cp -r build/ dist` all finished as
+// "build succeeded". Build tools count by name; a subcommand-style tool counts
+// when its subcommand (or its `run` script) is build/compile.
+const BUILD_TOOLS = /^(?:tsc|webpack|vite|esbuild|rollup|parcel|make|cmake|ninja|msbuild|gradlew?|mvnw?|turbo|nx|bazel)$/i;
+const SUBCOMMAND_TOOLS = /^(?:npm|yarn|pnpm|bun|deno|go|cargo|docker|podman|dotnet|swift|zig|next|nuxt|astro|ng|sbt|gradlew?|mvnw?|flutter|stack|cabal|mix|dune)$/i;
+const RUNNERS = /^(?:npx|bunx|pnpx)$/i;
+function isBuildCommand(intent) {
+  for (const segment of intent.split(' ; ')) {
+    let words = segmentWords(segment);
+    if (words.length && RUNNERS.test(words[0])) words = words.slice(1).filter(w => !w.startsWith('-'));
+    if (!words.length) continue;
+    const cmd = words[0].replace(/^.*[\\/]/, '').replace(/\.(?:exe|cmd|bat)$/i, '');
+    if (BUILD_TOOLS.test(cmd)) return true;
+    if (!SUBCOMMAND_TOOLS.test(cmd)) continue;
+    // Past flags, a flag's value (`--filter web`) and a workspace selector.
+    const rest = [];
+    for (let i = 1; i < words.length; i++) {
+      const w = words[i];
+      if (/^(?:--filter|-F|--cwd|--prefix|--dir|-C|-w|--workspace|-p|--project|-t|--tag|-f|--file)$/.test(w)) { i++; continue; }
+      if (w.startsWith('-')) continue;
+      if (w === 'workspace' && /^(?:yarn|npm|pnpm)$/i.test(cmd)) { i++; continue; }
+      rest.push(w);
+    }
+    const sub = rest[0] === 'run' ? rest[1] : rest[0];
+    if (sub && /^(?:build|compile)(?:[:\-].*)?$/i.test(sub)) return true;
+  }
+  return false;
+}
+
 function isTestCommand(intent) {
   return /\b(jest|pytest|vitest|mocha|cypress|playwright|rspec|\.test\.|\.spec\.)\b/i.test(intent) ||
     /\b(npm|yarn|pnpm|bun|go|cargo|dotnet)\s+(run\s+)?(test|tests)\b/i.test(intent) ||
@@ -381,7 +411,7 @@ const stdoutErrorPatterns = [
   /\bCompilation failed\b/i,
   /\bbuild failed\b/i,
   /\btest(s)? failed\b/i,
-  /\d+\s+fail(ed|ing)\b/i,                          // "3 failed" (jest/pytest/code-crumb), "3 failing" (mocha)
+  /(?<!\d)\d+\s+fail(ed|ing)\b/i,                   // "3 failed" (jest/pytest/code-crumb), "3 failing" (mocha)
   /^FAIL\b/m,                                        // Go test output
   /# fail [1-9]\d*/i,                                  // node --test TAP format (excludes "# fail 0")
   /\bfailed with exit code\b/i,
@@ -428,8 +458,15 @@ const falsePositives = [
 
 // Strip ANSI escape sequences (SGR colors/bold/underline, CSI controls, OSC hyperlinks/titles)
 // so regex patterns match through styled output and detail strings are clean for rendering.
+// An OSC sequence (a hyperlink, a title) ends in BEL or in ESC \\ (ST). The
+// old pattern knew only BEL: an OSC 8 link ending in ST was never stripped,
+// and a long run of them took quadratic time. `(?<!\\d)` below keeps a run of
+// 30,000 digits (Claude Code's inline output cap) from costing the hook
+// 350ms of backtracking in "\\d+\\s+failed" -- the lookbehind makes it linear.
 function stripAnsi(text) {
-  return text ? text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '') : '';
+  return text
+    ? text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    : '';
 }
 
 // A false-positive guard only cancels an error match on the SAME line.
@@ -479,6 +516,24 @@ function extractExitCode(stdout) {
   return match ? parseInt(match[1], 10) : null;
 }
 
+// The exit status an editor wrote around a command's output: a line of its
+// own, first or last. A read-only command's output is content -- `grep -n
+// "Exit code" x.js` prints matches that name exit codes, `tail ci.log` prints
+// "exited with code 1" -- so only such a trailer counts for it.
+const EXIT_TRAILER_RE = /^\s*(?:exit\s+(?:code|status)|exited\s+with(?:\s+(?:exit\s+)?(?:code|status))?)[:=\s]+(\d{1,3})\s*\.?\s*$/i;
+function extractTrailerExitCode(stdout) {
+  const lines = stripAnsi(toText(stdout)).split(/\r?\n/).filter(l => l.trim());
+  if (!lines.length) return null;
+  for (const line of [lines[0], lines[lines.length - 1]]) {
+    const m = EXIT_TRAILER_RE.exec(line);
+    if (m) return parseInt(m[1], 10);
+  }
+  return null;
+}
+
+// A chain that moves (cd/pushd/popd): only then can a move failure be its own.
+const SHELL_MOVE_RE = /(?:^|&&|\|\||[;|&\r\n])\s*(?:cd|pushd|popd)(?=\s|$)/i;
+
 // Friendly error detail based on what we found
 function errorDetail(stdout, stderr) {
   const combined = stripAnsi((stdout || '') + (stderr || ''));
@@ -492,7 +547,7 @@ function errorDetail(stdout, stderr) {
   if (/Cannot find module|ModuleNotFound/i.test(combined)) return 'missing module';
   if (/Traceback|at Object\.<anonymous>|Error:/.test(combined)) return 'exception thrown';
   if (/Compilation failed|build failed/i.test(combined)) return 'build broke';
-  if (/test(s)? failed|\d+\s+fail(ed|ing)|^FAIL\b|# fail [1-9]/im.test(combined)) return 'tests failed';
+  if (/test(s)? failed|(?<!\d)\d+\s+fail(ed|ing)|^FAIL\b|# fail [1-9]/im.test(combined)) return 'tests failed';
   if (/npm ERR!/i.test(combined)) return 'npm error';
   return 'something went wrong';
 }
@@ -539,6 +594,9 @@ function normalizeToolResponse(data) {
   // Claude Code's edit diff, carried through only when it is the array we expect.
   // It is read for line counts and never persisted -- see diffFromPatch.
   if (Array.isArray(rawResult.structuredPatch)) out.structuredPatch = rawResult.structuredPatch;
+  // Claude Code's Agent result: 'completed', or 'async_launched' for an agent
+  // sent to the background (the default) -- which returns at once.
+  if (typeof rawResult.status === 'string') out.status = rawResult.status;
   return out;
 }
 
@@ -607,8 +665,9 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
   const cmd = isShell ? toText(input.command || input.cmd || input.input) : '';
   const { unquoted, intent, readOnly } = shellIntent(cmd);
   // An exit code is only inferred from a shell's own output. Any other tool
-  // reporting "returned 12 results" is content, not a status.
-  const inferredExit = isShell ? extractExitCode(stdout) : null;
+  // reporting "returned 12 results" is content, not a status -- and so is a
+  // read-only command's output, save an editor's own trailer line.
+  const inferredExit = !isShell ? null : readOnly ? extractTrailerExitCode(stdout) : extractExitCode(stdout);
   const exitCode = typeof toolResponse?.exitCode === 'number' ? toolResponse.exitCode : null;
   const fp = toText(input.file_path || input.notebook_path || input.path || input.target_file);
 
@@ -629,9 +688,10 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
     state = 'error'; detail = exitDetail(stdout, stderr, inferredExit);
   } else if (!READ_TOOLS.test(name) && !SEARCH_TOOLS.test(name) && !WEB_TOOLS.test(name) && looksLikeError(stderr, stderrErrorPatterns)) {
     state = 'error'; detail = errorDetail(stdout, stderr);
-  } else if (isShell && readOnly && SHELL_MOVE_FAILURE.test(stripAnsi(stdout))) {
+  } else if (isShell && readOnly && SHELL_MOVE_RE.test(unquoted) && SHELL_MOVE_FAILURE.test(stripAnsi(stdout))) {
     // A read-only chain's stdout is content -- except a failed `cd`, whose
     // message is the only thing it can print (merged output, no exit code).
+    // Only a chain with a cd in it: `tail deploy.log` can print one too.
     state = 'error'; detail = errorDetail(stdout, stderr);
   } else if (isShell && !readOnly && looksLikeError(stdout, stdoutErrorPatterns)) {
     // Only check stdout patterns for shell commands -- other tools have
@@ -660,11 +720,12 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
     // The git checks come first: a commit message is free text, and
     // "Fix the build script" must still count as a commit.
     const isTest = isTestCommand(intent);
-    const isBuild = /\b(build|compile|tsc|webpack|vite|esbuild|rollup|make)\b/i.test(intent);
+    const isBuild = isBuildCommand(intent);
     const isGit = /\bgit\s/i.test(unquoted);
     const isInstall = isInstallCommand(intent);
 
-    if (isGit && isMergeConflict(stdout, stderr)) {
+    // `git log` / `git grep "CONFLICT ("` print conflicts as content.
+    if (isGit && !readOnly && isMergeConflict(stdout, stderr)) {
       state = 'error';
       detail = 'merge conflict!';
     } else if (/\bgit\s+push\b/i.test(intent)) {
@@ -708,8 +769,14 @@ function classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag) {
     state = 'proud';
     detail = /^senduserfile$/i.test(name) ? 'sent' : 'published';
   } else if (SUBAGENT_TOOLS.test(name)) {
-    // A returning Agent/Task/Workflow/TaskOutput means a helper finished
-    if (AGENT_DONE_TOOLS.test(name)) {
+    // A returning Agent/Task/Workflow/TaskOutput means a helper finished --
+    // unless it was only launched: background agents are Claude Code's
+    // default, and their Agent call returns `async_launched` straight away,
+    // so "agent done" was shown the moment each one started.
+    if (toolResponse?.status === 'async_launched') {
+      state = 'satisfied';
+      detail = 'agent launched';
+    } else if (AGENT_DONE_TOOLS.test(name)) {
       state = 'happy';
       detail = 'agent done';
     } else if (/^sendmessage$/i.test(name)) {
@@ -761,7 +828,8 @@ function classifyTruncatedInput(hookEvent, rawInput) {
     if (/"isError"\s*:\s*true/.test(rawInput)) {
       return { state: 'error', detail: errorDetail(rawInput, '') || 'something went wrong' };
     }
-    const toolMatch = rawInput.match(/"tool_name"\s*:\s*"([^"]+)"/);
+    // tool_name (hooks) or tool (the OpenCode plugin's flat payload).
+    const toolMatch = rawInput.match(/"(?:tool_name|toolName|tool)"\s*:\s*"([^"]+)"/);
     const toolName = toolMatch ? toolMatch[1] : '';
     // Tier 2: exit code embedded in stdout -- shell tools only. With the tool
     // name cut off by the truncation it is still tried, as it always was.
@@ -799,7 +867,8 @@ function classifyTruncatedInput(hookEvent, rawInput) {
     InstructionsLoaded: { state: 'reading',    detail: 'loading instructions' },
     PostModelSwitch:    { state: 'thinking',   detail: 'model switched' },
   };
-  return eventMap[hookEvent] || { state: 'thinking', detail: 'large input' };
+  return Object.prototype.hasOwnProperty.call(eventMap, hookEvent)
+    ? eventMap[hookEvent] : { state: 'thinking', detail: 'large input' };
 }
 
 // -- Streak Management -----------------------------------------------
@@ -875,25 +944,57 @@ function defaultStats() {
     session: { id: '', start: 0, toolCalls: 0, filesEdited: [], subagentCount: 0, commitCount: 0 },
     recentMilestone: null,
     daily: { date: '', sessionCount: 0, cumulativeMs: 0 },
-    frequentFiles: {},
-    topLevelSessions: {},
+    frequentFiles: Object.create(null),
+    topLevelSessions: Object.create(null),
   };
 }
 
 // Repair a stats object read from disk so every field the hooks touch exists.
 // A truncated write, an older schema, or a hand-edited file can leave `{}` or
 // a partial shape; without this, `stats.session.id` throws inside a hook.
+//
+// Every field keeps its default's type: a string "streak":"5" concatenated
+// ("51", "511"...), and `activeSubagents: [null]` threw in every hook -- which
+// then fell back, so the file was never rewritten and never repaired.
+// The maps keyed by a session id or a file name have no prototype: a session
+// called `__proto__` wrote its counters onto Object.prototype (so they never
+// persisted), and a file named `toString` read the inherited function and
+// stored "function toString() { [native code] }1" -- growing on every edit.
 function normalizeStats(parsed) {
   const def = defaultStats();
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return def;
   const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
-  const out = { ...def, ...parsed };
-  out.records = { ...def.records, ...obj(parsed.records) };
-  out.session = { ...def.session, ...obj(parsed.session) };
-  if (!Array.isArray(out.session.filesEdited)) out.session.filesEdited = [];
-  out.daily = { ...def.daily, ...obj(parsed.daily) };
-  out.frequentFiles = obj(parsed.frequentFiles);
-  out.topLevelSessions = obj(parsed.topLevelSessions);
+  const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+  const dict = (v, keep) => {
+    const d = Object.create(null);
+    for (const [k, x] of Object.entries(obj(v))) if (keep(x)) d[k] = x;
+    return d;
+  };
+  const typed = (src, d) => {
+    const o = { ...src };
+    for (const [k, dv] of Object.entries(d)) {
+      if (typeof dv === 'number') o[k] = isNum(src[k]) ? src[k] : dv;
+      else if (typeof dv === 'string') o[k] = typeof src[k] === 'string' ? src[k] : dv;
+      else if (Array.isArray(dv)) o[k] = Array.isArray(src[k]) ? src[k] : dv;
+    }
+    return o;
+  };
+  const out = typed({ ...def, ...parsed }, def);
+  out.records = typed({ ...def.records, ...obj(parsed.records) }, def.records);
+  out.session = typed({ ...def.session, ...obj(parsed.session) }, def.session);
+  out.session.filesEdited = out.session.filesEdited.filter(f => typeof f === 'string');
+  if (out.session.activeSubagents !== undefined) {
+    out.session.activeSubagents = Array.isArray(out.session.activeSubagents)
+      ? out.session.activeSubagents.filter(a => a && typeof a === 'object' && !Array.isArray(a)) : [];
+  }
+  out.daily = typed({ ...def.daily, ...obj(parsed.daily) }, def.daily);
+  const m = parsed.recentMilestone;
+  out.recentMilestone = m && typeof m === 'object' && !Array.isArray(m) ? m : null;
+  out.frequentFiles = dict(parsed.frequentFiles, isNum);
+  out.topLevelSessions = dict(parsed.topLevelSessions, isNum);
+  if (parsed.sessionCounters !== undefined) {
+    out.sessionCounters = dict(parsed.sessionCounters, (x) => x && typeof x === 'object' && !Array.isArray(x));
+  }
   return out;
 }
 

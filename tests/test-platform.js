@@ -559,8 +559,8 @@ describe('platform -- normalizeStats fills any missing shape', () => {
     assert.strictEqual(s.session.id, '');
     assert.deepStrictEqual(s.session.filesEdited, []);
     assert.strictEqual(s.records.longestSession, 0);
-    assert.deepStrictEqual(s.frequentFiles, {});
-    assert.deepStrictEqual(s.topLevelSessions, {});
+    assert.deepStrictEqual({ ...s.frequentFiles }, {});
+    assert.deepStrictEqual({ ...s.topLevelSessions }, {});
   });
   test('null / array / string fall back to defaults', () => {
     assert.strictEqual(sm.normalizeStats(null).streak, 0);
@@ -770,7 +770,7 @@ describe('platform -- renderer.js source-level fixes', () => {
   test('resize handler forces a redraw (prevFrame reset)', () => {
     const i = src.indexOf("process.stdout.on('resize'");
     assert.ok(i > 0);
-    assert.ok(src.slice(i, i + 800).includes('prevFrame = null'), 'resize must reset prevFrame or the cleared screen stays blank');
+    assert.ok(src.slice(i, i + 1400).includes('prevFrame = null'), 'resize must reset prevFrame or the cleared screen stays blank');
   });
   test('prefs palette index is normalized', () => {
     assert.ok(src.includes('normalizePaletteIndex(prefs.paletteIndex'));

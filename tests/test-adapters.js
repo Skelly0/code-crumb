@@ -852,6 +852,73 @@ describe('adapters -- opencode-adapter (plugin payloads)', () => {
     cleanup(tmp);
   });
 
+  // The task tool runs each task in a child session (sessions.create({ parentID })).
+  // Written as a session of its own, every task took the center from the
+  // session that launched it and piled up on the ring.
+  test.async('a task child session is an orbital of its parent, never a center candidate', async () => {
+    const plugin = path.join(ADAPTERS_DIR, 'opencode-plugin.mjs');
+    const tr = (await import(require('url').pathToFileURL(plugin).href)).CodeCrumbPlugin.translate;
+    const created = tr('event', { event: { type: 'session.created', properties: { info: { id: 'ses_kid', parentID: 'ses_dad' } } } });
+    assert.deepStrictEqual(created, { type: 'session.created', sessionId: 'ses_kid', parentSession: 'ses_dad' });
+    assert.ok(!('parentSession' in tr('event', { event: { type: 'session.created', properties: { info: { id: 'ses_dad' } } } })));
+
+    const { tmp, stateFile, statsFile, sessionsDir, env } = makeTempEnv('oc-child');
+    try {
+      delete env.CLAUDE_SESSION_ID;
+      runStdinAdapter(ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_dad', tool: 'task', toolInput: { description: 'x' } }, env);
+      runStdinAdapter(ADAPTER, created, env);
+      // Later child payloads carry no parent: the session file remembers it.
+      runStdinAdapter(ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_kid', tool: 'grep', toolInput: { pattern: 'x' } }, env);
+      let kid = readJSON(path.join(sessionsDir, 'ses_kid.json'));
+      assert.strictEqual(kid.parentSession, 'ses_dad');
+      assert.ok(!kid.lastPromptAt, 'a child never stamps attention');
+      assert.strictEqual(readJSON(stateFile).sessionId, 'ses_dad', 'nor takes the global file');
+      assert.strictEqual(readJSON(statsFile).daily.sessionCount, 1, 'nor counts as a session of its own');
+      runStdinAdapter(ADAPTER, { type: 'session.idle', sessionId: 'ses_kid' }, env);
+      kid = readJSON(path.join(sessionsDir, 'ses_kid.json'));
+      assert.strictEqual(kid.stopped, true, 'its turn end retires it');
+      assert.strictEqual(readJSON(stateFile).sessionId, 'ses_dad');
+      assert.ok(!readJSON(stateFile).stopped, 'and does not end the parent\'s turn');
+    } finally { cleanup(tmp); }
+  });
+
+  // An oversized payload used to reach only the global file: the orbital
+  // (and the main face, which reads the session file) stood on the tool's
+  // start, and every event was judged as a tool result -- a big Write whose
+  // content said "exit code 2" put a false error on the global file.
+  test('an oversized payload reaches the session file, judged by its own event', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('oc-big');
+    try {
+      delete env.CLAUDE_SESSION_ID;
+      runStdinAdapter(ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_big', tool: 'write', toolInput: { filePath: 'a.txt' } }, env);
+      const big = 'x'.repeat(600000) + '\nexit code 2\nError: nope\n' + 'y'.repeat(600000);
+      runStdinAdapter(ADAPTER, { type: 'tool.execute.after', sessionId: 'ses_big', tool: 'write',
+        toolInput: { filePath: 'a.txt', content: big }, title: '', output: '' }, env);
+      const f = readJSON(path.join(sessionsDir, 'ses_big.json'));
+      assert.notStrictEqual(f.state, 'coding', 'no longer stuck on the tool start');
+      assert.notStrictEqual(f.state, 'error', 'a write\'s content is not a verdict');
+      assert.ok(f.lastPromptAt > 0, 'the attention stamp is carried');
+      assert.strictEqual(readJSON(stateFile).state, f.state, 'the global file agrees');
+      runStdinAdapter(ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_big', tool: 'write',
+        toolInput: { filePath: 'b.txt', content: big } }, env);
+      assert.strictEqual(readJSON(path.join(sessionsDir, 'ses_big.json')).state, 'coding', 'an oversized start shows its tool');
+    } finally { cleanup(tmp); }
+  });
+
+  test('adapter identity fields are text, whatever the payload sends', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('oc-types');
+    try {
+      runStdinAdapter(ADAPTER, {
+        type: 'tool.execute.before', sessionId: 4242, tool: 'bash', toolInput: { command: 'ls' },
+        model_name: { provider: 'x', id: 'y' }, editor: ['oc'],
+      }, env);
+      const f = readJSON(path.join(sessionsDir, '4242.json'));
+      assert.strictEqual(f.sessionId, '4242', 'a numeric id becomes its string');
+      assert.strictEqual(typeof f.modelName, 'string');
+      assert.strictEqual(typeof f.editor, 'string');
+    } finally { cleanup(tmp); }
+  });
+
   test('the payload session id wins over the opencode-<ppid> fallback', () => {
     const { tmp, stateFile, env } = makeTempEnv('oc-plug-2');
     delete env.CLAUDE_SESSION_ID;
@@ -1791,11 +1858,66 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
         execFileSync(NODE, [WRAPPER, 'a prompt'], { env, timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] });
         const took = Date.now() - t0;
         assert.ok(took < 10000, `the wrapper exits after a short grace, not with the sleeper (${took}ms)`);
-        const session = readJSON(path.join(base.sessionsDir, 'codex-tg.json'));
+        const session = readJSON(path.join(base.sessionsDir, 'tg.json'));
         assert.strictEqual(session.stopped, true, 'and retires the session on the way out');
       } finally { cleanup(base.tmp); }
     });
   }
+
+  // Setup installs codex's native hooks AND suggests the wrapper for `codex
+  // exec`, which runs those hooks too: each run was two sessions, with the
+  // tool calls, the daily session count and the streak all counted twice.
+  test('with codex\'s own hooks live, a wrapped run is one session counted once', () => {
+    const base = makeTempEnv('codex-dual');
+    try {
+      const binDir = path.join(base.tmp, 'bin');
+      fs.mkdirSync(binDir, { recursive: true });
+      const T = '019a-dual-thread';
+      const US = path.join(__dirname, '..', 'update-state.js');
+      fs.writeFileSync(path.join(binDir, 'codex-fake.js'), [
+        "'use strict';",
+        "const { execFileSync } = require('child_process');",
+        `const T = ${JSON.stringify(T)};`,
+        `const hook = (ev, extra) => execFileSync(process.execPath, [${JSON.stringify(US)}, '--editor', 'codex', ev],`,
+        "  { input: JSON.stringify({ session_id: T, hook_event_name: ev, model: 'gpt-5.1-codex', ...extra }) });",
+        "const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');",
+        "hook('SessionStart', { source: 'startup' });",
+        "out({ type: 'thread.started', thread_id: T });",
+        "hook('UserPromptSubmit', { prompt: 'fix it' });",
+        "out({ type: 'turn.started' });",
+        "hook('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' } });",
+        "out({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'ls', status: 'in_progress' } });",
+        "hook('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: 'a' });",
+        "out({ type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'ls', aggregated_output: 'a', exit_code: 0, status: 'completed' } });",
+        "hook('Stop', {});",
+        "out({ type: 'turn.completed', usage: {} });",
+        '',
+      ].join('\n'), 'utf8');
+      if (process.platform === 'win32') {
+        fs.writeFileSync(path.join(binDir, 'codex.cmd'), '@node "%~dp0codex-fake.js" %*\r\n', 'utf8');
+      } else {
+        const sh = path.join(binDir, 'codex');
+        fs.writeFileSync(sh, '#!/bin/sh\nexec node "$(dirname "$0")/codex-fake.js" "$@"\n', 'utf8');
+        fs.chmodSync(sh, 0o755);
+      }
+      const env = { ...base.env };
+      for (const k of Object.keys(env)) if (/^path$/i.test(k)) delete env[k];
+      env.PATH = binDir + path.delimiter + (process.env.PATH || '');
+      delete env.CLAUDE_SESSION_ID;
+      execFileSync(NODE, [WRAPPER, 'fix it'], { env, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] });
+
+      assert.deepStrictEqual(fs.readdirSync(base.sessionsDir), [`${T}.json`], 'one session file, the hooks\' id');
+      const stats = readJSON(base.statsFile);
+      assert.strictEqual(stats.totalToolCalls, 1, 'one tool call');
+      assert.strictEqual(stats.daily.sessionCount, 1, 'one session');
+      assert.strictEqual(stats.streak, 1, 'one success');
+      const f = readJSON(path.join(base.sessionsDir, `${T}.json`));
+      assert.strictEqual(f.stopped, true, 'the wrapper still retires the run');
+      assert.strictEqual(f.state, 'idle', 'on the hooks\' last frame, not its own stale one');
+      assert.ok(f.lastPromptAt > 0, 'keeping their attention stamp');
+      assert.strictEqual(f.model, 'gpt-5.1-codex');
+    } finally { cleanup(base.tmp); }
+  });
 
   test('a failed turn breaks the streak once, not twice', () => {
     // Codex reports one failure as BOTH a top-level error and a turn.failed.
@@ -1872,7 +1994,7 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
       { type: 'thread.started', thread_id: 'abc' },
     ]);
     const state = readJSON(stateFile);
-    assert.strictEqual(state.sessionId, 'codex-abc');
+    assert.strictEqual(state.sessionId, 'abc', 'the bare thread id -- the id codex\'s own hooks carry');
     assert.strictEqual(state.editor, 'codex');
     assert.strictEqual(state.modelName, 'codex', 'the status line says "codex is ..." by default');
     // The wrapper is long-lived, so it publishes its OWN pid, not its parent's.
@@ -1880,7 +2002,7 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     assert.ok(state.pid > 0 && state.pid !== process.pid,
       `pid should be the wrapper process, not the test runner (${process.pid})`);
     const files = fs.readdirSync(sessionsDir);
-    assert.deepStrictEqual(files, ['codex-abc.json'], 'exactly one orbital, named for the thread');
+    assert.deepStrictEqual(files, ['abc.json'], 'exactly one orbital, named for the thread');
     cleanup(tmp);
   });
 
@@ -1931,7 +2053,7 @@ describe('adapters -- codex-wrapper against a fake codex on PATH', () => {
     assert.strictEqual(state.state, 'responding');
     assert.strictEqual(state.detail, 'wrapping up');
     assert.strictEqual(state.stopped, true);
-    assert.strictEqual(state.sessionId, 'codex-live');
+    assert.strictEqual(state.sessionId, 'live');
     cleanup(tmp);
   });
 
@@ -2599,7 +2721,7 @@ describe('update-state.js stopped flag preservation (#98)', () => {
   test('source: renderer fresh-read loop only detects false->true stopped transitions', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
     assert.ok(
-      src.includes('stoppedNow && !lastStopped && freshTs'),
+      src.includes('stoppedNow && !lastStopped && isNewerWrite(freshTs'),
       'renderer.js fresh-read should only detect false->true transitions'
     );
     assert.ok(
@@ -3411,7 +3533,7 @@ describe('editor PID liveness tracking', () => {
       'candidate PID should require a 2.5s survival window');
     assert.ok(rendererSrc.includes('isProcessAlive(candidatePid)'),
       'candidate PID should be liveness-checked before arming');
-    assert.ok(rendererSrc.includes('editorDead && ts > lastAppliedTimestamp'),
+    assert.ok(rendererSrc.includes('editorDead && isNewerWrite(ts, lastAppliedTimestamp, now)'),
       'a fresh write should clear a false editorDead (PID reuse guard)');
   });
 
@@ -3924,7 +4046,7 @@ describe('adapters -- codex-wrapper turn end vs session end', () => {
   // end from the close handler's session end, which overwrites it.
   test('turn.completed / turn.failed are turn ends; the next turn clears them', () => {
     const threadId = `te-${Date.now()}`;
-    const file = path.join(SHARED.SESSIONS_DIR, SHARED.safeFilename(`codex-${threadId}`) + '.json');
+    const file = path.join(SHARED.SESSIONS_DIR, SHARED.safeFilename(threadId) + '.json');
     withStateFile({ sessionId: 'nobody', stopped: true, timestamp: 0 }, () => {
       wrapper.handleEvent({ type: 'thread.started', thread_id: threadId });
       wrapper.handleEvent({ type: 'turn.started' });
@@ -4012,7 +4134,7 @@ describe('adapters -- codex-wrapper turn end vs session end', () => {
     env.PATH = binDir + path.delimiter + (process.env.PATH || '');
     delete env.CLAUDE_SESSION_ID;
     const child = spawn(NODE, [WRAPPER, 'a prompt'], { env, stdio: ['ignore', 'ignore', 'ignore'] });
-    return { ...base, child, done: exited(child), sessionFile: path.join(base.sessionsDir, 'codex-sig.json') };
+    return { ...base, child, done: exited(child), sessionFile: path.join(base.sessionsDir, 'sig.json') };
   }
 
   if (POSIX) {

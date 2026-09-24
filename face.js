@@ -21,6 +21,7 @@ const { getAccessory, ACCESSORIES } = require('./accessories');
 // Active tool states (real work happening NOW), completion (reward) states,
 // and the states work may interrupt -- shared with grid.js and renderer.js.
 const { ACTIVE_WORK_STATES, COMPLETION_STATES, INTERRUPTIBLE_STATES } = require('./shared');
+const { sessionListFits } = require('./grid');
 // Low-activity states used for timeline compression and consecutive-entry capping
 const LOW_ACTIVITY_STATES = new Set(['idle', 'sleeping', 'waiting']);
 
@@ -121,11 +122,13 @@ const KEY_HINTS = [
 ];
 
 // Pure: which hints fit in `width` visible columns, in display order.
-function fitKeyHints(width) {
+// `omit` names keys that do nothing at this size (see sessionListFits).
+function fitKeyHints(width, omit = []) {
   const sepW = 3; // ' · '
   const keep = [];
   let used = 0;
   for (const h of KEY_HINTS) {
+    if (omit.includes(h[0])) continue;
     const w = h[0].length + 1 + h[1].length + (keep.length ? sepW : 0);
     if (used + w > width) break;
     keep.push(h);
@@ -1475,7 +1478,7 @@ class ClaudeFace {
       const dc = ansi.fg(...dimColor(theme.label, 0.55));
       const kc = ansi.fg(...dimColor(theme.accent, 0.6));
       const sep = ` ${dc}\u00b7${r} `;
-      const fitted = fitKeyHints(cols - 1);
+      const fitted = fitKeyHints(cols - 1, sessionListFits(cols, rows) ? [] : ['l']);
       const hint = fitted.map(([k, label]) => `${kc}${k}${dc} ${label}`).join(sep) + r;
       // Strip ANSI to measure visible length
       const visible = hint.replace(/\x1b\[[^m]*m/g, '');

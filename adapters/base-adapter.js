@@ -119,7 +119,7 @@ function creditOwnerSession(stats, now = Date.now()) {
 function sessionCounters(stats) {
   if (!stats.sessionCounters || typeof stats.sessionCounters !== 'object'
       || Array.isArray(stats.sessionCounters)) {
-    stats.sessionCounters = {};
+    stats.sessionCounters = Object.create(null);
   }
   return stats.sessionCounters;
 }
@@ -188,7 +188,7 @@ function initSession(stats, sessionId) {
   if (!stats.daily || stats.daily.date !== today) {
     stats.daily = { date: today, sessionCount: 0, cumulativeMs: 0 };
   }
-  if (!stats.frequentFiles) stats.frequentFiles = {};
+  if (!stats.frequentFiles) stats.frequentFiles = Object.create(null);
   const counters = sessionCounters(stats);
   // Seed the owner's entry from stats.session when it has none (a stats file
   // from before the map): it was counted when it was adopted.
@@ -455,23 +455,48 @@ function runStdinAdapter(options) {
     const toolOutput = norm.toolOutput || '';
     const isError = norm.isError || false;
     // Fallback ID is editor-prefixed so anonymous sessions are
-    // self-describing and never collide across editors.
-    const sessionId = norm.sessionId
-      || data.session_id
+    // self-describing and never collide across editors. Every identity field
+    // is text (update-state.js does the same): an object session_id keyed the
+    // renderer's faces by a fresh object on every load (a respawn and a swap
+    // animation every 2s), a number made the session list read the selection
+    // as a row index, and an object model_name crashed the renderer's labels.
+    const sessionId = toText(norm.sessionId)
+      || toText(data.session_id)
       || process.env.CLAUDE_SESSION_ID
       || `${defaultEditor}-${process.ppid}`;
-    const modelName = norm.modelName
-      || data.model_name
+    const modelName = toText(norm.modelName)
+      || toText(data.model_name)
       || process.env.CODE_CRUMB_MODEL
       || defaultModel;
-    const editor = norm.editor
-      || data.editor
+    const editor = toText(norm.editor)
+      || toText(data.editor)
       || process.env.CODE_CRUMB_EDITOR
       || defaultEditor;
     // Real model identity, when an adapter can supply one. No env fallback:
     // CODE_CRUMB_MODEL overrides modelName (the display name), not this.
     // Prettified here so every adapter can just forward the provider's raw id.
     const model = prettyModelName(norm.model || data.model || '');
+
+    // The session file is the only memory an adapter has (each event is its
+    // own process): the attention stamp, the model and the parent below all
+    // come from it.
+    let prevSession = null;
+    try {
+      prevSession = JSON.parse(fs.readFileSync(
+        path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
+    } catch {}
+    if (!prevSession || typeof prevSession !== 'object') prevSession = null;
+
+    // A child session -- OpenCode's task tool runs one per delegated task --
+    // is an orbital of its parent, like a Claude Code subagent: it never
+    // stamps attention (every task used to take the center from the session
+    // that launched it), never owns the global file, counts its tool calls
+    // toward its parent, and its turn end retires it. Only session.created
+    // names the parent, so later events take it from the session file.
+    let parentSession = toText(norm.parentSession) || toText(data.parentSession)
+      || (prevSession ? toText(prevSession.parentSession) : '');
+    if (parentSession === sessionId) parentSession = '';
+    const statsId = parentSession || sessionId;
 
     // Read -> mutate -> write of the shared stats file, serialized: several
     // adapter processes can run at once and the last writer would otherwise
@@ -480,19 +505,15 @@ function runStdinAdapter(options) {
     const releaseStats = acquireFileLock(STATS_LOCK_FILE);
     try {
       const stats = readStats();
-      initSession(stats, sessionId);
+      initSession(stats, statsId);
 
-      const extra = buildExtra(stats, sessionId, modelName, editor, model);
+      const extra = buildExtra(stats, statsId, modelName, editor, model);
+      extra.sessionId = sessionId;
+      if (parentSession) extra.parentSession = parentSession;
 
-      // Attention stamp for the renderer's main-face policy. Each adapter
-      // event is its own process, so the session file is the only memory:
-      // the first event of a session, or the first after a turn end, starts a
-      // new turn and stamps now; anything else carries the old stamp forward.
-      let prevSession = null;
-      try {
-        prevSession = JSON.parse(fs.readFileSync(
-          path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
-      } catch {}
+      // Attention stamp for the renderer's main-face policy: the first event
+      // of a session, or the first after a turn end, starts a new turn and
+      // stamps now; anything else carries the old stamp forward.
       // The session file is the only memory an adapter has, and a plugin that
       // restarts holds no model until its next message: carry it forward.
       if (prevSession && prevSession.model && !extra.model) extra.model = prevSession.model;
@@ -506,7 +527,7 @@ function runStdinAdapter(options) {
       // A live file with no stamp self-heals rather than staying blind for the
       // whole turn: an `error` can be the first event a session ever writes,
       // and an upgrade can land mid-turn over a pre-feature session file.
-      if (!endsTurn && !lateToolEnd &&
+      if (!endsTurn && !lateToolEnd && !parentSession &&
           (!prevSession || prevSession.stopped || prevSession.turnEnded || !prevSession.lastPromptAt)) {
         extra.lastPromptAt = Date.now();
       } else if (prevSession && prevSession.lastPromptAt) {
@@ -563,16 +584,17 @@ function runStdinAdapter(options) {
       // A turn (or session) end folds this session's time into today's
       // total and the records. (extra's dailyCumulativeMs already counts
       // that time as the running session's, so it reads the same.)
-      if (stopped) creditOwnerSession(stats);
+      if (stopped && !parentSession) creditOwnerSession(stats);
       // Built before the tool end was classified, so refresh the commit count.
       extra.commitCount = stats.session.commitCount || 0;
-      guardedWriteState(sessionId, state, detail, extra, { toolEnd: isToolEnd });
+      if (!parentSession) guardedWriteState(sessionId, state, detail, extra, { toolEnd: isToolEnd });
       // A turn end is not a session end. On the session file `stopped` is
       // reserved for session_end (the update-state.js contract): the orbital
       // loader latches it and the main policy drops a stopped session, so a
       // turn-end `stopped` bounced the center away and back every turn and
       // released any pin on it. The global file keeps `stopped` for tmux.
-      const turnOnly = stopped && event !== 'session_end';
+      // A child's turn end is its whole life: it retires like a subagent.
+      const turnOnly = stopped && event !== 'session_end' && !parentSession;
       const sessionExtra = { ...extra };
       if (turnOnly) { delete sessionExtra.stopped; sessionExtra.turnEnded = true; }
       let sessionStopped = stopped && !turnOnly;
@@ -598,14 +620,50 @@ function runStdinAdapter(options) {
     const rawId = trunc
       ? ((/"session_?id"\s*:\s*"([^"\\]{1,256})"/i.exec(trunc.raw) || [])[1] || '') : '';
     const sessionId = rawId || process.env.CLAUDE_SESSION_ID || `${defaultEditor}-${process.ppid}`;
-    const shown = trunc ? trunc.override : { state: 'thinking', detail: '' };
-    guardedWriteState(sessionId, shown.state, shown.detail, {
+    // What the oversized payload was. Only a tool END is judged for errors:
+    // judging any event as one read a huge Write's content ("exit code 2")
+    // as a failure. A tool start shows its tool; anything else, thinking.
+    const raw = trunc ? trunc.raw : '';
+    const rawType = (/"(?:type|event)"\s*:\s*"([^"\\]{1,64})"/.exec(raw) || [])[1] || '';
+    const rawTool = (/"(?:tool_name|toolName|tool)"\s*:\s*"([^"\\]{1,128})"/.exec(raw) || [])[1] || '';
+    const toolEnd = TRUNC_TOOL_END_RE.test(rawType);
+    let shown;
+    if (!trunc) shown = { state: 'thinking', detail: '' };
+    else if (toolEnd || !rawType) shown = classifyTruncatedInput(toolEnd ? 'PostToolUse' : '', raw);
+    else if (TRUNC_TOOL_START_RE.test(rawType) && rawTool) shown = toolToState(rawTool, {});
+    else shown = { state: 'thinking', detail: 'large input' };
+
+    // The session file too, like update-state.js's fallback: without it the
+    // orbital (or the main face, which reads the session file) stood on the
+    // tool's start for up to the 10-minute long-tool hold.
+    let prev = null;
+    try {
+      prev = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
+    } catch {}
+    if (!prev || typeof prev !== 'object') prev = null;
+    const extra = {
       sessionId,
-      modelName: process.env.CODE_CRUMB_MODEL || defaultModel,
-      editor: defaultEditor,
-    });
+      modelName: (prev && toText(prev.modelName)) || process.env.CODE_CRUMB_MODEL || defaultModel,
+      editor: (prev && toText(prev.editor)) || defaultEditor,
+    };
+    for (const k of ['lastPromptAt', 'model', 'parentSession', 'taskDescription']) {
+      if (prev && prev[k]) extra[k] = prev[k];
+    }
+    if (!extra.parentSession) {
+      guardedWriteState(sessionId, shown.state, shown.detail, { ...extra }, { toolEnd });
+    }
+    if (!(prev && prev.stopped)) {
+      const sessionExtra = { ...extra };
+      if (prev && (prev.turnEnded || prev.turnOver) && toolEnd) sessionExtra.turnEnded = true;
+      writeSessionState(sessionId, shown.state, shown.detail, false, sessionExtra);
+    }
   });
 }
+
+// Event types in an oversized adapter payload (OpenCode plugin, OpenClaw,
+// generic), read out of the raw text by the fallback above.
+const TRUNC_TOOL_END_RE = /^(?:tool\.execute\.after|tool\.error|tool_end|tool_result|PostToolUse|PostToolUseFailure)$/;
+const TRUNC_TOOL_START_RE = /^(?:tool\.execute\.before|tool_start|tool_call|PreToolUse)$/;
 
 module.exports = {
   pidField,
