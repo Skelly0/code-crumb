@@ -4560,7 +4560,12 @@ describe('grid.js -- round 3: live-renderer findings', () => {
   // Caffeine history belonged to the session that left: the incoming face
   // went "hyperdrive!" 67ms after arriving, having done nothing.
   test('a swap clears the caffeine history after its own forceState', () => {
-    assert.ok(/face\.forceState\(newData\.state[\s\S]{0,600}?face\.stateChangeTimes = \[\];/.test(RSRC));
+    assert.ok(/face\.forceState\(newData\.state[\s\S]{0,1600}?face\.stateChangeTimes = \[\];/.test(RSRC));
+  });
+
+  // A swap restarted "still running … Ns" at 0, and the 10-minute hold with it.
+  test('a swap keeps a running tool\'s age', () => {
+    assert.ok(/ACTIVE_WORK_STATES\.has\(newData\.state\) \|\| newData\.state === 'waiting'\)[\s\S]{0,200}?face\.lastStateChange = ts;/.test(RSRC));
   });
 
   // A dead editor's agents are not running: counting them lifted the rescued
