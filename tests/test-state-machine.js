@@ -1948,6 +1948,13 @@ describe('state-machine.js -- classifyTruncatedInput', () => {
     assert.strictEqual(r.detail, 'needs permission');
   });
 
+  // A denied Write of a huge file is over 1 MB; it said "large input".
+  test('PermissionDenied maps to thinking / permission denied, like writeFallback', () => {
+    const r = classifyTruncatedInput('PermissionDenied', '');
+    assert.strictEqual(r.state, 'thinking');
+    assert.strictEqual(r.detail, 'permission denied');
+  });
+
   test('unknown event falls back to thinking', () => {
     const r = classifyTruncatedInput('SomeNewEvent', '');
     assert.strictEqual(r.state, 'thinking');
