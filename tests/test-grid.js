@@ -5122,6 +5122,49 @@ describe('grid.js -- Review round 5', () => {
     assert.ok(ran >= 12, `only ${ran} scenes had room for the ring`);
   });
 
+  test('a swap\'s demoted main rejoins the ring, however often it swaps, without the resolver firing', () => {
+    // The demoted main entered the ring by snapping into its slot (it had
+    // never been on it) or eased back from wherever it last stood (it had):
+    // the resolver fired on 13-54 frames of every swap.
+    const { ClaudeFace } = require('../lib/face');
+    const add = (orb, id, parentSession, firstSeen) => {
+      const f = new MiniFace(id);
+      f.updateFromFile({ state: 'coding', detail: 'edit', parentSession, cwd: '/r/' + id });
+      f.firstSeen = firstSeen;
+      orb.faces.set(id, f);
+    };
+    const oc = process.stdout.columns, or = process.stdout.rows;
+    try {
+      for (const [cols, rows] of [[140, 50], [180, 64]]) {
+        process.stdout.columns = cols; process.stdout.rows = rows;
+        for (const promote of ['f1', 'f5']) {
+          const face = new ClaudeFace();
+          face.showStats = true; face.accessoriesEnabled = true;
+          const orb = new OrbitalSystem();
+          add(orb, 'main', undefined, -5);
+          for (let k = 0; k < 6; k++) add(orb, 'f' + k, k < 3 ? 'main' : undefined, k);
+          orb.setMainSession('main');
+          const frames = (n) => {
+            for (let fr = 0; fr < n; fr++) { face.update(66); orb.update(66); face.render(); orb.render(cols, rows, face.lastPos, null); }
+          };
+          frames(80);
+          let shoved = 0;
+          const resolve = orb._resolveOverlaps.bind(orb);
+          orb._resolveOverlaps = (pos, c, r) => {
+            const before = pos.map(p => `${p.row},${p.col}`).join(' ');
+            resolve(pos, c, r);
+            if (pos.map(p => `${p.row},${p.col}`).join(' ') !== before) shoved++;
+          };
+          orb.setMainSession(promote); frames(90);    // main joins the ring, promote leaves it
+          orb.setMainSession('main'); frames(300);    // and back
+          orb.setMainSession(promote); frames(90);    // and again, main returning from a stale place
+          assert.strictEqual(shoved, 0, `${cols}x${rows} promote ${promote}: the resolver shoved faces on ${shoved} frames`);
+          assert.ok(!orb.faces.get('main')._joining, 'the demoted main settled');
+        }
+      }
+    } finally { process.stdout.columns = oc; process.stdout.rows = or; }
+  });
+
   // -- 8. The size render() was given ------------------------------------------
 
   test('connection dots and tethers clip to the size render() was given, not process.stdout', () => {
