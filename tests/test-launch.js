@@ -8,8 +8,14 @@
 // +================================================================+
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { parseArgs, resolveEditor, buildRendererCommands, WINDOW_TITLE } = require('../launch');
+const { spawn, execFileSync } = require('child_process');
+const { EventEmitter } = require('events');
+const {
+  parseArgs, resolveEditor, buildRendererCommands, buildEditorSpawn, superviseEditor, WINDOW_TITLE,
+} = require('../launch');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
@@ -369,6 +375,168 @@ describe('launch.js -- buildRendererCommands returns array', () => {
       assert.ok(Array.isArray(cmds[key].args), `${key} should have an args array`);
     }
   });
+});
+
+// -- Review round 5 ---------------------------------------------------------
+
+const LAUNCH = path.join(__dirname, '..', 'launch.js');
+
+// A temp home whose renderer reads as alive (a fresh PID file naming this
+// process), so launch.js never opens a window, plus a bin dir for a fake
+// editor. The env drops NoDefaultCurrentDirectoryInExePath: Claude Code's own
+// shell exports it, and with it set the current-folder bug cannot show.
+function launchFixture() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-launch-'));
+  fs.writeFileSync(path.join(tmp, '.code-crumb-prefs.json'), '{"autolaunch":false}');
+  fs.writeFileSync(path.join(tmp, '.code-crumb.pid'), String(process.pid));
+  const bin = path.join(tmp, 'bin');
+  fs.mkdirSync(bin);
+  const env = { ...process.env, HOME: tmp, USERPROFILE: tmp, CODE_CRUMB_STATE: path.join(tmp, '.code-crumb-state') };
+  for (const k of Object.keys(env)) {
+    if (/^(path|NoDefaultCurrentDirectoryInExePath)$/i.test(k)) delete env[k];
+  }
+  env.PATH = bin + path.delimiter + (process.env.PATH || '');
+  return { tmp, bin, env, log: path.join(tmp, 'editor.log') };
+}
+
+// A POSIX fake `claude`: a sh shim that execs node on `src` (same pid).
+function fakePosixEditor(fx, src) {
+  const js = path.join(fx.tmp, 'fake-editor.js');
+  fs.writeFileSync(js, `const fs = require('fs');\nconst log = (s) => fs.appendFileSync(${JSON.stringify(fx.log)}, s + '\\n');\n${src}\n`);
+  const sh = path.join(fx.bin, 'claude');
+  fs.writeFileSync(sh, `#!/bin/sh\nexec "${process.execPath}" "${js}" "$@"\n`);
+  fs.chmodSync(sh, 0o755);
+}
+
+function readLog(fx) {
+  try { return fs.readFileSync(fx.log, 'utf8'); } catch { return ''; }
+}
+
+async function waitFor(cond, ms, what) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (cond()) return;
+    await new Promise(r => setTimeout(r, 25));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+const exited = (child) => new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+
+describe('launch.js -- Review round 5: the launcher supervises the editor', () => {
+  test('superviseEditor (POSIX): the tty\'s signals are left to the editor, a kill is passed on', () => {
+    const proc = new EventEmitter();
+    const child = new EventEmitter();
+    const kills = [];
+    const exits = [];
+    child.kill = (sig) => kills.push(sig);
+    superviseEditor(child, { platform: 'linux', proc, exit: (c) => exits.push(c) });
+    proc.emit('SIGINT');
+    proc.emit('SIGQUIT');
+    assert.deepStrictEqual([kills, exits], [[], []], 'a Ctrl+C is the editor\'s to handle');
+    assert.ok(proc.listenerCount('SIGINT') > 0, 'and it must not kill the launcher either');
+    proc.emit('SIGTERM');
+    proc.emit('SIGHUP');
+    assert.deepStrictEqual(kills, ['SIGTERM', 'SIGHUP']);
+    child.emit('exit', null, 'SIGTERM');
+    assert.deepStrictEqual(exits, [143], 'the editor\'s own end, the shell way');
+    for (const sig of ['SIGINT', 'SIGQUIT', 'SIGTERM', 'SIGHUP']) {
+      assert.strictEqual(proc.listenerCount(sig), 0, `${sig} handler removed`);
+    }
+  });
+
+  test('superviseEditor (win32): Ctrl+C and Ctrl+Break wait for the editor, nothing is forwarded', () => {
+    const proc = new EventEmitter();
+    const child = new EventEmitter();
+    const kills = [];
+    const exits = [];
+    child.kill = (sig) => kills.push(sig);
+    superviseEditor(child, { platform: 'win32', proc, exit: (c) => exits.push(c) });
+    assert.ok(proc.listenerCount('SIGINT') > 0 && proc.listenerCount('SIGBREAK') > 0);
+    assert.strictEqual(proc.listenerCount('SIGTERM'), 0, 'child.kill would TerminateProcess the editor');
+    proc.emit('SIGINT');
+    proc.emit('SIGBREAK');
+    child.emit('exit', 3, null);
+    assert.deepStrictEqual([kills, exits], [[], [3]]);
+  });
+
+  test('buildEditorSpawn: node is this node, and the shell never looks in the current folder', () => {
+    for (const platform of ['win32', 'linux']) {
+      assert.strictEqual(buildEditorSpawn(platform, 'node', ['w.js']).cmd, process.execPath, platform);
+    }
+    const s = buildEditorSpawn('win32', 'claude', ['-p', 'x'], { KEEP: 'me' });
+    assert.strictEqual(s.opts.shell, true);
+    assert.strictEqual(s.opts.env.NoDefaultCurrentDirectoryInExePath, '1');
+    assert.strictEqual(s.opts.env.KEEP, 'me', 'the rest of the environment is passed on');
+  });
+
+  if (process.platform === 'win32') {
+    test('a project\'s own claude.cmd does not shadow the real one on PATH', () => {
+      const fx = launchFixture();
+      try {
+        const project = path.join(fx.tmp, 'project');
+        fs.mkdirSync(project);
+        fs.writeFileSync(path.join(fx.bin, 'claude.cmd'), `@echo from-path>"${fx.log}"\r\n`);
+        fs.writeFileSync(path.join(project, 'claude.cmd'), `@echo from-cwd>"${fx.log}"\r\n`);
+        try {
+          execFileSync(process.execPath, [LAUNCH], { cwd: project, env: fx.env, stdio: 'pipe', timeout: 20000 });
+        } catch (e) { if (e.status === null) throw e; }
+        assert.strictEqual(readLog(fx).trim(), 'from-path');
+      } finally { fs.rmSync(fx.tmp, { recursive: true, force: true }); }
+    });
+  }
+
+  if (process.platform !== 'win32') {
+    test.async('a Ctrl+C reaches the editor and the launcher stays until the editor exits', async () => {
+      const fx = launchFixture();
+      fakePosixEditor(fx, [
+        "process.on('SIGINT', () => { log('sigint'); setTimeout(() => process.exit(7), 300); });",
+        "log('started ' + process.pid);",
+        'setTimeout(() => process.exit(0), 10000);',
+      ].join('\n'));
+      const child = spawn(process.execPath, [LAUNCH], { env: fx.env, stdio: 'ignore' });
+      const done = exited(child);
+      let editorPid = 0;
+      try {
+        await waitFor(() => /started (\d+)/.test(readLog(fx)), 10000, 'the editor');
+        editorPid = Number(/started (\d+)/.exec(readLog(fx))[1]);
+        // The terminal sends it to the whole foreground group.
+        process.kill(child.pid, 'SIGINT');
+        process.kill(editorPid, 'SIGINT');
+        const r = await done;
+        assert.deepStrictEqual(r, { code: 7, signal: null }, 'the launcher left with the editor\'s own exit');
+        assert.ok(readLog(fx).includes('sigint'));
+      } finally {
+        try { process.kill(editorPid, 'SIGKILL'); } catch {}
+        try { child.kill('SIGKILL'); } catch {}
+        fs.rmSync(fx.tmp, { recursive: true, force: true });
+      }
+    });
+
+    test.async('a SIGTERM to the launcher is passed on to the editor', async () => {
+      const fx = launchFixture();
+      fakePosixEditor(fx, [
+        "process.on('SIGTERM', () => { log('sigterm'); process.exit(9); });",
+        "log('started ' + process.pid);",
+        'setTimeout(() => process.exit(0), 10000);',
+      ].join('\n'));
+      const child = spawn(process.execPath, [LAUNCH], { env: fx.env, stdio: 'ignore' });
+      const done = exited(child);
+      let editorPid = 0;
+      try {
+        await waitFor(() => /started (\d+)/.test(readLog(fx)), 10000, 'the editor');
+        editorPid = Number(/started (\d+)/.exec(readLog(fx))[1]);
+        process.kill(child.pid, 'SIGTERM');
+        const r = await done;
+        assert.deepStrictEqual(r, { code: 9, signal: null });
+        assert.ok(readLog(fx).includes('sigterm'), 'the editor was told, not left running');
+      } finally {
+        try { process.kill(editorPid, 'SIGKILL'); } catch {}
+        try { child.kill('SIGKILL'); } catch {}
+        fs.rmSync(fx.tmp, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 module.exports = suite;

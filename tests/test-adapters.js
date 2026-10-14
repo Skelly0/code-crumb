@@ -4653,4 +4653,169 @@ describe('adapters -- round 4', () => {
   });
 });
 
+// -- Review round 5 ----------------------------------------------------------
+// Each block below was run against the pre-fix sources first and failed.
+
+// A temp home for a wrapper run: autolaunch off, no inherited session id, and
+// no NoDefaultCurrentDirectoryInExePath -- Claude Code's own shell exports it,
+// which hides the current-folder bug from any test run inside Claude Code.
+function round5Env(tag) {
+  const base = makeTempEnv(tag);
+  fs.writeFileSync(path.join(base.tmp, '.code-crumb-prefs.json'), '{"autolaunch":false}');
+  const env = { ...base.env };
+  for (const k of Object.keys(env)) {
+    if (/^(path|NoDefaultCurrentDirectoryInExePath)$/i.test(k)) delete env[k];
+  }
+  delete env.CLAUDE_SESSION_ID;
+  const binDir = path.join(base.tmp, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  env.PATH = binDir + path.delimiter + (process.env.PATH || '');
+  return { ...base, env, binDir };
+}
+
+// A stand-in `codex` named `name` in `dir`, running `src` (Node) on every platform.
+function writeFakeCodex(dir, src, name = 'codex') {
+  const js = path.join(dir, `${name}-fake.js`);
+  fs.writeFileSync(js, src, 'utf8');
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(dir, `${name}.cmd`), `@"${NODE}" "%~dp0${name}-fake.js" %*\r\n`, 'utf8');
+  } else {
+    const sh = path.join(dir, name);
+    fs.writeFileSync(sh, `#!/bin/sh\nexec "${NODE}" "$(dirname "$0")/${name}-fake.js" "$@"\n`, 'utf8');
+    fs.chmodSync(sh, 0o755);
+  }
+}
+
+const fakeLines = (events) => [
+  "'use strict';",
+  "const fs = require('fs');",
+  `for (const e of ${JSON.stringify(events)}) fs.writeSync(1, JSON.stringify(e) + '\\n');`,
+  '',
+].join('\n');
+
+describe('adapters -- Review round 5: the codex wrapper', () => {
+  const WRAPPER = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
+  const US = path.join(__dirname, '..', 'update-state.js');
+
+  // cmd.exe tries the current folder, with every PATHEXT extension, before
+  // the PATH: the project's codex.cmd ran instead of codex.
+  if (process.platform === 'win32') {
+    test('a project\'s own codex.cmd does not shadow the codex on PATH', () => {
+      const t = round5Env('codex-shadow');
+      try {
+        const project = path.join(t.tmp, 'project');
+        fs.mkdirSync(project);
+        writeFakeCodex(t.binDir, fakeLines([{ type: 'thread.started', thread_id: 'from-path' }, { type: 'turn.completed' }]));
+        writeFakeCodex(project, fakeLines([{ type: 'thread.started', thread_id: 'from-cwd' }, { type: 'turn.completed' }]));
+        try {
+          execFileSync(NODE, [WRAPPER, 'a prompt'], { cwd: project, env: t.env, timeout: 30000, stdio: 'pipe' });
+        } catch (e) { if (e.status === null) throw e; }
+        assert.deepStrictEqual(fs.readdirSync(t.sessionsDir), ['from-path.json']);
+      } finally { cleanup(t.tmp); }
+    });
+  }
+
+  // A hooks.json from before the --editor tag runs update-state.js untagged:
+  // its writes say `claude`, and the wrapper never went quiet.
+  function runWithHooks(editorArgs) {
+    const t = round5Env('codex-legacy');
+    const T = '019a-legacy-thread';
+    writeFakeCodex(t.binDir, [
+      "'use strict';",
+      "const { execFileSync } = require('child_process');",
+      `const hook = (ev, extra) => execFileSync(process.execPath, [${JSON.stringify(US)}, ...${JSON.stringify(editorArgs)}, ev],`,
+      `  { input: JSON.stringify({ session_id: ${JSON.stringify(T)}, hook_event_name: ev, ...extra }) });`,
+      "const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');",
+      "hook('SessionStart', { source: 'startup' });",
+      `out({ type: 'thread.started', thread_id: ${JSON.stringify(T)} });`,
+      "hook('UserPromptSubmit', { prompt: 'x' });",
+      "out({ type: 'turn.started' });",
+      "hook('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' } });",
+      "out({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'ls', status: 'in_progress' } });",
+      "hook('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: 'a' });",
+      "out({ type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'ls', aggregated_output: 'a', exit_code: 0, status: 'completed' } });",
+      "hook('Stop', {});",
+      "out({ type: 'turn.completed', usage: {} });",
+      '',
+    ].join('\n'));
+    execFileSync(NODE, [WRAPPER, 'x'], { env: t.env, timeout: 30000, stdio: 'pipe' });
+    return { t, T };
+  }
+
+  test('legacy (untagged) codex hooks are recognised: one run, counted once', () => {
+    const { t, T } = runWithHooks([]);
+    try {
+      const stats = readJSON(t.statsFile);
+      assert.deepStrictEqual([stats.totalToolCalls, stats.streak, stats.daily.sessionCount], [1, 1, 1],
+        'each tool call, success and session once');
+      assert.deepStrictEqual(fs.readdirSync(t.sessionsDir), [`${T}.json`]);
+      assert.strictEqual(readJSON(path.join(t.sessionsDir, `${T}.json`)).stopped, true, 'still retired');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('tagged hooks still count once', () => {
+    const { t } = runWithHooks(['--editor', 'codex']);
+    try {
+      const stats = readJSON(t.statsFile);
+      assert.deepStrictEqual([stats.totalToolCalls, stats.streak], [1, 1]);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a Claude-tagged file the hooks did not write leaves the wrapper on its own', () => {
+    // Same thread id and a fresh timestamp, but no update-state.js marker: not
+    // a hook write (an adapter-shaped file never carries isWorktree).
+    const t = round5Env('codex-notahook');
+    try {
+      const T = 'thread-foreign';
+      writeFakeCodex(t.binDir, [
+        "'use strict';",
+        "const fs = require('fs');",
+        "const path = require('path');",
+        `const file = path.join(process.env.HOME, '.code-crumb-sessions', ${JSON.stringify(T + '.json')});`,
+        "const out = (o) => fs.writeSync(1, JSON.stringify(o) + '\\n');",
+        // Already there when thread.started is read -- the wrapper's first look.
+        "fs.mkdirSync(path.dirname(file), { recursive: true });",
+        "fs.writeFileSync(file, JSON.stringify({ session_id: 'x', editor: 'claude', state: 'idle', timestamp: Date.now() + 5 }));",
+        `out({ type: 'thread.started', thread_id: ${JSON.stringify(T)} });`,
+        "out({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'ls', status: 'in_progress' } });",
+        "out({ type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'ls', aggregated_output: 'a', exit_code: 0, status: 'completed' } });",
+        '',
+      ].join('\n'));
+      execFileSync(NODE, [WRAPPER, 'x'], { env: t.env, timeout: 30000, stdio: 'pipe' });
+      assert.strictEqual(readJSON(t.statsFile).totalToolCalls, 1, 'the wrapper counted the tool itself');
+    } finally { cleanup(t.tmp); }
+  });
+
+  // `codex exec ... | head`: the reader goes away and the next passthrough
+  // write is EPIPE -- an uncaught error, and the session never retired.
+  test.async('a reader that goes away (| head) ends the run cleanly and retires the session', async () => {
+    const t = round5Env('codex-epipe');
+    try {
+      writeFakeCodex(t.binDir, [
+        "'use strict';",
+        "const fs = require('fs');",
+        "const out = (o) => fs.writeSync(1, JSON.stringify(o) + '\\n');",
+        "out({ type: 'thread.started', thread_id: 'pipe-t' });",
+        "out({ type: 'turn.started' });",
+        "out({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } });",
+        'setTimeout(() => {',
+        "  try { for (let i = 0; i < 50; i++) out({ type: 'item.updated', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } }); } catch {}",
+        '}, 1500);',
+        'setTimeout(() => {}, 2500);',
+        '',
+      ].join('\n'));
+      const child = spawn(NODE, [WRAPPER, 'a prompt'], { env: t.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (d) => { stderr += d; });
+      child.stdout.once('data', () => child.stdout.destroy());
+      const code = await new Promise((resolve) => child.on('close', resolve));
+      assert.ok(!/EPIPE|Unhandled|EOF/.test(stderr), `no crash: ${stderr.split('\n')[0]}`);
+      if (process.platform !== 'win32') assert.strictEqual(code, 141, '128 + SIGPIPE');
+      const f = readJSON(path.join(t.sessionsDir, 'pipe-t.json'));
+      assert.strictEqual(f.stopped, true, `retired (${f.state} / ${f.detail})`);
+      assert.deepStrictEqual([f.state, f.detail], ['error', 'output closed']);
+    } finally { cleanup(t.tmp); }
+  });
+});
+
 module.exports = suite;
