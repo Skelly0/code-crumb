@@ -802,8 +802,8 @@ describe('platform -- renderer.js source-level fixes', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-clean-'));
     const timers = new Set();
     const handles = [];
-    const watch = () => {
-      const h = { closed: false, on() {}, close() { this.closed = true; } };
+    const watch = (d, cb) => {
+      const h = { cb, closed: false, on() {}, close() { this.closed = true; } };
       handles.push(h);
       return h;
     };
@@ -816,7 +816,8 @@ describe('platform -- renderer.js source-level fixes', () => {
     });
     try {
       assert.strictEqual(handles.length, 1, 'one watcher on the sessions folder');
-      assert.ok(timers.size > 0, 'a frame is pending');
+      handles[0].cb('change', null);   // arms the read throttle and the ring reload
+      assert.ok(timers.size >= 3, 'a frame, the throttle and the reload are pending');
       rt.cleanup();
       assert.strictEqual(code, 0);
       assert.ok(handles.every(h => h.closed), 'the watcher is closed');

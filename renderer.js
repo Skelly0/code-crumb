@@ -1198,16 +1198,15 @@ function runUnifiedMode(opts = {}) {
   // first event of a burst. That timer is not pushed back by later events:
   // a trailing debounce that every event reset never fired at all under a
   // steady stream. Every event also wakes a resting loop.
-  let stateWatchThrottled = false;
+  let stateWatchTimer = null;   // the 50ms throttle window; null when open
   let stateWatchMissed = false;
   let sessionWatchTimer = null;
   function onMainFileEvent() {
     if (runtimeStopped) return;
-    if (stateWatchThrottled) { stateWatchMissed = true; return; }
-    stateWatchThrottled = true;
+    if (stateWatchTimer) { stateWatchMissed = true; return; }
     try { checkState(); } catch {}
-    schedule(() => {
-      stateWatchThrottled = false;
+    stateWatchTimer = schedule(() => {
+      stateWatchTimer = null;
       if (stateWatchMissed) { stateWatchMissed = false; onMainFileEvent(); }
     }, 50);
   }
@@ -1245,6 +1244,7 @@ function runUnifiedMode(opts = {}) {
     runtimeStopped = true;
     try { sessionsWatcher.close(); } catch {}
     if (sessionWatchTimer) { try { cancel(sessionWatchTimer); } catch {} sessionWatchTimer = null; }
+    if (stateWatchTimer) { try { cancel(stateWatchTimer); } catch {} stateWatchTimer = null; }
     if (frameTimer) { try { cancel(frameTimer); } catch {} frameTimer = null; }
   }
   function restoreTerminal() {
