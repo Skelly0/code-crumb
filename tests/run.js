@@ -26,6 +26,10 @@ const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-test-home-'));
 process.env.HOME = fakeHome;
 process.env.USERPROFILE = fakeHome;
 process.env.CODE_CRUMB_STATE = path.join(fakeHome, '.code-crumb-state');
+// setup.js follows the editors' own config-dir variables (CODEX_HOME,
+// XDG_CONFIG_HOME, OPENCODE_CONFIG_DIR), which point outside HOME: unset,
+// every default lands in the throwaway home as well.
+for (const k of ['CODEX_HOME', 'XDG_CONFIG_HOME', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG']) delete process.env[k];
 process.on('exit', () => {
   try { fs.rmSync(fakeHome, { recursive: true, force: true }); } catch {}
 });

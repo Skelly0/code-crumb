@@ -36,7 +36,14 @@ const HOOK_SCRIPT = path.resolve(__dirname, 'update-state.js');
 const DEFAULT_HOOK_PATH = HOOK_SCRIPT.replace(/\\/g, '/');
 const DEFAULT_SETTINGS_PATH = path.join(HOME, '.claude', 'settings.json');
 
-const DEFAULT_CODEX_HOOKS_PATH = path.join(HOME, '.codex', 'hooks.json');
+// Codex keeps everything under CODEX_HOME when it is set -- codex refuses to
+// start unless it then names an existing directory -- and under ~/.codex
+// otherwise. Setup used to write ~/.codex regardless, so a CODEX_HOME user
+// got hooks codex never read. Resolved per call: tests pass their own env.
+function codexHome(env = process.env) {
+  return env.CODEX_HOME ? path.resolve(env.CODEX_HOME) : path.join(HOME, '.codex');
+}
+const DEFAULT_CODEX_HOOKS_PATH = path.join(codexHome(), 'hooks.json');
 
 const HOOK_EVENTS = [
   'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop',
@@ -403,9 +410,14 @@ function printCodexUsage(hooksPath, log) {
 }
 
 // Install (or repair) the Codex native hooks. Same contract as setupClaude:
-// opts { hooksPath, repoRoot, log, quiet } -> { ok, modified, added, replaced, pruned, error? }
+// opts { hooksPath, configPath, repoRoot, log, quiet }
+//   -> { ok, modified, added, replaced, pruned, notifyRemoved, error? }
+// The hooks report everything the legacy notify line does and more, and the
+// two together wrote the same session twice per turn (the notify write
+// erased the hooks' attention stamp), so a Code Crumb notify line found in
+// config.toml is taken out on the way.
 function setupCodex(opts = {}) {
-  const hooksPath = opts.hooksPath || DEFAULT_CODEX_HOOKS_PATH;
+  const hooksPath = opts.hooksPath || path.join(codexHome(), 'hooks.json');
   const log = opts.log || console.log;
   const hookPath = codexHookPath(opts.repoRoot);
   const faceHooks = buildCodexHooks(opts.repoRoot).hooks;
@@ -473,14 +485,20 @@ function setupCodex(opts = {}) {
     log('\n  All hooks already installed');
   }
 
+  // A failure here leaves the hooks installed: the notify line only costs
+  // the duplicate write, and the log says what to remove by hand.
+  const configPath = opts.configPath || path.join(path.dirname(hooksPath), 'config.toml');
+  const notify = removeCodexNotify({ configPath, log, quiet: true });
+  if (notify.removed) log(`  - Removed the legacy notify line from ${configPath} (the hooks replace it)`);
+
   if (!opts.quiet) printCodexUsage(hooksPath, log);
-  return { ok: true, modified, added, replaced, pruned };
+  return { ok: true, modified, added, replaced, pruned, notifyRemoved: notify.removed };
 }
 
-// Remove every Code Crumb entry from ~/.codex/hooks.json.
+// Remove every Code Crumb entry from $CODEX_HOME/hooks.json (~/.codex).
 // opts: { hooksPath, log }. Returns { ok, removed, error? }.
 function uninstallCodex(opts = {}) {
-  const hooksPath = opts.hooksPath || DEFAULT_CODEX_HOOKS_PATH;
+  const hooksPath = opts.hooksPath || path.join(codexHome(), 'hooks.json');
   const log = opts.log || console.log;
 
   log('\n  Code Crumb Uninstall (Codex CLI)');
@@ -518,64 +536,179 @@ function uninstallCodex(opts = {}) {
 // -- Codex CLI Setup (legacy notify channel) -------------------------
 // `notify` is Codex's pre-hooks callback (legacy_notify.rs upstream): one
 // turn-level event, no tool detail. Kept for older Codex builds.
+//
+// Code Crumb's only line in config.toml is one top-level `notify = [...]`
+// key, so the edits are textual and minimal -- there is no TOML parser here,
+// and the rest of the file comes back byte for byte. A UTF-8 BOM stays the
+// very first thing (prepending our lines in front of it left the BOM mid-file,
+// a TOML parse error that stopped codex starting), and the lines we add use
+// the file's own line ending, so a CRLF config never ends up mixed.
 
-function setupCodexNotify() {
-  const CODEX_CONFIG = path.join(HOME, '.codex', 'config.toml');
-  const notifyPath = path.resolve(__dirname, 'adapters', 'codex-notify.js').replace(/\\/g, '/');
+const NOTIFY_HEADER = '# Code Crumb integration';
+
+function codexNotifyPath() {
+  return path.resolve(__dirname, 'adapters', 'codex-notify.js').replace(/\\/g, '/');
+}
+
+// Index just past the line holding text[i], terminator included.
+function lineEnd(text, i) {
+  const nl = text.indexOf('\n', i);
+  return nl === -1 ? text.length : nl + 1;
+}
+
+// Net [ ] depth of a piece of one TOML line, outside strings and comments.
+function bracketDepth(s) {
+  let depth = 0;
+  let quote = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (quote) {
+      if (c === '\\' && quote === '"') i++;
+      else if (c === quote) quote = '';
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === '#') break;
+    else if (c === '[') depth++;
+    else if (c === ']') depth--;
+  }
+  return depth;
+}
+
+// Every `notify = ...` key in the file, one line or an array spread over
+// several, as { start, end, ours, topLevel }: whole-line character ranges
+// (end past the last terminator), `ours` when it names codex-notify.js, and
+// `topLevel` when no [table] header comes before it -- the only place the
+// key means anything to codex.
+function findNotifyKeys(text) {
+  const keys = [];
+  const re = /^[ \t]*notify[ \t]*=/gm;
+  let m;
+  while ((m = re.exec(text))) {
+    const start = m.index;
+    let end = lineEnd(text, start);
+    let depth = bracketDepth(text.slice(start + m[0].length, end));
+    while (depth > 0 && end < text.length) {
+      const next = lineEnd(text, end);
+      depth += bracketDepth(text.slice(end, next));
+      end = next;
+    }
+    keys.push({
+      start, end,
+      ours: /codex-notify\.js/.test(text.slice(start, end)),
+      topLevel: !/^[ \t]*\[/m.test(text.slice(0, start)),
+    });
+    re.lastIndex = end;
+  }
+  return keys;
+}
+
+// Read config.toml for an edit. A missing file is empty; anything else that
+// goes wrong (a OneDrive or antivirus lock, EACCES) means "do not touch it":
+// an empty read would have the write replace the whole config with one line.
+// `body` is the text after any BOM, which `bom` keeps for the write back.
+function readCodexConfig(configPath, log) {
+  let text;
+  try {
+    text = fs.readFileSync(configPath, 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { text: '', bom: '', body: '', existed: false };
+    log(`  [!!] Could not read ${configPath} (${err.code || err.message}) -- leaving it untouched.`);
+    return { error: err };
+  }
+  const bom = text.startsWith('﻿') ? '﻿' : '';
+  return { text, bom, body: text.slice(bom.length), existed: true };
+}
+
+// .bak first, then an atomic write that keeps the file's mode.
+function writeCodexConfig(configPath, text, previous, log) {
+  let mode = 0o600;
+  if (previous !== null) {
+    try { mode = fs.statSync(configPath).mode & 0o777; } catch {}
+    if (writeBackup(configPath + '.bak', previous)) log(`  [ok] Backup written to ${configPath}.bak`);
+  } else {
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  }
+  return writeJsonAtomic(configPath, text, mode || 0o600);
+}
+
+// Take every Code Crumb notify key out of config.toml, with the header
+// comment and the blank line setupCodexNotify wrote around it.
+// opts: { configPath, log } -> { ok, removed, error? }
+function removeCodexNotify(opts = {}) {
+  const configPath = opts.configPath || path.join(codexHome(), 'config.toml');
+  const log = opts.log || console.log;
+  const read = readCodexConfig(configPath, log);
+  if (read.error) return { ok: false, removed: 0, error: read.error };
+  const ours = findNotifyKeys(read.body).filter(k => k.ours);
+  if (!ours.length) {
+    if (!opts.quiet) log('  [ok] No Code Crumb notify line found -- nothing to do');
+    return { ok: true, removed: 0 };
+  }
+  let body = read.body;
+  for (const k of ours.reverse()) {
+    let { start, end } = k;
+    // The header line right above it, and then the blank line we left after.
+    const prevStart = body.lastIndexOf('\n', start - 2) + 1;
+    if (start > 0 && body.slice(prevStart, start).trim() === NOTIFY_HEADER) {
+      start = prevStart;
+      const after = lineEnd(body, end);
+      if (end < body.length && body.slice(end, after).trim() === '') end = after;
+    }
+    body = body.slice(0, start) + body.slice(end);
+  }
+  if (!writeCodexConfig(configPath, read.bom + body, read.text, log)) {
+    log(`  [!!] Could not write ${configPath}`);
+    return { ok: false, removed: 0, error: new Error('write failed') };
+  }
+  if (!opts.quiet) log(`  - Removed the Code Crumb notify line from ${configPath}`);
+  return { ok: true, removed: ours.length };
+}
+
+// Register codex-notify.js as codex's notify program.
+// opts: { configPath, notifyPath, log, quiet } -> { ok, modified, error? }
+function setupCodexNotify(opts = {}) {
+  const configPath = opts.configPath || path.join(codexHome(), 'config.toml');
+  const notifyPath = opts.notifyPath || codexNotifyPath();
+  const log = opts.log || console.log;
   const wrapperPath = path.resolve(__dirname, 'adapters', 'codex-wrapper.js').replace(/\\/g, '/');
   const rendererPath = path.resolve(__dirname, 'renderer.js').replace(/\\/g, '/');
+  const line = `notify = ["node", "${notifyPath}"]`;
 
-  console.log('\n  Code Crumb Setup (Codex CLI -- legacy notify)');
-  console.log('  ' + '='.repeat(40) + '\n');
-  console.log(`  Platform: ${process.platform}`);
-  console.log(`  Home:     ${HOME}`);
-  console.log(`  Adapter:  ${notifyPath}\n`);
+  log('\n  Code Crumb Setup (Codex CLI -- legacy notify)');
+  log('  ' + '='.repeat(40) + '\n');
+  log(`  Platform: ${process.platform}`);
+  log(`  Home:     ${HOME}`);
+  log(`  Adapter:  ${notifyPath}\n`);
 
-  // Read existing config or create new
-  let configText = '';
-  let hasNotify = false;
-  try {
-    configText = fs.readFileSync(CODEX_CONFIG, 'utf8');
-    hasNotify = /^\s*notify\s*=/m.test(configText);
-    console.log('  [ok] Found existing Codex config');
-  } catch (err) {
-    // Only a missing file means "no config". Anything else (a OneDrive or
-    // antivirus lock, EACCES) would leave configText empty and the write
-    // below would replace the user's whole config.toml with one line.
-    if (err && err.code !== 'ENOENT') {
-      console.log(`  [!!] Could not read ${CODEX_CONFIG} (${err.code || err.message}) -- leaving it untouched.`);
-      console.log(`  Add this line yourself: notify = ["node", "${notifyPath}"]`);
-      return;
-    }
-    console.log('  [..] No existing config found');
+  const read = readCodexConfig(configPath, log);
+  if (read.error) {
+    log(`  Add this line yourself: ${line}`);
+    return { ok: false, modified: false, error: read.error };
   }
+  log(read.existed ? '  [ok] Found existing Codex config' : '  [..] No existing config found');
 
-  if (hasNotify) {
-    // Check if our handler is already configured
-    if (configText.includes('codex-notify.js')) {
-      console.log('  [ok] Code Crumb notify handler already configured');
-    } else {
-      console.log('\n  [!!] Codex already has a notify handler configured.');
-      console.log('  To add Code Crumb, edit ~/.codex/config.toml:');
-      console.log(`  notify = ["node", "${notifyPath}"]`);
-    }
+  const keys = findNotifyKeys(read.body).filter(k => k.topLevel);
+  let modified = false;
+  if (keys.some(k => k.ours)) {
+    log('  [ok] Code Crumb notify handler already configured');
+  } else if (keys.length) {
+    log('\n  [!!] Codex already has a notify handler configured.');
+    log(`  To add Code Crumb, edit ${configPath}:`);
+    log(`  ${line}`);
   } else {
-    // Append notify config
-    const notifyLine = `# Code Crumb integration\nnotify = ["node", "${notifyPath}"]\n\n`;
-    const codexDir = path.dirname(CODEX_CONFIG);
-    if (!fs.existsSync(codexDir)) {
-      fs.mkdirSync(codexDir, { recursive: true });
+    // At the top, so the key is at global scope (not under a [section]) --
+    // but after a BOM, which must stay the first byte of the file.
+    const eol = /\r\n/.test(read.body) ? '\r\n' : '\n';
+    const block = `${NOTIFY_HEADER}${eol}${line}${eol}${eol}`;
+    if (!writeCodexConfig(configPath, read.bom + block + read.body, read.existed ? read.text : null, log)) {
+      log(`  [!!] Could not write ${configPath}`);
+      return { ok: false, modified: false, error: new Error('write failed') };
     }
-    if (configText) writeBackup(CODEX_CONFIG + '.bak', configText);
-    // Insert at top so the key is at global scope (not under a [section])
-    if (!writeJsonAtomic(CODEX_CONFIG, notifyLine + configText)) {
-      console.log(`  [!!] Could not write ${CODEX_CONFIG}`);
-      return;
-    }
-    console.log(`  + Added notify handler to ${CODEX_CONFIG}`);
+    modified = true;
+    log(`  + Added notify handler to ${configPath}`);
   }
 
-  console.log(`
+  if (opts.quiet) return { ok: true, modified };
+  log(`
   ${'─'.repeat(42)}
 
   This is the LEGACY channel: \`notify\` fires once per turn,
@@ -590,6 +723,8 @@ function setupCodexNotify() {
 
   HOOKS MODE (rich, interactive sessions too):
        node setup.js codex
+     It takes this notify line out again: the two together
+     report every turn twice.
 
   WRAPPER MODE (rich, headless \`codex exec\` runs):
        node "${wrapperPath}" "your prompt"
@@ -598,6 +733,7 @@ function setupCodexNotify() {
 
   ${'─'.repeat(42)}
 `);
+  return { ok: true, modified };
 }
 
 // -- OpenCode Setup --------------------------------------------------
@@ -917,10 +1053,15 @@ function main() {
     }
     case 'uninstall': {
       const r = uninstallClaude();
-      // Codex hooks live in their own file; clean them up too if present.
+      // Codex hooks live in their own file; clean them up too if present,
+      // and the legacy notify line in config.toml with them.
       let codexOk = true;
       if (fs.existsSync(DEFAULT_CODEX_HOOKS_PATH)) {
         codexOk = uninstallCodex().ok;
+      }
+      const codexConfig = path.join(codexHome(), 'config.toml');
+      if (fs.existsSync(codexConfig)) {
+        codexOk = removeCodexNotify({ configPath: codexConfig }).ok && codexOk;
       }
       process.exit(r.ok && codexOk ? 0 : 1);
       break;
@@ -932,9 +1073,11 @@ function main() {
       break;
     }
     case 'codex-notify':
-    case 'notify':
-      setupCodexNotify();
+    case 'notify': {
+      const r = setupCodexNotify();
+      if (!r.ok) process.exit(1);
       break;
+    }
     case 'opencode': {
       if (flags.includes('--uninstall')) {
         const r = uninstallOpenCode();
@@ -991,6 +1134,9 @@ module.exports = {
   setupCodex,
   uninstallCodex,
   buildCodexHooks,
+  setupCodexNotify,
+  removeCodexNotify,
+  codexHome,
   enableAutolaunch,
   HOOK_EVENTS,
   CODEX_HOOK_EVENTS,

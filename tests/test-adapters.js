@@ -4818,4 +4818,35 @@ describe('adapters -- Review round 5: the codex wrapper', () => {
   });
 });
 
+describe('adapters -- Review round 5: codex-notify', () => {
+  const NOTIFY = path.join(ADAPTERS_DIR, 'codex-notify.js');
+
+  // Both the legacy notify line and the native hooks: the notify write
+  // rebuilt the session file from scratch at every turn end, and the center
+  // face left the window because its attention stamp was gone.
+  test('a turn-complete notification keeps what the hooks know about the session', () => {
+    const t = round5Env('notify-sticky');
+    try {
+      const T = '019a-thread-notify';
+      const hook = (ev, extra = {}) => runUpdateState(null,
+        { session_id: T, hook_event_name: ev, model: 'gpt-5.1-codex', ...extra }, t.env, { args: ['--editor', 'codex', ev] });
+      // Another window owns the global file, as it usually does in a busy setup.
+      fs.writeFileSync(t.stateFile, JSON.stringify({ sessionId: 'claude-other', state: 'coding', timestamp: Date.now() }));
+      hook('SessionStart', { source: 'startup' });
+      hook('UserPromptSubmit', { prompt: 'fix it' });
+      hook('Stop');
+      const file = path.join(t.sessionsDir, `${T}.json`);
+      const before = readJSON(file);
+      assert.ok(before.lastPromptAt > 0 && before.model, 'fixture');
+      execFileSync(NODE, [NOTIFY, JSON.stringify({ type: 'agent-turn-complete', 'thread-id': T, 'last-assistant-message': 'Done.' })],
+        { env: t.env, stdio: 'ignore', timeout: 10000 });
+      const after = readJSON(file);
+      assert.deepStrictEqual([after.state, after.turnEnded], ['happy', true], 'the notification itself');
+      assert.strictEqual(after.lastPromptAt, before.lastPromptAt, 'attention stamp kept');
+      assert.strictEqual(after.model, before.model);
+      assert.strictEqual(after.gitBranch, before.gitBranch);
+    } finally { cleanup(t.tmp); }
+  });
+});
+
 module.exports = suite;
