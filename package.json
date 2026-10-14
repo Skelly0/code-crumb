@@ -22,6 +22,7 @@
     "setup:opencode": "node setup.js opencode",
     "setup:openclaw": "node setup.js openclaw",
     "setup:uninstall": "node setup.js uninstall",
+    "doctor": "node setup.js doctor",
     "tmux": "node renderer.js --tmux",
     "test": "node tests/run.js"
   },
