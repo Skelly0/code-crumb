@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js 18+](https://img.shields.io/badge/node-18%2B-brightgreen.svg)](https://nodejs.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-blue.svg)](#)
-[![2043 Tests](https://img.shields.io/badge/tests-2043-brightgreen.svg)](#)
+[![2497 Tests](https://img.shields.io/badge/tests-2497-brightgreen.svg)](#)
 
 A terminal tamagotchi that shows what your AI coding assistant is doing.
 
@@ -19,6 +19,9 @@ Zero dependencies. Just Node.js.
 
 Requires **Node.js 18+**. Works on **Windows**, **macOS**, and **Linux**.
 
+> [!IMPORTANT]
+> **`node` must be on your `PATH`** — every hook runs `node …`. On Windows, Claude Code runs hooks through Git Bash, so that is the `PATH` that counts. If you installed Claude Code with the native installer and never installed Node.js, there is no `node` for the hooks and every one of them fails.
+
 ### Claude Code (marketplace — recommended)
 
 Install directly from the Code Crumb marketplace — no cloning required:
@@ -28,14 +31,36 @@ Install directly from the Code Crumb marketplace — no cloning required:
 /plugin install code-crumb@code-crumb
 ```
 
-Then open a second terminal and run the face:
+The plugin lives in Claude Code's plugin cache, one folder per version. After an update the old folder lingers for a while, marked with an `.orphaned_at` file, so a plain `*` glob can pick the wrong one. Open a second terminal and start the face from the current folder:
+
+**macOS / Linux / Git Bash**
 
 ```bash
-node ~/.claude/plugins/cache/code-crumb/code-crumb/*/renderer.js
+CRUMB="$(ls -td ~/.claude/plugins/cache/code-crumb/code-crumb/*/ | while IFS= read -r d; do [ -e "$d.orphaned_at" ] || { echo "$d"; break; }; done)"
+node "${CRUMB}renderer.js"
+```
+
+**Windows (PowerShell)**
+
+```powershell
+$crumb = Get-ChildItem "$HOME\.claude\plugins\cache\code-crumb\code-crumb" -Directory |
+  Where-Object { -not (Test-Path (Join-Path $_.FullName '.orphaned_at')) } |
+  Sort-Object LastWriteTime | Select-Object -Last 1 -ExpandProperty FullName
+node "$crumb\renderer.js"
+```
+
+**Rather not open it by hand?** Turn on autolaunch once and the hooks open the face in a terminal of its own whenever it is not running. They open the renderer that sits next to them, so it keeps working across plugin updates:
+
+```bash
+node "${CRUMB}setup.js" --autolaunch
+```
+
+```powershell
+node "$crumb\setup.js" --autolaunch
 ```
 
 > [!TIP]
-> The renderer runs in its own terminal window alongside your editor — it doesn't block anything. If you want a stable path, clone the repo and run `node code-crumb/renderer.js` instead.
+> The renderer runs in its own terminal window alongside your editor — it doesn't block anything. If you want a stable path, clone the repo and run `node code-crumb/renderer.js` instead. After you quit the renderer, autolaunch leaves it closed until your editor starts a new session.
 
 ### Claude Code (local plugin)
 
@@ -94,6 +119,19 @@ node code-crumb/launch.js --editor codex "fix bug"   # Codex CLI
 node code-crumb/launch.js --editor opencode           # OpenCode
 node code-crumb/launch.js --editor openclaw            # OpenClaw/Pi
 ```
+
+### Check it's working
+
+```bash
+npm run doctor                     # in a clone (or: node code-crumb/setup.js doctor)
+node "${CRUMB}setup.js" doctor     # plugin install ($CRUMB from above)
+```
+
+```powershell
+node "$crumb\setup.js" doctor      # plugin install ($crumb from above)
+```
+
+`doctor` only reads. It checks that `node` is new enough and on `PATH`, whether the renderer is running, your Claude Code hooks (manual, plugin, or — a problem — both), the Codex hooks, autolaunch, and when a hook last wrote anything, and it prints a fix for every problem it finds. It exits 1 when it found one. With the plugin installed it also prints the exact command that starts the plugin's renderer.
 
 ### Try the demo
 
@@ -244,7 +282,7 @@ Any key closes the help overlay or the session list. `t` is disabled when `NO_CO
                                     └───────────────────────┘
 ```
 
-1. **Hooks/adapters** fire on lifecycle events (21 for Claude Code: your prompt, tool use, Stop, notifications, subagents, sessions, compaction, permissions, and more)
+1. **Hooks/adapters** fire on lifecycle events (23 for Claude Code: your prompt, tool use, Stop, notifications, subagents, sessions, compaction, permissions, model switches, and more)
 2. **`update-state.js`** maps tool names and results to face states and writes JSON state files (atomically — the renderer never sees a half-written file)
 3. **Session IDs** isolate the main session from subagent sessions (orbital mini-faces). Claude Code subagents report under the parent's session id, so they are separated by `agent_id` and each gets its own orbital file
 4. **`renderer.js`** watches for changes and animates at 15fps
@@ -253,12 +291,12 @@ Any key closes the help overlay or the session list. `t` is disabled when `NO_CO
 
 ### Claude Code
 
-**Plugin install** (recommended): `claude plugin marketplace add ./code-crumb` then `claude plugin install code-crumb@code-crumb` — hooks into all 21 lifecycle events automatically: PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, Stop, StopFailure, Notification, PermissionRequest, Elicitation, ElicitationResult, SubagentStart, SubagentStop, TeammateIdle, TaskCompleted, SessionStart, SessionEnd, PreCompact, PostCompact, Setup, ConfigChange, and InstructionsLoaded. Subagent sessions appear as orbital mini-faces.
+**Plugin install** (recommended): `claude plugin marketplace add ./code-crumb` then `claude plugin install code-crumb@code-crumb` — hooks into all 23 lifecycle events automatically: PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, Stop, StopFailure, Notification, PermissionRequest, PermissionDenied (answers a denied permission prompt), Elicitation, ElicitationResult, SubagentStart, SubagentStop, TeammateIdle, TaskCompleted, SessionStart, SessionEnd, PreCompact, PostCompact, Setup, ConfigChange, InstructionsLoaded, and PostModelSwitch (follows a `/model` switch). Subagent sessions appear as orbital mini-faces.
 
 > [!NOTE]
 > Agent teams support requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. When enabled, team members appear in the orbital display with role labels and accent colors.
 
-**Manual hooks**: `node setup.js` writes the same 21 hooks into `~/.claude/settings.json` (backing the file up to `settings.json.bak` first and refusing to touch a file it cannot parse). `node setup.js uninstall` removes them again. Use either the plugin or the manual hooks, not both — with both installed every event fires twice. See the [manual config](#manual-hook-setup) section for the JSON shape.
+**Manual hooks**: `node setup.js` writes the same 23 hooks into `~/.claude/settings.json` (backing the file up to `settings.json.bak` first and refusing to touch a file it cannot parse). `node setup.js uninstall` removes them again. Use either the plugin or the manual hooks, not both — with both installed every event fires twice. See the [manual config](#manual-hook-setup) section for the JSON shape.
 
 ### Codex CLI
 
@@ -276,10 +314,10 @@ Codex asks for a one-time trust confirmation the first time hooks fire; approve 
 | **Wrapper** | `launch.js --editor codex` | Tool-level | `codex exec` only — no trust prompt |
 | **Notify** (legacy) | `setup.js codex-notify` | Turn-level (completion only) | Any |
 
-Codex fires 10 of the 21 lifecycle events (`PreToolUse`, `PostToolUse`, `PermissionRequest`, `PreCompact`, `SessionStart`, `SessionEnd`, `SubagentStart`, `SubagentStop`, `UserPromptSubmit`, `Stop`) — it has no `Notification` and no `PostToolUseFailure`, and setup registers exactly the ten it does fire. The wrapper parses `codex exec --json` against codex-cli 0.146's ThreadEvent schema.
+Codex fires 11 of Claude Code's 23 events (`PreToolUse`, `PostToolUse`, `PermissionRequest`, `PreCompact`, `PostCompact`, `SessionStart`, `SessionEnd`, `SubagentStart`, `SubagentStop`, `UserPromptSubmit`, `Stop`) plus one of its own, `Interrupt`, which it runs instead of `Stop` when you press Esc. It has no `Notification`, `PostToolUseFailure` or `PostModelSwitch`, and setup registers exactly the 12 it does fire. The wrapper parses `codex exec --json` against codex-cli 0.146's ThreadEvent schema.
 
 > [!NOTE]
-> Upgrading from an older Code Crumb? Re-run `node setup.js codex`. A hooks file migrated from `~/.claude/settings.json` by hand has no `--editor codex` tag (so Codex sessions render as "claude") and may register a `Notification` event Codex never fires. Re-running rewrites every entry and prunes the unsupported one.
+> Upgrading from an older Code Crumb? Re-run `node setup.js codex`. A hooks file migrated from `~/.claude/settings.json` by hand has no `--editor codex` tag (so Codex sessions render as "claude", and a `codex exec` run through the wrapper is counted twice) and may register a `Notification` event Codex never fires. Re-running rewrites every entry and prunes the unsupported one; `npm run doctor` tells you whether yours needs it.
 
 ### OpenCode
 
@@ -334,7 +372,7 @@ Claude Code supplies it through `SessionStart` and `PostModelSwitch` (re-run `np
 <details>
 <summary>Claude Code — manual hook config</summary>
 
-Add to `~/.claude/settings.json` (this shows four of the 21 events; repeat the block for the others, or let `node setup.js` write them all):
+Add to `~/.claude/settings.json` (this shows four of the 23 events; repeat the block for the others, or let `node setup.js` write them all):
 
 ```json
 {
@@ -388,8 +426,8 @@ Or: `cd code-crumb && npm link`
 ## Performance
 
 - Zero dependencies — just Node.js
-- ~0.5% CPU at 15fps (even with orbitals)
-- Hook script completes in <50ms
+- The renderer uses about 1% of one CPU core at 15fps in a 160×50 terminal with orbitals showing, and ~41 MB of memory (RSS)
+- A hook takes ~45–60 ms on Windows, most of it starting node (and the shell Claude Code runs it through)
 - State files are ~1 KB each, written atomically
 - No network, no sockets — all file-based IPC
 
@@ -408,6 +446,32 @@ Or: `cd code-crumb && npm link`
 > [!WARNING]
 > Legacy `cmd.exe` does not support ANSI escape codes and will not render the face. Use Windows Terminal, VS Code terminal, or any modern terminal emulator instead.
 
+## Troubleshooting
+
+Start with `npm run doctor` (or `node setup.js doctor`, from wherever Code Crumb lives — see [Check it's working](#check-its-working)). It only reads, and it names the fix for each problem it finds.
+
+**The face shows nothing.** Usually one of three things: the renderer is not running (start it, or turn on autolaunch), `node` is not on the `PATH` the hooks see (see the note under [Quick Start](#quick-start)), or no hooks are installed. `doctor` checks all three and also tells you when a hook last wrote anything — "no hook has written in 2h" while you are using your editor means the hooks are not firing. Inside Claude Code, `/hooks` lists what is registered and `claude --debug` shows hook errors.
+
+**Every event happens twice and the counters double.** Both the plugin and the manual hooks are installed. Keep one: `node setup.js uninstall` removes the manual hooks, `claude plugin uninstall code-crumb@code-crumb` removes the plugin.
+
+**Every hook errors after you moved or renamed the clone.** Manual hooks store the absolute path to `update-state.js`. Run `node setup.js` again from the new location (and `node setup.js codex` if you use Codex) — it rewrites the paths.
+
+**Codex shows nothing.** Codex asks once to trust new hooks and runs none of them until you say yes. Start `codex` interactively and approve them, or pass `--dangerously-bypass-hook-trust` in automation.
+
+**Autolaunch did not open the face.** After you quit the renderer it stays closed until your editor starts a new session (`claude`, `claude --continue`). `node setup.js --autolaunch` clears that straight away.
+
+**The plugin is still on an old version.** Claude Code keeps a cached plugin until its version number changes. Run `claude plugin marketplace update code-crumb`, then `claude plugin update code-crumb@code-crumb`, and restart Claude Code.
+
+**Ghost or stale orbitals.** Quit the renderer (`q`), delete the sessions folder, and start it again. That is safe while the renderer is stopped; the hooks recreate whatever they need.
+
+```bash
+rm -rf ~/.code-crumb-sessions
+```
+
+```powershell
+Remove-Item -Recurse -Force "$HOME\.code-crumb-sessions"
+```
+
 ## Project Layout
 
 The root holds only what gets run by path. Your installed hooks point at `update-state.js` here, and the shell wrappers point at `launch.js`.
@@ -420,7 +484,7 @@ The root holds only what gets run by path. Your installed hooks point at `update
 | `renderer.js` | Main renderer — face + orbital subagents |
 | `update-state.js` | Hook script — maps tool events to face states |
 | `launch.js` | Auto-starts renderer and launches editor |
-| `setup.js` | Installs hooks for any supported editor |
+| `setup.js` | Installs hooks for any supported editor; `setup.js doctor` checks an install |
 | `code-crumb.sh` / `code-crumb.cmd` | Shell wrappers around `launch.js` |
 | `lib/face.js` | ClaudeFace class — state machine and rendering |
 | `lib/grid.js` | MiniFace + OrbitalSystem — subagent orbits |
@@ -441,7 +505,7 @@ The root holds only what gets run by path. Your installed hooks point at `update
 | `hooks/hooks.json` | Hook registrations used by the Claude Code plugin |
 | `demo/single.js` | Cycles through all 23 states (`npm run demo`) |
 | `demo/orbital.js` | Orbital subagent demo (`npm run demo:orbital`) |
-| `tests/run.js`, `tests/` | Test runner and suite (`npm test`) |
+| `tests/run.js`, `tests/` | Test runner and suite (`npm test`; files run in parallel, `--serial` for one process). Run the suite only through `tests/run.js` — a test file started directly refuses to run, because it would use your real `~/.code-crumb*` files |
 
 </details>
 
@@ -453,12 +517,17 @@ The root holds only what gets run by path. Your installed hooks point at `update
 
 **OpenCode:** `node setup.js opencode --uninstall` removes the plugin entry from `~/.config/opencode/opencode.json`.
 
-**Clean up state files:**
+**Clean up state files.** Quit the renderer first. Everything Code Crumb writes at run time sits in your home folder and starts with `.code-crumb`: `.code-crumb-state`, `.code-crumb-stats.json`, `.code-crumb-stats.lock`, `.code-crumb-prefs.json`, `.code-crumb.pid`, `.code-crumb-spawn.lock`, `.code-crumb-spawn.lock.claim`, `.code-crumb-quit`, `.code-crumb-tmux` and the `.code-crumb-sessions/` folder (plus the odd leftover `.tmp` from an interrupted write). These two patterns catch all of them:
+
 ```bash
-rm ~/.code-crumb-state ~/.code-crumb-stats.json ~/.code-crumb.pid ~/.code-crumb-prefs.json
-rm -f ~/.code-crumb-spawn.lock ~/.code-crumb-stats.lock
-rm -rf ~/.code-crumb-sessions
+rm -rf ~/.code-crumb-* ~/.code-crumb.pid*
 ```
+
+```powershell
+Remove-Item -Recurse -Force "$HOME\.code-crumb-*", "$HOME\.code-crumb.pid*"
+```
+
+If you pointed `CODE_CRUMB_STATE` somewhere else, delete that file too. Setup's backups (`~/.claude/settings.json.bak`, `~/.codex/hooks.json.bak`) are yours to keep or delete.
 
 ## License
 
