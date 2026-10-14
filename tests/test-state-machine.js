@@ -3963,8 +3963,8 @@ describe('update-state -- third review pass: autolaunch quit flag', () => {
     assert.ok(body.indexOf('fs.unlinkSync(QUIT_FLAG_FILE)') > 0);
     assert.ok(body.indexOf('fs.unlinkSync(QUIT_FLAG_FILE)') < body.indexOf('fs.accessSync(QUIT_FLAG_FILE)'),
       'the unlink must come before the access check');
-    assert.ok(src.includes("/^(startup|resume)$/.test(_rawField(input, 'source'))"),
-      'only an editor start clears it: compact and clear happen inside a running session');
+    // Which sources clear it is pinned behaviourally (startup, resume and
+    // fork do; compact and clear do not) in "Review round 5 (hooks)" below.
   });
 });
 
@@ -4162,6 +4162,200 @@ describe('state-machine -- round 4', () => {
       assert.strictEqual(post(c).detail, 'build succeeded', c);
     }
     assert.strictEqual(post('npx eslint .').detail, 'command succeeded');
+  });
+});
+
+// -- Review round 5 (hooks) --------------------------------------------------
+
+describe('update-state -- review round 5 (hooks): SessionStart sources', () => {
+  // Same isolation as the quit-flag tests above: autolaunch on, the flag
+  // present, and a live PID file so no window is ever opened.
+  function withQuitFlag(fn) {
+    const { tmp, sessionsDir, env } = makeTempEnv('src-1');
+    try {
+      const flag = pathMod.join(tmp, '.code-crumb-quit');
+      fsMod.writeFileSync(flag, String(Date.now()), 'utf8');
+      fsMod.writeFileSync(pathMod.join(tmp, '.code-crumb-prefs.json'), '{"autolaunch":true}', 'utf8');
+      fsMod.writeFileSync(pathMod.join(tmp, '.code-crumb.pid'), String(process.pid), 'utf8');
+      fn(env, flag, sessionsDir);
+    } finally { cleanup(tmp); }
+  }
+
+  // 2.1.300 adds `fork`: the resumed transcript under a new session id.
+  test('a fork is the user starting a session: it clears the quit flag and is attention', () => {
+    withQuitFlag((env, flag, sessionsDir) => {
+      runUpdateState('SessionStart', { session_id: 'src-1', source: 'fork' }, env);
+      assert.strictEqual(fsMod.existsSync(flag), false, 'a forked session relaunches a closed face');
+      const f = readJSON(pathMod.join(sessionsDir, 'src-1.json'));
+      assert.ok(f.lastPromptAt > 0, 'and takes the center');
+    });
+  });
+
+  test('a /clear inside a running editor leaves the flag alone', () => {
+    withQuitFlag((env, flag) => {
+      runUpdateState('SessionStart', { session_id: 'src-1', source: 'clear' }, env);
+      assert.strictEqual(fsMod.existsSync(flag), true);
+    });
+  });
+});
+
+describe('update-state -- review round 5 (hooks): async ordering', () => {
+  const sf = (dir, id) => pathMod.join(dir, `${id}.json`);
+  const patch = (fp, over) => fsMod.writeFileSync(fp, JSON.stringify({ ...readJSON(fp), ...over }), 'utf8');
+  const read = { tool_name: 'Read', tool_input: { file_path: 'a.js' } };
+
+  // A fast Read: both hooks start within milliseconds, and the Pre lands last.
+  test('a PreToolUse that lands after its own PostToolUse draws nothing, but counts', () => {
+    const { tmp, sessionsDir, stateFile, statsFile, env } = makeTempEnv('ord-1');
+    try {
+      runUpdateState('PostToolUse', { session_id: 'ord-1', ...read, tool_use_id: 'toolu_01ORD1',
+        tool_response: { type: 'text', file: { content: 'x' } } }, env);
+      const post = readJSON(sf(sessionsDir, 'ord-1'));
+      const calls = readJSON(statsFile).totalToolCalls || 0;
+      runUpdateState('PreToolUse', { session_id: 'ord-1', ...read, tool_use_id: 'toolu_01ORD1' }, env);
+      const after = readJSON(sf(sessionsDir, 'ord-1'));
+      assert.strictEqual(after.state, post.state, 'the finished call is not resurrected as "reading"');
+      assert.strictEqual(after.timestamp, post.timestamp, 'no write at all');
+      assert.strictEqual(readJSON(stateFile).state, post.state, 'nor on the global file');
+      assert.strictEqual(readJSON(statsFile).totalToolCalls, calls + 1, 'the call still counts');
+    } finally { cleanup(tmp); }
+  });
+
+  // The permission check runs after the Pre hooks fire, so this Pre is older
+  // than the prompt however the two spawns raced.
+  test('a PreToolUse for the call a permission prompt is waiting on does not replace the wait', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('ord-2');
+    try {
+      const call = { session_id: 'ord-2', tool_name: 'Bash', tool_input: { command: 'rm -rf dist' } };
+      runUpdateState('PermissionRequest', call, env);
+      runUpdateState('PreToolUse', { ...call, tool_use_id: 'toolu_01ORD2' }, env);
+      const f = readJSON(sf(sessionsDir, 'ord-2'));
+      assert.strictEqual(f.state, 'waiting');
+      assert.strictEqual(f.detail, 'allow Bash?');
+    } finally { cleanup(tmp); }
+  });
+
+  // syncAt in the future stands for "the synchronous event fired after this
+  // async hook did" -- the inversion itself cannot be staged sequentially.
+  test('an async event older than the newest synchronous write is not drawn', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('ord-3');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'ord-3', prompt: 'next' }, env);
+      const fp = sf(sessionsDir, 'ord-3');
+      assert.strictEqual(readJSON(fp).syncEvent, 'UserPromptSubmit');
+      patch(fp, { syncAt: Date.now() + 60000 });
+      const ups = readJSON(fp);
+      fsMod.writeFileSync(statsFile, JSON.stringify({ ...readJSON(statsFile), streak: 4 }), 'utf8');
+      runUpdateState('PostToolUseFailure', { session_id: 'ord-3', tool_name: 'Bash',
+        tool_input: { command: 'make' }, tool_use_id: 'toolu_01ORD3', error: 'Exit code 2' }, env);
+      runUpdateState('PreToolUse', { session_id: 'ord-3', tool_name: 'Bash',
+        tool_input: { command: 'ls' }, tool_use_id: 'toolu_01ORD4' }, env);
+      const f = readJSON(fp);
+      assert.strictEqual(f.state, 'thinking', 'the previous turn\'s failure stays off "reading your message"');
+      assert.strictEqual(f.detail, 'reading your message');
+      assert.strictEqual(f.timestamp, ups.timestamp);
+      assert.strictEqual(readJSON(statsFile).streak, 0, 'its failure still breaks the streak');
+    } finally { cleanup(tmp); }
+  });
+
+  test('after a turn end a late tool END keeps the carry rules; a late PreToolUse is dropped', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('ord-4');
+    try {
+      runUpdateState('Stop', { session_id: 'ord-4' }, env);
+      const fp = sf(sessionsDir, 'ord-4');
+      patch(fp, { syncAt: Date.now() + 60000 });
+      runUpdateState('PreToolUse', { session_id: 'ord-4', tool_name: 'Bash',
+        tool_input: { command: 'npm test' }, tool_use_id: 'toolu_01ORD5' }, env);
+      let f = readJSON(fp);
+      assert.strictEqual(f.state, 'idle', 'no "still running" after the turn is over');
+      assert.strictEqual(f.turnEnded, true);
+      runUpdateState('PostToolUseFailure', { session_id: 'ord-4', tool_name: 'Bash',
+        tool_input: { command: 'npm test' }, tool_use_id: 'toolu_01ORD5', error: 'Exit code 1' }, env);
+      f = readJSON(fp);
+      assert.strictEqual(f.state, 'error', 'a late failure after Stop still shows its error');
+      assert.strictEqual(f.turnEnded, true, 'and the turn stays over');
+    } finally { cleanup(tmp); }
+  });
+
+  test('a tool end records its id in a bounded list; the sync clock is carried', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('ord-5');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'ord-5', prompt: 'go' }, env);
+      const fp = sf(sessionsDir, 'ord-5');
+      const ups = readJSON(fp);
+      assert.strictEqual(typeof ups.eventAt, 'number');
+      assert.strictEqual(ups.syncAt, ups.eventAt, 'a synchronous write is its own sync clock');
+      const old = Array.from({ length: 16 }, (_, i) => `old${i}`);
+      patch(fp, { doneToolIds: old });
+      runUpdateState('PostToolUse', { session_id: 'ord-5', ...read,
+        tool_use_id: 'toolu_01ABCDEFGHIJKLMNOPQRSTUV', tool_response: { type: 'text' } }, env);
+      const f = readJSON(fp);
+      assert.strictEqual(f.doneToolIds.length, 16, 'bounded');
+      assert.strictEqual(f.doneToolIds[0], 'old1', 'the oldest goes');
+      assert.strictEqual(f.doneToolIds[15], 'GHIJKLMNOPQRSTUV', 'the newest last, kept to its 16-char tail');
+      assert.ok(f.eventAt > ups.eventAt, 'every write has its own event time');
+      assert.strictEqual(f.syncAt, ups.syncAt, 'an async write carries the sync clock');
+      assert.strictEqual(f.syncEvent, 'UserPromptSubmit');
+      assert.strictEqual(readJSON(pathMod.join(tmp, '.code-crumb-state')).doneToolIds, undefined,
+        'the ordering fields are the session file\'s alone');
+    } finally { cleanup(tmp); }
+  });
+
+  // Over 1 MB the payload is cut before tool_use_id (serialized after
+  // tool_response); the tail of the stream still has it.
+  test('a truncated PostToolUse still records its call, so its late Pre is dropped', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('ord-6');
+    try {
+      runUpdateState('PostToolUse', JSON.stringify({
+        session_id: 'ord-6', hook_event_name: 'PostToolUse', ...read,
+        tool_response: { stdout: 'y'.repeat(1200000) }, tool_use_id: 'toolu_01BIGBIGBIGBIG01',
+      }), env);
+      const fp = sf(sessionsDir, 'ord-6');
+      const post = readJSON(fp);
+      assert.ok(post.doneToolIds && post.doneToolIds.includes('01BIGBIGBIGBIG01'), JSON.stringify(post.doneToolIds));
+      runUpdateState('PreToolUse', { session_id: 'ord-6', ...read, tool_use_id: 'toolu_01BIGBIGBIGBIG01' }, env);
+      assert.strictEqual(readJSON(fp).timestamp, post.timestamp);
+    } finally { cleanup(tmp); }
+  });
+});
+
+describe('update-state -- review round 5 (hooks): firstSeenAt', () => {
+  const sf = (dir, id) => pathMod.join(dir, `${id}.json`);
+
+  // writeJsonAtomic renames a temp file over the old one, which replaces it:
+  // birthtime is the LAST write, so the unregistered window was classified
+  // parallel on its first event and the conductor's subagent on its next.
+  test('an unregistered parallel window stays parallel past its first write', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('w2-unreg');
+    try {
+      runUpdateState('PreToolUse', { session_id: 'w2-unreg', tool_name: 'Read',
+        tool_input: { file_path: 'a.js' }, tool_use_id: 'toolu_w2_1' }, env);
+      runUpdateState('SessionStart', { session_id: 'w1-owner', source: 'startup' }, env);
+      runUpdateState('UserPromptSubmit', { session_id: 'w1-owner', prompt: 'go' }, env);
+      runUpdateState('SubagentStart', { session_id: 'w1-owner', agent_id: 'a1', agent_type: 'Explore' }, env);
+      const bash = { session_id: 'w2-unreg', tool_name: 'Bash', tool_input: { command: 'ls' } };
+      runUpdateState('PreToolUse', { ...bash, tool_use_id: 'toolu_w2_2' }, env);
+      assert.strictEqual(readJSON(sf(sessionsDir, 'w2-unreg')).parentSession, undefined, 'first event: parallel');
+      runUpdateState('PostToolUse', { ...bash, tool_use_id: 'toolu_w2_2', tool_response: { stdout: 'a' } }, env);
+      const f = readJSON(sf(sessionsDir, 'w2-unreg'));
+      assert.strictEqual(f.parentSession, undefined, 'its next event: still parallel, never the owner\'s subagent');
+    } finally { cleanup(tmp); }
+  });
+
+  test('a file from before the field is seeded from its own last write, then kept', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('fs-1');
+    try {
+      fsMod.mkdirSync(sessionsDir, { recursive: true });
+      const old = Date.now() - 3600000;
+      fsMod.writeFileSync(sf(sessionsDir, 'fs-1'), JSON.stringify({
+        session_id: 'fs-1', state: 'idle', timestamp: old, editor: 'claude',
+      }), 'utf8');
+      runUpdateState('UserPromptSubmit', { session_id: 'fs-1', prompt: 'hi' }, env);
+      assert.strictEqual(readJSON(sf(sessionsDir, 'fs-1')).firstSeenAt, old);
+      runUpdateState('PreToolUse', { session_id: 'fs-1', tool_name: 'Bash', tool_input: { command: 'ls' },
+        tool_use_id: 'toolu_fs_1' }, env);
+      assert.strictEqual(readJSON(sf(sessionsDir, 'fs-1')).firstSeenAt, old, 'sticky');
+    } finally { cleanup(tmp); }
   });
 });
 

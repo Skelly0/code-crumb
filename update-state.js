@@ -11,7 +11,8 @@
 // |          SessionStart, SessionEnd, PreCompact, PostCompact,    |
 // |          PermissionRequest, Setup, Elicitation,                |
 // |          ElicitationResult, ConfigChange, InstructionsLoaded,  |
-// |          StopFailure, PostModelSwitch, and Codex's Interrupt   |
+// |          StopFailure, PostModelSwitch, PermissionDenied, and   |
+// |          Codex's Interrupt                                     |
 // |                                                                |
 // |  Works with Claude Code, Codex CLI, and OpenCode               |
 // +================================================================+
@@ -119,11 +120,137 @@ function inheritedTurnEnd(event, state) {
   return TURN_END_SAFE_STATES.has(state) ? 'turnEnded' : 'turnOver';
 }
 
+// SessionStart's `source`, checked against the 2.1.300 schema: startup |
+// resume | clear | compact | fork. Each comparison below names the sources it
+// means, so a new one is a decision rather than an accident:
+// - EDITOR_START_SOURCES clear the quit flag: the user starting a session --
+//   a new process, `--continue`/`--resume`, the resume picker, or `fork`
+//   (2.1.300: the resumed transcript under a NEW session id, fired from the
+//   same resume path). It was ignored, so a forked session never relaunched
+//   a face the user had closed.
+// - `clear` is a /clear inside a running editor: a fresh session (counters
+//   reset, attention stamped) but not the editor starting again.
+// - `compact` is the same live session restarting after a compaction; it is
+//   the one source that keeps its session file, counters and running agents.
+const EDITOR_START_SOURCES = new Set(['startup', 'resume', 'fork']);
+
+// -- Async hook ordering ---------------------------------------------
+// PreToolUse, PostToolUse and PostToolUseFailure are registered `"async":
+// true` (hooks/hooks.json, setup.js): on Windows every hook is Git Bash plus
+// node, ~55-85 ms, and a synchronous Pre + Post blocked the editor for ~170 ms
+// on every tool call. Async hooks land in any order, so each session-file
+// write records when its event fired and the async ones check it first --
+// inside the stats lock, which already serialises the read-modify-write (a
+// hook that misses the lock proceeds unlocked; that residual race is accepted).
+const ASYNC_EVENTS = new Set(['PreToolUse', 'PostToolUse', 'PostToolUseFailure']);
+// When this hook process started -- within a spawn of when the editor fired
+// the event, and the only clock a hook has (no payload carries a timestamp).
+const EVENT_AT = performance.timeOrigin;
+// The finished tool calls a session file remembers, newest last. A Pre that
+// lands after its own Post is the commonest inversion (a fast Read or echo:
+// both hooks start within milliseconds) and must not resurrect the work face,
+// which the renderer would then hold as "still running" for ten minutes.
+const DONE_TOOL_IDS_MAX = 16;
+// Ids are kept short -- the session file is ~1 KB and this list is its
+// largest optional field. The tail of a Claude Code id is its random part.
+function shortToolId(id) {
+  const s = toText(id);
+  return s.length > 16 ? s.slice(-16) : s;
+}
+
+// The ordering fields of one session-file write: `eventAt` on every write;
+// `syncAt`/`syncEvent` name the newest SYNCHRONOUS event the file has seen
+// (an async write carries them forward); `doneToolIds` is the bounded list
+// above, with `finishedId` appended by a tool end.
+function orderingFields(prev, event, finishedId) {
+  const out = { eventAt: EVENT_AT };
+  const prevSyncAt = (prev && typeof prev.syncAt === 'number') ? prev.syncAt : 0;
+  if (!ASYNC_EVENTS.has(event) && EVENT_AT >= prevSyncAt) {
+    out.syncAt = EVENT_AT;
+    out.syncEvent = event;
+  } else if (prevSyncAt) {
+    out.syncAt = prevSyncAt;
+    if (typeof prev.syncEvent === 'string') out.syncEvent = prev.syncEvent;
+  }
+  let done = (prev && Array.isArray(prev.doneToolIds))
+    ? prev.doneToolIds.filter(x => typeof x === 'string' && x) : [];
+  if (finishedId) {
+    done = done.filter(x => x !== finishedId);
+    done.push(finishedId);
+  }
+  if (done.length > DONE_TOOL_IDS_MAX) done = done.slice(-DONE_TOOL_IDS_MAX);
+  if (done.length) out.doneToolIds = done;
+  return out;
+}
+
+// Whether an async event arrived too late to be drawn. Its stats still count;
+// only the state-file writes are skipped.
+// - A PreToolUse whose call already finished (its tool_use_id is in
+//   doneToolIds), or whose call is the one the file's permission prompt is
+//   waiting on: Claude Code asks only after the Pre hooks have fired, so that
+//   Pre is older than the wait no matter how the two spawns raced -- the
+//   exact guard for the race the clock below can lose by a few ms of jitter.
+// - Any async event older than the file's newest synchronous write: a slow
+//   PreToolUse must never replace the `waiting` a PermissionRequest wrote
+//   after it, nor a previous turn's PostToolUse land on "reading your
+//   message". A tool END older than a turn end is the exception: it keeps the
+//   turn-end carry rules (a late PostToolUseFailure after Stop still shows
+//   its error, with `turnEnded` carried), as it always did.
+function asyncWriteIsStale(event, prev, toolUseId, callKey) {
+  if (!ASYNC_EVENTS.has(event) || !prev || typeof prev !== 'object') return false;
+  if (event === 'PreToolUse') {
+    const id = shortToolId(toolUseId);
+    if (id && Array.isArray(prev.doneToolIds) && prev.doneToolIds.includes(id)) return true;
+    if (prev.waitingOn && prev.waitingOn === callKey) return true;
+  }
+  if (typeof prev.syncAt === 'number' && prev.syncAt > EVENT_AT) {
+    return event === 'PreToolUse' || !TURN_CLOSING_EVENTS.has(prev.syncEvent);
+  }
+  return false;
+}
+
+// -- Permission waits ------------------------------------------------
+// Claude Code fires Notification(permission_prompt) 6000 ms after a
+// permission dialog opens and cancels that timer if the dialog is answered
+// first (2.1.300: one setTimeout per can_use_tool ask, cleared when the ask
+// settles; CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS turns it off).
+// So a PermissionRequest is an UNCONFIRMED wait, and the notification
+// confirms it: a wait still unconfirmed well past 6 s was answered (allowed),
+// and the tool is running -- its PostToolUse may be minutes away. The
+// renderer reads these fields; they live exactly as long as `waitingOn`.
+const WAIT_FIELDS = ['waitingOn', 'waitKind', 'waitConfirmed', 'permState', 'permDetail'];
+function permissionNotifyEnabled() {
+  const v = process.env.CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS;
+  return !(typeof v === 'string' && /^\s*(1|true|yes|on)\s*$/i.test(v));
+}
+
+// Notification types that ask for nothing (2.1.300's set). They used to fall
+// through to waiting / "needs attention": an elicitation_response arrives
+// right after the user ANSWERED an MCP elicitation, and the face went
+// straight back to waiting on them. Such a notification draws nothing.
+const INFO_NOTIFICATIONS = new Set([
+  'elicitation_response', 'elicitation_complete', 'agent_completed',
+  'computer_use_exit', 'push_notification', 'plugin_notification',
+]);
+
 // Sticky session-file fields: set once, preserved across every later write.
 // `editor` is deliberately absent: every write stamps it fresh (EDITOR is
 // never empty), so a copy-if-missing loop could never fire for it. The owner's
 // provenance is kept by the global owner guard instead.
-const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'lastPromptAt', 'model'];
+// `firstSeenAt` is when the file was first written. The legacy foreign-session
+// classifier used the file's birthtime for that, but writeJsonAtomic renames
+// a temp file over the old one, which REPLACES it -- birthtime is the last
+// write (NTFS and POSIX alike), so an unregistered parallel window was
+// classified parallel on its first event and the owner's subagent on its next.
+const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'lastPromptAt', 'model', 'firstSeenAt'];
+
+// firstSeenAt for a write whose previous file (if any) is `prev`: carried,
+// else seeded from a pre-field file's last write (the best it can know), else now.
+function firstSeenFor(prev, now) {
+  if (prev && typeof prev.firstSeenAt === 'number' && prev.firstSeenAt > 0) return prev.firstSeenAt;
+  if (prev && typeof prev.timestamp === 'number' && prev.timestamp > 0) return Math.min(prev.timestamp, now);
+  return now;
+}
 
 // Per-session counters, and the parking of a non-owner's agents, live in
 // state-machine.js (see "Per-Session Counters") -- the adapters share them.
@@ -146,21 +273,90 @@ function _readSessionFile(id) {
 // Not the subagent stamps, though: on a teammate's own file those only ever
 // come from the legacy foreign-session misclassification, the main path's
 // heal skips teammates, and this from-scratch write is what clears them.
+// An agent-routed teammate file (see _writeTeammate) is a child orbital, so
+// there the subagent stamps ARE right and every sticky field is carried.
 const TEAMMATE_STICKY = STICKY_FIELDS.filter(f => !['parentSession', 'taskDescription', 'agentType'].includes(f));
-function _teammateSessionExtra(sessionId, teamExtra) {
+function _teammateSessionExtra(sessionId, teamExtra, event, agentExtra) {
   const out = {
     modelName: process.env.CODE_CRUMB_MODEL || DEFAULT_MODEL_NAME,
     editor: EDITOR,
     ...teamExtra,
+    ...(agentExtra || {}),
     sessionId,
   };
   const prev = _readSessionFile(sessionId);
   if (prev) {
-    for (const field of TEAMMATE_STICKY) {
+    for (const field of (agentExtra ? STICKY_FIELDS : TEAMMATE_STICKY)) {
       if (prev[field] && !out[field]) out[field] = prev[field];
     }
   }
+  out.firstSeenAt = firstSeenFor(prev, Date.now());
+  Object.assign(out, orderingFields(prev, event));
   return out;
+}
+
+// A teammate's TeammateIdle / TaskCompleted. Claude Code 2.1.300 fires both
+// from the teammate's own stop-hook path, with `session_id` = the session it
+// runs in and `agent_id` = the teammate -- for an in-process teammate that
+// session is the LEAD's. Writing to `session_id` stamped the lead's file
+// `isTeammate` (sticky), so the main policy never picked the lead again, and
+// the teammate's own orbital ({lead}-agent-{id}, where all its tool events
+// go) never got its name and never went idle. With agent_id the write goes
+// to that orbital, exactly like every other agent event; without one it is
+// the session's own, as before.
+function _writeTeammate(sessionId, agentId, agentType, event, state, detail, teamExtra) {
+  if (!agentId) {
+    writeSessionState(sessionId, state, detail, false, _teammateSessionExtra(sessionId, teamExtra, event));
+    return;
+  }
+  const fileId = subagentSessionId(sessionId, agentId);
+  const agentExtra = { parentSession: sessionId };
+  if (agentType) { agentExtra.agentType = agentType; agentExtra.modelName = agentType; }
+  writeSessionState(fileId, state, detail, false, _teammateSessionExtra(fileId, teamExtra, event, agentExtra));
+  _healLeadFile(sessionId);
+  // Family heartbeat, as for every agent event.
+  _touchSessionFile(sessionId);
+}
+
+// A session whose agents are teammates is the team's lead (teams are one
+// level deep: "Sessions have a single implicit team"), so a lead file that
+// carries teammate fields was poisoned by the routing bug above. Heal it on
+// disk without moving its timestamp: the renderer must not re-apply the
+// lead's last state as a new write, and the lead's next hook carries the
+// healed fields forward (the sticky loop copies only what the file has).
+function _healLeadFile(leadId) {
+  const prev = _readSessionFile(leadId);
+  if (!prev || !prev.isTeammate || prev.parentSession) return;
+  const { isTeammate: _i, teammateName: _n, teamName: _t, taskSubject: _s, ...healed } = prev;
+  try {
+    writeJsonAtomic(path.join(SESSIONS_DIR, safeFilename(leadId) + '.json'), healed, 0o600);
+  } catch {}
+}
+
+// A subagent's permission prompt: its PermissionRequest carries agent_id and
+// went to the agent's orbital, but the 6 s Notification is sent with the
+// session's id alone (2.1.300 builds it without the tool's context). Confirm
+// the agents' unconfirmed waits that are old enough to be the one this
+// notification is about -- otherwise the renderer would resolve them while
+// the dialog is still open. One opened under ~5 s ago cannot be (the timer is
+// 6 s); if it was answered meanwhile, being confirmed early only means it
+// waits for its PostToolUse, as every wait did before.
+const PERMISSION_CONFIRM_MIN_AGE_MS = 5000;
+function _confirmAgentWaits(sessionId) {
+  try {
+    const prefix = safeFilename(sessionId) + '-agent-';
+    for (const name of fs.readdirSync(SESSIONS_DIR)) {
+      if (!name.startsWith(prefix) || !name.endsWith('.json')) continue;
+      const fp = path.join(SESSIONS_DIR, name);
+      let s = null;
+      try { s = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch {}
+      if (!s || typeof s !== 'object' || s.stopped || s.state !== 'waiting') continue;
+      if (s.waitKind !== 'permission' || s.waitConfirmed !== false) continue;
+      if (typeof s.eventAt === 'number' && EVENT_AT - s.eventAt < PERMISSION_CONFIRM_MIN_AGE_MS) continue;
+      // A fresh timestamp: the renderer skips a write whose timestamp it has seen.
+      writeJsonAtomic(fp, { ...s, waitConfirmed: true, timestamp: Date.now() }, 0o600);
+    }
+  } catch {}
 }
 
 // Top-level string fields out of a payload too large to parse (>1 MB --
@@ -174,6 +370,9 @@ const RAW_FIELD_RES = {
   agent_type: /"agent_type"\s*:\s*"([^"\\]{1,256})"/,
   hook_event_name: /"hook_event_name"\s*:\s*"([^"\\]{1,64})"/,
   source: /"source"\s*:\s*"([^"\\]{1,64})"/,
+  // Serialized AFTER tool_response, so it is read from the stream's tail
+  // (see inputTail) -- never from the first megabyte.
+  tool_use_id: /"tool_use_id"\s*:\s*"([^"\\]{1,256})"/,
 };
 function _rawField(raw, key) {
   const m = RAW_FIELD_RES[key].exec(raw);
@@ -405,7 +604,14 @@ function ensureRendererRunning(editorStarting = false) {
 // that parsed and then threw. `ids` holds whatever envelope ids survived
 // ({ sessionId, agentId, agentType }, any of them empty); `override` is a
 // { state, detail } classification that replaces the event map below.
+// Serialised behind the stats lock like the main path: a payload over 1 MB is
+// nearly always a PostToolUse, which now races its own (async) PreToolUse.
 function writeFallback(ids, override) {
+  const release = acquireFileLock(STATS_LOCK_FILE);
+  try { _writeFallback(ids, override); } finally { if (release) release(); }
+}
+
+function _writeFallback(ids, override) {
   // JSON parse may fail for events with empty or non-JSON stdin
   // (e.g., Stop, Notification, lifecycle events) -- still write the
   // correct state for the hook event.
@@ -509,6 +715,12 @@ function writeFallback(ids, override) {
   } else if (hookEvent === 'PermissionRequest') {
     fallbackState = 'waiting';
     fallbackDetail = 'needs permission';
+  } else if (hookEvent === 'PermissionDenied') {
+    // No payload, so no tool to match against a pending wait: a denial is
+    // still an answer -- the tool will not run, and nothing else says so.
+    fallbackState = 'thinking';
+    fallbackDetail = 'permission denied';
+    fallbackExtra.answered = true;
   } else if (hookEvent === 'Setup') {
     fallbackState = 'starting';
     fallbackDetail = 'setting up';
@@ -561,6 +773,11 @@ function writeFallback(ids, override) {
   // SessionStart reads nothing (its predecessor was just unlinked).
   let prevSession = null;
   if (hookEvent !== 'SessionStart') prevSession = _readSessionFile(sessionFileId);
+  // The async ordering rules hold here too (see asyncWriteIsStale). There is
+  // no call to match a wait against, but the tail of a truncated stream still
+  // names the tool_use_id.
+  const toolUseId = (ids && ids.toolUseId) || '';
+  if (asyncWriteIsStale(hookEvent, prevSession, toolUseId, '')) return;
   if (prevSession) {
     for (const field of STICKY_FIELDS) {
       if (prevSession[field] && !sessionExtra[field]) sessionExtra[field] = prevSession[field];
@@ -570,6 +787,9 @@ function writeFallback(ids, override) {
       if (inherit) sessionExtra[inherit] = true;
     }
   }
+  sessionExtra.firstSeenAt = firstSeenFor(prevSession, Date.now());
+  Object.assign(sessionExtra, orderingFields(prevSession, hookEvent,
+    (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure') ? shortToolId(toolUseId) : ''));
   const globalExtra = (!fallbackExtra.stopped && globalWasOurStop
     && (carriesTurnEnd(hookEvent) || (AMBIENT_EVENTS.has(hookEvent) && hookEvent !== 'SessionStart'))
     && fallbackState !== 'waiting')
@@ -601,15 +821,28 @@ function writeFallback(ids, override) {
 let input = '';
 const MAX_INPUT = 1048576;
 let inputTruncated = false;
+// The last few KB of a stream too large to keep: the envelope fields that
+// Claude Code serializes after tool_response (tool_use_id) live there.
+let inputTail = '';
+const INPUT_TAIL = 4096;
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => {
   if (input.length < MAX_INPUT) input += chunk;
   else inputTruncated = true;
+  inputTail = (inputTail + chunk).slice(-INPUT_TAIL);
 });
+// The LAST match in the tail: a tool_response can quote the key itself, but
+// the real envelope field is serialized after it.
+function _tailField(key) {
+  const re = new RegExp(RAW_FIELD_RES[key].source, 'g');
+  let m, last = '';
+  while ((m = re.exec(inputTail))) last = m[1];
+  return last;
+}
 process.stdin.on('end', () => {
   ensureRendererRunning(
     (hookEvent || _rawField(input, 'hook_event_name')) === 'SessionStart'
-    && /^(startup|resume)$/.test(_rawField(input, 'source')));
+    && EDITOR_START_SOURCES.has(_rawField(input, 'source')));
   if (inputTruncated) {
     // Too large to parse. The envelope ids are still recoverable from the raw
     // text, and they must be: this used to write ONLY the global file, with
@@ -623,6 +856,7 @@ process.stdin.on('end', () => {
         sessionId: _rawField(input, 'session_id'),
         agentId: _rawField(input, 'agent_id'),
         agentType: _rawField(input, 'agent_type'),
+        toolUseId: _tailField('tool_use_id'),
       }, truncResult);
     } catch {}
     process.exit(0);
@@ -634,6 +868,10 @@ process.stdin.on('end', () => {
   let workState = null;
   let workDetail = null;
   let waitingOn = null; // set by a PermissionRequest (see toolCallKey)
+  // A permission wait's confirmation fields (see WAIT_FIELDS), or null.
+  let waitFields = null;
+  // Set by a PermissionDenied that answers the pending wait.
+  let permissionAnswered = false;
   let compacting = false; // a PreCompact that is real work on this session
   // A compaction restart normally carries lastPromptAt forward off its own
   // session file. Set when that file is gone, so there is nothing to carry.
@@ -685,6 +923,16 @@ process.stdin.on('end', () => {
     const releaseStats = acquireFileLock(STATS_LOCK_FILE);
     try {
     const stats = readStats();
+
+    // The file this hook will write, as it stands before the write -- read
+    // inside the lock, so the ordering decision and the write are one step.
+    const prevSessionFile = _readSessionFile(writeSessionId);
+    const toolUseId = toText(data.tool_use_id);
+    const callKey = toolCallKey(toolName, toolInput);
+    // An async event that lost the race to a newer write: it still counts
+    // (tool calls, streak, commits), but it writes no state. See
+    // asyncWriteIsStale.
+    const staleWrite = asyncWriteIsStale(hookEvent, prevSessionFile, toolUseId, callKey);
 
     // Daily tracking -- reset counters on new day
     const today = localDay();
@@ -741,11 +989,20 @@ process.stdin.on('end', () => {
       // unrelated parallel top-level window? (#134) Without this distinction,
       // every parallel session gets stamped as a subagent of the conductor.
       const registryHit = !!stats.topLevelSessions[sessionId];
+      // When this session's file was first written (see firstSeenAt in
+      // STICKY_FIELDS). Birthtime only for a file that predates the field --
+      // it is the time of the LAST write, since every write replaces the file.
+      // (Not an agent event here, so prevSessionFile is this session's own.)
       let fileBornAt = null;
-      try {
-        const st = fs.statSync(path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'));
-        if (st.birthtimeMs > 0) fileBornAt = st.birthtimeMs;
-      } catch {}
+      if (prevSessionFile && typeof prevSessionFile.firstSeenAt === 'number'
+          && prevSessionFile.firstSeenAt > 0) {
+        fileBornAt = prevSessionFile.firstSeenAt;
+      } else {
+        try {
+          const st = fs.statSync(path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'));
+          if (st.birthtimeMs > 0) fileBornAt = st.birthtimeMs;
+        } catch {}
+      }
       const earliestSubagentStart = Math.min(
         ...stats.session.activeSubagents.map(s => s.startedAt || 0));
       if (classifyForeignSession({ registryHit, fileBornAt, earliestSubagentStart }) === 'parallel') {
@@ -881,8 +1138,9 @@ process.stdin.on('end', () => {
       // the PostModelSwitch hook never gets the switch event, so a gate would
       // pin the first model it ever saw and show it confidently forever after
       // a /model. A stale label is worse than none; re-reading once per turn
-      // self-heals, and costs one bounded read against a hook whose cost is
-      // already dominated by getGitBranch's child process.
+      // self-heals, and costs one bounded 32 KB read against a hook whose cost
+      // is dominated by starting node itself (getGitBranch reads .git/HEAD
+      // directly -- no child process is spawned anywhere on this path).
       rawModel = _readTranscriptModel(transcriptPath);
     }
     const model = prettyModelName(rawModel);
@@ -921,9 +1179,10 @@ process.stdin.on('end', () => {
       // The renderer's liveChildren conducting hold covers the idle gaps.
       // Skip entirely for known subagents (they write their own session
       // files), parallel windows (their tools belong to no subagent here),
-      // and agent events (already routed to their own orbital).
+      // agent events (already routed to their own orbital), and a stale Pre
+      // (its call already finished: see asyncWriteIsStale).
       if (stats.session.activeSubagents.length > 0 && !SUBAGENT_TOOLS.test(toolName)
-          && !isKnownSubagent && !isParallelSession && !isAgentEvent) {
+          && !isKnownSubagent && !isParallelSession && !isAgentEvent && !staleWrite) {
         const latest = stats.session.activeSubagents[stats.session.activeSubagents.length - 1];
         _touchActiveSubagents(stats.session.activeSubagents);
         if (!latest.agentId) {
@@ -1000,7 +1259,14 @@ process.stdin.on('end', () => {
     }
     else if (hookEvent === 'Notification') {
       // notification_type: permission_prompt | idle_prompt | elicitation_dialog | auth_success
+      // (plus the informational ones in INFO_NOTIFICATIONS, which draw nothing)
       const kind = toText(data.notification_type);
+      if (INFO_NOTIFICATIONS.has(kind)) {
+        writeStats(stats);
+        // process.exit skips finally -- release the stats lock by hand.
+        if (releaseStats) releaseStats();
+        process.exit(0);
+      }
       if (kind === 'auth_success') {
         state = 'satisfied';
         detail = 'signed in';
@@ -1010,6 +1276,23 @@ process.stdin.on('end', () => {
           : kind === 'idle_prompt' ? 'waiting for you'
           : kind === 'elicitation_dialog' ? 'needs input'
           : 'needs attention';
+      }
+      if (kind === 'permission_prompt') {
+        // The dialog is still open 6 s on: the wait is confirmed. Keep the
+        // PermissionRequest's own details (which tool, the tool's work face)
+        // rather than the generic "allow?" -- they name what is being asked.
+        const prev = prevSessionFile;
+        const asking = prev && prev.waitingOn && prev.waitKind === 'permission';
+        if (asking) {
+          waitingOn = prev.waitingOn;
+          if (prev.state === 'waiting' && typeof prev.detail === 'string' && prev.detail) detail = prev.detail;
+        }
+        waitFields = {
+          waitKind: 'permission', waitConfirmed: true,
+          ...(asking && typeof prev.permState === 'string' ? { permState: prev.permState } : {}),
+          ...(asking && typeof prev.permDetail === 'string' ? { permDetail: prev.permDetail } : {}),
+        };
+        if (!agentId) _confirmAgentWaits(sessionId);
       }
     }
     else if (hookEvent === 'UserPromptSubmit') {
@@ -1027,7 +1310,7 @@ process.stdin.on('end', () => {
         teammateName: mate,
         isTeammate: true,
       };
-      writeSessionState(sessionId, state, detail, false, _teammateSessionExtra(sessionId, teamExtra));
+      _writeTeammate(sessionId, agentId, agentType, hookEvent, state, detail, teamExtra);
       writeStats(stats);
       // process.exit skips finally -- release the stats lock by hand.
       if (releaseStats) releaseStats();
@@ -1050,7 +1333,7 @@ process.stdin.on('end', () => {
           taskSubject,
           isTeammate: true,
         };
-        writeSessionState(sessionId, state, detail, false, _teammateSessionExtra(sessionId, teamExtra));
+        _writeTeammate(sessionId, agentId, agentType, hookEvent, state, detail, teamExtra);
         writeStats(stats);
         // process.exit skips finally -- release the stats lock by hand.
         if (releaseStats) releaseStats();
@@ -1118,6 +1401,9 @@ process.stdin.on('end', () => {
           modelName: finished.model || 'haiku', editor: finished.editor || EDITOR,
           ...((finished.agentType || agentType) ? { agentType: finished.agentType || agentType } : {}),
           ...(prev && prev.model ? { model: prev.model } : {}),
+          // The retirement is the agent's newest synchronous word: an async
+          // PreToolUse of its own that lands after it must not revive it.
+          ...orderingFields(prev, hookEvent),
         });
       } else if (agentId) {
         // The agent's file name is deterministic, so it can be retired even
@@ -1131,7 +1417,9 @@ process.stdin.on('end', () => {
           // Keep the sticky fields, never the old state/detail/timestamp: a
           // stale timestamp would make the renderer ignore the retirement.
           const { state: _s, detail: _d, timestamp: _t, ...keep } = prev;
-          writeSessionState(orphanId, 'happy', 'done', true, { ...keep, sessionId: orphanId, stopped: true });
+          writeSessionState(orphanId, 'happy', 'done', true, {
+            ...keep, sessionId: orphanId, stopped: true, ...orderingFields(prev, hookEvent),
+          });
         }
       }
       if (stats.session.activeSubagents.length > 0) {
@@ -1217,7 +1505,34 @@ process.stdin.on('end', () => {
     else if (hookEvent === 'PermissionRequest') {
       state = 'waiting';
       detail = toolName ? `allow ${toolName}?` : 'needs permission';
-      waitingOn = toolCallKey(toolName, toolInput);
+      waitingOn = callKey;
+      // Claude Code only: the 6 s Notification is what confirms this wait
+      // (see WAIT_FIELDS). Codex has no Notification hook, so a Codex wait
+      // must never look unconfirmed -- the renderer would resolve it while
+      // the prompt is still open. Same when the user turned the
+      // notification off.
+      if (EDITOR === 'claude' && permissionNotifyEnabled()) {
+        const work = toolToState(toolName, toolInput);
+        waitFields = {
+          waitKind: 'permission', waitConfirmed: false,
+          permState: work.state, permDetail: work.detail,
+        };
+      }
+    }
+    else if (hookEvent === 'PermissionDenied') {
+      // 2.1.300 fires it when the auto-mode classifier refuses a tool call --
+      // only then: a user's "no" in the dialog fires nothing. The call never
+      // runs, so no PostToolUse or PostToolUseFailure follows it (the denial
+      // returns before the tool is called), and nothing else would close a
+      // wait on it. Not an error and not a reward: Claude reads the denial
+      // and carries on, so the face thinks. The streak is left alone.
+      state = 'thinking';
+      const label = /^mcp__/.test(toolName) ? (toolName.split('__')[1] || 'tool') : (toolName || 'tool');
+      detail = `${label.slice(0, 24)} denied`;
+      // It answers the wait on this call, or nothing at all if none is
+      // pending; a wait on some OTHER call is still open and stays.
+      const pending = prevSessionFile && prevSessionFile.waitingOn;
+      if (!pending || pending === callKey) permissionAnswered = true;
     }
     else if (hookEvent === 'Setup') {
       state = 'starting';
@@ -1337,12 +1652,14 @@ process.stdin.on('end', () => {
     if (stopped) extra.stopped = true;
     if (workState) { extra.workState = workState; extra.workDetail = workDetail; }
     if (waitingOn) extra.waitingOn = waitingOn;
+    if (waitFields) Object.assign(extra, waitFields);
     if (compacting) extra.compacting = true;
     // This write answers whatever the face was asked to wait on: the user
     // spoke (UserPromptSubmit), an elicitation came back, an AskUserQuestion
-    // returned. The renderer drops a wait still queued behind a reward, which
-    // otherwise reappeared after the answer. Not sticky -- one write only.
-    if (hookEvent === 'UserPromptSubmit' || hookEvent === 'ElicitationResult'
+    // returned, a denial closed the prompt. The renderer drops a wait still
+    // queued behind a reward, which otherwise reappeared after the answer.
+    // Not sticky -- one write only.
+    if (hookEvent === 'UserPromptSubmit' || hookEvent === 'ElicitationResult' || permissionAnswered
         || ((hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure') && ASK_TOOLS.test(toolName))) {
       extra.answered = true;
     }
@@ -1483,7 +1800,9 @@ process.stdin.on('end', () => {
     // SessionStart always takes over global state — explicit new-session signal
     if (hookEvent === 'SessionStart') shouldWriteGlobal = true;
 
-    if (shouldWriteGlobal) {
+    // A stale async event writes neither file (see asyncWriteIsStale): its
+    // stats above are already counted, and the newer state stays drawn.
+    if (shouldWriteGlobal && !staleWrite) {
       writeState(state, detail, (globalStopped || failureEndsTurn) ? { ...extra, stopped: true } : extra);
     }
     // Always write the per-session file: it is what the renderer's main face
@@ -1491,7 +1810,8 @@ process.stdin.on('end', () => {
     // too (the unlink above is skipped for `source === 'compact'`, which is
     // the same live session restarting), so a fresh session is a candidate for
     // the center before its first tool call.
-    {
+    if (!staleWrite) {
+      let existingSession = null;
       // Preserve stopped flag and sticky fields from existing session file
       // (set once at SubagentStart/TeammateIdle, must survive subsequent hook updates)
       // `model` is live here (unlike the dead 'editor' entry): extra.model is
@@ -1505,7 +1825,7 @@ process.stdin.on('end', () => {
       // session and does read -- that is how it keeps its own sticky fields.
       if (hookEvent !== 'SessionStart' || data.source === 'compact') {
         try {
-          const existingSession = JSON.parse(fs.readFileSync(
+          existingSession = JSON.parse(fs.readFileSync(
             path.join(SESSIONS_DIR, safeFilename(writeSessionId) + '.json'), 'utf8'));
           if (!stopped && existingSession.stopped &&
               (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')) {
@@ -1528,13 +1848,18 @@ process.stdin.on('end', () => {
           }
           // A permission prompt is answered by allowing it, too: then the only
           // word is the asking tool's own PostToolUse. Until that (or the
-          // user's next prompt), the question stays on the file.
+          // user's next prompt), the question stays on the file -- with its
+          // confirmation fields, which live exactly as long as it does.
           if (existingSession.waitingOn && !extra.waitingOn) {
             const post = hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure';
-            if (post && existingSession.waitingOn === toolCallKey(toolName, toolInput)) {
+            if (post && existingSession.waitingOn === callKey) {
               extra.answered = true;
             } else if (!extra.answered && !TURN_CLOSING_EVENTS.has(hookEvent)) {
-              extra.waitingOn = existingSession.waitingOn;
+              for (const field of WAIT_FIELDS) {
+                if (existingSession[field] !== undefined && extra[field] === undefined) {
+                  extra[field] = existingSession[field];
+                }
+              }
             }
           }
           // The piggybacked work state is only worth injecting if the renderer
@@ -1561,6 +1886,11 @@ process.stdin.on('end', () => {
           }
         } catch {}
       }
+      // Session-file only, after the global write: the ordering fields
+      // (asyncWriteIsStale reads them back) and when the file was born.
+      extra.firstSeenAt = firstSeenFor(existingSession, Date.now());
+      Object.assign(extra, orderingFields(existingSession, hookEvent,
+        (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure') ? shortToolId(toolUseId) : ''));
       if (hookEvent === 'Stop' && !isAgentEvent) {
         // Stop = end of turn, not end of session. Keep orbital visible as idle.
         // Global state file already has stopped=true for ownership release.
@@ -1571,10 +1901,11 @@ process.stdin.on('end', () => {
         if (failureEndsTurn) { extra.turnEnded = true; delete extra.turnOver; }
         writeSessionState(writeSessionId, state, detail, stopped, extra);
       }
-      // Family heartbeat: an agent working proves its parent is alive, and the
-      // parent itself writes nothing while it waits. See _touchSessionFile.
-      if (isAgentEvent) _touchSessionFile(sessionId);
     }
+    // Family heartbeat: an agent working proves its parent is alive, and the
+    // parent itself writes nothing while it waits. See _touchSessionFile.
+    // (A stale event is still the agent working.)
+    if (isAgentEvent) _touchSessionFile(sessionId);
     pruneFrequentFiles(stats.frequentFiles);
     _pruneCounters(counters, [stats.session.id, sessionId], now);
     writeStats(stats);
