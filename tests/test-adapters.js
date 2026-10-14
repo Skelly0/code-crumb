@@ -2948,13 +2948,15 @@ describe('base-adapter -- guardedWriteState unit tests', () => {
 
 describe('base-adapter -- initSession unit tests', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const { defaultStats } = require(path.join(__dirname, '..', 'lib', 'state-machine'));
+  const { defaultStats, localDay } = require(path.join(__dirname, '..', 'lib', 'state-machine'));
 
   test('creates daily bucket on first call', () => {
     const stats = defaultStats();
     stats.daily = { date: '', sessionCount: 0, cumulativeMs: 0 };
     baseAdapter.initSession(stats, 'init-1');
-    const today = new Date().toISOString().slice(0, 10);
+    // The LOCAL calendar day (localDay): a UTC date failed here every night
+    // between local and UTC midnight.
+    const today = localDay(Date.now());
     assert.strictEqual(stats.daily.date, today);
   });
 
@@ -2962,7 +2964,9 @@ describe('base-adapter -- initSession unit tests', () => {
     const stats = defaultStats();
     stats.daily = { date: '2020-01-01', sessionCount: 5, cumulativeMs: 1000 };
     baseAdapter.initSession(stats, 'init-2');
-    const today = new Date().toISOString().slice(0, 10);
+    // The LOCAL calendar day (localDay): a UTC date failed here every night
+    // between local and UTC midnight.
+    const today = localDay(Date.now());
     assert.strictEqual(stats.daily.date, today);
     assert.strictEqual(stats.daily.sessionCount, 1);
   });
@@ -4792,6 +4796,10 @@ describe('adapters -- Review round 5: the codex wrapper', () => {
   test.async('a reader that goes away (| head) ends the run cleanly and retires the session', async () => {
     const t = round5Env('codex-epipe');
     try {
+      // codex keeps printing until its own output breaks (or 10s pass), so
+      // there is always a write after the reader has gone, however slow the
+      // machine -- and the log shows whether codex was told.
+      const codexLog = path.join(t.tmp, 'codex.log');
       writeFakeCodex(t.binDir, [
         "'use strict';",
         "const fs = require('fs');",
@@ -4799,10 +4807,12 @@ describe('adapters -- Review round 5: the codex wrapper', () => {
         "out({ type: 'thread.started', thread_id: 'pipe-t' });",
         "out({ type: 'turn.started' });",
         "out({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } });",
-        'setTimeout(() => {',
-        "  try { for (let i = 0; i < 50; i++) out({ type: 'item.updated', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } }); } catch {}",
-        '}, 1500);',
-        'setTimeout(() => {}, 2500);',
+        'const end = Date.now() + 10000;',
+        'const tick = setInterval(() => {',
+        "  try { out({ type: 'item.updated', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } }); }",
+        `  catch { fs.writeFileSync(${JSON.stringify(codexLog)}, 'output broke'); clearInterval(tick); return; }`,
+        '  if (Date.now() > end) clearInterval(tick);',
+        '}, 100);',
         '',
       ].join('\n'));
       const child = spawn(NODE, [WRAPPER, 'a prompt'], { env: t.env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -4815,6 +4825,7 @@ describe('adapters -- Review round 5: the codex wrapper', () => {
       const f = readJSON(path.join(t.sessionsDir, 'pipe-t.json'));
       assert.strictEqual(f.stopped, true, `retired (${f.state} / ${f.detail})`);
       assert.deepStrictEqual([f.state, f.detail], ['error', 'output closed']);
+      assert.ok(fs.existsSync(codexLog), 'codex met the broken pipe and stopped');
     } finally { cleanup(t.tmp); }
   });
 });
