@@ -742,8 +742,255 @@ function setupCodexNotify(opts = {}) {
 // adapters/opencode-plugin.mjs instead of asking anyone to paste a snippet.
 
 const OPENCODE_SCHEMA = 'https://opencode.ai/config.json';
-const DEFAULT_OPENCODE_CONFIG = path.join(HOME, '.config', 'opencode', 'opencode.json');
+
+// Where OpenCode reads its global config: $XDG_CONFIG_HOME/opencode, else
+// ~/.config/opencode -- on Windows too, where it resolves the directory with
+// xdg-basedir off os.homedir(), not %APPDATA% (checked against the 1.18.21
+// binary). OPENCODE_CONFIG_DIR names one more directory it reads
+// opencode.json(c) from, after the global one; a user who set it keeps their
+// config there, so setup writes there. Setup used to write ~/.config
+// regardless and report success over a file OpenCode never read. In the
+// directory, an existing opencode.jsonc is used when there is no
+// opencode.json (OpenCode reads both). Resolved per call: tests pass an env.
+function opencodeConfigDir(env = process.env) {
+  if (env.OPENCODE_CONFIG_DIR) return path.resolve(env.OPENCODE_CONFIG_DIR);
+  const base = env.XDG_CONFIG_HOME ? path.resolve(env.XDG_CONFIG_HOME) : path.join(HOME, '.config');
+  return path.join(base, 'opencode');
+}
+
+function opencodeConfigPath(env = process.env) {
+  const dir = opencodeConfigDir(env);
+  const json = path.join(dir, 'opencode.json');
+  const jsonc = path.join(dir, 'opencode.jsonc');
+  return !fs.existsSync(json) && fs.existsSync(jsonc) ? jsonc : json;
+}
+
+const DEFAULT_OPENCODE_CONFIG = opencodeConfigPath();
 const DEFAULT_OPENCODE_PLUGIN = path.resolve(__dirname, 'adapters', 'opencode-plugin.mjs').replace(/\\/g, '/');
+
+// -- opencode.json is JSONC ------------------------------------------
+// OpenCode reads it with // and /* */ comments and trailing commas allowed,
+// and its own docs write it that way; setup refused such a file as "not
+// valid JSON". A strict-JSON file keeps the old path (parsed, edited and
+// written back with JSON.stringify -- there is nothing in it to lose).
+// Anything else goes through blankJsonc, which turns every comment, then
+// every trailing comma, into spaces of the same length: an offset into the
+// blanked text is an offset into the user's own, so the edit is textual and
+// minimal -- only the `plugin` member is rewritten (or added right after the
+// opening brace) and every comment elsewhere survives. A comment INSIDE that
+// member could not be kept through a rewrite, so setup refuses then and
+// names the entry to add by hand. User config is never lost; the .bak rule
+// still applies.
+
+function skipJsonString(s, i) {
+  for (let j = i + 1; j < s.length; j++) {
+    if (s[j] === '\\') j++;
+    else if (s[j] === '"') return j + 1;
+  }
+  return s.length;
+}
+
+function skipBlank(s, i) {
+  while (i < s.length && /\s/.test(s[i])) i++;
+  return i;
+}
+
+function skipJsonValue(s, i) {
+  if (s[i] === '"') return skipJsonString(s, i);
+  if (s[i] === '{' || s[i] === '[') {
+    let depth = 0;
+    while (i < s.length) {
+      const c = s[i];
+      if (c === '"') { i = skipJsonString(s, i); continue; }
+      if (c === '{' || c === '[') depth++;
+      else if ((c === '}' || c === ']') && --depth === 0) return i + 1;
+      i++;
+    }
+    return i;
+  }
+  while (i < s.length && !/[\s,\]}]/.test(s[i])) i++;
+  return i;
+}
+
+// { noComments, clean, comments: [[start, end), ...] }, or null for an
+// unterminated block comment.
+function blankJsonc(text) {
+  const out = text.split('');
+  const comments = [];
+  let i = 0;
+  if (out[0] === '﻿') { out[0] = ' '; i = 1; }
+  while (i < text.length) {
+    if (text[i] === '"') { i = skipJsonString(text, i); continue; }
+    if (text[i] === '/' && text[i + 1] === '/') {
+      const start = i;
+      while (i < text.length && text[i] !== '\n' && text[i] !== '\r') out[i++] = ' ';
+      comments.push([start, i]);
+      continue;
+    }
+    if (text[i] === '/' && text[i + 1] === '*') {
+      const close = text.indexOf('*/', i + 2);
+      if (close === -1) return null;
+      comments.push([i, close + 2]);
+      for (; i < close + 2; i++) if (text[i] !== '\n' && text[i] !== '\r') out[i] = ' ';
+      continue;
+    }
+    i++;
+  }
+  const noComments = out.join('');
+  const clean = noComments.split('');
+  for (let j = 0; j < noComments.length; j++) {
+    if (noComments[j] === '"') { j = skipJsonString(noComments, j) - 1; continue; }
+    if (noComments[j] !== ',') continue;
+    const next = noComments[skipBlank(noComments, j + 1)];
+    if (next === '}' || next === ']') clean[j] = ' ';
+  }
+  return { noComments, clean: clean.join(''), comments };
+}
+
+// The top-level object's `key` member in blanked text that already parsed:
+// { open, empty, member: { keyStart, valueStart, valueEnd } | null }.
+function findTopMember(s, key) {
+  let i = skipBlank(s, 0);
+  if (s[i] !== '{') return null;
+  const open = i;
+  i = skipBlank(s, i + 1);
+  const empty = s[i] === '}';
+  let member = null;
+  while (i < s.length && s[i] !== '}') {
+    if (s[i] === ',') { i = skipBlank(s, i + 1); continue; }
+    const keyStart = i;
+    const keyEnd = skipJsonString(s, i);
+    let name;
+    try { name = JSON.parse(s.slice(keyStart, keyEnd)); } catch { return null; }
+    const valueStart = skipBlank(s, skipBlank(s, keyEnd) + 1);   // past the ':'
+    const valueEnd = skipJsonValue(s, valueStart);
+    if (name === key) member = { keyStart, valueStart, valueEnd };   // the last one wins, as in JSON.parse
+    i = skipBlank(s, valueEnd);
+  }
+  return { open, empty, member };
+}
+
+// A plugin list as JSON text, in the shape the old one had: one line, or one
+// entry per line under the key's own indentation.
+function oneLineList(list) {
+  return '[' + list.map(x => JSON.stringify(x)).join(', ') + ']';
+}
+
+function jsonList(list, raw, m) {
+  const old = raw.slice(m.valueStart, m.valueEnd);
+  if (!old.includes('\n') || !list.length) return oneLineList(list);
+  const lineStart = raw.lastIndexOf('\n', m.keyStart - 1) + 1;
+  const indent = /^[ \t]*/.exec(raw.slice(lineStart, m.keyStart))[0];
+  const eol = old.includes('\r\n') ? '\r\n' : '\n';
+  return '[' + eol + list.map(x => `${indent}  ${JSON.stringify(x)}`).join(',' + eol) + eol + indent + ']';
+}
+
+// The JSONC text with its `plugin` member set to `list` (null: removed), or
+// null when a comment sits inside what would have to be rewritten.
+function editJsoncPlugin(raw, blanked, list) {
+  const top = findTopMember(blanked.clean, 'plugin');
+  if (!top) return null;
+  const commentIn = (a, b) => blanked.comments.some(([s, e]) => s < b && e > a);
+  const m = top.member;
+  if (m && list) {
+    if (commentIn(m.valueStart, m.valueEnd)) return null;
+    return raw.slice(0, m.valueStart) + jsonList(list, raw, m) + raw.slice(m.valueEnd);
+  }
+  if (m) {
+    // The member and the comma after it -- and its whole line when nothing
+    // else is on it, so no blank, indented line is left behind.
+    let a = m.keyStart;
+    let b = m.valueEnd;
+    const k = skipBlank(blanked.noComments, b);
+    if (blanked.noComments[k] === ',') b = k + 1;
+    if (commentIn(a, b)) return null;
+    const lineStart = raw.lastIndexOf('\n', a - 1) + 1;
+    const nl = raw.indexOf('\n', b);
+    const lineEnd = nl === -1 ? raw.length : nl;
+    if (/^[ \t]*$/.test(raw.slice(lineStart, a)) && /^[ \t\r]*$/.test(raw.slice(b, lineEnd))) {
+      a = lineStart;
+      b = nl === -1 ? raw.length : nl + 1;
+    }
+    return raw.slice(0, a) + raw.slice(b);
+  }
+  if (!list) return raw;
+  const member = `"plugin": ${oneLineList(list)}`;
+  const at = top.open + 1;
+  const nl = raw.indexOf('\n', at);
+  if (nl !== -1 && blanked.noComments.slice(at, nl).trim() === '') {
+    // `{` ends its line: the member goes on the next one, indented like the
+    // members already there.
+    const eol = raw[nl - 1] === '\r' ? '\r\n' : '\n';
+    const indent = top.empty ? '  ' : (/^[ \t]*/.exec(raw.slice(nl + 1))[0] || '  ');
+    return raw.slice(0, nl + 1) + indent + member + (top.empty ? '' : ',') + eol + raw.slice(nl + 1);
+  }
+  return raw.slice(0, at) + ' ' + member + (top.empty ? ' ' : ',') + raw.slice(at);
+}
+
+// readJsonConfig for opencode.json: strict JSON first, then JSONC. Same
+// result shape, plus `jsonc` (blankJsonc's texts) when the file needed it.
+function readOpenCodeConfig(filePath, log) {
+  let raw;
+  try {
+    raw = fs.readFileSync(filePath, 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') {
+      log('  [..] No existing OpenCode config found, creating new');
+      return { settings: {}, existed: false, raw: null, jsonc: null };
+    }
+    log(`  [!!] Could not read ${filePath}: ${err.message}`);
+    log('       Leaving it untouched. Fix or move the file, then re-run setup.');
+    return { error: err };
+  }
+  let settings;
+  let jsonc = null;
+  try {
+    settings = JSON.parse(raw);
+  } catch {
+    jsonc = blankJsonc(raw);
+    try {
+      if (!jsonc) throw new Error('unterminated comment');
+      settings = JSON.parse(jsonc.clean);
+    } catch (err) {
+      log(`  [!!] ${filePath} is not valid JSON or JSONC (${err.message}).`);
+      log('       Leaving it untouched so nothing is lost. Fix the file, then re-run setup.');
+      return { error: err };
+    }
+  }
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    log(`  [!!] ${filePath} is not a JSON object. Leaving it untouched.`);
+    return { error: new Error('OpenCode config is not an object') };
+  }
+  log(`  [ok] Found existing OpenCode config${jsonc ? ' (JSONC -- its comments are kept)' : ''}`);
+  return { settings, existed: true, raw, jsonc };
+}
+
+// writeSettings for text already serialized: .bak first, atomic, mode kept.
+function writeConfigText(configPath, text, existed, raw, log) {
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  let mode = 0o600;
+  if (existed) {
+    try { mode = fs.statSync(configPath).mode & 0o777; } catch {}
+    if (writeBackup(configPath + '.bak', raw)) log(`  [ok] Backup written to ${configPath}.bak`);
+  }
+  const ok = writeJsonAtomic(configPath, text, mode || 0o600);
+  if (!ok) log(`  [!!] Failed to write ${configPath}`);
+  return ok;
+}
+
+// Write the plugin list back, in whichever form the file came in.
+// Returns true, false (write failed) or 'comment' (refused, see above).
+function writeOpenCodeConfig(configPath, read, list, log) {
+  const { settings, existed, raw, jsonc } = read;
+  if (!jsonc) {
+    if (list && list.length) settings.plugin = list;
+    else delete settings.plugin;
+    return writeSettings(configPath, settings, existed, raw, log);
+  }
+  const text = editJsoncPlugin(raw, jsonc, list && list.length ? list : null);
+  if (text === null) return 'comment';
+  return writeConfigText(configPath, text, existed, raw, log);
+}
 
 // A config entry is `string` or `[string, options]`.
 function pluginEntryPath(entry) {
@@ -789,8 +1036,12 @@ function printOpenCodeUsage(configPath, pluginPath, log) {
     a tool that throws   ${arrow} error face (after never fires for those)
     permission.asked     ${arrow} waiting, "allow?"
     permission.replied   ${arrow} satisfied
+    question.asked       ${arrow} waiting, "asking you" (also plan_exit)
+    question.replied     ${arrow} satisfied
+    session.compacted    ${arrow} satisfied, "memory compacted"
     session.idle         ${arrow} happy, turn over
-    session.error        ${arrow} error face
+    session.error        ${arrow} error face, turn over (an Esc: interrupted;
+                           a context overflow: compacting memory)
 
   Upgrading: if you still have a hand-written
   ~/.config/opencode/plugins/code-crumb.js, delete it and remove its config
@@ -811,7 +1062,7 @@ function printOpenCodeUsage(configPath, pluginPath, log) {
 // instructions. opts: { configPath, pluginPath, install, log, quiet }
 // Returns { ok, modified, added, replaced, error? }.
 function setupOpenCode(opts = {}) {
-  const configPath = opts.configPath || DEFAULT_OPENCODE_CONFIG;
+  const configPath = opts.configPath || opencodeConfigPath();
   const pluginPath = opts.pluginPath || DEFAULT_OPENCODE_PLUGIN;
   const log = opts.log || console.log;
   const install = !!opts.install;
@@ -829,12 +1080,14 @@ function setupOpenCode(opts = {}) {
     return { ok: true, modified: false, added: 0, replaced: 0 };
   }
 
-  const read = readJsonConfig(configPath, log, 'OpenCode config');
+  const read = readOpenCodeConfig(configPath, log);
   if (read.error) return { ok: false, modified: false, added: 0, replaced: 0, error: read.error };
-  const { settings: config, existed, raw } = read;
+  const config = read.settings;
 
-  if (!config.$schema) config.$schema = OPENCODE_SCHEMA;
-  if (!Array.isArray(config.plugin)) config.plugin = [];
+  // (OpenCode writes a missing $schema into the file itself; a JSONC file is
+  // edited only where the plugin list is.)
+  if (!read.jsonc && !config.$schema) config.$schema = OPENCODE_SCHEMA;
+  let list = Array.isArray(config.plugin) ? config.plugin.slice() : [];
   if (config.plugins) {
     log('  [!!] Found a plural plugins key. OpenCode reads plugin (singular);');
     log('       the plural one does nothing. Leaving it in place.');
@@ -842,20 +1095,20 @@ function setupOpenCode(opts = {}) {
 
   let added = 0;
   let replaced = 0;
-  if (config.plugin.some(e => pluginEntryPath(e) === pluginPath)) {
+  if (list.some(e => pluginEntryPath(e) === pluginPath)) {
     log('  [ok] Plugin already registered');
-  } else if (config.plugin.some(isOurPlugin)) {
+  } else if (list.some(isOurPlugin)) {
     // A Code Crumb entry at a different path: the repo moved.
-    config.plugin = config.plugin.filter(e => !isOurPlugin(e)).concat(pluginPath);
+    list = list.filter(e => !isOurPlugin(e)).concat(pluginPath);
     replaced = 1;
     log('  ~ Updated the plugin path');
   } else {
-    config.plugin.push(pluginPath);
+    list.push(pluginPath);
     added = 1;
     log('  + Registered the Code Crumb plugin');
   }
 
-  const legacy = config.plugin.filter(e => !isOurPlugin(e) && /code-crumb/i.test(pluginEntryPath(e)));
+  const legacy = list.filter(e => !isOurPlugin(e) && /code-crumb/i.test(pluginEntryPath(e)));
   for (const entry of legacy) {
     log(`  [!!] Old hand-written entry still listed: ${pluginEntryPath(entry)}`);
     log('       Remove it -- two plugins means every event fires twice.');
@@ -863,7 +1116,14 @@ function setupOpenCode(opts = {}) {
 
   const modified = added + replaced > 0;
   if (modified) {
-    if (!writeSettings(configPath, config, existed, raw, log)) {
+    const wrote = writeOpenCodeConfig(configPath, read, list, log);
+    if (wrote === 'comment') {
+      log(`  [!!] ${configPath} has a comment inside its plugin list, which a rewrite would lose.`);
+      log('       Leaving the file untouched. Add this entry to the list yourself:');
+      log(`         "${pluginPath}"`);
+      return { ok: false, modified: false, added, replaced, error: new Error('comment in the plugin list') };
+    }
+    if (!wrote) {
       return { ok: false, modified: false, added, replaced, error: new Error('write failed') };
     }
     log(`\n  Plugin registered in ${configPath}`);
@@ -878,29 +1138,34 @@ function setupOpenCode(opts = {}) {
 // Remove every Code Crumb plugin entry (any path) and drop the key if it
 // ends up empty. opts: { configPath, log }. Returns { ok, removed, error? }.
 function uninstallOpenCode(opts = {}) {
-  const configPath = opts.configPath || DEFAULT_OPENCODE_CONFIG;
+  const configPath = opts.configPath || opencodeConfigPath();
   const log = opts.log || console.log;
 
   log('\n  Code Crumb Uninstall (OpenCode)');
   log('  ' + '='.repeat(40) + '\n');
 
-  const read = readJsonConfig(configPath, log, 'OpenCode config');
+  const read = readOpenCodeConfig(configPath, log);
   if (read.error) return { ok: false, removed: 0, error: read.error };
-  const { settings: config, existed, raw } = read;
+  const config = read.settings;
 
   let removed = 0;
+  let kept = [];
   if (Array.isArray(config.plugin)) {
-    const kept = config.plugin.filter(e => !isOurPlugin(e));
+    kept = config.plugin.filter(e => !isOurPlugin(e));
     removed = config.plugin.length - kept.length;
-    if (kept.length) config.plugin = kept;
-    else delete config.plugin;
   }
 
   if (removed === 0) {
     log('  [ok] No Code Crumb plugin entry found -- nothing to do');
     return { ok: true, removed: 0 };
   }
-  if (!writeSettings(configPath, config, existed, raw, log)) {
+  const wrote = writeOpenCodeConfig(configPath, read, kept, log);
+  if (wrote === 'comment') {
+    log(`  [!!] ${configPath} has a comment inside its plugin list, which a rewrite would lose.`);
+    log('       Leaving the file untouched. Remove the opencode-plugin.mjs entry yourself.');
+    return { ok: false, removed: 0, error: new Error('comment in the plugin list') };
+  }
+  if (!wrote) {
     return { ok: false, removed: 0, error: new Error('write failed') };
   }
   log(`  - Removed ${removed} Code Crumb plugin entry from ${configPath}\n`);
@@ -1130,6 +1395,8 @@ module.exports = {
   uninstallClaude,
   setupOpenCode,
   uninstallOpenCode,
+  opencodeConfigDir,
+  opencodeConfigPath,
   buildFaceHooks,
   setupCodex,
   uninstallCodex,

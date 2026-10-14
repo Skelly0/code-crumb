@@ -1311,7 +1311,9 @@ describe('platform -- setupOpenCode writes a real OpenCode config', () => {
     const { dir, configPath } = env();
     try {
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.writeFileSync(configPath, '{ "plugin": [ "x", ] }', 'utf8');
+      // Round 5: a trailing comma is valid JSONC, which OpenCode reads -- a
+      // cut-off file is what corrupt means now.
+      fs.writeFileSync(configPath, '{ "plugin": [ "x" ', 'utf8');
       const before = fs.readFileSync(configPath, 'utf8');
       const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
       assert.strictEqual(r.ok, false);
@@ -1825,6 +1827,100 @@ describe('platform -- Review round 5: Codex setup', () => {
       runSetup(dir, ['uninstall'], { CODEX_HOME: home });
       assert.ok(!OUR_LINE.test(fs.readFileSync(path.join(home, 'config.toml'), 'utf8')), 'uninstall finds it there too');
       assert.ok(!fs.readFileSync(path.join(home, 'hooks.json'), 'utf8').includes('update-state.js'));
+    } finally { cleanup(dir); }
+  });
+});
+
+describe('platform -- Review round 5: OpenCode setup', () => {
+  const PLUGIN = '/repo/adapters/opencode-plugin.mjs';
+  const quiet = { log: () => {} };
+  const ourEntry = (file) => fs.readFileSync(file, 'utf8').includes('adapters/opencode-plugin.mjs');
+
+  test('XDG_CONFIG_HOME is where OpenCode reads its config', () => {
+    const dir = setupHome('crumb-r5-xdg-');
+    try {
+      const xdg = path.join(dir, 'xdg');
+      runSetup(dir, ['opencode', '--install'], { XDG_CONFIG_HOME: xdg });
+      assert.ok(fs.existsSync(path.join(xdg, 'opencode', 'opencode.json')), '$XDG_CONFIG_HOME/opencode/opencode.json');
+      assert.ok(!fs.existsSync(path.join(dir, '.config', 'opencode', 'opencode.json')), 'not ~/.config');
+      runSetup(dir, ['opencode', '--uninstall'], { XDG_CONFIG_HOME: xdg });
+      assert.ok(!ourEntry(path.join(xdg, 'opencode', 'opencode.json')), 'and --uninstall looks there too');
+    } finally { cleanup(dir); }
+  });
+
+  test('OPENCODE_CONFIG_DIR, when set, is where setup writes', () => {
+    const dir = setupHome('crumb-r5-ocdir-');
+    try {
+      const cfgDir = path.join(dir, 'dotfiles', 'opencode');
+      runSetup(dir, ['opencode', '--install'], { OPENCODE_CONFIG_DIR: cfgDir });
+      assert.ok(ourEntry(path.join(cfgDir, 'opencode.json')));
+      assert.ok(!fs.existsSync(path.join(dir, '.config', 'opencode', 'opencode.json')));
+    } finally { cleanup(dir); }
+  });
+
+  test('an existing opencode.jsonc is the file edited, not a new opencode.json', () => {
+    const dir = setupHome('crumb-r5-jsoncfile-');
+    try {
+      const jsonc = path.join(dir, '.config', 'opencode', 'opencode.jsonc');
+      fs.mkdirSync(path.dirname(jsonc), { recursive: true });
+      fs.writeFileSync(jsonc, '{\n  // mine\n  "model": "x"\n}\n');
+      const r = runSetup(dir, ['opencode', '--install']);
+      assert.strictEqual(r.status, 0, r.out);
+      assert.ok(ourEntry(jsonc));
+      assert.ok(fs.readFileSync(jsonc, 'utf8').includes('// mine'));
+      assert.ok(!fs.existsSync(path.join(path.dirname(jsonc), 'opencode.json')));
+    } finally { cleanup(dir); }
+  });
+
+  test('a commented config with trailing commas is installed into, every comment kept', () => {
+    const dir = setupHome('crumb-r5-jsonc-');
+    try {
+      const configPath = path.join(dir, 'opencode.json');
+      const original = '{\n  // my model\n  "model": "anthropic/claude-opus-5",\n}\n';
+      fs.writeFileSync(configPath, original);
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.deepStrictEqual([r.ok, r.added], [true, 1], 'refused as "not valid JSON" before');
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'),
+        `{\n  "plugin": ["${PLUGIN}"],\n  // my model\n  "model": "anthropic/claude-opus-5",\n}\n`);
+      assert.strictEqual(fs.readFileSync(configPath + '.bak', 'utf8'), original, 'backed up first');
+      const again = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.strictEqual(again.modified, false, 'and found again on a re-run');
+    } finally { cleanup(dir); }
+  });
+
+  test('a moved entry in a multi-line JSONC list is replaced in place, and uninstall takes the lines out', () => {
+    const dir = setupHome('crumb-r5-jsonc-move-');
+    try {
+      const configPath = path.join(dir, 'opencode.jsonc');
+      fs.writeFileSync(configPath, [
+        '{', '  /* plugins */', '  "plugin": [', '    "./plugins/other.js",',
+        '    "/old/adapters/opencode-plugin.mjs",', '  ],', '  "model": "x", // trailing', '}', '',
+      ].join('\n'));
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.deepStrictEqual([r.ok, r.replaced], [true, 1]);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), [
+        '{', '  /* plugins */', '  "plugin": [', '    "./plugins/other.js",',
+        `    "${PLUGIN}"`, '  ],', '  "model": "x", // trailing', '}', '',
+      ].join('\n'));
+      fs.writeFileSync(configPath, `{\n  /* plugins */\n  "plugin": [\n    "${PLUGIN}",\n  ],\n  "model": "x", // trailing\n}\n`);
+      const u = setup.uninstallOpenCode({ configPath, ...quiet });
+      assert.deepStrictEqual([u.ok, u.removed], [true, 1]);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), '{\n  /* plugins */\n  "model": "x", // trailing\n}\n');
+    } finally { cleanup(dir); }
+  });
+
+  test('a comment inside the plugin list is never lost: setup refuses and says what to add', () => {
+    const dir = setupHome('crumb-r5-jsonc-refuse-');
+    try {
+      const configPath = path.join(dir, 'opencode.json');
+      const original = '{ "plugin": [ // keep me\n  "/old/adapters/opencode-plugin.mjs" ] }\n';
+      fs.writeFileSync(configPath, original);
+      const lines = [];
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, log: (l) => lines.push(l), quiet: true });
+      assert.strictEqual(r.ok, false);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), original, 'byte-identical');
+      assert.strictEqual(fs.existsSync(configPath + '.bak'), false);
+      assert.ok(lines.join('\n').includes(PLUGIN), 'names the entry to add by hand');
     } finally { cleanup(dir); }
   });
 });
