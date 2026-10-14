@@ -348,7 +348,9 @@ function _healLeadFile(leadId) {
 // 6 s); if it was answered meanwhile, being confirmed early only means it
 // waits for its PostToolUse, as every wait did before.
 const PERMISSION_CONFIRM_MIN_AGE_MS = 5000;
+// Returns the agent session-file names (no .json) it confirmed.
 function _confirmAgentWaits(sessionId) {
+  const confirmed = [];
   try {
     const prefix = safeFilename(sessionId) + '-agent-';
     for (const name of fs.readdirSync(SESSIONS_DIR)) {
@@ -364,6 +366,43 @@ function _confirmAgentWaits(sessionId) {
       if (typeof askedAt === 'number' && EVENT_AT - askedAt < PERMISSION_CONFIRM_MIN_AGE_MS) continue;
       // A fresh timestamp: the renderer skips a write whose timestamp it has seen.
       writeJsonAtomic(fp, { ...s, waitConfirmed: true, timestamp: Date.now() }, 0o600);
+      confirmed.push(name.slice(0, -'.json'.length));
+    }
+  } catch {}
+  return confirmed;
+}
+
+// The same notification also puts the PARENT on "allow?" -- the user is
+// needed, and the main face should say so. But allowing the agent's prompt
+// produces only the agent's own PostToolUse, and a parent waiting on its
+// agent writes nothing, so that wait (and the flashing title) outlived the
+// agent's tool by as long as the agent kept working. The parent's wait names
+// the agents it stands for (`waitForAgents`) and what it showed before
+// (`waitPrev`); when the last of them is answered, the parent goes back.
+// The global file gets the same treatment when this session owns it (tmux).
+function _releaseParentWait(parentId, agentFile) {
+  const restore = (s) => {
+    const rest = s.waitForAgents.filter(id => id !== agentFile);
+    if (rest.length) return null;    // still asking on another agent's behalf
+    const next = { ...s, timestamp: Date.now(), answered: true };
+    for (const field of [...WAIT_FIELDS, 'waitForAgents', 'waitPrev']) delete next[field];
+    const prev = s.waitPrev && typeof s.waitPrev.state === 'string' ? s.waitPrev : null;
+    next.state = prev ? prev.state : 'subagent';
+    next.detail = prev && typeof prev.detail === 'string' ? prev.detail : 'conducting';
+    return next;
+  };
+  const asksFor = (s) => s && typeof s === 'object' && s.state === 'waiting'
+    && Array.isArray(s.waitForAgents) && s.waitForAgents.includes(agentFile);
+  try {
+    const fp = path.join(SESSIONS_DIR, safeFilename(parentId) + '.json');
+    const s = _readSessionFile(parentId);
+    if (asksFor(s)) { const next = restore(s); if (next) writeJsonAtomic(fp, next, 0o600); }
+  } catch {}
+  try {
+    const g = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if (asksFor(g) && g.sessionId === parentId) {
+      const next = restore(g);
+      if (next) writeJsonAtomic(STATE_FILE, next, 0o600);
     }
   } catch {}
 }
@@ -1310,7 +1349,17 @@ process.stdin.on('end', () => {
           ...(asking && typeof prev.permState === 'string' ? { permState: prev.permState } : {}),
           ...(asking && typeof prev.permDetail === 'string' ? { permDetail: prev.permDetail } : {}),
         };
-        if (!agentId) _confirmAgentWaits(sessionId);
+        if (!agentId) {
+          const agents = _confirmAgentWaits(sessionId);
+          // Not the parent's own question: it stands in for its agents' (see
+          // _releaseParentWait), and remembers what to go back to.
+          if (!asking && agents.length) {
+            waitFields.waitForAgents = agents.slice(0, 8);
+            if (prev && typeof prev.state === 'string' && prev.state !== 'waiting') {
+              waitFields.waitPrev = { state: prev.state, detail: typeof prev.detail === 'string' ? prev.detail : '' };
+            }
+          }
+        }
       }
     }
     else if (hookEvent === 'UserPromptSubmit') {
@@ -1920,6 +1969,8 @@ process.stdin.on('end', () => {
         writeSessionState(writeSessionId, state, detail, stopped, extra);
       }
     }
+    // An agent's prompt was answered: a parent standing in for it goes back.
+    if (isAgentEvent && extra.answered) _releaseParentWait(sessionId, safeFilename(writeSessionId));
     // Family heartbeat: an agent working proves its parent is alive, and the
     // parent itself writes nothing while it waits. See _touchSessionFile.
     // (A stale event is still the agent working.)

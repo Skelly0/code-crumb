@@ -1824,6 +1824,68 @@ describe('review round 5 -- permission wait confirmation', () => {
       assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'pw-4-agent-ag1')).waitConfirmed, false);
     } finally { cleanup(t.tmp); }
   });
+
+  // The session-wide notification also lands on the PARENT's file as "allow?".
+  // Allowing the agent's prompt produces only the agent's own PostToolUse, so
+  // the parent -- which writes nothing while it waits on its agent -- kept a
+  // confirmed wait (and the flashing "WAITING FOR YOU" title) until its own
+  // next write, long after the agent's tool had finished.
+  function agentAsks(t, id) {
+    runUpdateState('UserPromptSubmit', { session_id: id, prompt: 'go' }, t.env);
+    runUpdateState('PreToolUse', { session_id: id, tool_name: 'Agent', tool_use_id: 'toolu_task',
+      tool_input: { description: 'run tests', subagent_type: 'general-purpose', prompt: 'run them' } }, t.env);
+    runUpdateState('SubagentStart', { session_id: id, agent_id: 'ag1', agent_type: 'general-purpose' }, t.env);
+    const call = { session_id: id, agent_id: 'ag1', agent_type: 'general-purpose', ...{
+      tool_name: ask.tool_name, tool_input: ask.tool_input } };
+    runUpdateState('PreToolUse', { ...call, tool_use_id: 'toolu_ag1' }, t.env);
+    runUpdateState('PermissionRequest', call, t.env);
+    const fp = sessionFile(t.sessionsDir, `${id}-agent-ag1`);
+    const agent = readJSON(fp);
+    fs.writeFileSync(fp, JSON.stringify({ ...agent, syncAt: agent.syncAt - 10000 }), 'utf8');
+    const before = readJSON(sessionFile(t.sessionsDir, id));
+    runUpdateState('Notification', { session_id: id, notification_type: 'permission_prompt' }, t.env);
+    return { call, before };
+  }
+
+  test('allowing a subagent\'s prompt takes the parent out of its wait', () => {
+    const t = makeTempEnv('pw-5');
+    try {
+      const { call, before } = agentAsks(t, 'pw-5');
+      const waiting = readJSON(sessionFile(t.sessionsDir, 'pw-5'));
+      assert.strictEqual(waiting.state, 'waiting', 'the notification still reaches the parent');
+      runUpdateState('PostToolUse', { ...call, tool_use_id: 'toolu_ag1',
+        tool_response: { stdout: '12 passing', stderr: '' } }, t.env);
+      const parent = readJSON(sessionFile(t.sessionsDir, 'pw-5'));
+      assert.strictEqual(parent.state, before.state, 'back to what it showed before the prompt');
+      assert.strictEqual(parent.detail, before.detail);
+      assert.strictEqual(parent.answered, true, 'the renderer drops the wait');
+      assert.ok(parent.timestamp > waiting.timestamp, 'a new timestamp, or the renderer never reads it');
+      for (const k of [...WAIT_KEYS, 'waitForAgents', 'waitPrev']) assert.strictEqual(parent[k], undefined, k);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'pw-5-agent-ag1')).answered, true);
+      // tmux reads the global file, which the owner's notification also set.
+      const g = readJSON(t.stateFile);
+      assert.strictEqual(g.sessionId, 'pw-5');
+      assert.notStrictEqual(g.state, 'waiting', 'the global file is released too');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('the parent\'s own prompt is not released by an agent\'s answer', () => {
+    const t = makeTempEnv('pw-6');
+    try {
+      runUpdateState('PermissionRequest', { ...ask, session_id: 'pw-6' }, t.env);
+      const fp = sessionFile(t.sessionsDir, 'pw-6');
+      const own = readJSON(fp);
+      fs.writeFileSync(fp, JSON.stringify({ ...own, syncAt: own.syncAt - 10000 }), 'utf8');
+      runUpdateState('Notification', { session_id: 'pw-6', notification_type: 'permission_prompt' }, t.env);
+      runUpdateState('PostToolUse', { session_id: 'pw-6', agent_id: 'ag9', agent_type: 'Explore',
+        tool_name: 'Read', tool_input: { file_path: 'b.js' }, tool_use_id: 'toolu_x',
+        tool_response: { type: 'text' } }, t.env);
+      const parent = readJSON(fp);
+      assert.strictEqual(parent.state, 'waiting');
+      assert.strictEqual(parent.waitConfirmed, true);
+      assert.ok(parent.waitingOn, 'still the parent\'s own question');
+    } finally { cleanup(t.tmp); }
+  });
 });
 
 describe('review round 5 -- PermissionDenied', () => {
