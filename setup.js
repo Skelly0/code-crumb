@@ -16,6 +16,8 @@
 // |                               (write opencode.json for real)   |
 // |    node setup.js openclaw     (OpenClaw / Pi)                  |
 // |    node setup.js --autolaunch (only flip the autolaunch pref)  |
+// |    node setup.js doctor       (read-only health check; exit 1  |
+// |                               when it finds a problem)         |
 // |                                                                |
 // |  Every installer is also a module: setupClaude() /             |
 // |  uninstallClaude() / setupCodex() / uninstallCodex() take      |
@@ -864,12 +866,438 @@ function enableAutolaunch(log = console.log, quitFlagFile = QUIT_FLAG_FILE) {
 // adapters never do, so setup must not offer or promise autolaunch for them.
 const AUTOLAUNCH_COMMANDS = new Set(['claude', 'claude-code', 'codex', 'openai']);
 
+// -- Doctor ----------------------------------------------------------
+// `node setup.js doctor` answers "why does the face show nothing?" by
+// checking everything the hooks and the renderer depend on: node, the
+// renderer's heartbeat, the Claude Code hooks (manual, plugin, or both), the
+// Codex hooks, autolaunch, and when a hook last wrote anything. One line per
+// check -- a tick when it is fine, a `!` plus a suggested fix when it is
+// not, a dot for plain information.
+//
+// It is READ-ONLY: no backup, no prefs, no quit-flag cleanup, no repair --
+// only reads, stats and the kill(pid, 0) probe isRendererAlive makes. And it
+// never throws: a missing, unreadable or garbage file is itself a finding.
+// The plugin is found through installed_plugins.json, the file
+// `claude plugin list --json` reports from, so nothing is spawned (claude
+// takes seconds to start and need not be on PATH). Returns { problems };
+// the CLI exits 1 when any `!` was printed.
+//
+// opts: { home, env, log, now, nodeVersion } -- every path is derived from
+// `home` and `env` the way shared.js and setup.js derive them, so a test
+// can point it at a temp home.
+
+const { PID_FILE, PREFS_FILE, SESSIONS_DIR, isRendererAlive } = require('./lib/shared');
+
+const DOCTOR_OK = '\u2713';
+const DOCTOR_BAD = '!';
+const DOCTOR_INFO = '\u00b7';
+// No write for this long and the question is "are the hooks firing at all?"
+const DOCTOR_QUIET_MS = 60 * 60 * 1000;
+
+function doctorIsObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+// Read and parse a JSON file. { exists, data } or { exists, error }.
+function doctorReadJson(file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return { exists: false };
+    return { exists: true, error: (e && (e.code || e.message)) || 'unreadable' };
+  }
+  try {
+    return { exists: true, data: JSON.parse(raw.replace(/^\uFEFF/, '')) };
+  } catch {
+    return { exists: true, error: 'not valid JSON' };
+  }
+}
+
+function doctorReadText(file) {
+  try { return fs.readFileSync(file, 'utf8'); } catch { return ''; }
+}
+
+function doctorStat(file) {
+  try { return fs.statSync(file); } catch { return null; }
+}
+
+function doctorAge(ms) {
+  const s = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 48 * 3600) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+// Numeric x.y.z comparison; anything unparseable (a git sha) compares equal,
+// so it can never raise a false "out of date".
+function doctorCompareVersions(a, b) {
+  const pa = String(a).split('.').map(n => parseInt(n, 10));
+  const pb = String(b).split('.').map(n => parseInt(n, 10));
+  for (let i = 0; i < 3; i++) {
+    if (!Number.isFinite(pa[i]) || !Number.isFinite(pb[i])) return 0;
+    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+// Windows env keys are case-insensitive (Path, PATH), a plain object's are not.
+function doctorEnv(env, name) {
+  const key = Object.keys(env).find(k => k.toUpperCase() === name);
+  return key ? String(env[key] || '') : '';
+}
+
+function doctorFindOnPath(name, env) {
+  const exts = process.platform === 'win32'
+    ? (doctorEnv(env, 'PATHEXT') || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean).concat([''])
+    : [''];
+  for (const dir of doctorEnv(env, 'PATH').split(path.delimiter).filter(Boolean)) {
+    for (const ext of exts) {
+      const candidate = path.join(dir, name + ext.toLowerCase());
+      const st = doctorStat(candidate);
+      if (st && st.isFile()) return candidate;
+    }
+  }
+  return '';
+}
+
+// Every Code Crumb command in a { hooks: { Event: [group...] } } config.
+function doctorOurCommands(config) {
+  const out = [];
+  const hooks = doctorIsObject(config) && doctorIsObject(config.hooks) ? config.hooks : {};
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    for (const group of groups) {
+      if (!group || !Array.isArray(group.hooks)) continue;
+      for (const hh of group.hooks) {
+        if (isOurCommand(hh)) out.push({ event, command: hh.command });
+      }
+    }
+  }
+  return out;
+}
+
+// The update-state.js a hook command runs, as a checkable path -- or '' when
+// it cannot be checked from here (a $VAR the shell would expand).
+function doctorScriptPath(command, home) {
+  const m = /(["'])([^"']*update-state\.js)\1/.exec(command) || /(\S*update-state\.js)/.exec(command);
+  let p = m ? (m[2] || m[1]) : '';
+  if (!p || p.includes('$')) return '';
+  if (p.startsWith('~/')) p = path.join(home, p.slice(2));
+  // Git Bash spells C:/x as /c/x; fs on Windows does not.
+  if (process.platform === 'win32') p = p.replace(/^\/([a-zA-Z])\//, '$1:/');
+  return p;
+}
+
+// Which hook scripts a set of commands runs, and which of those are gone.
+function doctorScripts(commands, home) {
+  const scripts = [...new Set(commands.map(c => doctorScriptPath(c.command, home)).filter(Boolean))];
+  return { scripts, missing: scripts.filter(p => !doctorStat(p)) };
+}
+
+// Code Crumb's entries in installed_plugins.json (version 2:
+// { plugins: { "code-crumb@<marketplace>": [{ scope, installPath, version }] } }).
+function doctorPluginInstalls(data) {
+  const out = [];
+  const plugins = doctorIsObject(data) && doctorIsObject(data.plugins) ? data.plugins : {};
+  for (const [key, list] of Object.entries(plugins)) {
+    if (!/^code-crumb@/.test(key) || !Array.isArray(list)) continue;
+    for (const entry of list) {
+      if (!doctorIsObject(entry) || typeof entry.installPath !== 'string') continue;
+      out.push({
+        key,
+        scope: typeof entry.scope === 'string' ? entry.scope : '',
+        installPath: entry.installPath,
+        version: typeof entry.version === 'string' ? entry.version : '',
+      });
+    }
+  }
+  return out;
+}
+
+function doctor(opts = {}) {
+  const home = opts.home || HOME;
+  const env = opts.env || process.env;
+  const log = opts.log || console.log;
+  const now = opts.now || Date.now();
+  const nodeVersion = String(opts.nodeVersion || process.versions.node);
+
+  let problems = 0;
+  const ok = (msg) => log(`  ${DOCTOR_OK} ${msg}`);
+  const info = (msg) => log(`  ${DOCTOR_INFO} ${msg}`);
+  const note = (msg) => log(`      ${msg}`);
+  // `fix` is one line or several (a command each).
+  const bad = (msg, fix) => {
+    problems++;
+    log(`  ${DOCTOR_BAD} ${msg}`);
+    [].concat(fix || []).forEach((line, i) => note(`${i ? '     ' : 'fix: '}${line}`));
+  };
+  // One check failing in a way nobody foresaw must not hide the others.
+  const check = (name, fn) => {
+    try { fn(); } catch (e) { bad(`could not check ${name}: ${(e && e.message) || e}`); }
+  };
+
+  const fwd = p => String(p).replace(/\\/g, '/');
+  const pidFile = path.join(home, path.basename(PID_FILE));
+  const quitFile = path.join(home, path.basename(QUIT_FLAG_FILE));
+  const prefsFile = path.join(home, path.basename(PREFS_FILE));
+  const sessionsDir = path.join(home, path.basename(SESSIONS_DIR));
+  const stateFile = env.CODE_CRUMB_STATE || path.join(home, '.code-crumb-state');
+  const claudeDir = env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
+  const settingsPath = path.join(claudeDir, 'settings.json');
+  const codexHome = env.CODEX_HOME || path.join(home, '.codex');
+  const codexHooksPath = path.join(codexHome, 'hooks.json');
+  const codexConfigPath = path.join(codexHome, 'config.toml');
+  const opencodePath = path.join(home, '.config', 'opencode', 'opencode.json');
+  const ownRenderer = fwd(path.resolve(__dirname, 'renderer.js'));
+  const ownSetup = fwd(path.resolve(__dirname, 'setup.js'));
+  const pkg = doctorReadJson(path.join(__dirname, 'package.json'));
+  const ownVersion = doctorIsObject(pkg.data) && typeof pkg.data.version === 'string' ? pkg.data.version : '';
+
+  log('\n  Code Crumb Doctor (read-only)');
+  log('  ' + '='.repeat(40) + '\n');
+  info(`this copy: ${fwd(__dirname)}${ownVersion ? ` (v${ownVersion})` : ''}`);
+  info(`home:      ${home}`);
+  log('');
+
+  // Gathered first and printed in reading order below: the renderer's fix
+  // names the plugin's renderer when that is what the hooks run, and the
+  // last-hook line wants to know whether anything is installed at all.
+  let prefs = {};
+  let prefsError = '';
+  const prefsRead = doctorReadJson(prefsFile);
+  if (prefsRead.error) prefsError = prefsRead.error;
+  else if (prefsRead.exists && !doctorIsObject(prefsRead.data)) prefsError = 'not a JSON object';
+  else if (prefsRead.exists) prefs = prefsRead.data;
+  const autolaunch = !!prefs.autolaunch;
+  const quitStat = doctorStat(quitFile);
+  const pidStat = doctorStat(pidFile);
+  let rendererAlive = false;
+  try { rendererAlive = !!pidStat && isRendererAlive(pidFile, now); } catch {}
+
+  const settingsRead = doctorReadJson(settingsPath);
+  const settings = doctorIsObject(settingsRead.data) ? settingsRead.data : {};
+  const manual = doctorOurCommands(settings);
+  const enabledKeys = doctorIsObject(settings.enabledPlugins)
+    ? Object.keys(settings.enabledPlugins).filter(k => /^code-crumb@/.test(k) && settings.enabledPlugins[k])
+    : [];
+  const installsRead = doctorReadJson(path.join(claudeDir, 'plugins', 'installed_plugins.json'));
+  const installs = doctorPluginInstalls(installsRead.data);
+  const pluginInstall = enabledKeys.length
+    ? (installs.find(i => i.key === enabledKeys[0] && i.scope === 'user') || installs.find(i => i.key === enabledKeys[0]))
+    : null;
+  const pluginLive = !!(pluginInstall && doctorStat(path.join(pluginInstall.installPath, 'update-state.js')));
+  const pluginRenderer = pluginLive ? fwd(path.join(pluginInstall.installPath, 'renderer.js')) : '';
+  const rendererCmd = `node "${manual.length || !pluginRenderer ? ownRenderer : pluginRenderer}"`;
+  const setupCmd = `node "${manual.length || !pluginLive ? ownSetup : fwd(path.join(pluginInstall.installPath, 'setup.js'))}"`;
+
+  const codexRead = doctorReadJson(codexHooksPath);
+  const codex = doctorOurCommands(codexRead.data);
+  const notifyLine = /^\s*notify\s*=.*codex-notify\.js/m.test(doctorReadText(codexConfigPath));
+
+  const opencodeRead = doctorReadJson(opencodePath);
+  const opencodeEntries = doctorIsObject(opencodeRead.data) && Array.isArray(opencodeRead.data.plugin)
+    ? opencodeRead.data.plugin.filter(isOurPlugin).map(pluginEntryPath)
+    : [];
+
+  // -- node --
+  check('node', () => {
+    const major = parseInt(nodeVersion.replace(/^v/, ''), 10);
+    if (major >= 18) ok(`node v${nodeVersion.replace(/^v/, '')} (18+ needed)`);
+    else bad(`node v${nodeVersion.replace(/^v/, '')} is too old -- Code Crumb needs 18+`, 'install Node.js 18 or newer from https://nodejs.org');
+    const onPath = doctorFindOnPath('node', env);
+    if (onPath) ok(`node is on PATH (${onPath}) -- every hook runs \`node\``);
+    else bad('node is not on PATH -- every hook runs `node ...`, so every hook fails', 'install Node.js, or put its folder on PATH (Claude Code on Windows runs hooks through Git Bash, so that PATH needs it too)');
+  });
+
+  // -- renderer --
+  check('the renderer', () => {
+    const pidText = pidStat ? doctorReadText(pidFile).trim() : '';
+    const age = pidStat ? doctorAge(now - pidStat.mtimeMs) : '';
+    if (rendererAlive) {
+      ok(`renderer running (pid ${pidText}, last heartbeat ${age} ago)`);
+    } else if (autolaunch && !quitStat) {
+      ok('renderer not running -- autolaunch opens it on the next hook');
+    } else {
+      const why = pidStat ? ` (its PID file, pid ${pidText || '?'}, last beat ${age} ago)` : '';
+      bad(`renderer is not running${why}`, [
+        'start it in a terminal of its own:',
+        `  ${rendererCmd}`,
+        'or let the hooks open it from now on:',
+        `  ${setupCmd} --autolaunch`,
+      ]);
+    }
+  });
+
+  // -- Claude Code --
+  check('the Claude Code hooks', () => {
+    if (settingsRead.error || (settingsRead.exists && !doctorIsObject(settingsRead.data))) {
+      bad(`${settingsPath} is ${settingsRead.error || 'not a JSON object'} -- Claude Code loads no hooks from it`,
+        'fix the file by hand; node setup.js will not touch it until it parses');
+    }
+    if (manual.length) {
+      const byEvent = new Map();
+      for (const c of manual) byEvent.set(c.event, (byEvent.get(c.event) || 0) + 1);
+      const missing = HOOK_EVENTS.filter(e => !byEvent.has(e));
+      const dupes = [...byEvent].filter(([, n]) => n > 1).map(([e]) => e);
+      const { scripts, missing: gone } = doctorScripts(manual, home);
+      for (const p of gone) {
+        bad(`manual hooks run ${p}, which does not exist -- every one of them fails (a moved or deleted clone)`,
+          ['re-run setup from wherever the clone lives now; it rewrites the paths. For this copy:', `  node "${ownSetup}"`]);
+      }
+      if (missing.length) {
+        bad(`manual hooks miss ${missing.length} of ${HOOK_EVENTS.length} events: ${missing.join(', ')}`,
+          'npm run setup (or node setup.js) registers the rest');
+      }
+      if (dupes.length) {
+        bad(`manual hooks register ${dupes.join(', ')} more than once -- each of those events fires twice`,
+          'node setup.js uninstall, then node setup.js');
+      }
+      if (!gone.length && !missing.length && !dupes.length) {
+        ok(`Claude Code: manual hooks for all ${HOOK_EVENTS.length} events in ${settingsPath}`);
+      }
+      for (const p of scripts) {
+        if (p !== DEFAULT_HOOK_PATH && !gone.includes(p)) note(`they run ${p} (this copy is ${DEFAULT_HOOK_PATH})`);
+      }
+    }
+    if (enabledKeys.length > 1) {
+      bad(`${enabledKeys.join(' and ')} are all enabled -- every event fires ${enabledKeys.length} times`,
+        `keep one: claude plugin uninstall ${enabledKeys.slice(1).join(' / ')}`);
+    }
+    if (enabledKeys.length) {
+      const key = enabledKeys[0];
+      if (!pluginInstall) {
+        const why = installsRead.error ? ` (${path.join(claudeDir, 'plugins', 'installed_plugins.json')} is ${installsRead.error})` : '';
+        bad(`plugin ${key} is enabled in settings.json but not installed${why}`, `claude plugin install ${key}`);
+      } else if (!pluginLive) {
+        bad(`plugin ${key} is installed at ${pluginInstall.installPath}, which has no update-state.js`,
+          `claude plugin uninstall ${key}, then claude plugin install ${key}`);
+      } else {
+        ok(`Claude Code: plugin ${key}${pluginInstall.version ? ` v${pluginInstall.version}` : ''}`);
+        note(`installed at ${pluginInstall.installPath}`);
+        note(`start the face: node "${pluginRenderer}"`);
+        const samePlace = path.resolve(pluginInstall.installPath) === path.resolve(__dirname);
+        if (!samePlace && ownVersion && pluginInstall.version &&
+            doctorCompareVersions(pluginInstall.version, ownVersion) < 0) {
+          bad(`the plugin is still v${pluginInstall.version}; this copy is v${ownVersion}`,
+            `claude plugin marketplace update ${key.split('@')[1]}, then claude plugin update ${key}, then restart Claude Code`);
+        }
+      }
+      if (manual.length) {
+        bad('the plugin AND the manual hooks are installed -- every event fires twice and the counters double',
+          `keep one: node setup.js uninstall (drops the manual hooks) or claude plugin uninstall ${key}`);
+      }
+    } else if (installs.length) {
+      info(`plugin ${installs[0].key} is installed but disabled (claude plugin enable ${installs[0].key})`);
+    }
+  });
+
+  // -- Codex --
+  check('the Codex hooks', () => {
+    if (codexRead.error || (codexRead.exists && !doctorIsObject(codexRead.data))) {
+      bad(`${codexHooksPath} is ${codexRead.error || 'not a JSON object'} -- Codex runs none of its hooks`,
+        'fix it by hand, or move it aside and run npm run setup:codex');
+    }
+    if (codex.length) {
+      const events = new Set(codex.map(c => c.event));
+      const untagged = codex.filter(c => !/--editor[=\s]+codex(\s|$)/.test(c.command));
+      const missing = CODEX_HOOK_EVENTS.filter(e => !events.has(e));
+      const extra = [...events].filter(e => !CODEX_HOOK_EVENTS.includes(e));
+      const { missing: gone } = doctorScripts(codex, home);
+      for (const p of gone) {
+        bad(`Codex hooks run ${p}, which does not exist -- every one of them fails`,
+          'run npm run setup:codex from wherever the clone lives now');
+      }
+      if (untagged.length) {
+        bad(`${untagged.length} of ${codex.length} Codex hooks have no --editor codex tag -- sessions show as "claude" and every codex exec wrapper run is counted twice`,
+          'npm run setup:codex (rewrites them)');
+      }
+      if (missing.length) {
+        bad(`Codex hooks miss ${missing.join(', ')}`, 'npm run setup:codex registers the rest');
+      }
+      if (!gone.length && !untagged.length && !missing.length) {
+        ok(`Codex: ${CODEX_HOOK_EVENTS.length} hooks in ${codexHooksPath}, tagged --editor codex`);
+      }
+      if (extra.length) note(`also registered for ${extra.join(', ')}, which codex never fires (npm run setup:codex prunes them)`);
+      note('Codex asks once to trust new hooks and runs none of them until you say yes');
+      if (notifyLine) {
+        bad(`${codexConfigPath} still has the legacy codex-notify line as well -- every Codex turn end is reported twice`,
+          `delete the notify = [... codex-notify.js] line from ${codexConfigPath}`);
+      }
+    } else if (notifyLine) {
+      info(`Codex: legacy notify channel only (turn ends, no tool events) -- npm run setup:codex, then drop the notify line from ${codexConfigPath}`);
+    } else {
+      info('Codex: not set up (npm run setup:codex if you use it)');
+    }
+  });
+
+  // -- OpenCode (shown only when registered) --
+  check('the OpenCode plugin', () => {
+    for (const entry of opencodeEntries) {
+      if (doctorStat(entry)) ok(`OpenCode: plugin registered in ${opencodePath}`);
+      else bad(`OpenCode: ${opencodePath} registers ${entry}, which does not exist`, 'node setup.js opencode --install from wherever the clone lives now');
+    }
+  });
+
+  if (!manual.length && !enabledKeys.length && !codex.length && !notifyLine && !opencodeEntries.length) {
+    bad('no editor integration found -- nothing will ever write to the face',
+      'npm run setup (Claude Code), npm run setup:codex, or install the plugin (see the README)');
+  } else if (!manual.length && !enabledKeys.length) {
+    info('Claude Code: not set up (npm run setup, or install the plugin)');
+  }
+
+  // -- autolaunch --
+  check('autolaunch', () => {
+    if (prefsError) {
+      bad(`${prefsFile} is ${prefsError} -- every preference reads as its default, autolaunch included`,
+        ['rewrite it with autolaunch on (the other prefs reset to their defaults):', `  ${setupCmd} --autolaunch`]);
+    }
+    if (!autolaunch) {
+      info(`autolaunch off -- start the renderer yourself, or turn it on: ${setupCmd} --autolaunch`);
+    } else if (quitStat && !rendererAlive) {
+      bad(`autolaunch is on, but the quit flag the renderer left ${doctorAge(now - quitStat.mtimeMs)} ago (${quitFile}) holds it off until your editor starts a new session`,
+        ['start a new session (claude, claude --continue), or clear it now:', `  ${setupCmd} --autolaunch`]);
+    } else {
+      ok('autolaunch on');
+    }
+  });
+
+  // -- last hook --
+  check('the last hook', () => {
+    let newest = null;
+    const consider = (file) => {
+      const st = doctorStat(file);
+      if (st && st.isFile() && (!newest || st.mtimeMs > newest.mtimeMs)) newest = { file, mtimeMs: st.mtimeMs };
+    };
+    consider(stateFile);
+    let names = [];
+    try { names = fs.readdirSync(sessionsDir); } catch {}
+    for (const n of names) if (n.endsWith('.json')) consider(path.join(sessionsDir, n));
+    const fix = 'use your editor once, then run this again; inside Claude Code, /hooks lists what is registered and claude --debug shows hook errors';
+    if (!newest) {
+      bad('no hook has written anything yet -- are the hooks installed and firing?', fix);
+    } else if (now - newest.mtimeMs > DOCTOR_QUIET_MS) {
+      bad(`no hook has written in ${doctorAge(now - newest.mtimeMs)} -- are the hooks firing?`, fix);
+    } else {
+      ok(`last hook ${doctorAge(now - newest.mtimeMs)} ago (${path.basename(newest.file)})`);
+    }
+  });
+
+  log('');
+  log(problems
+    ? `  ${problems} problem${problems === 1 ? '' : 's'} found.\n`
+    : '  No problems found.\n');
+  return { problems };
+}
+
 // -- CLI -------------------------------------------------------------
 
 function printUsage() {
   console.log('  Supported editors: claude, codex, codex-notify, opencode, openclaw');
   console.log('  Usage: node setup.js [claude|codex|codex-notify|opencode|openclaw|uninstall] [--autolaunch]');
-  console.log('         node setup.js opencode [--install|--uninstall]\n');
+  console.log('         node setup.js opencode [--install|--uninstall]');
+  console.log('         node setup.js doctor   (read-only health check; exits 1 if it finds a problem)\n');
 }
 
 const KNOWN_FLAGS = new Set(['--autolaunch', '--install', '--uninstall', '--help']);
@@ -949,6 +1377,10 @@ function main() {
     case 'pi':
       setupOpenClaw();
       break;
+    case 'doctor':
+      // Read-only, so it also skips the autolaunch question below.
+      process.exit(doctor().problems ? 1 : 0);
+      break;
     default:
       console.log(`\n  Unknown editor: "${command}"`);
       printUsage();
@@ -1000,3 +1432,6 @@ module.exports = {
   DEFAULT_OPENCODE_CONFIG,
   DEFAULT_OPENCODE_PLUGIN,
 };
+
+// The read-only diagnostic behind `node setup.js doctor`.
+module.exports.doctor = doctor;
