@@ -50,7 +50,19 @@ const HOOK_EVENTS = [
   // The only documented, zero-cost way to follow a /model switch. Codex does
   // not fire it, so it is deliberately absent from CODEX_HOOK_EVENTS below.
   'PostModelSwitch',
+  // Claude Code 2.1.300: the auto-mode classifier refused a tool call. It is
+  // the only word that the denied call will never run. Not a Codex event.
+  'PermissionDenied',
 ];
+
+// The per-tool events run with `"async": true` ("runs in background without
+// blocking", Claude Code 2.1.300). On Windows every hook is Git Bash plus
+// node, ~55-85 ms, so a synchronous Pre + Post blocked the editor ~170 ms on
+// every tool call. update-state.js orders their writes itself (see "Async
+// hook ordering" there). Everything else stays synchronous -- a Stop, a
+// prompt or a permission request must land in the order it happened, and
+// the async guards measure against exactly those.
+const ASYNC_HOOK_EVENTS = ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'];
 
 // Codex fires a subset of the same event names (no Notification, no
 // PostToolUseFailure), plus one of its own: Interrupt, which it runs INSTEAD
@@ -75,11 +87,31 @@ function buildFaceHooks(hookPath) {
         hooks: [{
           type: 'command',
           command: `node "${hookPath}" ${event}`,
+          ...(ASYNC_HOOK_EVENTS.includes(event) ? { async: true } : {}),
         }],
       },
     ];
   }
   return faceHooks;
+}
+
+// Bring our installed commands for `event` (at exactly hookPath) to the async
+// flag buildFaceHooks gives that event. An install from before the async
+// change matches by path and used to be reported "already installed" for
+// good; this upgrades it in place instead of adding a second entry. Returns
+// how many commands changed.
+function syncAsyncFlags(entries, event, hookPath) {
+  const want = ASYNC_HOOK_EVENTS.includes(event);
+  let changed = 0;
+  for (const e of entries) {
+    if (!Array.isArray(e?.hooks)) continue;
+    for (const hh of e.hooks) {
+      if (!isOurCommand(hh) || !hh.command.includes(hookPath)) continue;
+      if (want && hh.async !== true) { hh.async = true; changed++; }
+      else if (!want && 'async' in hh) { delete hh.async; changed++; }
+    }
+  }
+  return changed;
 }
 
 // One hook command that runs an update-state.js (ours, at any path). It must
@@ -271,12 +303,18 @@ function setupClaude(opts = {}) {
 
   let added = 0;
   let replaced = 0;
+  let upgraded = 0;
   for (const [event, hookConfigs] of Object.entries(faceHooks)) {
     if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
     const entries = settings.hooks[event];
 
     if (entries.some(e => hasExactPath(e, hookPath))) {
-      log(`  [ok] ${event} hook already installed`);
+      if (syncAsyncFlags(entries, event, hookPath)) {
+        upgraded++;
+        log(`  ~ Updated ${event} hook (${ASYNC_HOOK_EVENTS.includes(event) ? 'async' : 'sync'})`);
+      } else {
+        log(`  [ok] ${event} hook already installed`);
+      }
       continue;
     }
     // A Code Crumb entry with a different path: the repo moved. Replace it
@@ -292,10 +330,10 @@ function setupClaude(opts = {}) {
     log(`  + Added ${event} hook`);
   }
 
-  const modified = added + replaced > 0;
+  const modified = added + replaced + upgraded > 0;
   if (modified) {
     if (!writeSettings(settingsPath, settings, existed, raw, log)) {
-      return { ok: false, modified: false, added, replaced, error: new Error('write failed') };
+      return { ok: false, modified: false, added, replaced, upgraded, error: new Error('write failed') };
     }
     log(`\n  Hooks written to ${settingsPath}`);
   } else {
@@ -303,7 +341,7 @@ function setupClaude(opts = {}) {
   }
 
   if (!opts.quiet) printClaudeUsage(settingsPath, log);
-  return { ok: true, modified, added, replaced };
+  return { ok: true, modified, added, replaced, upgraded };
 }
 
 // Remove every Code Crumb hook entry (any path) and drop event arrays that

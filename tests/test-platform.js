@@ -910,7 +910,7 @@ describe('platform -- setup.js is a module first, a CLI second', () => {
       assert.strictEqual(typeof setup[k], k === 'HOOK_EVENTS' ? 'object' : 'function', k);
     }
     assert.ok(setup.HOOK_EVENTS.includes('UserPromptSubmit'));
-    assert.strictEqual(setup.HOOK_EVENTS.length, 22);
+    assert.strictEqual(setup.HOOK_EVENTS.length, 23);
   });
 });
 
@@ -928,7 +928,7 @@ describe('platform -- setupClaude never clobbers settings.json', () => {
       const r = setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
       assert.strictEqual(r.ok, true);
       const s = readJSON(settingsPath);
-      assert.strictEqual(Object.keys(s.hooks).length, 22);
+      assert.strictEqual(Object.keys(s.hooks).length, 23);
       assert.ok(s.hooks.UserPromptSubmit[0].hooks[0].command.includes(HOOK));
     } finally { cleanup(dir); }
   });
@@ -1022,12 +1022,66 @@ describe('platform -- setupClaude never clobbers settings.json', () => {
       setup.setupClaude({ settingsPath, hookPath: '/somewhere/else/update-state.js', ...quiet });
       const r = setup.uninstallClaude({ settingsPath, ...quiet });
       assert.strictEqual(r.ok, true);
-      assert.strictEqual(r.removed, 22);
+      assert.strictEqual(r.removed, 23);
       const s = readJSON(settingsPath);
       assert.deepStrictEqual(Object.keys(s.hooks), ['PreToolUse']);
       assert.strictEqual(s.hooks.PreToolUse.length, 1);
       assert.strictEqual(s.hooks.PreToolUse[0].hooks[0].command, 'node other-tool.js');
       assert.deepStrictEqual(s.permissions, { allow: ['x'] });
+    } finally { cleanup(dir); }
+  });
+
+  // -- Review round 5 (hooks): async per-tool hooks -----------------------
+  // Pre + Post on every tool call blocked the editor ~170 ms on Windows.
+  const ASYNC = ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'];
+
+  test('the per-tool hooks are async and nothing else is, in settings.json and hooks.json alike', () => {
+    const built = setup.buildFaceHooks(HOOK);
+    const shipped = readJSON(path.join(ROOT, 'hooks', 'hooks.json')).hooks;
+    assert.deepStrictEqual(Object.keys(shipped).sort(), [...setup.HOOK_EVENTS].sort(),
+      'the plugin registers exactly what the installer does');
+    for (const event of setup.HOOK_EVENTS) {
+      for (const [label, cfg] of [['buildFaceHooks', built], ['hooks.json', shipped]]) {
+        const hh = cfg[event][0].hooks[0];
+        if (ASYNC.includes(event)) assert.strictEqual(hh.async, true, `${label}: ${event} is async`);
+        else assert.strictEqual(hh.async, undefined, `${label}: ${event} stays synchronous`);
+      }
+    }
+  });
+
+  test('PermissionDenied is registered for Claude Code, synchronously, and not for Codex', () => {
+    assert.ok(setup.HOOK_EVENTS.includes('PermissionDenied'));
+    assert.ok(!setup.CODEX_HOOK_EVENTS.includes('PermissionDenied'), 'codex 0.156 has no such event');
+    const shipped = readJSON(path.join(ROOT, 'hooks', 'hooks.json')).hooks;
+    assert.ok(/update-state\.js" PermissionDenied$/.test(shipped.PermissionDenied[0].hooks[0].command));
+    const built = setup.buildFaceHooks(HOOK);
+    assert.ok(built.PermissionDenied[0].hooks[0].command.endsWith('update-state.js" PermissionDenied'));
+  });
+
+  test('re-running setup upgrades a pre-async install in place, once', () => {
+    const { dir, settingsPath } = env();
+    try {
+      // The shape every install before this change has: no async anywhere,
+      // plus a user hook of their own beside ours.
+      const old = setup.buildFaceHooks(HOOK);
+      for (const groups of Object.values(old)) for (const g of groups) for (const hh of g.hooks) delete hh.async;
+      delete old.PermissionDenied;
+      old.Stop[0].hooks[0].async = true;   // ours, wrongly async: it must not stay so
+      old.PreToolUse[0].hooks.push({ type: 'command', command: 'node mine.js' });
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(settingsPath, JSON.stringify({ hooks: old }), 'utf8');
+      const r = setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
+      assert.strictEqual(r.modified, true);
+      assert.strictEqual(r.upgraded, 4, 'three made async, Stop made synchronous');
+      assert.strictEqual(r.added, 1, 'and the new PermissionDenied added');
+      const s = readJSON(settingsPath);
+      assert.strictEqual(s.hooks.PreToolUse.length, 1, 'upgraded, not duplicated');
+      assert.strictEqual(s.hooks.PreToolUse[0].hooks[0].async, true);
+      assert.deepStrictEqual(s.hooks.PreToolUse[0].hooks[1], { type: 'command', command: 'node mine.js' },
+        'the user\'s own hook is untouched');
+      assert.strictEqual(s.hooks.Stop[0].hooks[0].async, undefined);
+      const again = setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
+      assert.strictEqual(again.modified, false, 'idempotent');
     } finally { cleanup(dir); }
   });
 
@@ -1474,7 +1528,7 @@ describe('platform -- third review pass: setup keeps the user\'s own hooks', () 
       setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
       assert.deepStrictEqual(readJSON(settingsPath).hooks.PreToolUse[0], theirs);
       const r = setup.uninstallClaude({ settingsPath, ...quiet });
-      assert.strictEqual(r.removed, 22);
+      assert.strictEqual(r.removed, 23);
       assert.deepStrictEqual(readJSON(settingsPath).hooks.PreToolUse, [theirs]);
     } finally { cleanup(dir); }
   });

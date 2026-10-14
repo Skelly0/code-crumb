@@ -69,7 +69,7 @@ function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
       }],
     },
     recentMilestone: null,
-    daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
+    daily: { date: require('../lib/state-machine').localDay(), sessionCount: 1, cumulativeMs: 0 },
     frequentFiles: {},
     topLevelSessions,
   };
@@ -2946,7 +2946,7 @@ describe('base-adapter -- initSession unit tests', () => {
     const stats = defaultStats();
     stats.daily = { date: '', sessionCount: 0, cumulativeMs: 0 };
     baseAdapter.initSession(stats, 'init-1');
-    const today = new Date().toISOString().slice(0, 10);
+    const today = require('../lib/state-machine').localDay();
     assert.strictEqual(stats.daily.date, today);
   });
 
@@ -2954,7 +2954,7 @@ describe('base-adapter -- initSession unit tests', () => {
     const stats = defaultStats();
     stats.daily = { date: '2020-01-01', sessionCount: 5, cumulativeMs: 1000 };
     baseAdapter.initSession(stats, 'init-2');
-    const today = new Date().toISOString().slice(0, 10);
+    const today = require('../lib/state-machine').localDay();
     assert.strictEqual(stats.daily.date, today);
     assert.strictEqual(stats.daily.sessionCount, 1);
   });
@@ -3210,7 +3210,7 @@ describe('bug fix structural tests', () => {
         }],
       },
       recentMilestone: null,
-      daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
+      daily: { date: require('../lib/state-machine').localDay(), sessionCount: 1, cumulativeMs: 0 },
       frequentFiles: {}, topLevelSessions: {},
     };
     fs.writeFileSync(statsFile, JSON.stringify(stats), 'utf8');

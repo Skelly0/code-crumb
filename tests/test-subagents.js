@@ -366,7 +366,7 @@ describe('update-state -- active subagent ageing net', () => {
         }],
       },
       recentMilestone: null,
-      daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
+      daily: { date: require('../lib/state-machine').localDay(), sessionCount: 1, cumulativeMs: 0 },
       frequentFiles: {},
       topLevelSessions: { p: Date.now() },
     });
@@ -465,7 +465,7 @@ describe('update-state -- agent events never adopt the stats session', () => {
         }],
       },
       recentMilestone: null,
-      daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
+      daily: { date: require('../lib/state-machine').localDay(), sessionCount: 1, cumulativeMs: 0 },
       frequentFiles: {},
       topLevelSessions: { Q: Date.now() },
     });
