@@ -147,6 +147,54 @@ describe('emotions -- non-string tool inputs never throw', () => {
   });
 });
 
+// -- Review round 5: shell commands name the right feeling ------------------
+
+describe('emotions -- review round 5: shell commands map to specific states', () => {
+  // [command, preState, postDetail] for a successful run printing "ok"
+  const table = [
+    ['./gradlew test', 'testing', 'tests passed'],
+    ['gradlew.bat test', 'testing', 'tests passed'],
+    ['./mvnw test', 'testing', 'tests passed'],
+    ['mvnw verify', 'testing', 'tests passed'],
+    ['node tests/run.js', 'testing', 'tests passed'],
+    ['node test/index.js', 'testing', 'tests passed'],
+    ['make lint', 'executing', 'make lint done'],
+    ['make clean', 'executing', 'make clean done'],
+    ['make format', 'executing', 'make format done'],
+    ['make', 'executing', 'build succeeded'],
+    ['cargo build', 'executing', 'build succeeded'],
+    ['git -C ../app commit -m "wip"', 'committing', 'committed'],
+    ['git --no-pager commit -m x', 'committing', 'committed'],
+    ['git -c core.hooksPath=/dev/null push', 'committing', 'pushed!'],
+    ['git --git-dir=.git commit -m x', 'committing', 'committed'],
+  ];
+  for (const [command, preState, postDetail] of table) {
+    test(`${command} -> pre ${preState} / post "${postDetail}"`, () => {
+      assert.strictEqual(sm.toolToState('Bash', { command }).state, preState);
+      assert.strictEqual(sm.classifyToolResult('Bash', { command }, { stdout: 'ok', stderr: '' }, false).detail, postDetail);
+    });
+  }
+
+  test('a background Bash is launched, and carries no verdict', () => {
+    const norm = sm.normalizeToolResponse({ tool_response: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b1' } });
+    const r = sm.classifyToolResult('Bash', { command: 'npm test', run_in_background: true }, norm, false);
+    assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'launched in background', true]);
+  });
+
+  test('a success the host vouched for keeps its reward face', () => {
+    // [command, stdout] -- each read as an error before trustSuccess
+    const rows = [
+      ['git commit -m "fix syntax error in config loader"', '[fix 9f8e7d6] fix syntax error in config loader', 'committed'],
+      ['npm test', '  loader\n    reports permission denied\n  1 passing', '1 tests passed'],
+      ['git branch -vv', '* main 1a2b3c4 Fix permission denied on Windows', 'git done'],
+    ];
+    for (const [command, stdout, detail] of rows) {
+      const r = sm.classifyToolResult('Bash', { command }, { stdout, stderr: '' }, false, { trustSuccess: true });
+      assert.strictEqual(r.detail, detail, command);
+    }
+  });
+});
+
 // -- Result -> emotion -------------------------------------------------
 
 describe('emotions -- normalizeToolResponse keeps the signals that mean trouble', () => {

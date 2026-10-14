@@ -938,7 +938,14 @@ process.stdin.on('end', () => {
       // itself failed -- force the error flag so we always show error state.
       const isErrorFlag = hookEvent === 'PostToolUseFailure'
         || toolResponse?.isError || data?.isError || false;
-      const result = classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag);
+      // Claude Code sends a failing tool as PostToolUseFailure, never as
+      // PostToolUse (checked against 2.1.300), so its PostToolUse is a
+      // success the host vouches for and its output is not searched for
+      // failure words (trustSuccess, in classifyToolResult). Codex has no
+      // PostToolUseFailure -- its PostToolUse fires for failures too -- so
+      // its output is still read.
+      const result = classifyToolResult(toolName, toolInput, toolResponse, isErrorFlag,
+        { trustSuccess: EDITOR === 'claude' && hookEvent === 'PostToolUse' });
       state = result.state;
       detail = result.detail;
       diffInfo = result.diffInfo;
@@ -954,7 +961,9 @@ process.stdin.on('end', () => {
 
       // Track git commits and streaks (skip for known subagents -- their
       // results should not affect the parent session's counters or streak).
-      if (!isKnownSubagent) {
+      // A background launch (result.neutral) has no verdict yet: it used to
+      // add to the streak before its job had run.
+      if (!isKnownSubagent && !result.neutral) {
         // commitCount is per session (each window's own counter). The streak
         // is global gamification, so parallel windows still contribute.
         if (result.state === 'proud' && result.detail === 'committed') {
