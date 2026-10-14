@@ -181,8 +181,11 @@ describe('state-machine.js -- toolToState', () => {
     assert.strictEqual(toolToState('Bash', { command: 'pip install flask' }).state, 'installing');
   });
 
-  test('Bash with cargo build → installing', () => {
-    assert.strictEqual(toolToState('Bash', { command: 'cargo build' }).state, 'installing');
+  // Review round 5: cargo build is a build, shown like every other build
+  // (it used to say "installing" for as long as it compiled); cargo add installs.
+  test('Bash with cargo build → executing, like any build; cargo add → installing', () => {
+    assert.strictEqual(toolToState('Bash', { command: 'cargo build' }).state, 'executing');
+    assert.strictEqual(toolToState('Bash', { command: 'cargo add serde' }).state, 'installing');
   });
 
   test('Bash with pnpm add → installing', () => {
@@ -4162,6 +4165,370 @@ describe('state-machine -- round 4', () => {
       assert.strictEqual(post(c).detail, 'build succeeded', c);
     }
     assert.strictEqual(post('npx eslint .').detail, 'command succeeded');
+  });
+});
+
+// -- Review round 5 (Oct 2026) -----------------------------------------------
+// Each block below was reproduced against the pre-fix sources first. Claude
+// Code 2.1.300 was watched with a logging hook: a failing Bash fires
+// PostToolUseFailure, never PostToolUse, and a successful one merges stderr
+// into stdout and leaves `stderr` empty.
+
+describe('state-machine -- review round 5: a trusted success is not searched', () => {
+  const sm = require('../lib/state-machine');
+  const TRUST = { trustSuccess: true };
+  // A successful Claude Code result: stderr merged into stdout.
+  const ok = (cmd, stdout, opts = TRUST, extra = {}) =>
+    classifyToolResult('Bash', { command: cmd }, { stdout, stderr: '', interrupted: false, ...extra }, false, opts);
+
+  test('commit subjects, branch names and stashes are not failures', () => {
+    const cases = [
+      ['git commit -m "Treat a delete-pending lock (win32 EPERM) as held, not free"',
+        '[main 1a2b3c4] Treat a delete-pending lock (win32 EPERM) as held, not free\n 1 file changed, 3 insertions(+)'],
+      ['git commit -am "fix syntax error in config loader"', '[fix 9f8e7d6] fix syntax error in config loader\n 1 file changed'],
+      ['git push -u origin fix/error-toast',
+        "To github.com:me/app.git\n * [new branch]      fix/error-toast -> fix/error-toast\nbranch 'fix/error-toast' set up to track 'origin/fix/error-toast'."],
+      ['git stash', 'Saved working directory and index state WIP on main: 1a2b3c4 Handle ENOENT on missing config'],
+      ['git cherry-pick 1a2b3c4', '[main 5d6e7f8] Fix FATAL crash on boot\n Date: Mon Oct 12 10:00:00 2026\n 1 file changed'],
+      ['node app.js', 'loader handles permission denied gracefully\nENOENT is retried\nall good'],
+    ];
+    for (const [cmd, out] of cases) {
+      assert.notStrictEqual(ok(cmd, out).state, 'error', cmd);
+    }
+    assert.deepStrictEqual([ok(cases[0][0], cases[0][1]).state, ok(cases[0][0], cases[0][1]).detail], ['proud', 'committed']);
+    assert.strictEqual(ok(cases[2][0], cases[2][1]).detail, 'pushed!');
+  });
+
+  test('a green test run whose test names sound like failures is a green run', () => {
+    // This repo's own suite names its tests after what they detect.
+    const suiteOut = [
+      '  state-machine.js -- isMergeConflict',
+      '    \u2713 detects "CONFLICT (content): Merge conflict in a.js"',
+      '    \u2713 exits with exit code 1 on a bad flag',
+      '    \u2713 detects "command not found"',
+      '', '  All 2454 tests passed in 31.2s',
+    ].join('\n');
+    const r = ok('node tests/run.js', suiteOut);
+    assert.deepStrictEqual([r.state, r.detail], ['relieved', '2454 tests passed']);
+    const jest = 'PASS src/loader.test.js\n  loader\n    reports permission denied (1 ms)\n    syntax error in json (2 ms)\nTests:       2 passed, 2 total';
+    assert.strictEqual(ok('npx jest --verbose', jest).state, 'relieved');
+  });
+
+  test('a trusted success infers no exit code from the output', () => {
+    assert.strictEqual(ok('node scripts/report.js', 'step 3 exited with code 1, retried\ndone').state, 'relieved');
+  });
+
+  test('a command line whose failure can still exit 0 is searched anyway', () => {
+    for (const cmd of ['npm test 2>&1 | tail -5', 'npm test || true', 'npm test; echo done',
+      'npm test && echo ok || echo bad', 'if npm test; then echo y; fi', 'npm test &']) {
+      assert.strictEqual(sm.shellIntent(cmd).masked, true, cmd);
+      const r = ok(cmd, 'Tests: 2 failed, 9 passed, 11 total');
+      assert.deepStrictEqual([r.state, r.detail], ['error', 'tests failed'], cmd);
+    }
+    for (const cmd of ['cd app && npm test', 'npm run build && npm test', 'git log | head -5',
+      'cat a.txt; npm test', '(npm test)', 'grep -rn x src | wc -l']) {
+      assert.strictEqual(sm.shellIntent(cmd).masked, false, cmd);
+    }
+  });
+
+  test('explicit signals still count when trusted', () => {
+    assert.strictEqual(ok('sleep 100', '', TRUST, { interrupted: true }).detail, 'interrupted');
+    assert.strictEqual(ok('make', 'x', TRUST, { exitCode: 2 }).state, 'error');
+    assert.strictEqual(classifyToolResult('Bash', { command: 'make' }, { stdout: 'x', stderr: '' }, true, TRUST).state, 'error');
+  });
+
+  test('BashOutput still reads the job it reports on', () => {
+    const r = classifyToolResult('BashOutput', {}, { stdout: 'Tests: 3 failed', stderr: '' }, false, TRUST);
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('a non-shell tool under trust skips the stderr scan but keeps isError', () => {
+    assert.strictEqual(classifyToolResult('mcp__x__run_job', {}, { stdout: '', stderr: 'error: retrying' }, false, TRUST).state, 'satisfied');
+    assert.strictEqual(classifyToolResult('mcp__x__run_job', {}, { stdout: '', stderr: 'error: retrying', isError: true }, false, TRUST).state, 'error');
+  });
+
+  test('end to end: a Claude PostToolUse is trusted, a Codex one is still read', () => {
+    const run = (args) => {
+      const t = makeTempEnv('trust-1');
+      const env = { ...t.env };
+      delete env.CODE_CRUMB_EDITOR;
+      try {
+        runUpdateState('PostToolUse', {
+          session_id: 'trust-1', tool_name: 'Bash',
+          tool_input: { command: 'git commit -m "Fix permission denied when writing prefs"' },
+          tool_response: { stdout: '[main 1a2b3c4] Fix permission denied when writing prefs\n 2 files changed', stderr: '', interrupted: false },
+        }, env, { args });
+        runUpdateState('PostToolUse', {
+          session_id: 'trust-1', tool_name: 'Bash', tool_input: { command: 'node app.js' },
+          tool_response: { stdout: 'handles permission denied gracefully', stderr: '' },
+        }, env, { args });
+        const st = readJSON(t.statsFile);
+        const s = readJSON(pathMod.join(t.sessionsDir, 'trust-1.json'));
+        return { commits: st.sessionCounters['trust-1'].commitCount, streak: st.streak, state: s.state };
+      } finally { cleanup(t.tmp); }
+    };
+    assert.deepStrictEqual(run([]), { commits: 1, streak: 2, state: 'relieved' });
+    // Codex: the commit echo is dropped, but plain output is still searched.
+    assert.deepStrictEqual(run(['--editor', 'codex']), { commits: 1, streak: 0, state: 'error' });
+  });
+});
+
+describe('state-machine -- review round 5: untrusted output drops what it only echoes', () => {
+  const post = (cmd, stdout, stderr = '') => classifyToolResult('Bash', { command: cmd }, { stdout, stderr }, false);
+
+  test('git echoes subjects and ref names: commit, push, fetch, stash, reset', () => {
+    const cases = [
+      ['git commit -m "Treat a delete-pending lock (win32 EPERM) as held, not free"',
+        '[main 1a2b3c4] Treat a delete-pending lock (win32 EPERM) as held, not free\n 1 file changed, 3 insertions(+)\n create mode 100644 src/panic-button.js', ''],
+      ['git commit -m "x"', '[main (root-commit) 1a2b3c4] Fix ENOENT\n src/panic.rs | 2 +-', ''],
+      ['git push -u origin fix/error-toast', '',
+        "remote: Create a pull request for 'fix/error-toast' on GitHub by visiting:\nremote:      https://github.com/me/app/pull/new/fix/error-toast\nTo github.com:me/app.git\n * [new branch]      fix/error-toast -> fix/error-toast\nbranch 'fix/error-toast' set up to track 'origin/fix/error-toast'."],
+      ['git fetch', '', 'From github.com:me/app\n * [new branch]      fix-failed-login -> origin/fix-failed-login\n   1a2b3c4..5d6e7f8  main -> origin/main'],
+      ['git pull', 'Updating 1a2b3c4..5d6e7f8\nFast-forward', 'From github.com:me/app\n * branch            fix-failed-x -> FETCH_HEAD'],
+      ['git stash', 'Saved working directory and index state WIP on main: 1a2b3c4 Handle ENOENT on missing config', ''],
+      ['git stash pop', 'Dropped refs/stash@{0} (1a2b3c4d5e6f)', ''],
+      ['git reset --hard HEAD~1', 'HEAD is now at 1a2b3c4 Fix FATAL crash in loader', ''],
+      ['git checkout -b fix/error-toast', '', "Switched to a new branch 'fix/error-toast'"],
+      ['git rebase main', '', 'Successfully rebased and updated refs/heads/fix-failed-login.'],
+    ];
+    for (const [cmd, out, err] of cases) {
+      assert.notStrictEqual(post(cmd, out, err).state, 'error', cmd);
+    }
+  });
+
+  test('Claude Code\'s cwd-reset notice is not the command failing', () => {
+    for (const dir of ['C:\\Users\\me\\code\\error-tracker', '/home/me/src/panic-button']) {
+      const r = post('cd .. && npm run lint', 'ok', `\nShell cwd was reset to ${dir}`);
+      assert.strictEqual(r.state, 'relieved', dir);
+    }
+  });
+
+  test('a green run\'s pass-marked test names are not failures', () => {
+    const out = '  cli\n    \u2713 prints syntax error for bad json\n    \u221a reports permission denied\n    \u2714 detects "CONFLICT (content): x"\nok 3 - exits with exit code 2\n\n  4 passing (12ms)';
+    const r = post('npm test', out);
+    assert.deepStrictEqual([r.state, r.detail], ['relieved', '4 tests passed']);
+    assert.strictEqual(post('pytest -v', 'tests/t.py::test_x[permission denied] PASSED [100%]\n== 1 passed ==').state, 'relieved');
+  });
+
+  test('a real failure on the same paths is still a failure', () => {
+    assert.strictEqual(post('npm test 2>&1 | tail -5', '    \u2713 one\n  1 passing\n  2 failing').state, 'error');
+    const rejected = 'To github.com:me/app.git\n ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to \'github.com:me/app.git\'';
+    assert.deepStrictEqual([post('git push', '', rejected).state, post('git push', '', rejected).detail], ['error', 'push rejected']);
+    // Merged into stdout (a masked pipe, OpenCode): stdout had no pattern for it.
+    assert.strictEqual(post('git push 2>&1 | tail -3', rejected).state, 'error');
+    assert.strictEqual(post('git status', '', 'fatal: not a git repository (or any of the parent directories): .git').state, 'error');
+    assert.strictEqual(post('git pull 2>&1 | cat', 'fatal: not a git repository (or any of the parent directories): .git').state, 'error');
+    const conflict = 'error: could not apply 1a2b3c4... Fix ENOENT\nCONFLICT (content): Merge conflict in a.js';
+    assert.strictEqual(post('git cherry-pick 1a2b3c4', conflict).detail, 'merge conflict!');
+  });
+
+  test('git listings, GitHub listings and container logs print content', () => {
+    const SCARY = '* main 1a2b3c4 Fix permission denied on Windows\n2026-10-14 FATAL could not connect\nhandle ENOENT';
+    for (const cmd of ['git branch -vv', 'git branch -a --contains 1a2b3c4', 'git branch --list "fix/*"', 'git reflog -5',
+      'git stash list', 'git stash show -p', 'git remote -v', 'git -C ../app rev-parse HEAD', 'gh pr list', 'gh run view 42 --log-failed',
+      'gh issue view 7', 'gh pr checks', 'docker logs api --tail 50', 'docker compose -f dev.yml logs web',
+      'docker-compose logs', 'kubectl -n prod logs pod/api', 'kubectl get pods', 'journalctl -u api']) {
+      assert.strictEqual(post(cmd, SCARY).state, 'relieved', cmd);
+    }
+    for (const cmd of ['git branch fix-x', 'git branch -d old', 'git branch -m a b', 'git stash', 'git reflog expire --all',
+      'gh pr create --fill', 'docker run img', 'kubectl apply -f x.yml']) {
+      assert.strictEqual(post(cmd, SCARY).state, 'error', cmd);
+    }
+  });
+});
+
+describe('state-machine -- review round 5: a background job has no verdict yet', () => {
+  const BG = { tool_response: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bu3bftxrt' } };
+
+  test('a background launch is launched, neutral, whatever it runs', () => {
+    const norm = normalizeToolResponse(BG);
+    assert.strictEqual(norm.backgroundTaskId, 'bu3bftxrt');
+    for (const command of ['npm test', '.\\gradlew.bat build', 'pnpm install', 'git commit -m "x"']) {
+      const r = classifyToolResult('Bash', { command, run_in_background: true }, norm, false, { trustSuccess: true });
+      assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'launched in background', true], command);
+    }
+    // The flag with no task id counts only with no output.
+    const flagOnly = classifyToolResult('Bash', { command: 'npm test', run_in_background: true }, { stdout: '', stderr: '' }, false);
+    assert.strictEqual(flagOnly.neutral, true);
+    const ran = classifyToolResult('Bash', { command: 'npm test', run_in_background: true }, { stdout: '3 passed', stderr: '' }, false);
+    assert.deepStrictEqual([ran.detail, ran.neutral], ['tests passed', undefined]);
+  });
+
+  test('a failed launch is still an error', () => {
+    const r = classifyToolResult('Bash', { command: 'npm test', run_in_background: true }, normalizeToolResponse(BG), true);
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('end to end: a background launch moves neither the streak nor the commit count', () => {
+    const t = makeTempEnv('bg-1');
+    try {
+      runUpdateState('PostToolUse', {
+        session_id: 'bg-1', tool_name: 'Bash', tool_input: { command: 'npm test' },
+        tool_response: { stdout: 'ok', stderr: '' },
+      }, t.env);
+      runUpdateState('PostToolUse', {
+        session_id: 'bg-1', tool_name: 'Bash', tool_input: { command: 'git commit -m "x"', run_in_background: true },
+        ...BG,
+      }, t.env);
+      const st = readJSON(t.statsFile);
+      assert.strictEqual(st.streak, 1, 'only the foreground call counted');
+      assert.strictEqual(st.sessionCounters['bg-1'].commitCount, 0);
+      const s = readJSON(pathMod.join(t.sessionsDir, 'bg-1.json'));
+      assert.deepStrictEqual([s.state, s.detail], ['satisfied', 'launched in background']);
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('state-machine -- review round 5: git global options', () => {
+  const pre = (command) => toolToState('Bash', { command }).state;
+  const post = (command, stdout = '') => classifyToolResult('Bash', { command }, { stdout, stderr: '' }, false).detail;
+
+  test('a commit or push past -C, -c, --no-pager or --git-dir is still one', () => {
+    for (const cmd of ['git -C ../app commit -m "wip"', 'git --no-pager commit -m x', 'git -c user.name=me commit -m x',
+      'git --git-dir=.git commit -m x', 'git --git-dir .git --work-tree . commit -m x', 'C:\\Git\\cmd\\git.exe -C app commit -m x']) {
+      assert.strictEqual(pre(cmd), 'committing', cmd);
+      assert.strictEqual(post(cmd, '[main 1a2b3c4] wip'), 'committed', cmd);
+    }
+    assert.strictEqual(pre('git -C ../app push'), 'committing');
+    assert.strictEqual(post('git -C ../app push'), 'pushed!');
+    assert.strictEqual(post('git -C ../app merge feature'), 'merged clean');
+    assert.strictEqual(post('git -C ../app status'), 'git done');
+  });
+
+  test('end to end: git -C commit is counted', () => {
+    const t = makeTempEnv('gitc-1');
+    try {
+      runUpdateState('PostToolUse', {
+        session_id: 'gitc-1', tool_name: 'Bash', tool_input: { command: 'git -C ../app commit -m "wip"' },
+        tool_response: { stdout: '[main 1a2b3c4] wip\n 1 file changed', stderr: '' },
+      }, t.env);
+      assert.strictEqual(readJSON(t.statsFile).sessionCounters['gitc-1'].commitCount, 1);
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('state-machine -- review round 5: linear-time command matching', () => {
+  // `pnpm -C -C ...` had exponentially many readings in the old install
+  // regex: twenty pairs held toolToState for over a minute.
+  test('install, git, make, node and training checks stay linear', () => {
+    const cmds = [
+      'pnpm' + ' -C -C'.repeat(200) + ' zz', 'npm' + ' --filter'.repeat(2000) + ' x',
+      'git' + ' -C x'.repeat(4000), 'make' + ' lint'.repeat(8000), 'node' + ' -r x'.repeat(4000),
+      'python '.repeat(4000), 'nohup '.repeat(4000), 'cat <<A\n'.repeat(4000),
+    ];
+    for (const cmd of cmds) {
+      const t0 = Date.now();
+      toolToState('Bash', { command: cmd });
+      classifyToolResult('Bash', { command: cmd }, { stdout: 'ok', stderr: '' }, false);
+      const ms = Date.now() - t0;
+      assert.ok(ms < 50, `${cmd.slice(0, 20)}... took ${ms}ms`);
+    }
+    assert.strictEqual(toolToState('Bash', { command: 'pnpm -C web install' }).state, 'installing', 'still matches');
+    assert.strictEqual(toolToState('Bash', { command: 'python train.py' }).state, 'training');
+  });
+});
+
+describe('state-machine -- review round 5: what a command is', () => {
+  const pre = (command) => toolToState('Bash', { command }).state;
+  const post = (command) => classifyToolResult('Bash', { command }, { stdout: 'ok', stderr: '' }, false).detail;
+
+  test('gradle and maven test runs are test runs, through their wrappers', () => {
+    for (const cmd of ['./gradlew test', 'gradlew.bat test', '.\\gradlew.bat :app:testDebugUnitTest', 'gradle check',
+      './gradlew connectedAndroidTest', './mvnw test', 'mvn test', 'mvnw verify', 'mvn -pl core -am verify', 'mvn clean test']) {
+      assert.strictEqual(pre(cmd), 'testing', cmd);
+      assert.strictEqual(post(cmd), 'tests passed', cmd);
+    }
+    for (const cmd of ['./gradlew build -x test', 'mvn clean install', './gradlew assemble', 'mvn compile']) {
+      assert.strictEqual(post(cmd), 'build succeeded', cmd);
+    }
+  });
+
+  test('only a build target makes make a build', () => {
+    for (const cmd of ['make', 'make -j8', 'make -j 8 all', 'make -C build', 'make build', 'make release', 'make CC=clang']) {
+      assert.strictEqual(post(cmd), 'build succeeded', cmd);
+    }
+    assert.strictEqual(post('make lint'), 'make lint done');
+    assert.strictEqual(post('make clean'), 'make clean done');
+    assert.strictEqual(post('make -C web format'), 'make format done');
+    assert.strictEqual(pre('make -C build test'), 'testing');
+    assert.strictEqual(post('make check'), 'tests passed');
+  });
+
+  test('cargo build is shown like any other build', () => {
+    assert.strictEqual(pre('cargo build --release'), 'executing');
+    assert.strictEqual(post('cargo build --release'), 'build succeeded');
+  });
+
+  test('node runs tests from tests/, test/, test.js and *.test.js files', () => {
+    for (const cmd of ['node tests/run.js', 'node tests/run.js grid face', 'node ./test/index.js', 'node test.js',
+      'node tests\\run.js --quiet', 'node --test', 'node --watch --test', 'node src/a.test.mjs',
+      'node --experimental-vm-modules tests/x.js', 'node -r ts-node/register test/a.spec.ts']) {
+      assert.strictEqual(pre(cmd), 'testing', cmd);
+      assert.strictEqual(post(cmd), 'tests passed', cmd);
+    }
+    for (const cmd of ['node scripts/build.js', 'node -e "test"', 'node testing.js', 'node setup.js', 'node']) {
+      assert.notStrictEqual(pre(cmd), 'testing', cmd);
+    }
+  });
+
+  test('a heredoc body is data, not commands', () => {
+    assert.strictEqual(pre("cat > notes.md <<'EOF'\nrun npm install first\nthen pytest\nEOF"), 'executing');
+    assert.strictEqual(pre('cat > x.sh <<EOF\nnpm install\nEOF\nnpm test'), 'testing', 'the line after the delimiter is a command');
+    assert.strictEqual(pre('git commit -F - <<EOF\nRun the build\nEOF'), 'committing');
+    assert.strictEqual(require('../lib/state-machine').shellIntent('git commit -F - <<EOF\nmsg; npm test\nEOF').masked, false);
+  });
+});
+
+describe('state-machine -- review round 5: a merge conflict is a git command\'s', () => {
+  test('PostToolUseFailure: a git conflict says so, a test run naming one does not', () => {
+    const merge = normalizeToolResponse({ error: 'Exit code 1\nAuto-merging a.txt\nCONFLICT (content): Merge conflict in a.txt\nAutomatic merge failed; fix conflicts and then commit the result.', is_interrupt: false });
+    assert.strictEqual(classifyToolResult('Bash', { command: 'git merge feature' }, merge, true).detail, 'merge conflict!');
+    const tests = normalizeToolResponse({ error: 'Exit code 1\n    \u2713 detects "CONFLICT (content): x"\n  test x: Automatic merge failed fixture\n  1 failed, 9 passed', is_interrupt: false });
+    assert.strictEqual(classifyToolResult('Bash', { command: 'node tests/run.js' }, tests, true).detail, 'tests failed');
+  });
+
+  test('a truncated PostToolUseFailure reports a git conflict', () => {
+    const raw = (cmd) => `{"hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"${cmd}"},"error":"Exit code 1\\nCONFLICT (content): Merge conflict in a.txt\\n` + 'x'.repeat(2000);
+    assert.strictEqual(classifyTruncatedInput('PostToolUseFailure', raw('git merge feature')).detail, 'merge conflict!');
+    assert.strictEqual(classifyTruncatedInput('PostToolUseFailure', raw('npm test')).detail, 'tool failed');
+  });
+});
+
+describe('state-machine -- review round 5: very large output is searched in two windows', () => {
+  const sm = require('../lib/state-machine');
+  test('the head and the tail are kept, whole lines only', () => {
+    assert.strictEqual(sm.scanWindow('short'), 'short');
+    const big = 'Exit code 2\n' + 'filler line\n'.repeat(100000) + 'Tests: 2 failed';
+    const w = sm.scanWindow(big);
+    assert.ok(w.length <= sm.SCAN_HEAD_BYTES + sm.SCAN_TAIL_BYTES + 1, `window is ${w.length}`);
+    assert.ok(w.startsWith('Exit code 2\n'));
+    assert.ok(w.endsWith('Tests: 2 failed'));
+    assert.ok(w.split('\n').every(l => l === '' || l === 'filler line' || l === 'Exit code 2' || l === 'Tests: 2 failed'), 'no cut lines');
+  });
+
+  // Relative, so it holds on any machine: a 900 KB result costs what an
+  // 80 KB one does (it used to cost eleven times as much), best of three.
+  test('a 900 KB result costs no more than an 80 KB one, and its verdict is still found', () => {
+    const best = (fn) => {
+      let ms = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const t0 = process.hrtime.bigint();
+        fn();
+        ms = Math.min(ms, Number(process.hrtime.bigint() - t0) / 1e6);
+      }
+      return ms;
+    };
+    const out = (n) => 'ok fine\n'.repeat(n) + '  2 failing\n';
+    const post = (stdout) => classifyToolResult('Bash', { command: 'npm test' }, { stdout, stderr: '' }, false);
+    const small = out(10000), big = out(115000);
+    assert.strictEqual(post(big).state, 'error', 'the verdict at the end is found');
+    const tSmall = best(() => post(small)), tBig = best(() => post(big));
+    assert.ok(tBig < tSmall * 3 + 5, `900 KB took ${tBig.toFixed(1)}ms, 80 KB ${tSmall.toFixed(1)}ms`);
+    const raw = (n) => '{"tool_name":"Bash","tool_response":{"stdout":"' + 'ok fine\\n'.repeat(n);
+    const rSmall = raw(10000), rBig = raw(115000);
+    const uSmall = best(() => classifyTruncatedInput('PostToolUse', rSmall));
+    const uBig = best(() => classifyTruncatedInput('PostToolUse', rBig));
+    assert.ok(uBig < uSmall * 3 + 5, `truncated: 900 KB took ${uBig.toFixed(1)}ms, 80 KB ${uSmall.toFixed(1)}ms`);
   });
 });
 
