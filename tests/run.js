@@ -80,9 +80,12 @@ const RESET = '\x1b[0m';
 // inherit process.env, so redirecting here -- before any test file
 // loads -- keeps the whole run out of the real home directory. A
 // running renderer never sees test writes, and the suite cannot
-// clobber the user's stats or prefs. CODEX_HOME and CLAUDE_CONFIG_DIR
-// would point a test straight back at the user's real editor config,
-// so they go too (the defaults then resolve inside the fake home).
+// clobber the user's stats or prefs. The editors' own config-dir
+// variables (CODEX_HOME, CLAUDE_CONFIG_DIR, and OpenCode's
+// XDG_CONFIG_HOME / OPENCODE_CONFIG_DIR / OPENCODE_CONFIG, which setup.js
+// and doctor follow) would point a test straight back at the user's real
+// editor config, so they go too (the defaults then resolve inside the
+// fake home).
 // Every process of a parallel run calls this, so each file gets a
 // home of its own.
 function isolate() {
@@ -90,8 +93,9 @@ function isolate() {
   process.env.HOME = fakeHome;
   process.env.USERPROFILE = fakeHome;
   process.env.CODE_CRUMB_STATE = path.join(fakeHome, '.code-crumb-state');
-  delete process.env.CODEX_HOME;
-  delete process.env.CLAUDE_CONFIG_DIR;
+  for (const k of ['CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG']) {
+    delete process.env[k];
+  }
   process.env[ISOLATION_MARKER] = fakeHome;
   process.on('exit', () => {
     try { fs.rmSync(fakeHome, { recursive: true, force: true }); } catch {}

@@ -482,7 +482,8 @@ describe('adapters -- opencode-plugin translate()', () => {
 
   test.async('session.error falls back to the error name when there is no message', async () => {
     const { translate } = await load();
-    const out = translate('event', bus('session.error', { error: { name: 'MessageAbortedError', data: {} } }));
+    // Round 5: a session.error with no sessionID is dropped, so the fixture names one.
+    const out = translate('event', bus('session.error', { sessionID: 'ses_1', error: { name: 'MessageAbortedError', data: {} } }));
     assert.strictEqual(out.error, 'MessageAbortedError');
   });
 
@@ -2940,13 +2941,15 @@ describe('base-adapter -- guardedWriteState unit tests', () => {
 
 describe('base-adapter -- initSession unit tests', () => {
   const baseAdapter = require(path.join(ADAPTERS_DIR, 'base-adapter'));
-  const { defaultStats } = require(path.join(__dirname, '..', 'lib', 'state-machine'));
+  const { defaultStats, localDay } = require(path.join(__dirname, '..', 'lib', 'state-machine'));
 
   test('creates daily bucket on first call', () => {
     const stats = defaultStats();
     stats.daily = { date: '', sessionCount: 0, cumulativeMs: 0 };
     baseAdapter.initSession(stats, 'init-1');
-    const today = require('../lib/state-machine').localDay();
+    // The LOCAL calendar day (localDay): a UTC date failed here every night
+    // between local and UTC midnight.
+    const today = localDay(Date.now());
     assert.strictEqual(stats.daily.date, today);
   });
 
@@ -2954,7 +2957,9 @@ describe('base-adapter -- initSession unit tests', () => {
     const stats = defaultStats();
     stats.daily = { date: '2020-01-01', sessionCount: 5, cumulativeMs: 1000 };
     baseAdapter.initSession(stats, 'init-2');
-    const today = require('../lib/state-machine').localDay();
+    // The LOCAL calendar day (localDay): a UTC date failed here every night
+    // between local and UTC midnight.
+    const today = localDay(Date.now());
     assert.strictEqual(stats.daily.date, today);
     assert.strictEqual(stats.daily.sessionCount, 1);
   });
@@ -4643,6 +4648,415 @@ describe('adapters -- round 4', () => {
       assert.deepStrictEqual(Object.keys(st.sessionCounters), ['ses_root']);
       assert.strictEqual(st.session.toolCalls, 2);
     } finally { cleanup(tmp); }
+  });
+});
+
+// -- Review round 5 ----------------------------------------------------------
+// Each block below was run against the pre-fix sources first and failed.
+
+// A temp home for a wrapper run: autolaunch off, no inherited session id, and
+// no NoDefaultCurrentDirectoryInExePath -- Claude Code's own shell exports it,
+// which hides the current-folder bug from any test run inside Claude Code.
+function round5Env(tag) {
+  const base = makeTempEnv(tag);
+  fs.writeFileSync(path.join(base.tmp, '.code-crumb-prefs.json'), '{"autolaunch":false}');
+  const env = { ...base.env };
+  for (const k of Object.keys(env)) {
+    if (/^(path|NoDefaultCurrentDirectoryInExePath)$/i.test(k)) delete env[k];
+  }
+  delete env.CLAUDE_SESSION_ID;
+  const binDir = path.join(base.tmp, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  env.PATH = binDir + path.delimiter + (process.env.PATH || '');
+  return { ...base, env, binDir };
+}
+
+// A stand-in `codex` named `name` in `dir`, running `src` (Node) on every platform.
+function writeFakeCodex(dir, src, name = 'codex') {
+  const js = path.join(dir, `${name}-fake.js`);
+  fs.writeFileSync(js, src, 'utf8');
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(dir, `${name}.cmd`), `@"${NODE}" "%~dp0${name}-fake.js" %*\r\n`, 'utf8');
+  } else {
+    const sh = path.join(dir, name);
+    fs.writeFileSync(sh, `#!/bin/sh\nexec "${NODE}" "$(dirname "$0")/${name}-fake.js" "$@"\n`, 'utf8');
+    fs.chmodSync(sh, 0o755);
+  }
+}
+
+const fakeLines = (events) => [
+  "'use strict';",
+  "const fs = require('fs');",
+  `for (const e of ${JSON.stringify(events)}) fs.writeSync(1, JSON.stringify(e) + '\\n');`,
+  '',
+].join('\n');
+
+describe('adapters -- Review round 5: the codex wrapper', () => {
+  const WRAPPER = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
+  const US = path.join(__dirname, '..', 'update-state.js');
+
+  // cmd.exe tries the current folder, with every PATHEXT extension, before
+  // the PATH: the project's codex.cmd ran instead of codex.
+  if (process.platform === 'win32') {
+    test('a project\'s own codex.cmd does not shadow the codex on PATH', () => {
+      const t = round5Env('codex-shadow');
+      try {
+        const project = path.join(t.tmp, 'project');
+        fs.mkdirSync(project);
+        writeFakeCodex(t.binDir, fakeLines([{ type: 'thread.started', thread_id: 'from-path' }, { type: 'turn.completed' }]));
+        writeFakeCodex(project, fakeLines([{ type: 'thread.started', thread_id: 'from-cwd' }, { type: 'turn.completed' }]));
+        try {
+          execFileSync(NODE, [WRAPPER, 'a prompt'], { cwd: project, env: t.env, timeout: 30000, stdio: 'pipe' });
+        } catch (e) { if (e.status === null) throw e; }
+        assert.deepStrictEqual(fs.readdirSync(t.sessionsDir), ['from-path.json']);
+      } finally { cleanup(t.tmp); }
+    });
+  }
+
+  // A hooks.json from before the --editor tag runs update-state.js untagged:
+  // its writes say `claude`, and the wrapper never went quiet.
+  function runWithHooks(editorArgs) {
+    const t = round5Env('codex-legacy');
+    const T = '019a-legacy-thread';
+    writeFakeCodex(t.binDir, [
+      "'use strict';",
+      "const { execFileSync } = require('child_process');",
+      `const hook = (ev, extra) => execFileSync(process.execPath, [${JSON.stringify(US)}, ...${JSON.stringify(editorArgs)}, ev],`,
+      `  { input: JSON.stringify({ session_id: ${JSON.stringify(T)}, hook_event_name: ev, ...extra }) });`,
+      "const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');",
+      "hook('SessionStart', { source: 'startup' });",
+      `out({ type: 'thread.started', thread_id: ${JSON.stringify(T)} });`,
+      "hook('UserPromptSubmit', { prompt: 'x' });",
+      "out({ type: 'turn.started' });",
+      "hook('PreToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' } });",
+      "out({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'ls', status: 'in_progress' } });",
+      "hook('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: 'a' });",
+      "out({ type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'ls', aggregated_output: 'a', exit_code: 0, status: 'completed' } });",
+      "hook('Stop', {});",
+      "out({ type: 'turn.completed', usage: {} });",
+      '',
+    ].join('\n'));
+    execFileSync(NODE, [WRAPPER, 'x'], { env: t.env, timeout: 30000, stdio: 'pipe' });
+    return { t, T };
+  }
+
+  test('legacy (untagged) codex hooks are recognised: one run, counted once', () => {
+    const { t, T } = runWithHooks([]);
+    try {
+      const stats = readJSON(t.statsFile);
+      assert.deepStrictEqual([stats.totalToolCalls, stats.streak, stats.daily.sessionCount], [1, 1, 1],
+        'each tool call, success and session once');
+      assert.deepStrictEqual(fs.readdirSync(t.sessionsDir), [`${T}.json`]);
+      assert.strictEqual(readJSON(path.join(t.sessionsDir, `${T}.json`)).stopped, true, 'still retired');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('tagged hooks still count once', () => {
+    const { t } = runWithHooks(['--editor', 'codex']);
+    try {
+      const stats = readJSON(t.statsFile);
+      assert.deepStrictEqual([stats.totalToolCalls, stats.streak], [1, 1]);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a Claude-tagged file the hooks did not write leaves the wrapper on its own', () => {
+    // Same thread id and a fresh timestamp, but no update-state.js marker: not
+    // a hook write (an adapter-shaped file never carries isWorktree).
+    const t = round5Env('codex-notahook');
+    try {
+      const T = 'thread-foreign';
+      writeFakeCodex(t.binDir, [
+        "'use strict';",
+        "const fs = require('fs');",
+        "const path = require('path');",
+        `const file = path.join(process.env.HOME, '.code-crumb-sessions', ${JSON.stringify(T + '.json')});`,
+        "const out = (o) => fs.writeSync(1, JSON.stringify(o) + '\\n');",
+        // Already there when thread.started is read -- the wrapper's first look.
+        "fs.mkdirSync(path.dirname(file), { recursive: true });",
+        "fs.writeFileSync(file, JSON.stringify({ session_id: 'x', editor: 'claude', state: 'idle', timestamp: Date.now() + 5 }));",
+        `out({ type: 'thread.started', thread_id: ${JSON.stringify(T)} });`,
+        "out({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'ls', status: 'in_progress' } });",
+        "out({ type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: 'ls', aggregated_output: 'a', exit_code: 0, status: 'completed' } });",
+        '',
+      ].join('\n'));
+      execFileSync(NODE, [WRAPPER, 'x'], { env: t.env, timeout: 30000, stdio: 'pipe' });
+      assert.strictEqual(readJSON(t.statsFile).totalToolCalls, 1, 'the wrapper counted the tool itself');
+    } finally { cleanup(t.tmp); }
+  });
+
+  // `codex exec ... | head`: the reader goes away and the next passthrough
+  // write is EPIPE -- an uncaught error, and the session never retired.
+  test.async('a reader that goes away (| head) ends the run cleanly and retires the session', async () => {
+    const t = round5Env('codex-epipe');
+    try {
+      // codex keeps printing until its own output breaks (or 10s pass), so
+      // there is always a write after the reader has gone, however slow the
+      // machine -- and the log shows whether codex was told.
+      const codexLog = path.join(t.tmp, 'codex.log');
+      writeFakeCodex(t.binDir, [
+        "'use strict';",
+        "const fs = require('fs');",
+        "const out = (o) => fs.writeSync(1, JSON.stringify(o) + '\\n');",
+        "out({ type: 'thread.started', thread_id: 'pipe-t' });",
+        "out({ type: 'turn.started' });",
+        "out({ type: 'item.started', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } });",
+        'const end = Date.now() + 10000;',
+        'const tick = setInterval(() => {',
+        "  try { out({ type: 'item.updated', item: { id: 'i1', type: 'command_execution', command: 'npm test', status: 'in_progress' } }); }",
+        `  catch { fs.writeFileSync(${JSON.stringify(codexLog)}, 'output broke'); clearInterval(tick); return; }`,
+        '  if (Date.now() > end) clearInterval(tick);',
+        '}, 100);',
+        '',
+      ].join('\n'));
+      const child = spawn(NODE, [WRAPPER, 'a prompt'], { env: t.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (d) => { stderr += d; });
+      child.stdout.once('data', () => child.stdout.destroy());
+      const code = await new Promise((resolve) => child.on('close', resolve));
+      assert.ok(!/EPIPE|Unhandled|EOF/.test(stderr), `no crash: ${stderr.split('\n')[0]}`);
+      if (process.platform !== 'win32') assert.strictEqual(code, 141, '128 + SIGPIPE');
+      const f = readJSON(path.join(t.sessionsDir, 'pipe-t.json'));
+      assert.strictEqual(f.stopped, true, `retired (${f.state} / ${f.detail})`);
+      assert.deepStrictEqual([f.state, f.detail], ['error', 'output closed']);
+      assert.ok(fs.existsSync(codexLog), 'codex met the broken pipe and stopped');
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('adapters -- Review round 5: codex-notify', () => {
+  const NOTIFY = path.join(ADAPTERS_DIR, 'codex-notify.js');
+
+  // Both the legacy notify line and the native hooks: the notify write
+  // rebuilt the session file from scratch at every turn end, and the center
+  // face left the window because its attention stamp was gone.
+  test('a turn-complete notification keeps what the hooks know about the session', () => {
+    const t = round5Env('notify-sticky');
+    try {
+      const T = '019a-thread-notify';
+      const hook = (ev, extra = {}) => runUpdateState(null,
+        { session_id: T, hook_event_name: ev, model: 'gpt-5.1-codex', ...extra }, t.env, { args: ['--editor', 'codex', ev] });
+      // Another window owns the global file, as it usually does in a busy setup.
+      fs.writeFileSync(t.stateFile, JSON.stringify({ sessionId: 'claude-other', state: 'coding', timestamp: Date.now() }));
+      hook('SessionStart', { source: 'startup' });
+      hook('UserPromptSubmit', { prompt: 'fix it' });
+      hook('Stop');
+      const file = path.join(t.sessionsDir, `${T}.json`);
+      const before = readJSON(file);
+      assert.ok(before.lastPromptAt > 0 && before.model, 'fixture');
+      execFileSync(NODE, [NOTIFY, JSON.stringify({ type: 'agent-turn-complete', 'thread-id': T, 'last-assistant-message': 'Done.' })],
+        { env: t.env, stdio: 'ignore', timeout: 10000 });
+      const after = readJSON(file);
+      assert.deepStrictEqual([after.state, after.turnEnded], ['happy', true], 'the notification itself');
+      assert.strictEqual(after.lastPromptAt, before.lastPromptAt, 'attention stamp kept');
+      assert.strictEqual(after.model, before.model);
+      assert.strictEqual(after.gitBranch, before.gitBranch);
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('adapters -- Review round 5: OpenCode', () => {
+  const PLUGIN_FILE = path.join(ADAPTERS_DIR, 'opencode-plugin.mjs');
+  const OPENCODE = path.join(ADAPTERS_DIR, 'opencode-adapter.js');
+  const { pathToFileURL } = require('url');
+
+  // The real plugin, driven through its hooks, with every adapter it spawns
+  // writing into `t`'s temp home. A hook spawns synchronously (there is no
+  // await before the spawn), inheriting process.env at that moment, so the
+  // env is pointed at the temp home for the call and put back straight after.
+  async function plugin(t, tag) {
+    const { CodeCrumbPlugin } = await import(`${pathToFileURL(PLUGIN_FILE).href}?t=r5-${tag}`);
+    const hooks = await CodeCrumbPlugin();
+    const KEYS = ['HOME', 'USERPROFILE', 'CODE_CRUMB_STATE', 'CODE_CRUMB_NODE', 'CLAUDE_SESSION_ID'];
+    const call = (fn) => {
+      const saved = {};
+      for (const k of KEYS) saved[k] = process.env[k];
+      Object.assign(process.env, { HOME: t.tmp, USERPROFILE: t.tmp, CODE_CRUMB_STATE: t.stateFile, CODE_CRUMB_NODE: NODE });
+      delete process.env.CLAUDE_SESSION_ID;
+      try { return fn(); } finally {
+        for (const k of KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+      }
+    };
+    return {
+      translate: CodeCrumbPlugin.translate,
+      event: (type, properties) => call(() => hooks.event({ event: { type, properties } })),
+      before: (input, output) => call(() => hooks['tool.execute.before'](input, output)),
+      after: (input, output) => call(() => hooks['tool.execute.after'](input, output)),
+    };
+  }
+  const sessionOf = (t, id) => readJSON(path.join(t.sessionsDir, `${id}.json`));
+  const seedStreak = (t, streak) => fs.writeFileSync(t.statsFile, JSON.stringify({ streak, bestStreak: streak, totalErrors: 0 }));
+  const statsOf = (t) => readJSON(t.statsFile);
+
+  // The shell tool reports its exit code only in result.metadata.exit, and a
+  // test runner's verdict is at the END of a long output.
+  test.async('a failed shell command is an error, whatever its output says', async () => {
+    const t = round5Env('oc-exit');
+    try {
+      const P = await plugin(t, 'exit');
+      seedStreak(t, 4);
+      const longRun = 'ok passes case\n'.repeat(400) + '\n  398 passing (2s)\n  2 failing\n\n  1) parser\n     AssertionError: expected 1 to equal 2\n';
+      for (const [command, output, metadata] of [
+        ['test -f dist/index.js', '(no output)', { exit: 1 }],
+        ['pwsh -c "exit 3"', '(no output)', { exit: 3 }],
+        ['python check.py', 'checking 12 files\n2 files would be reformatted\n', { exit: 1 }],
+        ['npm test', longRun, {}],
+      ]) {
+        const p = P.translate('tool.execute.after', { sessionID: 'ses_e', tool: 'bash', callID: 'c', args: { command } },
+          { title: command, output, metadata: { output, truncated: false, ...metadata } });
+        runStdinAdapter(OPENCODE, p, t.env);
+        const f = sessionOf(t, 'ses_e');
+        assert.strictEqual(f.state, 'error', `${command} -> ${f.state} / ${f.detail}`);
+      }
+      assert.strictEqual(statsOf(t).streak, 0);
+      // And a clean exit is still a success.
+      const ok = P.translate('tool.execute.after', { sessionID: 'ses_e', tool: 'bash', callID: 'c', args: { command: 'ls' } },
+        { title: 'ls', output: 'a\nb', metadata: { exit: 0 } });
+      runStdinAdapter(OPENCODE, ok, t.env);
+      assert.deepStrictEqual([sessionOf(t, 'ses_e').state, statsOf(t).streak], ['relieved', 1]);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test.async('a timed-out or aborted command is told from a success', async () => {
+    const t = round5Env('oc-null-exit');
+    try {
+      const P = await plugin(t, 'nullexit');
+      const run = (output) => {
+        const p = P.translate('tool.execute.after', { sessionID: 'ses_n', tool: 'bash', callID: 'c', args: { command: 'npm run dev' } },
+          { title: 'npm run dev', output, metadata: { exit: null } });
+        runStdinAdapter(OPENCODE, p, t.env);
+        return sessionOf(t, 'ses_n');
+      };
+      const timedOut = run('listening\n\n<shell_metadata>\nshell tool terminated command after exceeding timeout 120000 ms. If this command\n</shell_metadata>');
+      assert.deepStrictEqual([timedOut.state, timedOut.detail], ['error', 'timed out']);
+      const aborted = run('listening\n\n<shell_metadata>\nUser aborted the command\n</shell_metadata>');
+      assert.deepStrictEqual([aborted.state, aborted.detail], ['error', 'interrupted']);
+    } finally { cleanup(t.tmp); }
+  });
+
+  // sessionID is optional on session.error: a plugin or skill that fails to
+  // load reports an error that belongs to no session.
+  test.async('a sessionless session.error draws nothing and counts nothing', async () => {
+    const t = round5Env('oc-sessionless');
+    try {
+      const P = await plugin(t, 'sessionless');
+      const ev = { error: { name: 'UnknownError', data: { message: 'Failed to parse skill foo' } } };
+      assert.strictEqual(P.translate('event', { event: { type: 'session.error', properties: ev } }), null);
+      // An older plugin copy sending it anyway: the adapter drops it too.
+      runStdinAdapter(OPENCODE, { type: 'session.error', error: 'Failed to parse skill foo' }, t.env);
+      assert.ok(!fs.existsSync(t.sessionsDir) || fs.readdirSync(t.sessionsDir).length === 0, 'no phantom session');
+      assert.ok(!fs.existsSync(t.statsFile), 'no session counted, no streak broken');
+      assert.ok(!fs.existsSync(t.stateFile));
+    } finally { cleanup(t.tmp); }
+  });
+
+  // After a failed turn OpenCode sets the session idle: session.idle used to
+  // replace the error with "all done!".
+  test.async('a failed turn keeps its error face through the idle that follows', async () => {
+    const t = round5Env('oc-failed-turn');
+    try {
+      const P = await plugin(t, 'failed');
+      seedStreak(t, 5);
+      await P.event('session.error', { sessionID: 'ses_f', error: { name: 'APIError', data: { message: 'connection lost' } } });
+      let f = sessionOf(t, 'ses_f');
+      assert.deepStrictEqual([f.state, f.detail, f.turnEnded], ['error', 'connection lost', true], 'the error ends the turn');
+      assert.strictEqual(readJSON(t.stateFile).stopped, true);
+      await P.event('session.idle', { sessionID: 'ses_f' });
+      f = sessionOf(t, 'ses_f');
+      assert.deepStrictEqual([f.state, f.detail, f.turnEnded], ['error', 'connection lost', true]);
+      const s = statsOf(t);
+      assert.deepStrictEqual([s.streak, s.brokenStreak, s.totalErrors], [0, 5, 1], 'broken once');
+      // The next turn starts clean.
+      runStdinAdapter(OPENCODE, { type: 'thinking', sessionId: 'ses_f' }, t.env);
+      runStdinAdapter(OPENCODE, { type: 'session.idle', sessionId: 'ses_f' }, t.env);
+      assert.strictEqual(sessionOf(t, 'ses_f').state, 'happy');
+    } finally { cleanup(t.tmp); }
+  });
+
+  // On a context overflow with auto-compaction, OpenCode publishes
+  // session.error, compacts, publishes session.compacted and carries on.
+  test.async('a context overflow that compacts is compaction, not a failure', async () => {
+    const t = round5Env('oc-overflow');
+    try {
+      const P = await plugin(t, 'overflow');
+      seedStreak(t, 3);
+      await P.event('session.error', { sessionID: 'ses_o', error: { name: 'ContextOverflowError', data: { message: 'prompt is too long' } } });
+      const f = sessionOf(t, 'ses_o');
+      assert.deepStrictEqual([f.state, f.detail], ['thinking', 'compacting memory']);
+      assert.ok(!f.turnEnded, 'the turn goes on');
+      await P.event('session.compacted', { sessionID: 'ses_o' });
+      await waitFor(() => sessionOf(t, 'ses_o').detail === 'memory compacted', 10000, 'the compaction');
+      await P.event('session.idle', { sessionID: 'ses_o' });
+      assert.deepStrictEqual([sessionOf(t, 'ses_o').state, statsOf(t).streak], ['happy', 3]);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test.async('a context overflow straight into the idle (no compaction) is a failed turn', async () => {
+    const t = round5Env('oc-overflow-off');
+    try {
+      const P = await plugin(t, 'overflowoff');
+      seedStreak(t, 3);
+      await P.event('session.error', { sessionID: 'ses_x', error: { name: 'ContextOverflowError', data: { message: 'prompt is too long' } } });
+      await P.event('session.idle', { sessionID: 'ses_x' });
+      const f = sessionOf(t, 'ses_x');
+      assert.deepStrictEqual([f.state, f.detail, f.turnEnded], ['error', 'context too long', true]);
+      assert.deepStrictEqual([statsOf(t).streak, statsOf(t).brokenStreak], [0, 3]);
+    } finally { cleanup(t.tmp); }
+  });
+
+  // Esc: the running tool is marked aborted (metadata.interrupted) and the
+  // turn ends in MessageAbortedError -- the streak broke twice, and the
+  // second break zeroed brokenStreak so the face never reacted.
+  test.async('an Esc shows interrupted and leaves the streak alone, in either order', async () => {
+    const aborted = (P) => P.translate('event', { event: { type: 'message.part.updated', properties: { part: {
+      type: 'tool', sessionID: 'ses_a', callID: 'c1', tool: 'bash',
+      state: { status: 'error', input: { command: 'npm test' }, error: 'Tool execution aborted', metadata: { interrupted: true } },
+    } } } });
+    const abortErr = { sessionID: 'ses_a', error: { name: 'MessageAbortedError', data: { message: 'Aborted' } } };
+    for (const order of ['tool first', 'tool last']) {
+      const t = round5Env('oc-esc');
+      try {
+        const P = await plugin(t, `esc-${order.replace(' ', '')}`);
+        seedStreak(t, 7);
+        runStdinAdapter(OPENCODE, { type: 'tool.execute.before', sessionId: 'ses_a', tool: 'bash', toolInput: { command: 'npm test' } }, t.env);
+        assert.strictEqual(aborted(P).interrupted, true, 'the plugin forwards the interruption');
+        if (order === 'tool first') runStdinAdapter(OPENCODE, aborted(P), t.env);
+        await P.event('session.error', abortErr);
+        await P.event('session.idle', { sessionID: 'ses_a' });
+        if (order === 'tool last') runStdinAdapter(OPENCODE, aborted(P), t.env);
+        const f = sessionOf(t, 'ses_a');
+        assert.deepStrictEqual([f.state, f.detail, f.turnEnded], ['error', 'interrupted', true], order);
+        const s = statsOf(t);
+        assert.deepStrictEqual([s.streak, s.totalErrors || 0], [7, 0], `${order}: an Esc is the user's choice`);
+      } finally { cleanup(t.tmp); }
+    }
+  });
+
+  // The question tool (and plan_exit's approval prompt) wait on the user.
+  test.async('a question waits on the user and its answer is an answer', async () => {
+    const t = round5Env('oc-question');
+    try {
+      const P = await plugin(t, 'question');
+      seedStreak(t, 2);
+      runStdinAdapter(OPENCODE, { type: 'tool.execute.before', sessionId: 'ses_q', tool: 'question',
+        toolInput: { questions: [{ question: 'Which DB?', options: [] }] } }, t.env);
+      assert.deepStrictEqual([sessionOf(t, 'ses_q').state, sessionOf(t, 'ses_q').detail], ['waiting', 'asking you']);
+      for (const type of ['question.asked', 'question.replied', 'question.rejected']) {
+        assert.ok(P.translate('event', { event: { type, properties: { sessionID: 'ses_q', requestID: 'r1' } } }), type);
+      }
+      runStdinAdapter(OPENCODE, P.translate('event', { event: { type: 'question.asked', properties: { id: 'r1', sessionID: 'ses_q', questions: [] } } }), t.env);
+      assert.deepStrictEqual([sessionOf(t, 'ses_q').state, sessionOf(t, 'ses_q').detail], ['waiting', 'asking you']);
+      runStdinAdapter(OPENCODE, P.translate('event', { event: { type: 'question.replied', properties: { sessionID: 'ses_q', requestID: 'r1', answers: [['Postgres']] } } }), t.env);
+      let f = sessionOf(t, 'ses_q');
+      assert.deepStrictEqual([f.state, f.detail, f.answered], ['satisfied', 'got your answer', true]);
+      // Dismissing it is an answer too, and the tool's throw is no failure.
+      runStdinAdapter(OPENCODE, P.translate('event', { event: { type: 'question.rejected', properties: { sessionID: 'ses_q', requestID: 'r2' } } }), t.env);
+      runStdinAdapter(OPENCODE, P.translate('event', { event: { type: 'message.part.updated', properties: { part: {
+        type: 'tool', sessionID: 'ses_q', callID: 'c2', tool: 'plan_exit',
+        state: { status: 'error', input: {}, error: 'The user dismissed this question' } } } } }), t.env);
+      f = sessionOf(t, 'ses_q');
+      assert.deepStrictEqual([f.state, f.detail, f.answered], ['satisfied', 'question dismissed', true]);
+      assert.strictEqual(statsOf(t).streak, 2, 'a dismissal breaks nothing');
+    } finally { cleanup(t.tmp); }
   });
 });
 
