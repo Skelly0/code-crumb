@@ -413,6 +413,9 @@ describe('release -- setup.js doctor', () => {
   }
   // node on PATH, nothing else from the real environment.
   const baseEnv = () => ({ PATH: path.dirname(NODE), PATHEXT: process.env.PATHEXT || '' });
+  // Above Linux's pid_max ceiling (2^22) and not a multiple of 4, so no
+  // process anywhere has it: a PID file naming it is a dead renderer's.
+  const DEAD_PID = String(2 ** 31 - 1);
 
   function doctor(home, { env = {}, nodeVersion } = {}) {
     const lines = [];
@@ -588,7 +591,7 @@ describe('release -- setup.js doctor', () => {
   test('a stale PID file reads as a stopped renderer, with its age', () => {
     const home = healthyHome();
     put(home, '.code-crumb-prefs.json', { autolaunch: false });
-    put(home, '.code-crumb.pid', '999999', 3 * 3600e3);
+    put(home, '.code-crumb.pid', DEAD_PID, 3 * 3600e3);
     const r = doctor(home);
     assert.strictEqual(r.problems, 1, r.text);
     assert.ok(r.bad[0].includes('renderer is not running') && r.bad[0].includes('3h ago'), r.text);
@@ -671,7 +674,7 @@ describe('release -- setup.js doctor', () => {
     put(messy, '.claude/settings.json', { hooks: setup.buildFaceHooks('/nowhere/update-state.js'), enabledPlugins: { 'code-crumb@code-crumb': true } });
     put(messy, '.code-crumb-prefs.json', { autolaunch: true });
     put(messy, '.code-crumb-quit', '1');
-    put(messy, '.code-crumb.pid', '999999', 3600e3);
+    put(messy, '.code-crumb.pid', DEAD_PID, 3600e3);
     put(messy, '.code-crumb-sessions/old.json', {}, 5 * 3600e3);
     const was = snapshot(messy);
     const bad = cli(messy);
