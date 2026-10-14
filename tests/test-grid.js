@@ -5264,6 +5264,37 @@ describe('grid.js -- Review round 5', () => {
     assert.ok(!/[\n\u001b]/.test(f.detail), 'a newline or ESC reached the ring');
     assert.strictEqual(settled(permWait({ permDetail: { cmd: 'x' } })).detail, '');
   });
+
+  // update-state.js now heals a lead file that a teammate event stamped with
+  // isTeammate (it used to write teammate fields to the lead's own file). The
+  // team fields are sticky on a real teammate's file, so a write without
+  // isTeammate IS the heal -- but the face kept the flag, so the lead stayed
+  // out of the main policy until the renderer restarted.
+  test('a healed lead file stops being a teammate in a running renderer', () => {
+    const face = new MiniFace('lead');
+    const t0 = Date.now() - 5000;
+    face.updateFromFile({ state: 'waiting', isTeammate: true, teamName: 'builders',
+      teammateName: 'researcher', timestamp: t0 });
+    assert.strictEqual(face.isMainSession, false);
+    face.updateFromFile({ state: 'thinking', timestamp: t0 + 1000 });
+    assert.strictEqual(face.isTeammate, false);
+    assert.strictEqual(face.teammateName, '');
+    assert.strictEqual(face.teamName, '');
+    assert.strictEqual(face.teamColor, null);
+    assert.strictEqual(face.isMainSession, true);
+  });
+
+  test('a real teammate keeps its team fields across its own writes', () => {
+    const face = new MiniFace('lead-agent-a1');
+    const t0 = Date.now() - 5000;
+    face.updateFromFile({ state: 'coding', isTeammate: true, teamName: 'builders',
+      teammateName: 'researcher', parentSession: 'lead', timestamp: t0 });
+    face.updateFromFile({ state: 'reading', isTeammate: true, teamName: 'builders',
+      teammateName: 'researcher', parentSession: 'lead', timestamp: t0 + 1000 });
+    assert.strictEqual(face.isTeammate, true);
+    assert.strictEqual(face.teammateName, 'researcher');
+    assert.strictEqual(face.teamName, 'builders');
+  });
 });
 
 module.exports = suite;
