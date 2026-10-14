@@ -196,6 +196,11 @@ function orderingFields(prev, event, finishedId) {
 //   message". A tool END older than a turn end is the exception: it keeps the
 //   turn-end carry rules (a late PostToolUseFailure after Stop still shows
 //   its error, with `turnEnded` carried), as it always did.
+// A sync write further ahead than ORDER_SLACK_MS is a clock that stepped back
+// (NTP, a resumed VM), not an inversion -- a real one is milliseconds, a slow
+// spawn under load seconds -- and must not freeze every async write until the
+// clock catches up (the renderer's FUTURE_SLACK_MS makes the same call).
+const ORDER_SLACK_MS = 60000;
 function asyncWriteIsStale(event, prev, toolUseId, callKey) {
   if (!ASYNC_EVENTS.has(event) || !prev || typeof prev !== 'object') return false;
   if (event === 'PreToolUse') {
@@ -203,7 +208,8 @@ function asyncWriteIsStale(event, prev, toolUseId, callKey) {
     if (id && Array.isArray(prev.doneToolIds) && prev.doneToolIds.includes(id)) return true;
     if (prev.waitingOn && prev.waitingOn === callKey) return true;
   }
-  if (typeof prev.syncAt === 'number' && prev.syncAt > EVENT_AT) {
+  if (typeof prev.syncAt === 'number' && prev.syncAt > EVENT_AT
+      && prev.syncAt - EVENT_AT < ORDER_SLACK_MS) {
     return event === 'PreToolUse' || !TURN_CLOSING_EVENTS.has(prev.syncEvent);
   }
   return false;
@@ -352,7 +358,10 @@ function _confirmAgentWaits(sessionId) {
       try { s = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch {}
       if (!s || typeof s !== 'object' || s.stopped || s.state !== 'waiting') continue;
       if (s.waitKind !== 'permission' || s.waitConfirmed !== false) continue;
-      if (typeof s.eventAt === 'number' && EVENT_AT - s.eventAt < PERMISSION_CONFIRM_MIN_AGE_MS) continue;
+      // The request's own time: syncAt (an async write since, a parallel
+      // tool of the agent's, moves eventAt but carries syncAt).
+      const askedAt = typeof s.syncAt === 'number' ? s.syncAt : s.eventAt;
+      if (typeof askedAt === 'number' && EVENT_AT - askedAt < PERMISSION_CONFIRM_MIN_AGE_MS) continue;
       // A fresh timestamp: the renderer skips a write whose timestamp it has seen.
       writeJsonAtomic(fp, { ...s, waitConfirmed: true, timestamp: Date.now() }, 0o600);
     }

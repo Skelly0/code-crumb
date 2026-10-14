@@ -4243,7 +4243,7 @@ describe('update-state -- review round 5 (hooks): async ordering', () => {
       runUpdateState('UserPromptSubmit', { session_id: 'ord-3', prompt: 'next' }, env);
       const fp = sf(sessionsDir, 'ord-3');
       assert.strictEqual(readJSON(fp).syncEvent, 'UserPromptSubmit');
-      patch(fp, { syncAt: Date.now() + 60000 });
+      patch(fp, { syncAt: Date.now() + 20000 });
       const ups = readJSON(fp);
       fsMod.writeFileSync(statsFile, JSON.stringify({ ...readJSON(statsFile), streak: 4 }), 'utf8');
       runUpdateState('PostToolUseFailure', { session_id: 'ord-3', tool_name: 'Bash',
@@ -4263,7 +4263,7 @@ describe('update-state -- review round 5 (hooks): async ordering', () => {
     try {
       runUpdateState('Stop', { session_id: 'ord-4' }, env);
       const fp = sf(sessionsDir, 'ord-4');
-      patch(fp, { syncAt: Date.now() + 60000 });
+      patch(fp, { syncAt: Date.now() + 20000 });
       runUpdateState('PreToolUse', { session_id: 'ord-4', tool_name: 'Bash',
         tool_input: { command: 'npm test' }, tool_use_id: 'toolu_01ORD5' }, env);
       let f = readJSON(fp);
@@ -4274,6 +4274,21 @@ describe('update-state -- review round 5 (hooks): async ordering', () => {
       f = readJSON(fp);
       assert.strictEqual(f.state, 'error', 'a late failure after Stop still shows its error');
       assert.strictEqual(f.turnEnded, true, 'and the turn stays over');
+    } finally { cleanup(tmp); }
+  });
+
+  // A sync write minutes "ahead" is a clock that stepped back, not an
+  // inversion: treating it as one froze every tool write until the clock
+  // caught up.
+  test('a clock stepped back does not freeze the async writes', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('ord-7');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'ord-7', prompt: 'go' }, env);
+      const fp = sf(sessionsDir, 'ord-7');
+      patch(fp, { syncAt: Date.now() + 5 * 60000 });
+      runUpdateState('PreToolUse', { session_id: 'ord-7', tool_name: 'Bash',
+        tool_input: { command: 'npm test' }, tool_use_id: 'toolu_01ORD7' }, env);
+      assert.strictEqual(readJSON(fp).state, 'testing');
     } finally { cleanup(tmp); }
   });
 

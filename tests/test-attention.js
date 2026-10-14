@@ -1806,8 +1806,9 @@ describe('review round 5 -- permission wait confirmation', () => {
       const fp = sessionFile(t.sessionsDir, 'pw-3-agent-ag1');
       const agent = readJSON(fp);
       assert.strictEqual(agent.waitConfirmed, false);
-      // The dialog has been open for ten seconds.
-      fs.writeFileSync(fp, JSON.stringify({ ...agent, eventAt: agent.eventAt - 10000 }), 'utf8');
+      // The dialog has been open for ten seconds (syncAt: the request's own
+      // time), and a parallel tool of the agent's wrote since (eventAt).
+      fs.writeFileSync(fp, JSON.stringify({ ...agent, syncAt: agent.syncAt - 10000 }), 'utf8');
       runUpdateState('Notification', { session_id: 'pw-3', notification_type: 'permission_prompt' }, t.env);
       const after = readJSON(fp);
       assert.strictEqual(after.waitConfirmed, true);
