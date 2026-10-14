@@ -26,6 +26,8 @@ const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-test-home-'));
 process.env.HOME = fakeHome;
 process.env.USERPROFILE = fakeHome;
 process.env.CODE_CRUMB_STATE = path.join(fakeHome, '.code-crumb-state');
+// createSuite() (_harness.js) refuses to run unless this names HOME.
+process.env.CRUMB_TEST_HOME = fakeHome;
 process.on('exit', () => {
   try { fs.rmSync(fakeHome, { recursive: true, force: true }); } catch {}
 });

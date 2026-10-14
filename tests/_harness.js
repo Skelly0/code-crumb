@@ -9,6 +9,10 @@
 // |  only after they settle.                                       |
 // |                                                                |
 // |  CRUMB_TEST_QUIET=1 prints only failures and the summary.      |
+// |                                                                |
+// |  createSuite() refuses to run outside tests/run.js: a test     |
+// |  file started directly would use the real ~/.code-crumb*       |
+// |  files and talk to the live renderer.                          |
 // +================================================================+
 
 const fs = require('fs');
@@ -21,9 +25,36 @@ const GREEN = '\x1b[32m';
 const RED = '\x1b[31m';
 const RESET = '\x1b[0m';
 
+// -- Direct-run guard ----------------------------------------------
+// `node tests/test-adapters.js` used to run the whole file against the
+// user's REAL home: its hooks wrote ~/.code-crumb-state and the sessions
+// directory under a live renderer, and that is how the old suite once
+// corrupted live stats. tests/run.js points HOME and USERPROFILE at a
+// throwaway directory and names it in CRUMB_TEST_HOME (run.js's
+// ISOLATION_MARKER); a suite is built only while that still names the
+// home every path in shared.js resolves from (USERPROFILE first, as
+// there). Subprocess tests inherit the marker, but they run hooks and
+// adapters, never a suite, so a temp HOME of their own is no problem.
+const ISOLATION_MARKER = 'CRUMB_TEST_HOME';
+
+function isIsolated(env = process.env) {
+  const marker = env[ISOLATION_MARKER];
+  const home = env.USERPROFILE || env.HOME;
+  return !!marker && !!home && path.resolve(marker) === path.resolve(home);
+}
+
+function refuseUnlessIsolated() {
+  if (isIsolated()) return;
+  const file = path.basename(process.argv[1] || 'this file');
+  const filter = file.replace(/^test-/, '').replace(/\.js$/, '');
+  process.stderr.write(`  ${file} must be run through the runner, which isolates HOME first: node tests/run.js ${filter}\n`);
+  process.exit(1);
+}
+
 // -- Suite --------------------------------------------------------
 
 function createSuite() {
+  refuseUnlessIsolated();
   let passed = 0;
   let failed = 0;
   let currentDescribe = '';
@@ -38,7 +69,7 @@ function createSuite() {
 
   function pass(name) {
     passed++;
-    if (!QUIET) console.log(`    ${GREEN}✓${RESET} ${name}`);
+    if (!QUIET) console.log(`    ${GREEN}\u2713${RESET} ${name}`);
   }
 
   function fail(name, err, describeName) {
@@ -46,7 +77,7 @@ function createSuite() {
     const message = err && err.message ? err.message : String(err);
     const label = QUIET && describeName ? `${describeName} > ${name}` : name;
     failures.push({ describe: describeName, name, message });
-    console.log(`    ${RED}✗${RESET} ${label}`);
+    console.log(`    ${RED}\u2717${RESET} ${label}`);
     console.log(`      ${message}`);
   }
 
