@@ -658,7 +658,7 @@ describe('face.js -- escalation is for tools, not for held states', () => {
     const face = new ClaudeFace();
     face.state = state;
     face.stateDetail = detail;
-    face.lastStateChange = Date.now() - heldMs;
+    face.lastStateChange = face.now() - heldMs;
     return face;
   }
 

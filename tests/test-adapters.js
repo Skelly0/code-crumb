@@ -2562,9 +2562,9 @@ describe('bug fix regressions', () => {
     const { ClaudeFace } = require(path.join(__dirname, '..', 'lib', 'face.js'));
     const face = new ClaudeFace();
     face.setState('coding', 'editing app.js');
-    const before = Date.now();
+    const before = face.now();
     face.forceState('responding', 'wrapping up', 3000);
-    const after = Date.now();
+    const after = face.now();
     assert.strictEqual(face.state, 'responding', 'forceState skips the pending queue');
     assert.strictEqual(face.stateDetail, 'wrapping up');
     assert.strictEqual(face.pendingState, null, 'the queue is dropped');
@@ -2575,15 +2575,17 @@ describe('bug fix regressions', () => {
     assert.strictEqual(face.state, 'responding', 'the 3s minimum buffers the next state');
   });
 
-  // Kept as a source check: both rescue paths live inside the renderer's
-  // 15fps render loop, which the suite has no harness for. This asserts only
-  // that they still route through face.forceState (whose behaviour the test
-  // above covers) rather than hand-rolling the transition again.
-  test('source: the renderer responding rescues go through face.forceState', () => {
+  // Kept as a source check: the rescue lives inside the renderer's render
+  // loop. This asserts only that it still routes through face.forceState
+  // (whose behaviour the test above covers) rather than hand-rolling the
+  // transition again. There is one rescue now: the fresh-read block that had
+  // the second was removed in review round 5 (it swallowed a StopFailure's
+  // error -- tests/test-emotions.js has the behavioural test).
+  test('source: the renderer responding rescue goes through face.forceState', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
     const calls = src.match(/face\.forceState\('responding'/g) || [];
-    assert.strictEqual(calls.length, 2,
-      `both the stopped-flag and fresh-read rescues should forceState, found ${calls.length}`);
+    assert.strictEqual(calls.length, 1,
+      `the stopped-flag rescue should forceState, found ${calls.length}`);
     assert.ok(!src.includes('minDisplayUntil = now;'),
       'responding should not use minDisplayUntil = now (immediate expire)');
     assert.ok(!src.includes("face.state = 'responding';"),
@@ -2698,17 +2700,9 @@ describe('update-state.js stopped flag preservation (#98)', () => {
     );
   });
 
-  test('source: renderer fresh-read loop only detects false->true stopped transitions', () => {
-    const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
-    assert.ok(
-      src.includes('stoppedNow && !lastStopped && isNewerWrite(freshTs'),
-      'renderer.js fresh-read should only detect false->true transitions'
-    );
-    assert.ok(
-      !src.includes('stoppedNow !== lastStopped && freshTs'),
-      'renderer.js should not have the old bidirectional stoppedNow !== lastStopped check'
-    );
-  });
+  // (The fresh-read loop this block also pinned is gone -- review round 5 --
+  // and with it the latch it guarded; the forced read every 2s covers a
+  // missed Stop. tests/test-emotions.js drives both paths behaviourally.)
 });
 
 describe('update-state.js parallel sessions orbital visibility fix', () => {

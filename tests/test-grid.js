@@ -4563,7 +4563,9 @@ describe('grid.js -- round 3: live-renderer findings', () => {
 
   // A swap restarted "still running … Ns" at 0, and the 10-minute hold with it.
   test('a swap keeps a running tool\'s age', () => {
-    assert.ok(/ACTIVE_WORK_STATES\.has\(newData\.state\) \|\| newData\.state === 'waiting'\)[\s\S]{0,200}?face\.lastStateChange = ts;/.test(RSRC));
+    // (Carried over as an age: the face's clock is monotonic since review
+    // round 5, so the write's wall timestamp is no longer a face time.)
+    assert.ok(/ACTIVE_WORK_STATES\.has\(newData\.state\) \|\| newData\.state === 'waiting'\)[\s\S]{0,200}?face\.lastStateChange = face\.now\(\) - \(Date\.now\(\) - ts\);/.test(RSRC));
   });
 
   // A dead editor's agents are not running: counting them lifted the rescued

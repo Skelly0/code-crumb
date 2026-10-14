@@ -793,12 +793,39 @@ describe('platform -- renderer.js source-level fixes', () => {
   test('prefs palette index is normalized', () => {
     assert.ok(src.includes('normalizePaletteIndex(prefs.paletteIndex'));
   });
-  test('cleanup closes the file watchers and clears the session debounce timer', () => {
-    const i = src.indexOf('function cleanup() {');
-    const body = src.slice(i, i + 900);
-    assert.ok(body.includes('stateWatcher'), 'cleanup should close stateWatcher');
-    assert.ok(body.includes('sessionWatcher'), 'cleanup should close sessionWatcher');
-    assert.ok(body.includes('clearTimeout(sessionWatchTimer)'));
+  // Was a source grep for two watcher names. Review round 5 folded them into
+  // one self-healing watcher, and runUnifiedMode's seams let the test watch
+  // cleanup do its job instead.
+  test('cleanup closes the file watcher and cancels every pending timer', () => {
+    const renderer = require('../renderer');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-clean-'));
+    const timers = new Set();
+    const handles = [];
+    const watch = (d, cb) => {
+      const h = { cb, closed: false, on() {}, close() { this.closed = true; } };
+      handles.push(h);
+      return h;
+    };
+    let code = null;
+    const rt = renderer.runUnifiedMode({
+      sessionsDir: dir, watch, installHandlers: false,
+      schedule: (fn, ms) => { const t = { fn, ms }; timers.add(t); return t; },
+      cancel: (t) => { timers.delete(t); },
+      write: () => {}, exit: (c) => { code = c; },
+    });
+    try {
+      assert.strictEqual(handles.length, 1, 'one watcher on the sessions folder');
+      handles[0].cb('change', null);   // arms the read throttle and the ring reload
+      assert.ok(timers.size >= 3, 'a frame, the throttle and the reload are pending');
+      rt.cleanup();
+      assert.strictEqual(code, 0);
+      assert.ok(handles.every(h => h.closed), 'the watcher is closed');
+      assert.strictEqual(timers.size, 0, 'no timer is left to fire');
+    } finally {
+      rt.dispose();
+      try { fs.unlinkSync(shared.QUIT_FLAG_FILE); } catch {}
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
