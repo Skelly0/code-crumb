@@ -4747,4 +4747,75 @@ describe('update-state -- review round 5 (hooks): firstSeenAt', () => {
   });
 });
 
+// -- Review round 5 (integration): a predicate's "no" is not a failure ------
+// grep/rg/findstr exit 1 for "no match", diff/cmp for "the files differ",
+// test/[ for "false", which/where for "not found". Claude Code reports any
+// non-zero exit as PostToolUseFailure ("Exit code 1"), Codex and OpenCode as
+// a numeric exit code -- and every empty search was an error face that broke
+// the streak. Exit 2 is how these tools report a real failure.
+
+describe('state-machine.js -- review round 5: a predicate command answering no', () => {
+  const sm = require('../lib/state-machine');
+  const claudeFail = (command, error) =>
+    sm.classifyToolResult('Bash', { command }, sm.normalizeToolResponse({ error, is_interrupt: false }), true);
+  const exited = (command, exitCode, stdout = '') =>
+    sm.classifyToolResult('Bash', { command }, { stdout, stderr: '', exitCode }, false);
+
+  test('an empty search is no matches, and neutral', () => {
+    for (const cmd of ['grep -rn "TODO" src', 'rg -n deprecated lib', 'git grep -n foo',
+      'findstr /s /i "needle" *.js', 'cd lib && grep -c x shared.js | grep -v 0', 'cat a.txt | grep -q needle',
+      'bash -lc "rg needle"']) {
+      const r = claudeFail(cmd, 'Exit code 1');
+      assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'no matches', true], cmd);
+    }
+    const r = exited('rg TODO', 1);
+    assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'no matches', true], 'numeric exit');
+  });
+
+  test('a difference, a false test and a missing command are answers too', () => {
+    const d = claudeFail('diff a.txt b.txt', 'Exit code 1\n1c1\n< old\n---\n> new');
+    assert.deepStrictEqual([d.state, d.detail, d.neutral], ['satisfied', 'files differ', true]);
+    assert.strictEqual(claudeFail('git diff --quiet', 'Exit code 1').detail, 'files differ');
+    for (const cmd of ['test -f dist/index.js', '[ -d node_modules ]', '[[ -n "$CI" ]']) {
+      assert.deepStrictEqual([claudeFail(cmd, 'Exit code 1').detail, claudeFail(cmd, 'Exit code 1').neutral],
+        ['condition false', true], cmd);
+    }
+    assert.strictEqual(claudeFail('which pnpm', 'Exit code 1').detail, 'not found');
+    assert.strictEqual(claudeFail('pgrep -f renderer.js', 'Exit code 1').detail, 'no process');
+  });
+
+  test('a real failure is still an error', () => {
+    const cases = [
+      ['grep foo missing.txt', 'Exit code 2\ngrep: missing.txt: No such file or directory'],
+      ['cat nope.txt | grep x', 'Exit code 1\ncat: nope.txt: No such file or directory'],
+      ['cd nowhere && grep x y', 'Exit code 1\nbash: cd: nowhere: No such file or directory'],
+      ['npm test && grep x y', 'Exit code 1'],          // npm test may be the one that failed
+      ['grep x y; npm test', 'Exit code 1'],
+      ['diff a b && npm test', 'Exit code 1\nnpm ERR! Test failed'],
+      ['git diff --stat', 'Exit code 1'],              // without --quiet/--exit-code, 1 is trouble
+      ['npm test', 'Exit code 1'],
+    ];
+    for (const [cmd, err] of cases) {
+      const r = claudeFail(cmd, err);
+      assert.strictEqual(r.state, 'error', cmd);
+      assert.ok(!r.neutral, cmd);
+    }
+    assert.strictEqual(exited('rg x', 2).state, 'error');
+    assert.strictEqual(claudeFail('grep x y', 'interrupted').state, 'error');
+  });
+
+  test('end to end: an empty grep through PostToolUseFailure keeps the streak', () => {
+    const { tmp, statsFile, sessionsDir, env } = makeTempEnv('pred-1');
+    try {
+      fsMod.writeFileSync(statsFile, JSON.stringify({ streak: 6, bestStreak: 6 }), 'utf8');
+      const call = { session_id: 'pred-1', tool_name: 'Bash', tool_input: { command: 'grep -rn needle src' } };
+      runUpdateState('PreToolUse', { ...call, tool_use_id: 'toolu_p1' }, env);
+      runUpdateState('PostToolUseFailure', { ...call, tool_use_id: 'toolu_p1', error: 'Exit code 1', is_interrupt: false }, env);
+      const f = readJSON(pathMod.join(sessionsDir, 'pred-1.json'));
+      assert.deepStrictEqual([f.state, f.detail], ['satisfied', 'no matches']);
+      assert.strictEqual(readJSON(statsFile).streak, 6, 'neither broken nor extended');
+    } finally { cleanup(tmp); }
+  });
+});
+
 module.exports = suite;
