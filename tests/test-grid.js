@@ -2157,7 +2157,10 @@ describe('grid.js -- face removal respects PID liveness when file is missing (Bu
 // -- Bug #111: File deletion protects on parse error (Bug B) --
 
 describe('grid.js -- file deletion protects on parse error (Bug B)', () => {
-  test('corrupted JSON file is not deleted during mtime purge', () => {
+  // Review round 5 narrowed this: a write in progress carries a fresh mtime,
+  // so only a FRESH unparseable file can be mid-write. One that has stayed
+  // corrupt past STALE_MS is junk and is purged (see the round 5 block).
+  test('a corrupted JSON file with a fresh mtime is not deleted (it may be mid-write)', () => {
     const fs = require('fs');
     const pathMod = require('path');
     const { SESSIONS_DIR } = require('../lib/shared');
@@ -2169,10 +2172,6 @@ describe('grid.js -- file deletion protects on parse error (Bug B)', () => {
 
     // Write corrupted JSON (simulates mid-write race)
     fs.writeFileSync(filePath, '{"session_id":"corrupted-json-test","state":"thinki');
-
-    // Backdate past STALE_MS so purge loop considers it
-    const staleTime = new Date(Date.now() - STALE_MS - 5000);
-    fs.utimesSync(filePath, staleTime, staleTime);
 
     // Load — purge loop should catch the parse error and continue (protect the file)
     orbital.loadSessions('main-id');
@@ -4749,6 +4748,477 @@ describe('grid.js -- round 4', () => {
       assert.doesNotThrow(() => o2.loadSessions(null));
       assert.ok(!fs.existsSync(fp), 'a stale file with a junk pid is purged');
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+// -- Review round 5 -----------------------------------------------------------
+// Each test below was checked to fail against the pre-fix sources first,
+// except the ones marked "guard", which pin a risk the fix itself introduced.
+
+describe('grid.js -- Review round 5', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const grid = require('../lib/grid');
+  const alive = () => true;
+  const mkdir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-r5-'));
+  const rm = (dir) => fs.rmSync(dir, { recursive: true, force: true });
+  const put = (dir, name, body, mtimeMs) => {
+    const fp = path.join(dir, name);
+    fs.writeFileSync(fp, typeof body === 'string' ? body : JSON.stringify(body));
+    if (mtimeMs !== undefined) fs.utimesSync(fp, new Date(mtimeMs), new Date(mtimeMs));
+    return fp;
+  };
+  const orbitalAt = (dir) => { const o = new OrbitalSystem(); o._sessionsDir = dir; return o; };
+  const settleAsync = async (o) => {
+    const until = Date.now() + 3000;
+    while (o._loadingInProgress && Date.now() < until) await new Promise(r => setTimeout(r, 5));
+  };
+  const loadAsync = async (o, id = null) => {
+    o.loadSessionsAsync(id);
+    await settleAsync(o);
+    await new Promise(r => setTimeout(r, 50)); // its unlinks are fire-and-forget
+  };
+
+  // -- 1. PID verdicts ---------------------------------------------------------
+
+  test('win32 ignores the low two bits of a pid: only a multiple of 4 is addressable', () => {
+    assert.strictEqual(grid.pidAddressable(5917, 'win32'), false);
+    assert.strictEqual(grid.pidAddressable(5, 'win32'), false);
+    assert.strictEqual(grid.pidAddressable(5916, 'win32'), true);
+    assert.strictEqual(grid.pidAddressable(5917, 'linux'), true);
+    assert.strictEqual(grid.pidAddressable(5917, 'darwin'), true);
+    if (process.platform === 'win32') {
+      assert.strictEqual(isProcessAlive(process.pid + 1), false, 'kill(pid + 1, 0) opened this very process');
+    }
+  });
+
+  test('a pid kill(0) and the resolver disagree about keeps no ghost and does not loop the resolver', () => {
+    // pid + 1 on win32 aliases this process for kill(0) and is absent from
+    // Get-Process. The resolver here reports every pid absent: the same
+    // disagreement on any platform where pid + 1 happens to be alive.
+    const ghostPid = process.pid + 1;
+    let calls = 0;
+    _pidStartCache.delete(ghostPid);
+    _setPidResolver((pids, done) => { calls++; done(new Map()); });
+    const dir = mkdir();
+    try {
+      const old = Date.now() - 2 * 3600e3;
+      const ghost = put(dir, 'ghost.json', { session_id: 'ghost', state: 'coding', pid: ghostPid, timestamp: old }, old);
+      put(dir, 'live.json', { session_id: 'live', state: 'coding', pid: ghostPid, timestamp: Date.now() });
+      const orb = orbitalAt(dir);
+      for (let i = 0; i < 5; i++) orb.loadSessions(null);
+      assert.strictEqual(fs.existsSync(ghost), false, 'a 2h-old file was kept alive by a pid nobody owns');
+      assert.ok(calls <= 1, `the resolver ran ${calls} times for one pid in five loads`);
+    } finally {
+      _setPidResolver(null);
+      _pidStartCache.delete(ghostPid);
+      rm(dir);
+    }
+  });
+
+  test('a pid the resolver cannot find stays "not ours" until its TTL, then refreshes once', () => {
+    const pid = 515152;
+    let calls = 0;
+    _pidStartCache.delete(pid);
+    _setPidResolver((pids, done) => { calls++; done(new Map()); });
+    try {
+      for (let i = 0; i < 5; i++) {
+        assert.strictEqual(isOwnedByLiveProcess(pid, Date.now(), alive), false, `call ${i}: an absent pid read as pending`);
+      }
+      assert.strictEqual(calls, 1, 'one resolution, not one per call');
+      assert.strictEqual(_pidStartStatus(pid), 'dead');
+      _pidStartCache.get(pid).resolvedAt = Date.now() - grid.PID_CACHE_TTL_MS - 1000;
+      _setPidResolver(() => { calls++; }); // a refresh that is still in flight
+      assert.strictEqual(isOwnedByLiveProcess(pid, Date.now(), alive), false, 'the old verdict serves while it refreshes');
+      assert.strictEqual(isOwnedByLiveProcess(pid, Date.now(), alive), false);
+      assert.strictEqual(calls, 2, 'the expired verdict refreshed exactly once');
+    } finally {
+      _setPidResolver(null);
+      _pidStartCache.delete(pid);
+    }
+  });
+
+  test('a start time that never resolves protects for PID_PENDING_PROTECT_MS, then only within the 1h cap', () => {
+    assert.strictEqual(grid.PID_PENDING_PROTECT_MS, 30000);
+    const pid = 525252;
+    try {
+      _pidStartCache.set(pid, { value: 'pending', resolvedAt: Date.now() });
+      assert.strictEqual(isOwnedByLiveProcess(pid, Date.now() - 99999999, alive), true, 'a fresh pending protects');
+      _pidStartCache.set(pid, { value: 'pending', resolvedAt: Date.now() - grid.PID_PENDING_PROTECT_MS - 1000 });
+      assert.strictEqual(isOwnedByLiveProcess(pid, Date.now() - 99999999, alive), false,
+        'a pending that never resolved made an ancient session immortal');
+      assert.strictEqual(isOwnedByLiveProcess(pid, Date.now() - 30 * 60000, alive), true,
+        'a recent write keeps the 1h cap');
+    } finally { _pidStartCache.delete(pid); }
+  });
+
+  // -- 2. Parent freshness ---------------------------------------------------
+
+  test.async('a torn read of a fresh parent does not cost its silent children (async, as sync)', async () => {
+    for (const ageS of [100, 130]) {
+      const dir = mkdir();
+      try {
+        put(dir, 'parent.json', ''); // fresh mtime, nothing readable this pass
+        const t = Date.now() - ageS * 1000;
+        const child = put(dir, 'parent-agent-a1.json',
+          { session_id: 'parent-agent-a1', parentSession: 'parent', state: 'thinking', timestamp: t }, t);
+        const orb = orbitalAt(dir);
+        await loadAsync(orb);
+        assert.ok(orb.faces.has('parent-agent-a1'), `a child silent ${ageS}s was dropped`);
+        assert.ok(fs.existsSync(child), `a child silent ${ageS}s was unlinked`);
+      } finally { rm(dir); }
+    }
+  });
+
+  // -- 3. Junk ---------------------------------------------------------------
+
+  test.async('junk that has stayed junk past STALE_MS is purged, sync and async; fresh or main junk is not', async () => {
+    const day = Date.now() - 24 * 3600e3;
+    const bodies = ['null', '[]', '5', '', '{"session_id":"to'];
+    for (const mode of ['sync', 'async']) {
+      const dir = mkdir();
+      try {
+        const stale = bodies.map((body, i) => put(dir, `junk${i}.json`, body, day));
+        const fresh = put(dir, 'fresh.json', '{"session_id":"fre');
+        const main = put(dir, 'main.json', '{"session_id":"ma', day);
+        const orb = orbitalAt(dir);
+        if (mode === 'sync') orb.loadSessions('main'); else await loadAsync(orb, 'main');
+        stale.forEach((fp, i) => assert.strictEqual(fs.existsSync(fp), false,
+          `${mode}: ${JSON.stringify(bodies[i])} sat a day as junk and was kept`));
+        assert.ok(fs.existsSync(fresh), `${mode}: a fresh torn file may be mid-write`);
+        assert.ok(fs.existsSync(main), `${mode}: the main session's file is never unlinked`);
+      } finally { rm(dir); }
+    }
+  });
+
+  test('guard: a read torn by a write in progress is never taken for old junk (the stat follows the read)', () => {
+    const dir = mkdir();
+    const realRead = fs.readFileSync;
+    try {
+      const old = Date.now() - 24 * 3600e3;
+      const fp = put(dir, 'busy.json', { session_id: 'busy', state: 'coding', timestamp: old }, old);
+      fs.readFileSync = function (p, ...rest) {
+        if (String(p) === fp) {
+          // The direct-write fallback rewrites in place: this read lands mid-write.
+          fs.writeFileSync(fp, '{"session_id":"busy","sta');
+          return '{"session_id":"busy","sta';
+        }
+        return realRead.call(fs, p, ...rest);
+      };
+      orbitalAt(dir).loadSessions(null);
+      fs.readFileSync = realRead;
+      assert.ok(fs.existsSync(fp), 'a file being written right now was unlinked');
+    } finally {
+      fs.readFileSync = realRead;
+      rm(dir);
+    }
+  });
+
+  // -- 4. Older snapshots ----------------------------------------------------
+
+  test('updateFromFile never applies a write older than the last one it applied', () => {
+    const t = Date.now();
+    const f = new MiniFace('mono');
+    f.updateFromFile({ state: 'error', detail: 'build failed', timestamp: t }, t);
+    f.minDisplayUntil = 0;
+    f.updateFromFile({ state: 'coding', detail: 'edit old.js', timestamp: t - 5000 }, t - 5000);
+    assert.strictEqual(f.state, 'error');
+    assert.strictEqual(f.detail, 'build failed');
+    assert.strictEqual(f.pendingState, null, 'the older write was queued to show 1.5s later');
+    // A clock stepped back: the last write is an hour ahead, and a current
+    // one must still count as new (the renderer's FUTURE_SLACK_MS rule).
+    const g = new MiniFace('future');
+    g.updateFromFile({ state: 'coding', timestamp: t + 3600e3 }, t);
+    g.minDisplayUntil = 0;
+    g.updateFromFile({ state: 'reading', detail: 'now', timestamp: t }, t);
+    assert.strictEqual(g.state, 'reading', 'a face whose last write came from the future froze');
+  });
+
+  test.async('an async pass whose reads predate a sync load does not apply over it', async () => {
+    const dir = mkdir();
+    const realReadFile = fs.readFile;
+    try {
+      const a = put(dir, 'a.json', { session_id: 'a', state: 'coding', detail: 'edit old.js', timestamp: Date.now() - 5000 });
+      const orb = orbitalAt(dir);
+      orb.loadSessions(null);
+      let interleaved = false;
+      fs.readFile = function (p, ...args) {
+        const cb = args.pop();
+        return realReadFile.call(fs, p, ...args, (err, data) => {
+          if (!interleaved) {
+            interleaved = true;
+            // The swap frame's sync reload runs between this read and its callback.
+            put(dir, 'a.json', { session_id: 'a', state: 'error', detail: 'build failed', timestamp: Date.now() });
+            put(dir, 'b.json', { session_id: 'b', state: 'reading', timestamp: Date.now() });
+            orb.loadSessions(null);
+          }
+          cb(err, data);
+        });
+      };
+      orb.loadSessionsAsync(null);
+      await settleAsync(orb);
+      fs.readFile = realReadFile;
+      assert.ok(interleaved, 'sanity: the sync load ran mid-pass');
+      const A = orb.faces.get('a');
+      assert.strictEqual(A.state, 'error');
+      assert.notStrictEqual(A.pendingState, 'coding', 'the older snapshot was queued over the newer');
+      assert.ok(orb.faces.has('b'), 'a face born during the pass was deleted (to respawn 2s later)');
+      assert.ok(fs.existsSync(a));
+    } finally {
+      fs.readFile = realReadFile;
+      rm(dir);
+    }
+  });
+
+  // -- 5. One loader ---------------------------------------------------------
+
+  test('loadSessions stats each file once', () => {
+    const dir = mkdir();
+    const realStat = fs.statSync;
+    let stats = 0;
+    try {
+      for (let i = 0; i < 4; i++) put(dir, `s${i}.json`, { session_id: `s${i}`, state: 'coding', timestamp: Date.now() });
+      fs.statSync = function (...args) { stats++; return realStat.apply(fs, args); };
+      orbitalAt(dir).loadSessions(null);
+      fs.statSync = realStat;
+      assert.strictEqual(stats, 4, `${stats} stats for 4 files`);
+    } finally {
+      fs.statSync = realStat;
+      rm(dir);
+    }
+  });
+
+  test.async('the sync and async loaders reach the same verdicts on the same directory', async () => {
+    const build = (dir) => {
+      const now = Date.now();
+      put(dir, 'P.json', '');                                     // a live parent, torn this pass
+      put(dir, 'P-agent-1.json', { session_id: 'P-agent-1', parentSession: 'P', state: 'thinking', timestamp: now - 100e3 }, now - 100e3);
+      put(dir, 'P-agent-2.json', { session_id: 'P-agent-2', parentSession: 'P', state: 'thinking', timestamp: now - 130e3 }, now - 130e3);
+      put(dir, 'old.json', { session_id: 'old', state: 'coding', timestamp: now - 200e3 }, now - 200e3);
+      put(dir, 'junk.json', 'null', now - 200e3);
+      put(dir, 'done.json', { session_id: 'done', state: 'happy', stopped: true, timestamp: now }, now);
+      put(dir, 'win.json', { session_id: 'win', state: 'reading', timestamp: now }, now);
+    };
+    const verdict = (orb, dir) => ({ faces: [...orb.faces.keys()].sort(), files: fs.readdirSync(dir).sort() });
+    const d1 = mkdir();
+    const d2 = mkdir();
+    try {
+      build(d1);
+      build(d2);
+      const s = orbitalAt(d1);
+      s.loadSessions(null);
+      const a = orbitalAt(d2);
+      await loadAsync(a);
+      assert.deepStrictEqual(verdict(a, d2), verdict(s, d1));
+      assert.deepStrictEqual(verdict(s, d1), {
+        faces: ['P-agent-1', 'P-agent-2', 'win'],
+        files: ['P-agent-1.json', 'P-agent-2.json', 'P.json', 'done.json', 'win.json'],
+      });
+    } finally { rm(d1); rm(d2); }
+  });
+
+  // -- 6. A clock stepped back -------------------------------------------------
+
+  test('a session file from the future is judged from when it was first seen', () => {
+    const dir = mkdir();
+    const realNow = Date.now;
+    try {
+      const fut = realNow() + 3600e3;
+      const fp = put(dir, 'crashed.json', { session_id: 'crashed', state: 'coding', timestamp: fut, lastPromptAt: fut }, fut);
+      const orb = orbitalAt(dir);
+      orb.loadSessions(null);
+      const f = orb.faces.get('crashed');
+      assert.ok(f && !f.isStale(), 'sanity: the face is there and fresh');
+      assert.ok(f.lastUpdate <= realNow(), 'lastUpdate sits an hour in the future');
+      Date.now = () => realNow() + ORPHAN_TIMEOUT + 5000;
+      assert.strictEqual(f.isStale(), true, 'a crashed session read as fresh for the whole step');
+      Date.now = () => realNow() + STALE_MS + 5000;
+      orb.loadSessions(null); // the face goes...
+      orb.loadSessions(null); // ...and with nothing vouching for it, the file
+      assert.strictEqual(fs.existsSync(fp), false, 'its file was never purged');
+    } finally {
+      Date.now = realNow;
+      rm(dir);
+    }
+  });
+
+  test('a face seen just before the clock stepped back does not stay fresh until it catches up', () => {
+    const f = new MiniFace('stepped');
+    f.state = 'coding';
+    f.lastUpdate = Date.now() + 3600e3;
+    f.tick(16);
+    assert.ok(f.lastUpdate <= Date.now(), 'lastUpdate left in the future');
+    const realNow = Date.now;
+    try {
+      Date.now = () => realNow() + ORPHAN_TIMEOUT + 5000;
+      assert.strictEqual(f.isStale(), true);
+    } finally { Date.now = realNow; }
+  });
+
+  // -- 7. A face joining a settled ring --------------------------------------
+
+  test('a face joining a settled ring slides in: the resolver never fires and it lands clear', () => {
+    const { ClaudeFace } = require('../lib/face');
+    const { MINI_W, MINI_H } = grid;
+    const ov = (p, q) => p.col < q.col + MINI_W && q.col < p.col + MINI_W && p.row < q.row + MINI_H && q.row < p.row + MINI_H;
+    const boxes = (out) => {
+      const re = /\x1b\[(\d+);(\d+)H(?:\x1b\[[^m]*m)*\u256d/g;
+      const found = [];
+      let m;
+      while ((m = re.exec(out))) found.push({ row: +m[1], col: +m[2] });
+      return found;
+    };
+    const add = (orb, id, parentSession, firstSeen, spawning) => {
+      const f = new MiniFace(id);
+      f.updateFromFile({ state: 'coding', detail: 'edit', parentSession, cwd: '/r/' + id });
+      f.firstSeen = firstSeen;
+      f.spawning = spawning;
+      f.spawnProgress = 0;
+      orb.faces.set(id, f);
+      orb._sortedDirty = true;
+      orb._groupsDirty = true;
+    };
+    const oc = process.stdout.columns, or = process.stdout.rows;
+    let ran = 0;
+    try {
+      for (const [cols, rows] of [[140, 50], [160, 60], [180, 64]]) {
+        process.stdout.columns = cols; process.stdout.rows = rows;
+        // into the middle of a family, at its front (its slot is past the
+        // empty stretch between groups), and as a new top-level window
+        for (const [id, parent, firstSeen] of [['mid', 'p1', 1.5], ['front', 'p1', -1], ['solo', undefined, 99]]) {
+          for (const spawning of [true, false]) {
+            const face = new ClaudeFace();
+            face.showStats = true; face.accessoriesEnabled = true;
+            const orb = new OrbitalSystem();
+            orb.setMainSession('main');
+            for (let k = 0; k < 6; k++) add(orb, 'f' + k, k < 3 ? 'p1' : undefined, k, false);
+            const frame = () => { face.update(66); orb.update(66); face.render(); return orb.render(cols, rows, face.lastPos, null); };
+            for (let fr = 0; fr < 80; fr++) frame();
+            if (orb.calculateOrbit(cols, rows, face.lastPos).maxSlots < 7) continue;
+            ran++;
+            let shoved = 0;
+            const resolve = orb._resolveOverlaps.bind(orb);
+            orb._resolveOverlaps = (pos, c, r) => {
+              const before = pos.map(p => `${p.row},${p.col}`).join(' ');
+              resolve(pos, c, r);
+              if (pos.map(p => `${p.row},${p.col}`).join(' ') !== before) shoved++;
+            };
+            add(orb, id, parent, firstSeen, spawning);
+            for (let fr = 0; fr < 90; fr++) frame();
+            const label = `${cols}x${rows} ${id} spawning=${spawning}`;
+            assert.strictEqual(shoved, 0, `${label}: the resolver shoved faces on ${shoved} frames`);
+            const nf = orb.faces.get(id);
+            assert.ok(!nf._joining && !nf.spawning, `${label}: the newcomer never settled`);
+            const pos = boxes(frame());
+            assert.strictEqual(pos.length, 7, `${label}: ${pos.length} faces drawn`);
+            for (let i = 0; i < pos.length; i++) for (let j = i + 1; j < pos.length; j++) {
+              assert.ok(!ov(pos[i], pos[j]), `${label}: faces at ${pos[i].row},${pos[i].col} and ${pos[j].row},${pos[j].col} overlap`);
+            }
+          }
+        }
+      }
+    } finally { process.stdout.columns = oc; process.stdout.rows = or; }
+    assert.ok(ran >= 12, `only ${ran} scenes had room for the ring`);
+  });
+
+  // -- 8. The size render() was given ------------------------------------------
+
+  test('connection dots and tethers clip to the size render() was given, not process.stdout', () => {
+    const dots = (out) => {
+      const re = /\x1b\[(\d+);(\d+)H(?:\x1b\[[^m]*m)*\u00b7/g;
+      const found = [];
+      let m;
+      while ((m = re.exec(out))) found.push({ row: +m[1], col: +m[2] });
+      return found;
+    };
+    const oc = process.stdout.columns, or = process.stdout.rows;
+    process.stdout.columns = 80; process.stdout.rows = 24;
+    try {
+      const orb = new OrbitalSystem();
+      orb.setMainSession('main');
+      orb.time = 5000;
+      const child = new MiniFace('main-agent-1');
+      child.updateFromFile({ state: 'coding', parentSession: 'main', timestamp: Date.now() });
+      orb.faces.set(child.sessionId, child);
+      const mainPos = { row: 25, col: 85, w: 30, h: 10, centerX: 100, centerY: 30 };
+      const conn = dots(orb.render(200, 60, mainPos, null));
+      assert.ok(conn.some(d => d.col > 80), 'no connection dot past stdout\'s 80 columns of a 200-column render');
+      const f1 = new MiniFace('a'); f1.parentSession = 'main';
+      const f2 = new MiniFace('b'); f2.parentSession = 'main';
+      const tether = dots(orb._renderGroupTethers(
+        [{ col: 100, row: 40, face: f1 }, { col: 170, row: 40, face: f2 }], mainPos, [100, 160, 210], 200, 60));
+      assert.ok(tether.some(d => d.col > 80 && d.row > 24), 'tether dots clipped to stdout, not to the size given');
+    } finally { process.stdout.columns = oc; process.stdout.rows = or; }
+  });
+
+  // -- 9. Permission waits ---------------------------------------------------
+
+  const permWait = (over = {}) => ({
+    session_id: 's', state: 'waiting', detail: 'allow?', editor: 'claude',
+    waitKind: 'permission', waitConfirmed: false, permState: 'executing', permDetail: 'npm test',
+    waitingOn: 'abc123', timestamp: Date.now() - grid.PERMISSION_CONFIRM_MS - 1000, ...over,
+  });
+  const settled = (data) => {
+    const f = new MiniFace('s');
+    f.updateFromFile(data, data.timestamp);
+    f.tick(16);
+    return f;
+  };
+
+  test('an unconfirmed Claude permission wait past PERMISSION_CONFIRM_MS shows its running tool', () => {
+    assert.strictEqual(grid.PERMISSION_CONFIRM_MS, 8000);
+    const f = settled(permWait());
+    assert.strictEqual(f.state, 'executing', 'the answered wait still asked "allow?"');
+    assert.strictEqual(f.detail, 'npm test');
+    // A running tool, timed from now: not timed out to thinking on the spot...
+    f.minDisplayUntil = 0;
+    f.tick(16);
+    assert.strictEqual(f.state, 'executing', 'the inferred tool timed out the moment it showed');
+    // ...while staleness still reads the write itself.
+    assert.ok(Date.now() - f.lastUpdate >= grid.PERMISSION_CONFIRM_MS);
+  });
+
+  test('a wait still queued behind a minimum display settles there too', () => {
+    const t = Date.now() - grid.PERMISSION_CONFIRM_MS - 1000;
+    const f = new MiniFace('s');
+    f.updateFromFile({ state: 'reviewing', editor: 'claude', timestamp: t - 10 }, t - 10);
+    f.updateFromFile(permWait({ timestamp: t }), t);
+    assert.strictEqual(f.pendingState, 'waiting', 'sanity: the wait is queued');
+    f.tick(16);
+    assert.strictEqual(f.pendingState, 'executing');
+    assert.strictEqual(f.pendingDetail, 'npm test');
+  });
+
+  test('guard: a young, confirmed, non-Claude or non-permission wait stays a wait', () => {
+    for (const [why, over] of [
+      ['young', { timestamp: Date.now() - 2000 }],
+      ['confirmed', { waitConfirmed: true }],
+      ['codex', { editor: 'codex' }],
+      ['not a permission', { waitKind: undefined }],
+    ]) {
+      const f = settled(permWait(over));
+      assert.strictEqual(f.state, 'waiting', why);
+      assert.strictEqual(f.detail, 'allow?', why);
+    }
+    // The confirming Notification lands before the window closes: still a wait.
+    const t = Date.now() - grid.PERMISSION_CONFIRM_MS - 1000;
+    const f = new MiniFace('s');
+    f.updateFromFile(permWait({ timestamp: t }), t);
+    f.updateFromFile(permWait({ waitConfirmed: true, timestamp: t + 6000 }), t + 6000);
+    f.tick(16);
+    assert.strictEqual(f.state, 'waiting', 'a confirmed wait was settled as answered');
+  });
+
+  test('the asking tool\'s fields are hostile file text like every other', () => {
+    for (const bad of ['happy', '__proto__', 'responding', 'waiting', { x: 1 }, 7]) {
+      const f = settled(permWait({ permState: bad }));
+      assert.strictEqual(f.state, 'executing', `${JSON.stringify(bad)} -> ${f.state}`);
+    }
+    const f = settled(permWait({ permState: 'testing', permDetail: 'npm\n test\u001b[2J' }));
+    assert.strictEqual(f.state, 'testing');
+    assert.ok(!/[\n\u001b]/.test(f.detail), 'a newline or ESC reached the ring');
+    assert.strictEqual(settled(permWait({ permDetail: { cmd: 'x' } })).detail, '');
   });
 });
 
