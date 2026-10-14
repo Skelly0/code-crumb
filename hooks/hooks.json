@@ -6,7 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" PreToolUse"
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" PreToolUse",
+            "async": true
           }
         ]
       }
@@ -17,7 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" PostToolUse"
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" PostToolUse",
+            "async": true
           }
         ]
       }
@@ -28,7 +30,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" PostToolUseFailure"
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" PostToolUseFailure",
+            "async": true
           }
         ]
       }
@@ -238,6 +241,17 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" PostModelSwitch"
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/update-state.js\" PermissionDenied"
           }
         ]
       }
