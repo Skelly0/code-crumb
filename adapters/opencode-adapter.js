@@ -13,8 +13,11 @@
 // |    tool.error             -> tool_end with isError             |
 // |    permission.asked       -> waiting "allow?"                  |
 // |    permission.replied     -> satisfied                         |
+// |    question.asked         -> waiting "asking you"              |
+// |    question.replied       -> satisfied (answered)              |
+// |    session.compacted      -> satisfied "memory compacted"      |
 // |    session.idle           -> turn_end (happy, stopped)         |
-// |    session.error          -> error                             |
+// |    session.error          -> error, ending the turn            |
 // |                                                                |
 // |  Plugin payload fields:                                        |
 // |    { "type": "...", "sessionId": "ses_1", "tool": "edit",      |
@@ -44,11 +47,34 @@ function mapOpenCodeEventType(raw) {
     case 'tool.error':             return 'tool_end';
     case 'session.idle':           return 'turn_end';
     case 'session.error':          return 'error';
+    case 'session.compacted':      return 'compacted';
     case 'permission.asked':       return 'permission_ask';
     case 'permission.replied':     return 'permission_reply';
+    case 'question.asked':         return 'question_ask';
+    case 'question.replied':       return 'question_reply';
+    case 'question.rejected':      return 'question_reject';
     default:                       return raw;
   }
 }
+
+// OpenCode's own tool names for what Claude Code calls AskUserQuestion and
+// Enter/ExitPlanMode, so the shared tables give them the same faces: the
+// question tool waits on the user (it read "thinking / question" and the face
+// went to sleep while OpenCode asked), and plan_exit asks for approval of the
+// plan through the same question service.
+const TOOL_ALIASES = {
+  question: 'AskUserQuestion',
+  plan_exit: 'ExitPlanMode',
+  plan_enter: 'EnterPlanMode',
+};
+
+// What a dismissed question throws (QuestionRejectedError): the user's
+// choice, not a failure.
+const DISMISSED_RE = /dismissed this question/i;
+
+// The SDK error names worth telling apart (session.error's errorName).
+const ABORTED_RE = /^(MessageAbortedError|AbortError)$/;
+const OVERFLOW_NAME = 'ContextOverflowError';
 
 // Only strings are useful as text; an object here used to reach the error
 // forensics as "[object Object]" or a raw boolean.
@@ -75,7 +101,8 @@ function normaliseEvent(data) {
   // spelling nests them (input.tool, input.args) and the generic format uses
   // tool/tool_input. All three stay supported.
   const opencodeInput = data.input || {};
-  const toolName = data.tool || opencodeInput.tool || data.tool_name || '';
+  const rawTool = data.tool || opencodeInput.tool || data.tool_name || '';
+  const toolName = (typeof rawTool === 'string' && TOOL_ALIASES[rawTool]) || rawTool;
   const toolInput = normaliseToolInput(
     data.toolInput || data.tool_input || opencodeInput.args
   );
@@ -88,6 +115,14 @@ function normaliseEvent(data) {
 
   const sessionId = data.sessionId || data.session_id || '';
 
+  // A session.error that names no session belongs to none: a plugin that
+  // failed to load, a skill that failed to parse. Drawn, it was a phantom
+  // opencode-<pid> session that also took the stats owner and the streak.
+  // (The plugin drops these already; this covers any older copy of it.)
+  if (rawEvent === 'session.error' && !sessionId && !process.env.CLAUDE_SESSION_ID) {
+    return { skip: true };
+  }
+
   // Raw provider model id, when the plugin observed one. Prettified by
   // base-adapter -- this side just carries it.
   const model = data.model || '';
@@ -95,7 +130,17 @@ function normaliseEvent(data) {
   // Set on a task tool's child session (see the plugin's session.created).
   const parentSession = textField(data.parentSession);
 
-  return { event, toolName, toolInput, toolOutput, isError, stderr, sessionId, model, parentSession };
+  // How a shell command ended, from the tool's result metadata (see the
+  // plugin's shellOutcome): the only place OpenCode 1.18 reports it.
+  const exitCode = typeof data.exit === 'number' ? data.exit
+    : typeof data.exitCode === 'number' ? data.exitCode : undefined;
+  const interrupted = data.interrupted === true;
+
+  return {
+    event, toolName, toolInput, toolOutput, isError, stderr, sessionId, model, parentSession,
+    ...(exitCode !== undefined ? { exitCode } : {}),
+    ...(interrupted ? { interrupted } : {}),
+  };
 }
 
 // -- Custom event mapping -----------------------------------------------
@@ -116,6 +161,55 @@ function mapEvent(event, toolName, toolInput, toolOutput, isError, data) {
     // `answered`: the renderer drops the prompt if it is still queued.
     return { state: 'satisfied', detail: 'got your answer', extra: { answered: true } };
   }
+  // "asking" is what face.js keys the question particles off.
+  if (event === 'question_ask') {
+    return { state: 'waiting', detail: 'asking you' };
+  }
+  if (event === 'question_reply') {
+    return { state: 'satisfied', detail: 'got your answer', extra: { answered: true } };
+  }
+  if (event === 'question_reject') {
+    return { state: 'satisfied', detail: 'question dismissed', extra: { answered: true } };
+  }
+  if (event === 'compacted') {
+    return { state: 'satisfied', detail: 'memory compacted' };
+  }
+  if (event === 'tool_end' && isError && DISMISSED_RE.test(textField(data.error))) {
+    // The question tool (or plan_exit) throws when the user dismisses it:
+    // an answer, not a broken streak.
+    return { state: 'satisfied', detail: 'question dismissed', extra: { answered: true } };
+  }
+  if (event === 'tool_end' && data.timedOut === true) {
+    // The shell tool killed it; the exit code is null then, never an error
+    // the forensics could see.
+    return { state: 'error', detail: 'timed out', breakStreak: true };
+  }
+  // A session.error is the end of the turn (OpenCode sets the session idle
+  // right after it), and shown as such, like Claude Code's StopFailure: the
+  // error stays on screen through the session.idle that follows (see
+  // `turnError` in base-adapter). Two kinds are no failure of the turn:
+  //   - an Esc (MessageAbortedError) is the user's choice: `interrupted`,
+  //     ending the turn, the streak left alone -- as for Codex's Interrupt
+  //   - a context overflow is compacted away and the turn carries on: the
+  //     face shows the compaction. Should it be followed straight by the
+  //     idle instead (compaction off, or it could not fit), the plugin marks
+  //     that idle `overflowFailed`, below.
+  if (event === 'error' && (data.type === 'session.error' || data.errorName)) {
+    const name = textField(data.errorName);
+    if (name === OVERFLOW_NAME) return { state: 'thinking', detail: 'compacting memory' };
+    if (ABORTED_RE.test(name)) {
+      return { state: 'error', detail: 'interrupted', stopped: true, extra: { turnError: 'interrupted' } };
+    }
+    const detail = textField(data.error) || textField(data.output?.error) || textField(data.message)
+      || 'something went wrong';
+    return { state: 'error', detail, stopped: true, breakStreak: true, extra: { turnError: detail } };
+  }
+  if (event === 'turn_end' && data.overflowFailed === true) {
+    return {
+      state: 'error', detail: 'context too long', stopped: true, breakStreak: true,
+      extra: { turnError: 'context too long' },
+    };
+  }
   if (event === 'message_update') {
     if (data.is_thinking) {
       return { state: 'thinking', detail: data.thinking || 'analyzing' };
@@ -125,8 +219,9 @@ function mapEvent(event, toolName, toolInput, toolOutput, isError, data) {
     return { state: 'waiting', detail: 'receiving message' };
   }
   if (event === 'error' && !data.message && typeof data.error === 'string') {
-    // Fall through to the shared error branch (it is the one that breaks the
-    // streak), but under a field name that branch actually reads.
+    // The generic {event:'error'} format: fall through to the shared error
+    // branch (it is the one that breaks the streak), but under a field name
+    // that branch actually reads.
     data.message = data.error;
   }
   return null; // Fall through to common handling
@@ -143,4 +238,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { normaliseEvent, mapEvent, mapOpenCodeEventType };
+module.exports = { normaliseEvent, mapEvent, mapOpenCodeEventType, TOOL_ALIASES };
