@@ -1352,7 +1352,7 @@ describe('renderer -- third review pass', () => {
   });
 
   test('source: a turn end never cuts a reward or an error short', () => {
-    const i = rendererSrc.indexOf('if (stateData.stopped && Date.now() < face.minDisplayUntil');
+    const i = rendererSrc.indexOf('if (stateData.stopped && face.now() < face.minDisplayUntil');
     assert.ok(i > 0);
     const cond = rendererSrc.slice(i, rendererSrc.indexOf('{', i));
     assert.ok(cond.includes('!COMPLETION_STATES.has(face.state)'));

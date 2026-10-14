@@ -251,7 +251,7 @@ describe('emotions -- a completion face keeps the screen for its guaranteed wind
     return f;
   }
   function pastWindow(f) {
-    f.lastStateChange = Date.now() - (face.COMPLETION_MIN_SHOW_MS + 100);
+    f.lastStateChange = f.now() - (face.COMPLETION_MIN_SHOW_MS + 100);
   }
 
   test('a newer completion inside the window is buffered, not shown', () => {
@@ -275,7 +275,7 @@ describe('emotions -- a completion face keeps the screen for its guaranteed wind
   test('a pending completion flushes once the window passes, before its full min display', () => {
     const f = fresh('proud');
     f.setState('satisfied');
-    assert.ok(f.minDisplayUntil > Date.now() + 2000, 'proud min display should still be running');
+    assert.ok(f.minDisplayUntil > f.now() + 2000, 'proud min display should still be running');
     pastWindow(f);
     f.update(66);
     assert.strictEqual(f.state, 'satisfied');
@@ -302,7 +302,7 @@ describe('emotions -- a completion face keeps the screen for its guaranteed wind
 
 describe('emotions -- work that arrives while a completion is pending is not lost', () => {
   function pastWindow(f) {
-    f.lastStateChange = Date.now() - (face.COMPLETION_MIN_SHOW_MS + 100);
+    f.lastStateChange = f.now() - (face.COMPLETION_MIN_SHOW_MS + 100);
   }
 
   test('the work is remembered alongside the pending completion', () => {
@@ -363,7 +363,7 @@ describe('emotions -- forceState', () => {
     f.setState('coding');
     f.setState('proud');           // buffered behind coding
     const before = f.stateChangeTimes.length;
-    const now = Date.now();
+    const now = f.now();
     f.forceState('responding', 'wrapping up', 3000);
     assert.strictEqual(f.state, 'responding');
     assert.strictEqual(f.stateDetail, 'wrapping up');
@@ -376,7 +376,7 @@ describe('emotions -- forceState', () => {
   });
   test('defaults the min display to the state table', () => {
     const f = new face.ClaudeFace();
-    const now = Date.now();
+    const now = f.now();
     f.forceState('responding');
     assert.ok(Math.abs(f.minDisplayUntil - (now + face.MIN_DISPLAY_MS.responding)) < 100);
   });
@@ -393,13 +393,8 @@ describe('emotions -- state sets are defined once', () => {
     assert.strictEqual(renderer.COMPLETION_STATES, shared.COMPLETION_STATES);
     assert.strictEqual(grid.ACTIVE_WORK_STATES, shared.ACTIVE_WORK_STATES);
   });
-  test('renderer FRESH_READ_STATES covers every active work and completion state', () => {
-    const fr = renderer.FRESH_READ_STATES;
-    assert.ok(fr instanceof Set);
-    for (const s of shared.ACTIVE_WORK_STATES) assert.ok(fr.has(s), `missing ${s}`);
-    for (const s of shared.COMPLETION_STATES) assert.ok(fr.has(s), `missing ${s}`);
-    assert.ok(fr.has('thinking'));
-  });
+  // (FRESH_READ_STATES went with the renderer's fresh-read block: see
+  // "Review round 5 (renderer)" below for why that block had to go.)
 });
 
 // -- Display coverage ----------------------------------------------------
@@ -1033,8 +1028,14 @@ describe('emotions -- tmux mode decays like the face does', () => {
     test(label, () => assert.strictEqual(tmuxDisplayState(data, NOW), expected));
   }
 
+  // Was a source grep for the call; tmux mode's line is now a pure function.
   test('tmux mode uses it', () => {
-    assert.ok(/const state = tmuxDisplayState\(data, Date\.now\(\)\);/.test(RENDERER_SRC));
+    const { tmuxStatusLine } = renderer;
+    const none = () => '';
+    assert.ok(tmuxStatusLine({ state: 'executing', timestamp: at(LONG_TOOL_HOLD_MS + 1) }, NOW, none)
+      .includes(renderer.PALETTES[0].themes.idle.status), 'the decayed state is what the line says');
+    assert.ok(tmuxStatusLine({ state: 'executing', timestamp: at(1000) }, NOW, none)
+      .includes(renderer.PALETTES[0].themes.executing.status));
   });
 });
 
@@ -1061,6 +1062,969 @@ describe('emotions -- the startup gate never replays an old write', () => {
     const ts = START - 30000;
     assert.strictEqual(startupGate(ts, false, START + 1000, START), 'record');
     assert.strictEqual(startupGate(ts, false, START + 7000, START), 'apply');
+  });
+});
+
+// -- Review round 5 (renderer) ------------------------------------------------
+// Each test below was run against the pre-fix sources first and failed there.
+// Most drive the real runtime through runUnifiedMode's seams -- a fake
+// fs.watch, a fake scheduler that moves both clocks, a temp sessions folder --
+// i.e. the closure the older source greps could only look at.
+
+const os = require('os');
+const { ansi } = require('../lib/themes');
+
+// Both clocks, faked in lockstep: Date.now() (wall) and the face's monotonic
+// one. `stepWall` moves only the wall clock, as NTP or a resumed VM does.
+// (The pre-fix face read Date.now() for everything, so the same test drives
+// it too -- and shows the freeze.)
+function withClocks(fn) {
+  const realNow = Date.now;
+  let wall = realNow();
+  let mono = 5000;
+  Date.now = () => wall;
+  if (face._setClock) face._setClock(() => mono);
+  try {
+    return fn({
+      advance(ms) { wall += ms; mono += ms; },
+      stepWall(ms) { wall += ms; },
+      frames(f, ms) { for (let t = 0; t < ms; t += 66) { wall += 66; mono += 66; f.update(66); } },
+      get wall() { return wall; },
+    });
+  } finally {
+    Date.now = realNow;
+    if (face._setClock) face._setClock(null);
+  }
+}
+
+// A live runtime with everything that touches the outside world faked:
+// fs.watch (h.handles, fire with h.handles[i].cb), the timers (h.runFor runs
+// them in order, moving both clocks to each; `granularity` rounds every
+// firing up to a timer tick, as Windows' 15.6ms one does), and the output
+// (h.writes). The async ring loader is stubbed -- its callbacks would land
+// after the test -- so tests call h.load() for a synchronous one.
+function r5Runtime({ granularity = 0 } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-r5-'));
+  const realNow = Date.now;
+  let wall = realNow();
+  let mono = 1000;
+  Date.now = () => wall;
+  face._setClock(() => mono);
+  const timers = [];
+  let seq = 0;
+  const schedule = (fn, ms) => {
+    const t = { fn, due: mono + Math.max(0, ms || 0), seq: ++seq, live: true };
+    timers.push(t);
+    return t;
+  };
+  const cancel = (t) => { if (t) t.live = false; };
+  const writes = [];
+  const handles = [];
+  const watch = (d, cb) => {
+    const w = {
+      dir: d, cb, closed: false, onError: null,
+      on(ev, f) { if (ev === 'error') w.onError = f; return w; },
+      close() { w.closed = true; },
+    };
+    handles.push(w);
+    return w;
+  };
+  let exitCode = null;
+  let rt;
+  try {
+    rt = renderer.runUnifiedMode({
+      sessionsDir: dir, watch, schedule, cancel,
+      write: (s) => { writes.push(s); }, exit: (c) => { exitCode = c; },
+      installHandlers: false, start: false,
+    });
+  } catch (e) {
+    Date.now = realNow;
+    face._setClock(null);
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
+  rt.orbital.loadSessionsAsync = () => {};
+  const h = {
+    rt, dir, writes, handles, timers, loopRuns: 0,
+    get exitCode() { return exitCode; },
+    get wall() { return wall; },
+    get mono() { return mono; },
+    advance(ms) { wall += ms; mono += ms; },
+    stepWall(ms) { wall += ms; },
+    file(id) { return path.join(dir, id + '.json'); },
+    write(id, obj) {
+      shared.writeJsonAtomic(h.file(id), { session_id: id, sessionId: id, editor: 'claude', timestamp: wall, ...obj });
+    },
+    load() { rt.orbital.loadSessions(null); },
+    event(name) { handles[handles.length - 1].cb('change', name); },
+    pending(fn) { return timers.filter(t => t.live && (!fn || t.fn === fn)); },
+    runFor(ms) {
+      const end = mono + ms;
+      for (;;) {
+        let next = null;
+        for (const t of timers) {
+          if (t.live && (!next || t.due < next.due || (t.due === next.due && t.seq < next.seq))) next = t;
+        }
+        if (!next) break;
+        let at = Math.max(next.due, mono);
+        if (granularity) at = Math.ceil(at / granularity - 1e-9) * granularity;
+        if (at > end) break;
+        wall += at - mono;
+        mono = at;
+        next.live = false;
+        timers.splice(timers.indexOf(next), 1);
+        if (next.fn === rt.loop) h.loopRuns++;
+        next.fn();
+      }
+      wall += end - mono;
+      mono = end;
+    },
+    titles() { return writes.join('').match(/\u001b\]0;[^\u0007]*\u0007/g) || []; },
+    done() {
+      try { rt.dispose(); } catch {}
+      Date.now = realNow;
+      face._setClock(null);
+      fs.rmSync(dir, { recursive: true, force: true });
+    },
+  };
+  return h;
+}
+
+// Start a session `S` that the policy will pick as main, after the boot window.
+function r5Session(h, data) {
+  h.advance(6000);
+  h.write('S', { lastPromptAt: h.wall - 10, ...data });
+  h.load();
+  h.rt.checkState();
+  assert.strictEqual(h.rt.mainSession(), 'S', 'precondition: S is the main session');
+}
+
+describe('review round 5 -- one self-healing watcher on the sessions folder', () => {
+  const { createDirWatcher, isPlainBasename } = renderer;
+  const STORM = '\\\\?\\C:\\Users\\me\\.code-crumb-sessions';
+
+  function fakeFs() {
+    const st = { present: true, blocked: false, mkdirs: 0, handles: [], timers: [] };
+    st.exists = () => st.present;
+    st.mkdir = () => { st.mkdirs++; st.present = true; };
+    st.watch = (dir, cb) => {
+      if (st.blocked || !st.present) { const e = new Error('EPERM'); e.code = 'EPERM'; throw e; }
+      const w = {
+        cb, closed: false, onError: null,
+        on(ev, f) { if (ev === 'error') w.onError = f; return w; },
+        close() { w.closed = true; },
+      };
+      st.handles.push(w);
+      return w;
+    };
+    st.schedule = (fn, ms) => { const t = { fn, ms, live: true }; st.timers.push(t); return t; };
+    st.cancel = (t) => { t.live = false; };
+    st.live = () => st.timers.filter(t => t.live);
+    st.fire = () => { const t = st.live()[0]; if (t) { t.live = false; t.fn(); } return t; };
+    return st;
+  }
+  function make(st) {
+    const out = { events: [], reopened: 0 };
+    out.w = createDirWatcher({
+      dir: '/s', exists: st.exists, mkdir: st.mkdir, watch: st.watch,
+      schedule: st.schedule, cancel: st.cancel,
+      onEvent: (e, f) => out.events.push([e, f]), onReopen: () => { out.reopened++; },
+    });
+    return out;
+  }
+
+  test('a plain file event passes straight through', () => {
+    const st = fakeFs();
+    const m = make(st);
+    st.handles[0].cb('change', 'a.json');
+    st.handles[0].cb('rename', null);
+    assert.deepStrictEqual(m.events, [['change', 'a.json'], ['rename', null]]);
+    assert.strictEqual(st.handles[0].closed, false);
+  });
+
+  test('the win32 storm: an event naming the folder itself closes the handle on the first one', () => {
+    const st = fakeFs();
+    const m = make(st);
+    for (let i = 0; i < 10000; i++) st.handles[0].cb('rename', STORM);
+    assert.strictEqual(m.events.length, 0, 'none of the storm reaches the renderer');
+    assert.strictEqual(st.handles[0].closed, true);
+    assert.strictEqual(st.live().length, 1, 'one re-open is scheduled, not one per event');
+    assert.strictEqual(st.live()[0].ms, 500);
+  });
+
+  test('it re-opens once the folder is back -- creating it if need be -- and says so', () => {
+    const st = fakeFs();
+    const m = make(st);
+    st.present = false;
+    st.handles[0].cb('rename', STORM);
+    st.fire();
+    assert.strictEqual(st.mkdirs, 1, 'the folder is created again (the hooks would anyway)');
+    assert.strictEqual(st.handles.length, 2);
+    assert.strictEqual(m.reopened, 1, 'the caller hears about it: events were missed');
+    st.handles[1].cb('change', 'b.json');
+    assert.deepStrictEqual(m.events, [['change', 'b.json']]);
+    st.handles[0].cb('change', 'late.json');
+    assert.strictEqual(m.events.length, 1, 'a late event from the closed handle is ignored');
+  });
+
+  test('a rename that leaves no folder behind closes it too (a platform that names the folder itself)', () => {
+    const st = fakeFs();
+    make(st);
+    st.present = false;
+    st.handles[0].cb('rename', '.code-crumb-sessions');
+    assert.strictEqual(st.handles[0].closed, true);
+  });
+
+  test('an error event closes and re-opens', () => {
+    const st = fakeFs();
+    const m = make(st);
+    st.handles[0].onError(new Error('EPERM'));
+    assert.strictEqual(st.handles[0].closed, true);
+    st.fire();
+    assert.strictEqual(st.handles.length, 2);
+    assert.strictEqual(m.reopened, 1);
+  });
+
+  test('the backoff doubles while the folder cannot be watched, is capped, and resets once healthy', () => {
+    const st = fakeFs();
+    make(st);
+    st.blocked = true;
+    st.handles[0].cb('rename', STORM);
+    const delays = [];
+    for (let i = 0; i < 6; i++) { delays.push(st.live()[0].ms); st.fire(); }
+    assert.deepStrictEqual(delays, [500, 1000, 2000, 4000, 8000, 8000]);
+    st.blocked = false;
+    st.fire();
+    assert.strictEqual(st.handles.length, 2, 'open again');
+    st.handles[1].cb('change', 'x.json');
+    st.handles[1].cb('rename', STORM);
+    assert.strictEqual(st.live()[0].ms, 500, 'a healthy event starts the backoff afresh');
+  });
+
+  test('check() notices a folder that vanished without a word, and close() cancels a re-open', () => {
+    const st = fakeFs();
+    const m = make(st);
+    m.w.check();
+    assert.strictEqual(st.handles[0].closed, false, 'nothing to do while healthy');
+    st.present = false;
+    m.w.check();
+    assert.strictEqual(st.handles[0].closed, true);
+    assert.strictEqual(st.live().length, 1);
+    m.w.close();
+    assert.strictEqual(st.live().length, 0, 'no re-open after close');
+  });
+
+  test('a plain basename is a file in the folder; anything with a separator is not', () => {
+    assert.strictEqual(isPlainBasename('abc.json'), true);
+    assert.strictEqual(isPlainBasename('x.json.123.tmp'), true);
+    for (const bad of [STORM, 'C:\\x\\y', '/tmp/s', 'a/b', '', '.', '..']) {
+      assert.strictEqual(isPlainBasename(bad), false, bad);
+    }
+  });
+
+  test('the renderer keeps one handle and fans every event out to the face and the ring', () => {
+    const h = r5Runtime();
+    try {
+      assert.strictEqual(h.handles.length, 1, 'one fs.watch on the sessions folder (there were two)');
+      let ringLoads = 0;
+      h.rt.orbital.loadSessionsAsync = () => { ringLoads++; };
+      r5Session(h, { state: 'coding', detail: 'edit a.js' });
+      h.advance(2000);
+      h.write('S', { state: 'reading', detail: 'read b.js' });
+      h.event('S.json');
+      assert.strictEqual(h.rt.face.state, 'reading', 'the main file event re-read it at once');
+      for (let i = 0; i < 5; i++) h.event('other.json');
+      h.runFor(100);
+      assert.strictEqual(ringLoads, 1, 'one ring reload for the burst, 80ms after its first event');
+    } finally { h.done(); }
+  });
+
+  test('deleting the folder under the renderer costs one event, and the new folder is watched', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'coding', detail: 'edit a.js' });
+      fs.rmSync(h.dir, { recursive: true, force: true });
+      for (let i = 0; i < 1000; i++) h.handles[0].cb('rename', STORM);
+      assert.strictEqual(h.handles[0].closed, true, 'the storming handle is closed');
+      h.runFor(600);
+      assert.strictEqual(h.handles.length, 2, 're-opened after the backoff');
+      assert.ok(fs.existsSync(h.dir), 'on a recreated folder');
+      assert.strictEqual(h.rt.trackers().watching, true);
+      h.write('S', { state: 'reading', detail: 'read c.js' });
+      h.advance(1600);
+      h.event('S.json');
+      assert.strictEqual(h.rt.face.state, 'reading', 'the face follows its file again');
+    } finally { h.done(); }
+  });
+});
+
+describe('review round 5 -- an allowed permission prompt is the tool, running', () => {
+  const { permissionAnswered, isUnconfirmedPermission, PERMISSION_CONFIRM_MS, tmuxDisplayState, readState } = renderer;
+  const T = 50000000;
+  const wait = (extra = {}) => ({
+    state: 'waiting', detail: 'allow Bash?', timestamp: T, waitKind: 'permission',
+    waitConfirmed: false, editor: 'claude', permState: 'testing', permDetail: 'npm test', ...extra,
+  });
+
+  test('PERMISSION_CONFIRM_MS covers the 6s Notification timer with slack', () => {
+    assert.strictEqual(PERMISSION_CONFIRM_MS, 8000);
+  });
+
+  // [label, write, ageMs, expected]
+  const table = [
+    ['an unconfirmed Claude Code wait 8s old was answered', wait(), 8000, true],
+    ['not before the window', wait(), 7999, false],
+    ['a confirmed wait is still a wait', wait({ waitConfirmed: true }), 60000, false],
+    ['a write that does not say is still a wait (older hooks)', wait({ waitConfirmed: null }), 60000, false],
+    ['no waitKind: an older hook', wait({ waitKind: '' }), 60000, false],
+    ['codex has no Notification hook', wait({ editor: 'codex' }), 60000, false],
+    ['opencode either', wait({ editor: 'opencode' }), 60000, false],
+    ['no tool to show', wait({ permState: null }), 60000, false],
+    ['responding is no tool', wait({ permState: 'responding' }), 60000, false],
+    ['not a wait any more', wait({ state: 'relieved' }), 60000, false],
+    ['no timestamp', wait({ timestamp: 0 }), 60000, false],
+  ];
+  for (const [label, w, age, expected] of table) {
+    test(label, () => assert.strictEqual(permissionAnswered(w, (w.timestamp || T) + age), expected));
+  }
+  test('the shape check is the same minus the clock', () => {
+    assert.strictEqual(isUnconfirmedPermission(wait()), true);
+    assert.strictEqual(isUnconfirmedPermission(wait({ waitConfirmed: true })), false);
+  });
+
+  test('readState passes the contract through its sanitisers', () => {
+    const t = makeTempEnv();
+    try {
+      const fp = path.join(t.tmp, 's.json');
+      fs.writeFileSync(fp, JSON.stringify({
+        state: 'waiting', timestamp: 5, waitKind: 'permission', waitConfirmed: false,
+        permState: 'testing', permDetail: 'npm\ntest\u001b[2J', editor: 'claude',
+      }));
+      let s = readState(fp);
+      assert.strictEqual(s.waitKind, 'permission');
+      assert.strictEqual(s.waitConfirmed, false);
+      assert.strictEqual(s.permState, 'testing');
+      assert.strictEqual(s.permDetail, 'npm test[2J', 'one line, no control characters');
+      fs.writeFileSync(fp, JSON.stringify({ state: 'waiting', timestamp: 5, waitConfirmed: 'false', permState: '__proto__', waitKind: { x: 1 } }));
+      s = readState(fp);
+      assert.strictEqual(s.waitConfirmed, null, 'a boolean or nothing');
+      assert.strictEqual(s.permState, null, 'a known state or nothing');
+      assert.strictEqual(s.waitKind, '');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('tmux mode reads an answered prompt as its tool', () => {
+    assert.strictEqual(tmuxDisplayState(wait(), T + 9000), 'testing');
+    assert.strictEqual(tmuxDisplayState(wait({ waitConfirmed: true }), T + 9000), 'waiting');
+    assert.strictEqual(tmuxDisplayState(wait({ editor: 'codex' }), T + 9000), 'waiting');
+    assert.strictEqual(tmuxDisplayState(wait(), T + 7000), 'waiting');
+  });
+
+  function permWait(h, extra = {}) {
+    h.write('S', {
+      state: 'waiting', detail: 'allow Bash?', waitingOn: 'Bash:abc', waitKind: 'permission',
+      waitConfirmed: false, permState: 'testing', permDetail: 'npm test', ...extra,
+    });
+    h.event('S.json');
+  }
+
+  test('the runtime: allowed, the 2-minute test run shows as the test run, then its result', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'testing', detail: 'npm test' });
+      const preTs = h.wall;
+      h.rt.loop();
+      h.runFor(1500);
+      permWait(h);
+      assert.strictEqual(h.rt.face.state, 'waiting', 'the prompt is shown');
+      h.runFor(7500);
+      assert.strictEqual(h.rt.face.state, 'waiting', 'still inside the confirmation window');
+      h.runFor(1000);
+      assert.strictEqual(h.rt.face.state, 'testing', 'unconfirmed after 8s: allowed, and running');
+      assert.strictEqual(h.rt.face.stateDetail, 'npm test');
+      h.writes.length = 0;
+      h.runFor(120000);
+      assert.strictEqual(h.rt.face.state, 'testing', 'the long-tool hold keeps it');
+      assert.ok(/still running/.test(h.rt.face.displayDetail(36)), h.rt.face.displayDetail(36));
+      assert.ok(!h.titles().some(t => t.includes('WAITING FOR YOU')), 'the title never shouted');
+      h.write('S', { state: 'relieved', detail: 'tests passed', answered: true, workState: 'testing', workSince: preTs });
+      h.event('S.json');
+      assert.strictEqual(h.rt.face.state, 'relieved', 'the PostToolUse lands as usual');
+    } finally { h.done(); }
+  });
+
+  test('the runtime: a prompt its Notification confirmed keeps waiting, and escalates', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'testing', detail: 'npm test' });
+      h.rt.loop();
+      h.runFor(1500);
+      permWait(h);
+      h.runFor(6000);
+      permWait(h, { waitConfirmed: true });
+      h.runFor(3000);
+      assert.strictEqual(h.rt.face.state, 'waiting');
+      h.runFor(31000);
+      assert.strictEqual(h.rt.face.state, 'waiting');
+      assert.strictEqual(h.rt.face.waitEscalated(), true);
+      assert.ok(h.titles().some(t => t.includes('WAITING FOR YOU')), 'the title flashes as before');
+    } finally { h.done(); }
+  });
+
+  for (const [label, extra] of [
+    ['another editor', { editor: 'codex' }],
+    ['an older hook without the fields', { waitKind: undefined, waitConfirmed: undefined, permState: undefined }],
+  ]) {
+    test(`the runtime: ${label} keeps waiting exactly as before`, () => {
+      const h = r5Runtime();
+      try {
+        r5Session(h, { state: 'testing', detail: 'npm test', editor: extra.editor || 'claude' });
+        h.rt.loop();
+        h.runFor(1500);
+        permWait(h, extra);
+        h.runFor(40000);
+        assert.strictEqual(h.rt.face.state, 'waiting');
+        assert.strictEqual(h.rt.face.waitEscalated(), true);
+      } finally { h.done(); }
+    });
+  }
+
+  test('the runtime: a session swapped in on an allowed prompt arrives as its tool', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'coding', detail: 'edit a.js' });
+      h.rt.loop();
+      h.runFor(500);
+      h.write('B', {
+        state: 'waiting', detail: 'allow Bash?', waitingOn: 'Bash:x', waitKind: 'permission',
+        waitConfirmed: false, permState: 'executing', permDetail: 'make', timestamp: h.wall - 20000,
+        lastPromptAt: h.wall,
+      });
+      h.load();
+      h.writes.length = 0;
+      h.runFor(2000);
+      assert.strictEqual(h.rt.mainSession(), 'B');
+      assert.strictEqual(h.rt.face.state, 'executing');
+      assert.strictEqual(h.rt.face.stateDetail, 'make');
+      assert.ok(!h.titles().some(t => t.includes('WAITING FOR YOU')));
+    } finally { h.done(); }
+  });
+});
+
+describe('review round 5 -- a repeated reward drops the finished tool queued behind it', () => {
+  test('two quick Reads: the second Read never comes back after its own reward', () => {
+    withClocks((c) => {
+      const f = new face.ClaudeFace();
+      f.forceState('thinking', '');
+      f.setState('reading', 'a.js');
+      c.frames(f, 1500);
+      f.setState('satisfied', 'read a.js');
+      c.frames(f, 300);
+      f.setState('reading', 'b.js');
+      assert.strictEqual(f.pendingState, 'reading', 'precondition: queued inside the reward window');
+      c.frames(f, 300);
+      f.setState('satisfied', 'read b.js');
+      assert.strictEqual(f.pendingState, null, 'the finished Read is dropped');
+      let shown = false;
+      for (let i = 0; i < 60; i++) { c.frames(f, 66); if (f.state === 'reading') shown = true; }
+      assert.ok(!shown, 'reading b.js was drawn for a tool that had finished');
+      assert.strictEqual(f.state, 'satisfied');
+    });
+  });
+
+  test('a queued prompt survives the repeated reward; a queued newer reward does too', () => {
+    const f = new face.ClaudeFace();
+    f.setState('satisfied', 'read a.js');
+    f.setState('waiting', 'allow?');
+    assert.strictEqual(f.pendingState, 'waiting');
+    f.setState('satisfied', 'read b.js');
+    assert.strictEqual(f.pendingState, 'waiting', 'a prompt is no tool and still wants an answer');
+    const g = new face.ClaudeFace();
+    g.setState('satisfied', 'read a.js');
+    g.setState('proud', 'saved b.js');
+    g.setState('satisfied', 'read c.js');
+    assert.strictEqual(g.pendingState, 'proud');
+  });
+
+  test('work remembered behind a queued reward goes with it; a remembered prompt stays', () => {
+    const f = new face.ClaudeFace();
+    f.setState('happy', 'agent done');
+    f.setState('satisfied', 'read a.js');        // queued newer reward
+    f.setState('reading', 'b.js');               // remembered behind it
+    assert.deepStrictEqual(f.pendingWork, { state: 'reading', detail: 'b.js' });
+    f.setState('happy', 'agent done');           // that tool, finished
+    assert.strictEqual(f.pendingWork, null);
+    const g = new face.ClaudeFace();
+    g.setState('happy', 'agent done');
+    g.setState('satisfied', 'read a.js');
+    g.setState('waiting', 'allow?');
+    g.setState('happy', 'agent done');
+    assert.deepStrictEqual(g.pendingWork, { state: 'waiting', detail: 'allow?' });
+  });
+});
+
+describe('review round 5 -- a wall clock stepped back freezes nothing', () => {
+  const { startupGate } = renderer;
+
+  test('the face: an hour back, the reward window still closes and the next tool shows', () => {
+    withClocks((c) => {
+      const f = new face.ClaudeFace();
+      f.forceState('coding', 'edit a.js');
+      c.advance(2000);
+      f.setState('happy', 'agent done');
+      c.advance(500);
+      c.stepWall(-3600000);
+      f.setState('coding', 'edit b.js');
+      assert.strictEqual(f.pendingState, 'coding', 'queued inside the reward window');
+      c.frames(f, 3000);
+      assert.strictEqual(f.state, 'coding', 'the window closed on time');
+      assert.strictEqual(f.stateDetail, 'edit b.js');
+    });
+  });
+
+  test('the face: a tool that outlives the step still counts up', () => {
+    withClocks((c) => {
+      const f = new face.ClaudeFace();
+      f.forceState('executing', 'npm test');
+      c.advance(1000);
+      c.stepWall(-3600000);
+      c.frames(f, 9000);
+      assert.ok(/still running \u2026 10s/.test(f.displayDetail(60)), f.displayDetail(60));
+    });
+  });
+
+  test('the face: the caffeine window is monotonic too', () => {
+    withClocks((c) => {
+      const f = new face.ClaudeFace();
+      for (const s of ['reading', 'coding', 'searching', 'reading', 'coding']) {
+        f.forceState(s, 'x');
+        c.advance(100);
+      }
+      c.stepWall(3600000);   // forward: the burst is still 0.5s old
+      f.minDisplayUntil = 0;
+      f.update(66);
+      assert.strictEqual(f.state, 'caffeinated');
+    });
+  });
+
+  test('startupGate: the boot window is the monotonic uptime, not the wall clock', () => {
+    // Up 10 minutes, stepped back 10: by the wall clock it has "just started",
+    // and every turn end was recorded instead of shown.
+    const START = 1e12;
+    assert.strictEqual(startupGate(START - 50, true, START, START, 600000), 'apply');
+    // The renderer hands over the start re-expressed on today's wall clock
+    // (now - uptime), so a bigger step cannot make every fresh write look
+    // older than the renderer either. Up 10 minutes, stepped back 20:
+    const now = START + 600000 - 1200000;
+    assert.strictEqual(startupGate(now - 50, false, now, now - 600000, 600000), 'apply',
+      'every live write was recorded for as long as the step');
+    // Up an hour, stepped back two: the start, on today's wall clock.
+    const now2 = START + 3600000 - 7200000;
+    assert.strictEqual(startupGate(now2 - 50, false, now2, now2 - 3600000, 3600000), 'apply');
+    assert.strictEqual(startupGate(now2 - 50, true, now2, now2 - 3600000, 3600000), 'apply');
+  });
+
+  test('startupGate: a turn that ends after the renderer started is shown, even at boot', () => {
+    const START = 1e12;
+    assert.strictEqual(startupGate(START + 1500, true, START + 2000, START, 2000), 'apply',
+      'a StopFailure at t+2s was recorded, and its error rescued into done!');
+    assert.strictEqual(startupGate(START - 100, true, START + 1000, START, 1000), 'record',
+      'one that ended before the start is still not resurrected');
+    assert.strictEqual(startupGate(0, true, START + 1000, START, 1000), 'record');
+  });
+
+  test('the runtime: writes made after the step are read, shown and timed out as usual', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'coding', detail: 'edit a.js' });
+      h.rt.loop();
+      h.runFor(2000);
+      assert.strictEqual(h.rt.face.state, 'coding');
+      const m = fs.statSync(h.file('S')).mtimeMs;
+      h.stepWall(-3600000);
+      h.write('S', { state: 'satisfied', detail: 'read b.js' });
+      // The OS stamps the file with the stepped clock too: an OLDER mtime.
+      const old = new Date(m - 3600000);
+      fs.utimesSync(h.file('S'), old, old);
+      h.runFor(2500);
+      assert.strictEqual(h.rt.face.state, 'satisfied', 'the write after the step was read');
+      h.runFor(8000);
+      assert.strictEqual(h.rt.face.state, 'thinking', 'and its linger ran out on time');
+    } finally { h.done(); }
+  });
+
+  test('the runtime: a swapped-in tool keeps its age on the face clock', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'coding', detail: 'edit a.js' });
+      h.rt.loop();
+      h.runFor(500);
+      h.write('B', { state: 'executing', detail: 'make', timestamp: h.wall - 30000, lastPromptAt: h.wall });
+      h.load();
+      h.runFor(2000);
+      assert.strictEqual(h.rt.mainSession(), 'B');
+      assert.strictEqual(h.rt.face.state, 'executing');
+      const held = h.rt.face.heldMs();
+      assert.ok(held >= 30000 && held < 34000, `held ${held}ms`);
+    } finally { h.done(); }
+  });
+});
+
+describe('review round 5 -- text from a state file never reaches the terminal raw', () => {
+  const { readState } = renderer;
+  const EVIL = 'x\u001b]0;owned\u0007\n\u001b[2J.js';
+
+  function readObj(obj) {
+    const t = makeTempEnv();
+    try {
+      const fp = path.join(t.tmp, 's.json');
+      fs.writeFileSync(fp, JSON.stringify(obj));
+      return readState(fp);
+    } finally { cleanup(t.tmp); }
+  }
+
+  test('frequentFiles keys are one printable line before the idle thought prints one', () => {
+    const s = readObj({ state: 'idle', timestamp: 5, frequentFiles: { [EVIL]: 7 } });
+    const keys = Object.keys(s.frequentFiles);
+    assert.strictEqual(keys.length, 1);
+    assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(keys[0]), JSON.stringify(keys[0]));
+    const f = new face.ClaudeFace();
+    f.accessoriesEnabled = false;
+    f.forceState('idle', '');
+    f.setStats(s);
+    let frame = null;
+    for (let i = 0; i < 400 && !frame; i++) {
+      f.thoughtIndex = i;
+      f._updateThought();
+      if (f.thoughtText.includes('back to')) frame = f.render();
+    }
+    assert.ok(frame, 'the thought was drawn');
+    assert.ok(!frame.includes('\u001b]0;owned'), 'no OSC title from a file name');
+    assert.ok(!frame.includes('\u001b[2J'), 'no clear-screen from a file name');
+  });
+
+  test('a key with nothing printable left, or a count that is no number, is dropped', () => {
+    const t = makeTempEnv();
+    try {
+      const fp = path.join(t.tmp, 's.json');
+      // Raw JSON: an object literal's `__proto__` would set a prototype, not a key.
+      fs.writeFileSync(fp, '{"state":"idle","timestamp":5,"frequentFiles":'
+        + '{"\\u001b\\u0007\\n":9,"a.js":"x\\u001b[2J","b.js":4,"__proto__":3}}');
+      const s = readState(fp);
+      assert.deepStrictEqual(Object.keys(s.frequentFiles).sort(), ['__proto__', 'b.js']);
+      assert.strictEqual(s.frequentFiles.__proto__, 3, '__proto__ is just a file name');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a milestone must be a known type with a positive integer value', () => {
+    const at = Date.now();
+    for (const bad of [{ type: 'streak', value: -100, at }, { type: 'streak', value: 'x\u001b]0;owned\u0007', at },
+      { type: 'streak', value: 2.5, at }, { type: 'other', value: 25, at }, { type: 'streak', value: 25 }, 'x', [1]]) {
+      assert.strictEqual(readObj({ state: 'happy', timestamp: 5, milestone: bad }).milestone, null, JSON.stringify(bad));
+    }
+    assert.deepStrictEqual(readObj({ state: 'happy', timestamp: 5, milestone: { type: 'streak', value: 25, at } }).milestone,
+      { type: 'streak', value: 25, at });
+  });
+
+  test('a hostile milestone handed to the face directly cannot break render()', () => {
+    for (const value of [-100, 'x\u001b]0;owned\u0007']) {
+      const f = new face.ClaudeFace();
+      f.forceState('happy', 'done');
+      f.setStats({ milestone: { type: 'streak', value, at: Date.now() } });
+      const out = f.render();
+      assert.ok(!out.includes('\u001b]0;owned'));
+    }
+  });
+
+  test('counters are numbers, or 0', () => {
+    const s = readObj({ state: 'idle', timestamp: 5, toolCalls: 'x\u001b[2J', streak: '9', filesEdited: 3,
+      diffInfo: { added: '1\u001b[2J', removed: 2 } });
+    assert.strictEqual(s.toolCalls, 0);
+    assert.strictEqual(s.streak, 0);
+    assert.strictEqual(s.filesEdited, 3);
+    assert.deepStrictEqual(s.diffInfo, { added: 0, removed: 2 });
+  });
+});
+
+describe('review round 5 -- a failed read is not data', () => {
+  const { readState } = renderer;
+
+  test('readState marks every non-read as failed, and a good read as not', () => {
+    const t = makeTempEnv();
+    try {
+      const fp = path.join(t.tmp, 's.json');
+      assert.strictEqual(readState(path.join(t.tmp, 'missing.json')).failed, true);
+      for (const raw of ['', '   ', '{"state":"cod', 'null', '[1,2]', '7']) {
+        fs.writeFileSync(fp, raw);
+        const s = readState(fp);
+        assert.strictEqual(s.failed, true, JSON.stringify(raw));
+        assert.strictEqual(s.state, 'idle', 'still idle for callers that only look at that');
+      }
+      fs.writeFileSync(fp, JSON.stringify({ state: 'coding', timestamp: 5 }));
+      assert.ok(!readState(fp).failed);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('the runtime: a torn read between turns leaves the turn over', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'coding', detail: 'edit a.js' });
+      h.advance(2100);
+      h.write('S', { state: 'idle', detail: 'between turns', turnEnded: true });
+      h.rt.checkState();
+      assert.strictEqual(h.rt.trackers().lastStopped, true, 'precondition: the turn is over');
+      h.advance(2100);
+      fs.writeFileSync(h.file('S'), '{"state":"coding","timesta');   // torn
+      h.rt.checkState();
+      const tr = h.rt.trackers();
+      assert.strictEqual(tr.lastStopped, true, 'a torn read made the session active again');
+      assert.strictEqual(tr.lastAppliedState, 'responding');
+    } finally { h.done(); }
+  });
+});
+
+describe('review round 5 -- tmux mode names the session\'s own branch', () => {
+  const { tmuxStatusLine } = renderer;
+  test('no gitBranch in the write: the branch of the write\'s cwd, never the tmux process\'s', () => {
+    const asked = [];
+    const branchOf = (cwd) => { asked.push(cwd); return cwd === '/repo' ? 'feature-x' : 'WRONG'; };
+    const line = tmuxStatusLine({ state: 'coding', timestamp: 0, cwd: '/repo' }, 1, branchOf);
+    assert.ok(line.includes('[feature-x]'), line);
+    assert.deepStrictEqual(asked, ['/repo']);
+  });
+  test('no cwd, no branch -- and a gitBranch in the write needs no lookup', () => {
+    const asked = [];
+    const branchOf = (cwd) => { asked.push(cwd); return 'WRONG'; };
+    assert.ok(!tmuxStatusLine({ state: 'coding', timestamp: 0 }, 1, branchOf).includes('['
+      + 'WRONG'), 'no lookup without a cwd');
+    assert.ok(tmuxStatusLine({ state: 'coding', timestamp: 0, gitBranch: 'main', cwd: '/r' }, 1, branchOf).includes('[main]'));
+    assert.deepStrictEqual(asked, []);
+  });
+});
+
+describe('review round 5 -- quitting and crashing put the terminal back', () => {
+  const PID = path.join(shared.HOME, '.code-crumb.pid');
+
+  test('the restore resets the title (empty OSC 0, then the title stack pop)', () => {
+    const r = renderer.TERMINAL_RESTORE;
+    assert.ok(r.includes('\u001b]0;\u0007'), 'an empty title: Windows Terminal shows the profile title again');
+    assert.ok(r.includes('\u001b[23;0t'), 'XTPOPTITLE where there is a title stack');
+    assert.ok(r.includes(ansi.show), 'the cursor comes back');
+    assert.ok(r.indexOf('\u001b]0;\u0007') < r.indexOf('\u001b[23;0t'), 'the pop wins where it is understood');
+  });
+
+  test('cleanup writes it, writes the quit flag and exits 0', () => {
+    const h = r5Runtime();
+    try {
+      h.rt.cleanup();
+      assert.strictEqual(h.exitCode, 0);
+      assert.ok(h.writes[h.writes.length - 1].includes(renderer.TITLE_RESET));
+      assert.ok(fs.existsSync(shared.QUIT_FLAG_FILE), 'a quit is a quit');
+    } finally {
+      try { fs.unlinkSync(shared.QUIT_FLAG_FILE); } catch {}
+      h.done();
+    }
+  });
+
+  test('a crash restores the terminal and drops the PID file, but never writes the quit flag', () => {
+    const h = r5Runtime();
+    const realErr = process.stderr.write;
+    let err = '';
+    try {
+      fs.writeFileSync(PID, '12345');
+      try { fs.unlinkSync(shared.QUIT_FLAG_FILE); } catch {}
+      process.stderr.write = (s) => { err += s; return true; };
+      h.rt.crash(new Error('r5 boom'));
+      process.stderr.write = realErr;
+      assert.strictEqual(h.exitCode, 1);
+      assert.ok(h.writes[h.writes.length - 1].includes(renderer.TERMINAL_RESTORE));
+      assert.ok(!fs.existsSync(PID), 'a dead renderer must not look alive');
+      assert.ok(!fs.existsSync(shared.QUIT_FLAG_FILE), 'autolaunch must be free to bring it back');
+      assert.ok(err.includes('r5 boom'));
+    } finally {
+      process.stderr.write = realErr;
+      try { fs.unlinkSync(PID); } catch {}
+      h.done();
+    }
+  });
+
+  test('the frame loop survives a throw in face.update or the session list', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'coding', detail: 'edit a.js' });
+      h.rt.face.update = () => { throw new Error('update'); };
+      h.rt.orbital.getSortedFaces = () => { throw new Error('list'); };
+      h.rt.face.showSessionList = true;
+      h.rt.loop();
+      assert.strictEqual(h.pending(h.rt.loop).length, 1, 'the next frame is still scheduled');
+    } finally { h.done(); }
+  });
+
+  for (const how of ['throw', 'reject']) {
+    test(`a real renderer that dies by ${how === 'throw' ? 'an uncaught exception' : 'an unhandled rejection'} exits 1, terminal restored`, () => {
+      const t = makeTempEnv();
+      try {
+        const pidFile = path.join(t.tmp, '.code-crumb.pid');
+        const script = [
+          `const r = require(${JSON.stringify(path.join(ROOT, 'renderer.js'))});`,
+          `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+          'r.runUnifiedMode();',
+          how === 'throw'
+            ? "setTimeout(() => { throw new Error('r5-crash'); }, 300);"
+            : "setTimeout(() => { Promise.reject(new Error('r5-crash')); }, 300);",
+        ].join('\n');
+        const res = require('child_process').spawnSync(process.execPath, ['-e', script], {
+          env: t.env, encoding: 'utf8', timeout: 20000,
+        });
+        assert.strictEqual(res.status, 1, `exit ${res.status}, stderr: ${res.stderr}`);
+        assert.ok(res.stdout.includes(renderer.TERMINAL_RESTORE), 'cursor, screen and title restored');
+        assert.ok(res.stderr.includes('r5-crash'), 'and the error is reported');
+        assert.ok(!fs.existsSync(pidFile), 'the PID file is gone');
+        assert.ok(!fs.existsSync(path.join(t.tmp, '.code-crumb-quit')), 'no quit flag');
+      } finally { cleanup(t.tmp); }
+    });
+  }
+});
+
+describe('review round 5 -- no fresh-read block: a turn end between forced reads waits for one', () => {
+  // Coarse mtimes (FAT, some network shares): the next write keeps the mtime,
+  // so only the forced read every 2s sees it. The fresh-read block used to
+  // see a thinking face's turn end first, stamp it applied without showing it,
+  // and leave the rescue to turn the turn into "done!".
+  // Whole seconds, so the pinned mtime reads back exactly.
+  function pinMtime(h) {
+    const t = new Date(Math.floor(fs.statSync(h.file('S')).mtimeMs / 1000) * 1000);
+    fs.utimesSync(h.file('S'), t, t);
+    return t;
+  }
+
+  test('a StopFailure right after thinking shows its error', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'thinking', detail: 'reading your message' });
+      const m = pinMtime(h);
+      h.advance(2050);
+      h.rt.checkState();                         // the forced read
+      h.advance(50);
+      h.write('S', { state: 'error', detail: 'API error', turnEnded: true });
+      fs.utimesSync(h.file('S'), m, m);
+      h.advance(500);
+      h.rt.checkState();                         // not forced, mtime unchanged
+      assert.strictEqual(h.rt.face.state, 'thinking', 'not seen yet');
+      h.advance(1500);
+      h.rt.checkState();                         // forced
+      assert.strictEqual(h.rt.face.state, 'error');
+      assert.strictEqual(h.rt.face.stateDetail, 'API error');
+    } finally { h.done(); }
+  });
+
+  test('a Stop the mtime check missed is still rescued into responding -> happy', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'executing', detail: 'npm test' });
+      const m = pinMtime(h);
+      h.advance(2050);
+      h.rt.checkState();
+      h.advance(50);
+      h.write('S', { state: 'idle', detail: 'between turns', turnEnded: true });
+      fs.utimesSync(h.file('S'), m, m);
+      h.advance(500);
+      h.rt.checkState();
+      assert.strictEqual(h.rt.face.state, 'executing', 'not seen yet');
+      h.advance(1500);
+      h.rt.checkState();
+      assert.strictEqual(h.rt.face.state, 'responding');
+      h.advance(3100);
+      h.rt.checkState();
+      assert.strictEqual(h.rt.face.state, 'happy');
+    } finally { h.done(); }
+  });
+});
+
+describe('review round 5 -- frames on deadlines, and a resting face at low power', () => {
+  const { nextFrameDeadline, canRestLowPower, FRAME_INTERVAL_MS, LOW_POWER_FRAME_MS, LOW_POWER_FPS } = renderer;
+
+  test('nextFrameDeadline: a late frame is made up, a lost second is not burst through', () => {
+    assert.strictEqual(nextFrameDeadline(1000, 1000, 50), 1050);
+    assert.strictEqual(nextFrameDeadline(1000, 1060, 50), 1050, 'late by less than a frame: due at once');
+    assert.strictEqual(nextFrameDeadline(1000, 1101, 50), 1101, 'behind by more: start again from now');
+    assert.strictEqual(LOW_POWER_FPS, 4);
+    assert.strictEqual(LOW_POWER_FRAME_MS, 250);
+    assert.ok(Math.abs(FRAME_INTERVAL_MS - 1000 / 15) < 1e-9);
+  });
+
+  test('canRestLowPower: only a resting face with nothing else moving', () => {
+    const base = () => {
+      const f = new face.ClaudeFace();
+      f.state = 'idle';
+      f.particles.particles.length = 0;
+      f.blinkFrame = -1;
+      return f;
+    };
+    let f = base();
+    assert.strictEqual(canRestLowPower(f), true);
+    f.particles.spawn(2, 'float');
+    assert.strictEqual(canRestLowPower(f), true, 'its own slow drift does not count');
+    f.state = 'sleeping';
+    f.particles.spawn(1, 'zzz');
+    assert.strictEqual(canRestLowPower(f), true);
+    const no = [
+      ['busy state', (g) => { g.state = 'coding'; }],
+      ['waiting', (g) => { g.state = 'waiting'; }],
+      ['something queued', (g) => { g.pendingState = 'reading'; }],
+      ['a sparkle', (g) => { g.particles.spawn(1, 'sparkle'); }],
+      ['help open', (g) => { g.showHelp = true; }],
+      ['list open', (g) => { g.showSessionList = true; }],
+      ['being petted', (g) => { g.petTimer = 5; }],
+      ['afterglow', (g) => { g.petAfterglowTimer = 5; }],
+      ['blinking', (g) => { g.blinkFrame = 1; }],
+      ['glitching', (g) => { g.glitchIntensity = 0.2; }],
+    ];
+    for (const [label, mut] of no) {
+      f = base();
+      mut(f);
+      assert.strictEqual(canRestLowPower(f), false, label);
+    }
+    assert.strictEqual(canRestLowPower(base(), { transitionActive: true }), false, 'a swap');
+    assert.strictEqual(canRestLowPower(base(), { orbitalsBusy: true }), false, 'a busy orbital');
+  });
+
+  test('15 frames a second on a 15.6ms timer tick (re-arming 66ms after each frame gave ~13)', () => {
+    const h = r5Runtime({ granularity: 15.625 });
+    try {
+      r5Session(h, { state: 'coding', detail: 'edit a.js' });
+      h.rt.loop();
+      h.loopRuns = 0;
+      h.runFor(3000);
+      assert.ok(h.loopRuns >= 44 && h.loopRuns <= 46, `${h.loopRuns} frames in 3s`);
+    } finally { h.done(); }
+  });
+
+  test('a resting face drops to ~4 fps, and an event, a key or a resize wakes it at once', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'idle', detail: '' });
+      h.rt.loop();
+      h.runFor(5000);
+      assert.strictEqual(h.rt.face.state, 'idle');
+      h.loopRuns = 0;
+      h.runFor(10000);
+      assert.ok(h.loopRuns < 75, `${h.loopRuns} frames in 10s at rest (150 at full rate)`);
+      for (const [label, poke] of [
+        ['a watcher event', () => h.event('other.json')],
+        ['a key', () => { h.rt.onKeys('h'); h.rt.onKeys('x'); }],
+        ['a resize', () => h.rt.onResize()],
+      ]) {
+        h.runFor(2000);
+        let guard = 0;
+        while (h.rt.trackers().frameInterval !== LOW_POWER_FRAME_MS && guard++ < 50) h.runFor(250);
+        assert.strictEqual(h.rt.trackers().frameInterval, LOW_POWER_FRAME_MS, `${label}: resting first`);
+        poke();
+        const next = h.pending(h.rt.loop);
+        assert.strictEqual(next.length, 1, label);
+        assert.strictEqual(next[0].due, h.mono, `${label} draws the next frame now`);
+      }
+    } finally { h.done(); }
   });
 });
 
