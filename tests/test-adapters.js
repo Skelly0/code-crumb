@@ -4854,6 +4854,56 @@ describe('adapters -- Review round 5: codex-notify', () => {
   });
 });
 
+// update-state.js stamps a sticky firstSeenAt (the foreign-session
+// classifier's "this file existed before that agent" test), but
+// writeSessionState rebuilds an adapter's file from scratch, so any
+// adapter write -- codex-notify's turn end, the wrapper's -- reset it to now.
+describe('adapters -- Review round 5 (integration): firstSeenAt and neutral results', () => {
+  test('codex-notify keeps the hooks\' firstSeenAt', () => {
+    const t = round5Env('notify-first-seen');
+    try {
+      const T = '019a-thread-first';
+      runUpdateState(null, { session_id: T, hook_event_name: 'UserPromptSubmit', prompt: 'go' },
+        t.env, { args: ['--editor', 'codex', 'UserPromptSubmit'] });
+      const file = path.join(t.sessionsDir, `${T}.json`);
+      const seeded = readJSON(file);
+      const old = Date.now() - 3600000;
+      fs.writeFileSync(file, JSON.stringify({ ...seeded, firstSeenAt: old }));
+      execFileSync(NODE, [path.join(ADAPTERS_DIR, 'codex-notify.js'),
+        JSON.stringify({ type: 'agent-turn-complete', 'thread-id': T, 'last-assistant-message': 'Done.' })],
+        { env: t.env, stdio: 'ignore', timeout: 10000 });
+      assert.strictEqual(readJSON(file).firstSeenAt, old);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('an adapter session keeps its firstSeenAt across its own writes', () => {
+    const t = round5Env('openclaw-first-seen');
+    try {
+      const OPENCLAW = path.join(ADAPTERS_DIR, 'openclaw-adapter.js');
+      runStdinAdapter(OPENCLAW, { event: 'tool_call', toolName: 'read', session_id: 'fs-cl' }, t.env);
+      const file = path.join(t.sessionsDir, 'fs-cl.json');
+      const first = readJSON(file).firstSeenAt;
+      assert.ok(typeof first === 'number' && first > 0, 'stamped on the first write');
+      runStdinAdapter(OPENCLAW, { event: 'tool_result', toolName: 'read', session_id: 'fs-cl' }, t.env);
+      assert.strictEqual(readJSON(file).firstSeenAt, first);
+    } finally { cleanup(t.tmp); }
+  });
+
+  // classifyToolResult marks a background launch neutral: nothing has run
+  // yet, so it neither extends nor breaks the streak (update-state.js
+  // already honours it).
+  test('a neutral result leaves the streak alone', () => {
+    const { handleToolEnd } = require('../adapters/base-adapter');
+    const { defaultStats } = require('../lib/state-machine');
+    const stats = defaultStats();
+    stats.streak = 4;
+    const r = handleToolEnd(stats, 'Bash', { command: 'npm test', run_in_background: true },
+      { stdout: '', stderr: '', backgroundTaskId: 'bg1' }, false);
+    assert.strictEqual(r.neutral, true, 'fixture');
+    assert.strictEqual(stats.streak, 4);
+  });
+});
+
 describe('adapters -- Review round 5: OpenCode', () => {
   const PLUGIN_FILE = path.join(ADAPTERS_DIR, 'opencode-plugin.mjs');
   const OPENCODE = path.join(ADAPTERS_DIR, 'opencode-adapter.js');

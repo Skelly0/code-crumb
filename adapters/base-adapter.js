@@ -31,7 +31,7 @@ const {
   EDIT_TOOLS, ASK_TOOLS,
   pruneFrequentFiles, topFrequentFiles, prettyModelName, toText,
   COUNTER_MAX_FILES, freshCounter, normalizeCounter, parkAgents, unparkAgents, pruneCounters,
-  creditSession, creditEndFor, touchCounter, localDay,
+  creditSession, creditEndFor, touchCounter, localDay, firstSeenFor,
 } = require('../lib/state-machine');
 
 // -- State file writing ------------------------------------------------
@@ -73,9 +73,15 @@ function writeSessionState(sessionId, state, detail = '', stopped = false, extra
   try {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
     const filename = safeFilename(sessionId) + '.json';
+    // Rebuilt from scratch, so the one field that must outlive every write
+    // -- when the file was born, which update-state.js's foreign-session
+    // classifier compares with an agent's start -- is carried by hand.
+    let prev = null;
+    try { prev = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, filename), 'utf8')); } catch {}
     const data = {
       session_id: sessionId, state, detail: cleanDetail(detail),
       timestamp: nextTimestamp(), cwd: process.cwd(), stopped,
+      firstSeenAt: firstSeenFor(prev && typeof prev === 'object' ? prev : null, Date.now()),
       ...pidField(),
       ...extra,
     };
@@ -307,9 +313,11 @@ function handleToolStart(stats, toolName, toolInput) {
 // applies to Codex's Interrupt. Breaking it there counted the same Esc twice
 // for OpenCode (the aborted tool and the aborted turn), and a second break
 // zeroed brokenStreak, so the face never reacted to the first.
+// A neutral result (a background launch: nothing has run yet) leaves it alone
+// too, as in update-state.js.
 function handleToolEnd(stats, toolName, toolInput, toolResponse, isError) {
   const result = classifyToolResult(toolName, toolInput, toolResponse, isError);
-  if (!(toolResponse && toolResponse.interrupted)) updateStreak(stats, result.state === 'error');
+  if (!(toolResponse && toolResponse.interrupted) && !result.neutral) updateStreak(stats, result.state === 'error');
   // Same rule as update-state.js: a commit counts for this session.
   if (result.state === 'proud' && result.detail === 'committed') {
     stats.session.commitCount = (stats.session.commitCount || 0) + 1;

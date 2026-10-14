@@ -35,7 +35,7 @@ const {
   COUNTER_MAX_FILES,
   freshCounter: _freshCounter, normalizeCounter: _normalizeCounter,
   parkAgents: _parkAgents, unparkAgents: _unparkAgents, pruneCounters: _pruneCounters,
-  creditSession: _creditSession, creditEndFor, touchCounter, localDay,
+  creditSession: _creditSession, creditEndFor, touchCounter, localDay, firstSeenFor,
 } = require('./lib/state-machine');
 
 // Safety net for a missed SubagentStop: an activeSubagents entry older than
@@ -250,13 +250,8 @@ const INFO_NOTIFICATIONS = new Set([
 // classified parallel on its first event and the owner's subagent on its next.
 const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'lastPromptAt', 'model', 'firstSeenAt'];
 
-// firstSeenAt for a write whose previous file (if any) is `prev`: carried,
-// else seeded from a pre-field file's last write (the best it can know), else now.
-function firstSeenFor(prev, now) {
-  if (prev && typeof prev.firstSeenAt === 'number' && prev.firstSeenAt > 0) return prev.firstSeenAt;
-  if (prev && typeof prev.timestamp === 'number' && prev.timestamp > 0) return Math.min(prev.timestamp, now);
-  return now;
-}
+// firstSeenAt itself comes from state-machine.js's firstSeenFor, which the
+// adapters share.
 
 // Per-session counters, and the parking of a non-owner's agents, live in
 // state-machine.js (see "Per-Session Counters") -- the adapters share them.
