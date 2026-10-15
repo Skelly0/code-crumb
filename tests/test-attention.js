@@ -1352,7 +1352,7 @@ describe('renderer -- third review pass', () => {
   });
 
   test('source: a turn end never cuts a reward or an error short', () => {
-    const i = rendererSrc.indexOf('if (stateData.stopped && Date.now() < face.minDisplayUntil');
+    const i = rendererSrc.indexOf('if (stateData.stopped && face.now() < face.minDisplayUntil');
     assert.ok(i > 0);
     const cond = rendererSrc.slice(i, rendererSrc.indexOf('{', i));
     assert.ok(cond.includes('!COMPLETION_STATES.has(face.state)'));
@@ -1713,6 +1713,355 @@ describe('round 4 -- hooks and renderer', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'renderer.js'), 'utf8');
     assert.ok(/if \(lastEditorPid && !editorDead && !lastStopped && !RESCUE_EXCLUDE\.has\(face\.state\)\)/.test(src));
     assert.ok(/fileWaiting: lastWaitingOn,/.test(src));
+  });
+});
+
+// -- Review round 5 (hooks): permission waits --------------------------------
+// Claude Code fires Notification(permission_prompt) 6 s after a permission
+// dialog opens and cancels it when the dialog is answered first, so a
+// PermissionRequest is an unconfirmed wait and the notification confirms it.
+
+describe('review round 5 -- permission wait confirmation', () => {
+  const WAIT_KEYS = ['waitingOn', 'waitKind', 'waitConfirmed', 'permState', 'permDetail'];
+  const ask = { session_id: 'pw-1', tool_name: 'Bash', tool_input: { command: 'npm test' } };
+
+  test('a PermissionRequest is an unconfirmed permission wait naming the tool\'s own face', () => {
+    const t = makeTempEnv('pw-1');
+    try {
+      runUpdateState('PermissionRequest', ask, t.env);
+      const f = readJSON(sessionFile(t.sessionsDir, 'pw-1'));
+      assert.strictEqual(f.state, 'waiting');
+      assert.strictEqual(f.waitKind, 'permission');
+      assert.strictEqual(f.waitConfirmed, false);
+      assert.strictEqual(f.permState, 'testing', 'what the face shows once the user allows it');
+      assert.ok(f.permDetail, 'with its detail');
+      assert.ok(f.waitingOn);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('the 6 s notification confirms it and keeps what is being asked', () => {
+    const t = makeTempEnv('pw-1');
+    try {
+      runUpdateState('PermissionRequest', ask, t.env);
+      const before = readJSON(sessionFile(t.sessionsDir, 'pw-1'));
+      runUpdateState('Notification', { session_id: 'pw-1', notification_type: 'permission_prompt',
+        message: 'Claude needs your permission to use Bash' }, t.env);
+      const f = readJSON(sessionFile(t.sessionsDir, 'pw-1'));
+      assert.strictEqual(f.state, 'waiting');
+      assert.strictEqual(f.waitConfirmed, true);
+      assert.strictEqual(f.waitKind, 'permission');
+      assert.strictEqual(f.waitingOn, before.waitingOn, 'carried forward');
+      assert.strictEqual(f.permState, before.permState);
+      assert.strictEqual(f.permDetail, before.permDetail);
+      assert.strictEqual(f.detail, 'allow Bash?', 'not the generic "allow?"');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a wait survives an unrelated write and every answer clears all five fields', () => {
+    for (const answer of [
+      ['PostToolUse', { ...ask, tool_response: { stdout: 'ok' } }],
+      ['PostToolUseFailure', { ...ask, error: 'Exit code 1' }],
+      ['UserPromptSubmit', { session_id: 'pw-1', prompt: 'never mind' }],
+      ['PermissionDenied', { ...ask, tool_use_id: 'toolu_x', reason: 'classifier' }],
+      ['Stop', { session_id: 'pw-1' }],
+    ]) {
+      const t = makeTempEnv('pw-1');
+      try {
+        runUpdateState('PermissionRequest', ask, t.env);
+        runUpdateState('PostToolUse', { session_id: 'pw-1', tool_name: 'Read',
+          tool_input: { file_path: 'a.js' }, tool_response: { type: 'text' } }, t.env);
+        let f = readJSON(sessionFile(t.sessionsDir, 'pw-1'));
+        for (const k of WAIT_KEYS) assert.notStrictEqual(f[k], undefined, `${k} kept past a parallel tool`);
+        runUpdateState(answer[0], answer[1], t.env);
+        f = readJSON(sessionFile(t.sessionsDir, 'pw-1'));
+        for (const k of WAIT_KEYS) assert.strictEqual(f[k], undefined, `${answer[0]} clears ${k}`);
+      } finally { cleanup(t.tmp); }
+    }
+  });
+
+  test('codex, and a disabled notification, never write an unconfirmed wait', () => {
+    for (const [label, extraEnv, args] of [
+      ['codex', { CODE_CRUMB_EDITOR: 'codex' }, []],
+      ['--editor codex', {}, ['--editor', 'codex']],
+      ['notify disabled', { CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS: '1' }, []],
+    ]) {
+      const t = makeTempEnv('pw-2');
+      try {
+        runUpdateState('PermissionRequest', { ...ask, session_id: 'pw-2' }, { ...t.env, ...extraEnv }, { args });
+        const f = readJSON(sessionFile(t.sessionsDir, 'pw-2'));
+        assert.strictEqual(f.state, 'waiting', label);
+        assert.ok(f.waitingOn, `${label}: still names the call`);
+        assert.strictEqual(f.waitKind, undefined, `${label}: nothing would ever confirm it`);
+        assert.strictEqual(f.waitConfirmed, undefined, label);
+      } finally { cleanup(t.tmp); }
+    }
+  });
+
+  // The subagent's PermissionRequest carries agent_id; the notification does
+  // not (2.1.300 sends it with the session id alone).
+  test('a subagent\'s wait is confirmed by the session\'s notification', () => {
+    const t = makeTempEnv('pw-3');
+    try {
+      runUpdateState('PermissionRequest', { ...ask, session_id: 'pw-3', agent_id: 'ag1', agent_type: 'Explore' }, t.env);
+      const fp = sessionFile(t.sessionsDir, 'pw-3-agent-ag1');
+      const agent = readJSON(fp);
+      assert.strictEqual(agent.waitConfirmed, false);
+      // The dialog has been open for ten seconds (syncAt: the request's own
+      // time), and a parallel tool of the agent's wrote since (eventAt).
+      fs.writeFileSync(fp, JSON.stringify({ ...agent, syncAt: agent.syncAt - 10000 }), 'utf8');
+      runUpdateState('Notification', { session_id: 'pw-3', notification_type: 'permission_prompt' }, t.env);
+      const after = readJSON(fp);
+      assert.strictEqual(after.waitConfirmed, true);
+      assert.ok(after.timestamp > agent.timestamp, 'a new timestamp, or the renderer never reads it');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a subagent wait opened under 5 s ago is not this notification\'s', () => {
+    const t = makeTempEnv('pw-4');
+    try {
+      runUpdateState('PermissionRequest', { ...ask, session_id: 'pw-4', agent_id: 'ag1' }, t.env);
+      runUpdateState('Notification', { session_id: 'pw-4', notification_type: 'permission_prompt' }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'pw-4-agent-ag1')).waitConfirmed, false);
+    } finally { cleanup(t.tmp); }
+  });
+
+  // The session-wide notification also lands on the PARENT's file as "allow?".
+  // Allowing the agent's prompt produces only the agent's own PostToolUse, so
+  // the parent -- which writes nothing while it waits on its agent -- kept a
+  // confirmed wait (and the flashing "WAITING FOR YOU" title) until its own
+  // next write, long after the agent's tool had finished.
+  function agentAsks(t, id) {
+    runUpdateState('UserPromptSubmit', { session_id: id, prompt: 'go' }, t.env);
+    runUpdateState('PreToolUse', { session_id: id, tool_name: 'Agent', tool_use_id: 'toolu_task',
+      tool_input: { description: 'run tests', subagent_type: 'general-purpose', prompt: 'run them' } }, t.env);
+    runUpdateState('SubagentStart', { session_id: id, agent_id: 'ag1', agent_type: 'general-purpose' }, t.env);
+    const call = { session_id: id, agent_id: 'ag1', agent_type: 'general-purpose', ...{
+      tool_name: ask.tool_name, tool_input: ask.tool_input } };
+    runUpdateState('PreToolUse', { ...call, tool_use_id: 'toolu_ag1' }, t.env);
+    runUpdateState('PermissionRequest', call, t.env);
+    const fp = sessionFile(t.sessionsDir, `${id}-agent-ag1`);
+    const agent = readJSON(fp);
+    fs.writeFileSync(fp, JSON.stringify({ ...agent, syncAt: agent.syncAt - 10000 }), 'utf8');
+    const before = readJSON(sessionFile(t.sessionsDir, id));
+    runUpdateState('Notification', { session_id: id, notification_type: 'permission_prompt' }, t.env);
+    return { call, before };
+  }
+
+  test('allowing a subagent\'s prompt takes the parent out of its wait', () => {
+    const t = makeTempEnv('pw-5');
+    try {
+      const { call, before } = agentAsks(t, 'pw-5');
+      const waiting = readJSON(sessionFile(t.sessionsDir, 'pw-5'));
+      assert.strictEqual(waiting.state, 'waiting', 'the notification still reaches the parent');
+      runUpdateState('PostToolUse', { ...call, tool_use_id: 'toolu_ag1',
+        tool_response: { stdout: '12 passing', stderr: '' } }, t.env);
+      const parent = readJSON(sessionFile(t.sessionsDir, 'pw-5'));
+      assert.strictEqual(parent.state, before.state, 'back to what it showed before the prompt');
+      assert.strictEqual(parent.detail, before.detail);
+      assert.strictEqual(parent.answered, true, 'the renderer drops the wait');
+      assert.ok(parent.timestamp > waiting.timestamp, 'a new timestamp, or the renderer never reads it');
+      for (const k of [...WAIT_KEYS, 'waitForAgents', 'waitPrev']) assert.strictEqual(parent[k], undefined, k);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'pw-5-agent-ag1')).answered, true);
+      // tmux reads the global file, which the owner's notification also set.
+      const g = readJSON(t.stateFile);
+      assert.strictEqual(g.sessionId, 'pw-5');
+      assert.notStrictEqual(g.state, 'waiting', 'the global file is released too');
+    } finally { cleanup(t.tmp); }
+  });
+
+  // Two agents asking at once: the parent stands in for both, and goes back
+  // only when the second is answered. The shrunk list was computed and never
+  // written, so the second answer still found the first id and never released.
+  test('with two agents asking, the parent goes back after the second answer', () => {
+    const t = makeTempEnv('pw-7');
+    try {
+      const id = 'pw-7';
+      runUpdateState('UserPromptSubmit', { session_id: id, prompt: 'go' }, t.env);
+      runUpdateState('PreToolUse', { session_id: id, tool_name: 'Agent', tool_use_id: 'toolu_task',
+        tool_input: { description: 'two at once', subagent_type: 'general-purpose', prompt: 'go' } }, t.env);
+      const before = readJSON(sessionFile(t.sessionsDir, id));
+      const calls = ['ag1', 'ag2'].map((ag, i) => ({ session_id: id, agent_id: ag, agent_type: 'general-purpose',
+        tool_name: 'Bash', tool_input: { command: `npm run job${i}` } }));
+      for (const [i, call] of calls.entries()) {
+        runUpdateState('SubagentStart', { session_id: id, agent_id: call.agent_id, agent_type: 'general-purpose' }, t.env);
+        runUpdateState('PreToolUse', { ...call, tool_use_id: `toolu_j${i}` }, t.env);
+        runUpdateState('PermissionRequest', call, t.env);
+        const fp = sessionFile(t.sessionsDir, `${id}-agent-${call.agent_id}`);
+        const a = readJSON(fp);
+        fs.writeFileSync(fp, JSON.stringify({ ...a, syncAt: a.syncAt - 10000 }), 'utf8');
+      }
+      runUpdateState('Notification', { session_id: id, notification_type: 'permission_prompt' }, t.env);
+      assert.deepStrictEqual(readJSON(sessionFile(t.sessionsDir, id)).waitForAgents.sort(), [`${id}-agent-ag1`, `${id}-agent-ag2`]);
+      runUpdateState('PostToolUse', { ...calls[0], tool_use_id: 'toolu_j0', tool_response: { stdout: 'ok' } }, t.env);
+      const mid = readJSON(sessionFile(t.sessionsDir, id));
+      assert.strictEqual(mid.state, 'waiting', 'still asking for the second agent');
+      assert.deepStrictEqual(mid.waitForAgents, [`${id}-agent-ag2`]);
+      runUpdateState('PostToolUse', { ...calls[1], tool_use_id: 'toolu_j1', tool_response: { stdout: 'ok' } }, t.env);
+      const after = readJSON(sessionFile(t.sessionsDir, id));
+      assert.strictEqual(after.state, before.state);
+      assert.strictEqual(after.waitForAgents, undefined);
+    } finally { cleanup(t.tmp); }
+  });
+
+  // Agents asking a few seconds apart get a notification each. The second one
+  // replaced the parent's list with only the agent IT confirmed (or, if it
+  // confirmed nothing, dropped the list), so the first agent was forgotten.
+  test('a later notification adds to the parent\'s agents, never replaces them', () => {
+    const t = makeTempEnv('pw-8');
+    try {
+      const id = 'pw-8';
+      runUpdateState('UserPromptSubmit', { session_id: id, prompt: 'go' }, t.env);
+      runUpdateState('PreToolUse', { session_id: id, tool_name: 'Agent', tool_use_id: 'toolu_task',
+        tool_input: { description: 'staggered', subagent_type: 'general-purpose', prompt: 'go' } }, t.env);
+      const before = readJSON(sessionFile(t.sessionsDir, id));
+      const ask = (ag, i) => {
+        const call = { session_id: id, agent_id: ag, agent_type: 'general-purpose',
+          tool_name: 'Bash', tool_input: { command: `npm run step${i}` } };
+        runUpdateState('SubagentStart', { session_id: id, agent_id: ag, agent_type: 'general-purpose' }, t.env);
+        runUpdateState('PreToolUse', { ...call, tool_use_id: `toolu_s${i}` }, t.env);
+        runUpdateState('PermissionRequest', call, t.env);
+        const fp = sessionFile(t.sessionsDir, `${id}-agent-${ag}`);
+        const a = readJSON(fp);
+        fs.writeFileSync(fp, JSON.stringify({ ...a, syncAt: a.syncAt - 10000 }), 'utf8');
+        return call;
+      };
+      const c1 = ask('ag1', 1);
+      runUpdateState('Notification', { session_id: id, notification_type: 'permission_prompt' }, t.env);
+      const c2 = ask('ag2', 2);
+      runUpdateState('Notification', { session_id: id, notification_type: 'permission_prompt' }, t.env);
+      runUpdateState('Notification', { session_id: id, notification_type: 'permission_prompt' }, t.env); // confirms nothing
+      assert.deepStrictEqual(readJSON(sessionFile(t.sessionsDir, id)).waitForAgents.sort(),
+        [`${id}-agent-ag1`, `${id}-agent-ag2`]);
+      runUpdateState('PostToolUse', { ...c2, tool_use_id: 'toolu_s2', tool_response: { stdout: 'ok' } }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, id)).state, 'waiting', 'ag1 still asking');
+      runUpdateState('PostToolUse', { ...c1, tool_use_id: 'toolu_s1', tool_response: { stdout: 'ok' } }, t.env);
+      const after = readJSON(sessionFile(t.sessionsDir, id));
+      // ag2's SubagentStart put the parent on "conducting 2" before the second
+      // prompt: that is the face it goes back to.
+      assert.deepStrictEqual([after.state, after.detail], ['subagent', 'conducting 2'], 'back to the pre-prompt face');
+      assert.strictEqual(before.state, 'subagent', 'fixture');
+      assert.strictEqual(after.waitForAgents, undefined);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('the parent\'s own prompt is not released by an agent\'s answer', () => {
+    const t = makeTempEnv('pw-6');
+    try {
+      runUpdateState('PermissionRequest', { ...ask, session_id: 'pw-6' }, t.env);
+      const fp = sessionFile(t.sessionsDir, 'pw-6');
+      const own = readJSON(fp);
+      fs.writeFileSync(fp, JSON.stringify({ ...own, syncAt: own.syncAt - 10000 }), 'utf8');
+      runUpdateState('Notification', { session_id: 'pw-6', notification_type: 'permission_prompt' }, t.env);
+      runUpdateState('PostToolUse', { session_id: 'pw-6', agent_id: 'ag9', agent_type: 'Explore',
+        tool_name: 'Read', tool_input: { file_path: 'b.js' }, tool_use_id: 'toolu_x',
+        tool_response: { type: 'text' } }, t.env);
+      const parent = readJSON(fp);
+      assert.strictEqual(parent.state, 'waiting');
+      assert.strictEqual(parent.waitConfirmed, true);
+      assert.ok(parent.waitingOn, 'still the parent\'s own question');
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('review round 5 -- PermissionDenied', () => {
+  const call = { session_id: 'pd-1', tool_name: 'Bash', tool_input: { command: 'git push --force' } };
+
+  test('it answers the wait on its call, thinks, and leaves the streak alone', () => {
+    const t = makeTempEnv('pd-1');
+    try {
+      fs.writeFileSync(t.statsFile, JSON.stringify({ streak: 7, bestStreak: 7 }), 'utf8');
+      runUpdateState('PermissionRequest', call, t.env);
+      runUpdateState('PermissionDenied', { ...call, tool_use_id: 'toolu_d1',
+        reason: 'Force-pushing is blocked in auto mode' }, t.env);
+      const f = readJSON(sessionFile(t.sessionsDir, 'pd-1'));
+      assert.strictEqual(f.state, 'thinking');
+      assert.strictEqual(f.detail, 'Bash denied');
+      assert.strictEqual(f.answered, true);
+      assert.strictEqual(f.waitingOn, undefined);
+      const stats = readJSON(t.statsFile);
+      assert.strictEqual(stats.streak, 7, 'a denial is no failure');
+      assert.ok(!stats.brokenStreakAt, 'and breaks nothing');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a denial of some other call leaves the open wait open', () => {
+    const t = makeTempEnv('pd-2');
+    try {
+      runUpdateState('PermissionRequest', { ...call, session_id: 'pd-2' }, t.env);
+      runUpdateState('PermissionDenied', { session_id: 'pd-2', tool_name: 'mcp__github__delete_repo',
+        tool_input: { repo: 'x' }, tool_use_id: 'toolu_d2', reason: 'no' }, t.env);
+      const f = readJSON(sessionFile(t.sessionsDir, 'pd-2'));
+      assert.strictEqual(f.detail, 'github denied', 'an MCP tool is named by its server');
+      assert.ok(f.waitingOn, 'the Bash prompt is still open');
+      assert.strictEqual(f.answered, undefined);
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('a subagent\'s denial goes to its own orbital', () => {
+    const t = makeTempEnv('pd-3');
+    try {
+      runUpdateState('SessionStart', { session_id: 'pd-3', source: 'startup' }, t.env);
+      runUpdateState('PermissionDenied', { ...call, session_id: 'pd-3', agent_id: 'ag9',
+        agent_type: 'Explore', tool_use_id: 'toolu_d3', reason: 'no' }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'pd-3-agent-ag9')).detail, 'Bash denied');
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'pd-3')).state, 'idle', 'the parent is untouched');
+    } finally { cleanup(t.tmp); }
+  });
+
+});
+
+describe('review round 5 -- notifications that ask for nothing', () => {
+  // elicitation_response arrives right after the user ANSWERED an MCP
+  // elicitation; it used to put the face straight back to waiting on them.
+  test('an informational notification draws nothing', () => {
+    for (const kind of ['elicitation_response', 'elicitation_complete', 'agent_completed', 'computer_use_exit']) {
+      const t = makeTempEnv('nt-1');
+      try {
+        runUpdateState('ElicitationResult', { session_id: 'nt-1', action: 'accept', mcp_server_name: 'gh' }, t.env);
+        const before = readJSON(sessionFile(t.sessionsDir, 'nt-1'));
+        runUpdateState('Notification', { session_id: 'nt-1', notification_type: kind, message: 'x' }, t.env);
+        const f = readJSON(sessionFile(t.sessionsDir, 'nt-1'));
+        assert.strictEqual(f.state, 'satisfied', kind);
+        assert.strictEqual(f.timestamp, before.timestamp, `${kind}: no write at all`);
+      } finally { cleanup(t.tmp); }
+    }
+  });
+
+  test('the ones that do ask still wait', () => {
+    const t = makeTempEnv('nt-2');
+    try {
+      runUpdateState('Notification', { session_id: 'nt-2', notification_type: 'agent_needs_input' }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, 'nt-2')).state, 'waiting');
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+// -- Review round 5 (docs-pass bugs): the notify-disable switch -------------
+// Suspected: Claude Code turns the 6 s notification off for ANY non-empty
+// CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS, so a `0` would leave our
+// unconfirmed wait to resolve after 8 s with the dialog still open. It does
+// not: 2.1.300 reads it through its env table as `D.bool()`, which is
+// `["1","true","yes","on"].includes(String(v).toLowerCase().trim())` -- the
+// same switch update-state.js already reads. Pinned, so neither side drifts
+// from the binary without a test saying so.
+
+describe('review round 5 (docs-pass bugs) -- the notify-disable switch reads like Claude Code', () => {
+  const ask = { session_id: 'nd-1', tool_name: 'Bash', tool_input: { command: 'npm test' } };
+  const waitKindWith = (value) => {
+    const t = makeTempEnv('nd-1');
+    try {
+      runUpdateState('PermissionRequest', ask,
+        { ...t.env, CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS: value });
+      return readJSON(sessionFile(t.sessionsDir, 'nd-1')).waitKind;
+    } finally { cleanup(t.tmp); }
+  };
+
+  test('0, false and an empty value leave the notification on: the wait is unconfirmed', () => {
+    for (const v of ['0', 'false', '']) assert.strictEqual(waitKindWith(v), 'permission', JSON.stringify(v));
+  });
+
+  test('1/true/yes/on in any case, padded, turn it off: no unconfirmed wait', () => {
+    for (const v of [' On ', 'TRUE']) assert.strictEqual(waitKindWith(v), undefined, JSON.stringify(v));
   });
 });
 

@@ -18,11 +18,25 @@
 // |  native hooks (node setup.js codex) or codex-wrapper.js.       |
 // +================================================================+
 
+const fs = require('fs');
+const path = require('path');
 const {
   writeSessionState, guardedWriteState, readStats, writeStats, initSession, buildExtra,
   creditOwnerSession,
 } = require('./base-adapter');
-const { withStatsLock } = require('../lib/shared');
+const { withStatsLock, SESSIONS_DIR, safeFilename } = require('../lib/shared');
+
+// What the session file knows that a turn-complete notification does not.
+// Codex's native hooks write the same session (same thread id), and the
+// rebuilt-from-scratch notify write used to erase all of it at every turn
+// end: the attention stamp above all, so the center face left a Codex window
+// the moment its turn finished for anyone with both the notify line and the
+// hooks. The sticky set is update-state.js's (STICKY_FIELDS); the branch and
+// worktree flag only a hook can compute.
+const CARRIED_FIELDS = [
+  'taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName',
+  'lastPromptAt', 'model', 'gitBranch', 'isWorktree',
+];
 
 // -- Parse the notify JSON argument ----------------------------------
 
@@ -69,6 +83,23 @@ try {
     const sessionExtra = { ...globalExtra };
     delete sessionExtra.stopped;
     if (turnEnded) sessionExtra.turnEnded = true;
+    // Who wrote this, for codex-wrapper: it goes quiet once codex's hooks
+    // write its session, and a notify write looks like one (editor codex,
+    // another pid, isWorktree carried below) -- so a notify line beside the
+    // wrapper, with no hooks, silenced every turn after the first. Not in
+    // CARRIED_FIELDS: the next write by anyone else is not a notify write.
+    sessionExtra.writer = 'notify';
+    let prev = null;
+    try {
+      prev = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
+    } catch {}
+    if (prev && typeof prev === 'object') {
+      for (const field of CARRIED_FIELDS) {
+        if (prev[field] !== undefined && prev[field] !== null && sessionExtra[field] === undefined) {
+          sessionExtra[field] = prev[field];
+        }
+      }
+    }
     writeSessionState(sessionId, state, detail, false, sessionExtra);
     writeStats(stats);
   });

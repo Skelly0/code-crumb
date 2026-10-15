@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 'use strict';
 
 // +================================================================+
@@ -329,7 +328,7 @@ describe('face.js -- ClaudeFace.update', () => {
     const face = new ClaudeFace();
     face.setState('happy');
     face.setState('coding');
-    face.minDisplayUntil = Date.now() - 1;
+    face.minDisplayUntil = face.now() - 1;
     face.update(66);
     assert.strictEqual(face.state, 'coding');
   });
@@ -423,9 +422,9 @@ describe('face.js -- ClaudeFace.getMouth', () => {
 describe('face.js -- ClaudeFace._buildSparkline', () => {
   test('returns null with fewer than 3 timeline entries', () => {
     const face = new ClaudeFace();
-    assert.strictEqual(face._buildSparkline(10, Date.now()), null);
-    face.timeline.push({ state: 'coding', at: Date.now() });
-    assert.strictEqual(face._buildSparkline(10, Date.now()), null);
+    assert.strictEqual(face._buildSparkline(10, face.now()), null);
+    face.timeline.push({ state: 'coding', at: face.now() });
+    assert.strictEqual(face._buildSparkline(10, face.now()), null);
   });
 
   test('returns null when session duration < 2000ms', () => {
@@ -608,7 +607,7 @@ describe('face.js -- pet spam easter egg', () => {
 
   test('filters out old pet timestamps outside window', () => {
     const face = new ClaudeFace();
-    face.petTimes = [Date.now() - 3000, Date.now() - 2500];
+    face.petTimes = [face.now() - 3000, face.now() - 2500];
     face.pet();
     assert.strictEqual(face.petTimes.length, 1);
   });
@@ -661,7 +660,7 @@ describe('face.js -- pet spam escalation', () => {
     const face = new ClaudeFace();
     for (let i = 0; i < 8; i++) face.pet();
     assert.strictEqual(face.petSpamLevel, 1);
-    face.petSpamLastAt = Date.now() - 11000;
+    face.petSpamLastAt = face.now() - 11000;
     for (let i = 0; i < 50; i++) face.update(66);
     for (let i = 0; i < 8; i++) face.pet();
     assert.strictEqual(face.petSpamLevel, 1);
@@ -1131,7 +1130,7 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
     face.setState('relieved');
     assert.strictEqual(face.state, 'relieved');
     // Simulate relieved has been showing for 1900ms (past the guaranteed window)
-    face.lastStateChange = Date.now() - 1900;
+    face.lastStateChange = face.now() - 1900;
     face.setState('coding', 'editing app.ts');
     assert.strictEqual(face.state, 'coding');
   });
@@ -1188,7 +1187,7 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
   test('work state bypasses completion after the 1800ms guaranteed window (Fix #96)', () => {
     const face = new ClaudeFace();
     face.setState('happy');
-    face.lastStateChange = Date.now() - 1900; // past the guaranteed window
+    face.lastStateChange = face.now() - 1900; // past the guaranteed window
     face.setState('reading');
     assert.strictEqual(face.state, 'reading'); // bypasses now that window passed
     assert.strictEqual(face.pendingState, null);
@@ -1240,7 +1239,7 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
   test('executing bypasses happy min display after the 1800ms guaranteed window', () => {
     const face = new ClaudeFace();
     face.setState('happy');
-    face.lastStateChange = Date.now() - 1900;
+    face.lastStateChange = face.now() - 1900;
     face.setState('executing', 'next command');
     assert.strictEqual(face.state, 'executing');
   });
@@ -1248,7 +1247,7 @@ describe('face.js -- active work bypasses thinking min display (Bug 2)', () => {
   test('testing bypasses satisfied min display after the 1800ms guaranteed window', () => {
     const face = new ClaudeFace();
     face.setState('satisfied');
-    face.lastStateChange = Date.now() - 1900;
+    face.lastStateChange = face.now() - 1900;
     face.setState('testing', 'npm test');
     assert.strictEqual(face.state, 'testing');
   });
@@ -1320,7 +1319,7 @@ describe('caffeinated detection', () => {
     face.minDisplayUntil = 0;
     face.setState('coding');
     face.minDisplayUntil = 0;
-    const before = Date.now();
+    const before = face.now();
     face.update(16);
     assert.strictEqual(face.state, 'caffeinated');
     // minDisplayUntil should be set (2500ms from now)
@@ -1373,7 +1372,7 @@ describe('face.js -- completion states bypass minDisplayUntil (#76)', () => {
   test('completion state (happy) bypasses non-work minDisplayUntil', () => {
     const face = new ClaudeFace();
     face.setState('thinking');
-    face.minDisplayUntil = Date.now() + 50000;
+    face.minDisplayUntil = face.now() + 50000;
     face.setState('happy');
     assert.strictEqual(face.state, 'happy',
       'completion state should bypass non-work minDisplayUntil');
@@ -1382,7 +1381,7 @@ describe('face.js -- completion states bypass minDisplayUntil (#76)', () => {
   test('completion state (satisfied) queued behind active work -- no bypass', () => {
     const face = new ClaudeFace();
     face.setState('executing');
-    face.minDisplayUntil = Date.now() + 50000;
+    face.minDisplayUntil = face.now() + 50000;
     face.setState('satisfied');
     assert.strictEqual(face.state, 'executing',
       'satisfied should not bypass active work state');
@@ -1392,7 +1391,7 @@ describe('face.js -- completion states bypass minDisplayUntil (#76)', () => {
   test('non-completion state does NOT bypass minDisplayUntil', () => {
     const face = new ClaudeFace();
     face.setState('coding');
-    face.minDisplayUntil = Date.now() + 50000;
+    face.minDisplayUntil = face.now() + 50000;
     face.setState('reading');
     assert.strictEqual(face.state, 'coding',
       'non-completion state should not bypass minDisplayUntil');
@@ -1401,7 +1400,7 @@ describe('face.js -- completion states bypass minDisplayUntil (#76)', () => {
   test('pending completion not overwritten by non-completion state', () => {
     const face = new ClaudeFace();
     face.setState('coding');
-    face.minDisplayUntil = Date.now() + 50000;
+    face.minDisplayUntil = face.now() + 50000;
     // Reading goes to pending
     face.setState('reading');
     assert.strictEqual(face.pendingState, 'reading');
@@ -1625,7 +1624,7 @@ describe('face.js -- petting system', () => {
     face.petSpamActive = false;
     face.petSpamTimer = 0;
     face.petTimes = [];
-    face.petSpamLastAt = Date.now() - 11000;
+    face.petSpamLastAt = face.now() - 11000;
     // New burst
     for (let i = 0; i < 8; i++) face.pet();
     assert.strictEqual(face.petSpamLevel, 1);
@@ -2131,7 +2130,7 @@ describe('face.js -- ClaudeFace.update()', () => {
     const face = new ClaudeFace();
     face.setState('coding');
     // Force minDisplayUntil into the past so pending will flush
-    face.minDisplayUntil = Date.now() - 1;
+    face.minDisplayUntil = face.now() - 1;
     face.pendingState = 'reading';
     face.pendingDetail = 'test.js';
     face.update(66);
@@ -2157,8 +2156,8 @@ describe('face.js -- ClaudeFace active work bypass', () => {
       for (const work of workStates) {
         const face = new ClaudeFace();
         face.state = inter;
-        face.lastStateChange = Date.now() - 10000; // ensure completion min show has passed
-        face.minDisplayUntil = Date.now() + 60000; // far in the future
+        face.lastStateChange = face.now() - 10000; // ensure completion min show has passed
+        face.minDisplayUntil = face.now() + 60000; // far in the future
         face.setState(work);
         assert.strictEqual(face.state, work,
           `expected ${work} to bypass ${inter}, but state is ${face.state}`);
@@ -2401,35 +2400,35 @@ describe('face.js -- long-running tool escalation', () => {
   test('detail gains "still running" with elapsed seconds after 8s', () => {
     const f = new ClaudeFace();
     f.setState('executing', 'npm test');
-    f.lastStateChange = Date.now() - 9000;
+    f.lastStateChange = f.now() - 9000;
     assert.match(f.displayDetail(), /^npm test \u00b7 still running \u2026 9s$/);
   });
 
   test('an empty detail escalates to just the suffix', () => {
     const f = new ClaudeFace();
     f.setState('executing', '');
-    f.lastStateChange = Date.now() - 12000;
+    f.lastStateChange = f.now() - 12000;
     assert.match(f.displayDetail(), /^still running \u2026 12s$/);
   });
 
   test('non-work states never escalate', () => {
     const f = new ClaudeFace();
     f.forceState('happy', 'all done');
-    f.lastStateChange = Date.now() - 60000;
+    f.lastStateChange = f.now() - 60000;
     assert.strictEqual(f.displayDetail(), 'all done');
   });
 
   test('heldMs measures the time since the current state started', () => {
     const f = new ClaudeFace();
     f.setState('coding', 'edit face.js');
-    f.lastStateChange = Date.now() - 5000;
+    f.lastStateChange = f.now() - 5000;
     assert.ok(f.heldMs() >= 5000 && f.heldMs() < 6000);
   });
 
   test('sweat particles appear after 20s of the same tool', () => {
     const f = new ClaudeFace();
     f.setState('executing', 'npm test');
-    f.lastStateChange = Date.now() - 21000;
+    f.lastStateChange = f.now() - 21000;
     f.particles.particles = [];
     for (let i = 0; i < 24; i++) f.update(66);
     assert.ok(f.particles.particles.some(p => p.style === 'sweat'));
@@ -2438,7 +2437,7 @@ describe('face.js -- long-running tool escalation', () => {
   test('no sweat before 20s', () => {
     const f = new ClaudeFace();
     f.setState('executing', 'npm test');
-    f.lastStateChange = Date.now() - 10000;
+    f.lastStateChange = f.now() - 10000;
     f.particles.particles = [];
     for (let i = 0; i < 24; i++) f.update(66);
     assert.ok(!f.particles.particles.some(p => p.style === 'sweat'));
@@ -2447,7 +2446,7 @@ describe('face.js -- long-running tool escalation', () => {
   test('a long-held non-work state grows no sweat', () => {
     const f = new ClaudeFace();
     f.forceState('idle', '');
-    f.lastStateChange = Date.now() - 60000;
+    f.lastStateChange = f.now() - 60000;
     f.particles.particles = [];
     for (let i = 0; i < 24; i++) f.update(66);
     assert.ok(!f.particles.particles.some(p => p.style === 'sweat'));
@@ -2456,7 +2455,7 @@ describe('face.js -- long-running tool escalation', () => {
   test('the rendered detail line keeps the suffix when the base detail is long', () => {
     const f = new ClaudeFace();
     f.setState('executing', 'x'.repeat(60));
-    f.lastStateChange = Date.now() - 9000;
+    f.lastStateChange = f.now() - 9000;
     const origCols = process.stdout.columns;
     const origRows = process.stdout.rows;
     process.stdout.columns = 80;
@@ -2470,7 +2469,7 @@ describe('face.js -- long-running tool escalation', () => {
   test('an escalated empty detail still draws a detail line', () => {
     const f = new ClaudeFace();
     f.setState('executing', '');
-    f.lastStateChange = Date.now() - 9000;
+    f.lastStateChange = f.now() - 9000;
     const origCols = process.stdout.columns;
     const origRows = process.stdout.rows;
     process.stdout.columns = 80;
@@ -2494,7 +2493,7 @@ describe('face.js -- waiting escalation after 30s', () => {
   const waitingFor = (ms, detail = 'waiting for you') => {
     const f = new ClaudeFace();
     f.setState('waiting', detail);
-    f.lastStateChange = Date.now() - ms;
+    f.lastStateChange = f.now() - ms;
     return f;
   };
 
@@ -2527,7 +2526,7 @@ describe('face.js -- waiting escalation after 30s', () => {
   test('only waiting escalates -- a long tool does not', () => {
     const f = new ClaudeFace();
     f.setState('executing', 'npm test');
-    f.lastStateChange = Date.now() - 60000;
+    f.lastStateChange = f.now() - 60000;
     assert.strictEqual(f.waitEscalated(), false);
   });
 
@@ -2755,7 +2754,7 @@ describe('face.js -- caffeine never replaces a queued state', () => {
   function hotFace() {
     const face = new ClaudeFace();
     face.setState('executing', 'npm test');
-    const now = Date.now();
+    const now = face.now();
     face.stateChangeTimes = [now - 500, now - 400, now - 300, now - 200, now - 100];
     face.minDisplayUntil = now + 5000;
     return face;
@@ -2785,7 +2784,7 @@ describe('face.js -- caffeine never replaces a queued state', () => {
     const face = new ClaudeFace();
     face.state = 'caffeinated';
     face.prevState = 'executing';
-    face.minDisplayUntil = Date.now() + 5000;
+    face.minDisplayUntil = face.now() + 5000;
     face.pendingState = 'waiting';
     face.pendingDetail = 'allow?';
     face.stateChangeTimes = [];
@@ -2835,12 +2834,24 @@ describe('face.js -- same-state work write drops a stale queued completion', () 
     assert.strictEqual(face.pendingState, 'proud');
   });
 
-  test('a queued error is never dropped by a same-state work write', () => {
+  // This used to pin a guard for a queued error (`pendingState = 'error'` set
+  // by hand). No path can queue one -- an error bypasses every buffer and
+  // nothing promotes one into the queue -- so the guard was deleted as dead
+  // code, and what is pinned now is the invariant that made it dead.
+  test('an error is never queued, so a same-state work write has none to drop', () => {
     const face = new ClaudeFace();
     face.setState('executing', 'ls');
-    face.pendingState = 'error';
-    face.setState('executing', 'again');
-    assert.strictEqual(face.pendingState, 'error');
+    face.setState('error', 'boom');              // inside executing's minimum
+    assert.strictEqual(face.state, 'error', 'an error bypasses the buffer');
+    face.setState('relieved', 'done');           // queued behind the error
+    face.setState('error', 'again');             // same state: drops the reward
+    assert.notStrictEqual(face.pendingState, 'error');
+    const f2 = new ClaudeFace();
+    f2.setState('happy', 'done');
+    f2.setState('waiting', 'allow?');            // remembered behind the reward
+    f2.setState('error', 'x');
+    assert.strictEqual(f2.state, 'error');
+    assert.notStrictEqual(f2.pendingState, 'error');
   });
 });
 
@@ -2854,12 +2865,12 @@ describe('face.js -- third review pass: buffering', () => {
     face.setState('satisfied', 'read a.js');     // queued behind the running tool
     face.setState('waiting', 'allow?');          // used to be dropped outright
     assert.deepStrictEqual(face.pendingWork, { state: 'waiting', detail: 'allow?' });
-    face.minDisplayUntil = Date.now() - 1;
+    face.minDisplayUntil = face.now() - 1;
     face.update(66);                              // the reward lands, the wait is promoted
     assert.strictEqual(face.state, 'satisfied');
     assert.strictEqual(face.pendingState, 'waiting');
-    face.lastStateChange = Date.now() - 5000;     // past the guaranteed window
-    face.minDisplayUntil = Date.now() - 1;
+    face.lastStateChange = face.now() - 5000;     // past the guaranteed window
+    face.minDisplayUntil = face.now() - 1;
     face.update(66);
     assert.strictEqual(face.state, 'waiting');
     assert.strictEqual(face.stateDetail, 'allow?');
@@ -2881,7 +2892,7 @@ describe('face.js -- third review pass: buffering', () => {
     face.setState('satisfied', 'read a.js');
     assert.strictEqual(face.state, 'error');
     assert.strictEqual(face.pendingState, 'satisfied');
-    face.minDisplayUntil = Date.now() - 1;
+    face.minDisplayUntil = face.now() - 1;
     face.update(66);
     assert.strictEqual(face.state, 'satisfied');
   });
@@ -2890,10 +2901,10 @@ describe('face.js -- third review pass: buffering', () => {
     const face = new ClaudeFace();
     face.setState('error', 'A failed');
     face.setState('satisfied', 'read a.js');     // queued behind the first error
-    face.minDisplayUntil = Date.now() + 500;      // the first error is nearly done
+    face.minDisplayUntil = face.now() + 500;      // the first error is nearly done
     face.setState('error', 'C failed');          // same state, newer failure
     assert.strictEqual(face.pendingState, null, 'the older reward is dropped');
-    assert.ok(face.minDisplayUntil - Date.now() > 3000, 'the new error gets its own 4s');
+    assert.ok(face.minDisplayUntil - face.now() > 3000, 'the new error gets its own 4s');
     assert.strictEqual(face.stateDetail, 'C failed');
   });
 
@@ -2919,7 +2930,7 @@ describe('face.js -- third review pass: buffering', () => {
     face.forceState('caffeinated', 'npm test');
     face.prevState = 'testing';
     face.stateChangeTimes = [];                   // the burst is over
-    face.minDisplayUntil = Date.now() - 1;
+    face.minDisplayUntil = face.now() - 1;
     face.update(66);
     assert.strictEqual(face.state, 'testing');
     assert.strictEqual(face.stateDetail, 'npm test');
@@ -2971,7 +2982,7 @@ describe('face.js -- third review pass: streak loss', () => {
     face.setState('error', 'lint failed');
     face.setStats({ state: 'error', brokenStreak: 0, brokenStreakAt: Date.now() });
     assert.strictEqual(face.lastBrokenStreak, 60, 'the burst keeps "DEVASTATION." on screen');
-    face.minDisplayUntil = Date.now() - 1;
+    face.minDisplayUntil = face.now() - 1;
     face.setState('reading', 'a.js');
     assert.strictEqual(face.state, 'reading');
     assert.strictEqual(face.lastBrokenStreak, 0, 'leaving the error ends the loss');
@@ -3158,7 +3169,7 @@ describe('face.js -- round 3: wide characters', () => {
     face.forceState('reading', '\u8a2d\u8a08\u66f8\u306e\u30ec\u30d3\u30e5\u30fc\u8cc7\u6599.md');
     let d = face.displayDetail(12);
     assert.ok(strWidth(d) <= 12, `"${d}" is ${strWidth(d)} columns`);
-    face.lastStateChange = Date.now() - 20000;
+    face.lastStateChange = face.now() - 20000;
     d = face.displayDetail(30);
     assert.ok(/still running/.test(d), 'the suffix survives');
     assert.ok(strWidth(d) <= 30, `"${d}" is ${strWidth(d)} columns`);

@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 'use strict';
 
 // +================================================================+
@@ -8,7 +7,10 @@
 // +================================================================+
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const { MiniFace, OrbitalSystem, hashTeamColor } = require('../lib/grid');
+const { makeTempEnv, cleanup, readJSON, runUpdateState } = require('./_harness');
 
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
@@ -405,6 +407,99 @@ describe('teams -- OrbitalSystem._assignLabels with taskDescription', () => {
     os.faces.set('s1', face);
     os._assignLabels();
     assert.strictEqual(face.label, 'audit');
+  });
+});
+
+// -- Review round 5 (hooks): teammate events route by agent_id ------------
+// Claude Code 2.1.300 fires TeammateIdle and a teammate's TaskCompleted from
+// the teammate's own stop-hook path: session_id is the session it runs in --
+// for an in-process teammate, the LEAD's -- and agent_id is the teammate.
+
+describe('teams -- review round 5: teammate events route by agent_id', () => {
+  const LEAD = 'lead-0000-1111';
+  const MATE = 'a7f3c2d1';
+  const read = (dir, id) => {
+    try { return readJSON(path.join(dir, `${id}.json`)); } catch { return null; }
+  };
+
+  test('TeammateIdle writes the teammate orbital, never the lead', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv(LEAD);
+    try {
+      runUpdateState('SessionStart', { session_id: LEAD, source: 'startup' }, env);
+      runUpdateState('UserPromptSubmit', { session_id: LEAD, prompt: 'build a team' }, env);
+      runUpdateState('PreToolUse', { session_id: LEAD, agent_id: MATE, agent_type: 'researcher',
+        tool_name: 'Read', tool_input: { file_path: 'x.js' }, tool_use_id: 'toolu_mate_1' }, env);
+      runUpdateState('TeammateIdle', { session_id: LEAD, agent_id: MATE, agent_type: 'researcher',
+        teammate_name: 'researcher', team_name: 'default' }, env);
+      const lead = read(sessionsDir, LEAD);
+      assert.strictEqual(lead.isTeammate, undefined, 'the lead is not its own teammate');
+      assert.strictEqual(lead.teammateName, undefined);
+      assert.ok(lead.lastPromptAt > 0, 'the lead keeps its attention stamp');
+      const mate = read(sessionsDir, `${LEAD}-agent-${MATE}`);
+      assert.strictEqual(mate.isTeammate, true);
+      assert.strictEqual(mate.teammateName, 'researcher');
+      assert.strictEqual(mate.teamName, 'default');
+      assert.strictEqual(mate.state, 'waiting');
+      assert.strictEqual(mate.detail, 'researcher idle');
+      assert.strictEqual(mate.parentSession, LEAD, 'still the lead\'s orbital');
+      assert.strictEqual(mate.agentType, 'researcher');
+    } finally { cleanup(tmp); }
+  });
+
+  test('a team TaskCompleted writes the teammate orbital, never the lead', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv(LEAD);
+    try {
+      runUpdateState('SessionStart', { session_id: LEAD, source: 'startup' }, env);
+      runUpdateState('TaskCompleted', { session_id: LEAD, agent_id: MATE, task_id: '1',
+        task_subject: 'Survey APIs', teammate_name: 'researcher', team_name: 'default' }, env);
+      const lead = read(sessionsDir, LEAD);
+      assert.strictEqual(lead.isTeammate, undefined);
+      assert.strictEqual(lead.state, 'idle', 'the lead\'s own face is untouched');
+      const mate = read(sessionsDir, `${LEAD}-agent-${MATE}`);
+      assert.strictEqual(mate.isTeammate, true);
+      assert.strictEqual(mate.detail, 'Survey APIs');
+      assert.strictEqual(mate.taskSubject, 'Survey APIs');
+      assert.strictEqual(mate.parentSession, LEAD);
+    } finally { cleanup(tmp); }
+  });
+
+  test('a lead file poisoned by the old routing is healed without a new timestamp', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv(LEAD);
+    try {
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      const ts = Date.now() - 5000;
+      fs.writeFileSync(path.join(sessionsDir, `${LEAD}.json`), JSON.stringify({
+        session_id: LEAD, sessionId: LEAD, state: 'coding', detail: 'edit a.js', timestamp: ts,
+        editor: 'claude', lastPromptAt: 4242, isTeammate: true, teammateName: 'researcher',
+        teamName: 'default',
+      }), 'utf8');
+      runUpdateState('TeammateIdle', { session_id: LEAD, agent_id: MATE,
+        teammate_name: 'researcher', team_name: 'default' }, env);
+      const lead = read(sessionsDir, LEAD);
+      assert.strictEqual(lead.isTeammate, undefined, 'healed');
+      assert.strictEqual(lead.teammateName, undefined);
+      assert.strictEqual(lead.teamName, undefined);
+      assert.strictEqual(lead.lastPromptAt, 4242, 'everything else is kept');
+      assert.strictEqual(lead.state, 'coding');
+      assert.strictEqual(lead.timestamp, ts,
+        'a new timestamp would make the renderer re-apply the lead\'s old state as fresh');
+      // ...and the lead's next write does not bring them back.
+      runUpdateState('PreToolUse', { session_id: LEAD, tool_name: 'Bash',
+        tool_input: { command: 'ls' }, tool_use_id: 'toolu_lead_1' }, env);
+      assert.strictEqual(read(sessionsDir, LEAD).isTeammate, undefined);
+    } finally { cleanup(tmp); }
+  });
+
+  test('without agent_id a teammate event is its own session\'s, as before', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('pane-mate');
+    try {
+      runUpdateState('TeammateIdle', { session_id: 'pane-mate',
+        teammate_name: 'tester', team_name: 'default' }, env);
+      const own = read(sessionsDir, 'pane-mate');
+      assert.strictEqual(own.isTeammate, true);
+      assert.strictEqual(own.teammateName, 'tester');
+      assert.deepStrictEqual(fs.readdirSync(sessionsDir), ['pane-mate.json'], 'no agent file');
+    } finally { cleanup(tmp); }
   });
 });
 

@@ -28,10 +28,10 @@ const {
 } = require('../lib/shared');
 const {
   toolToState, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
-  EDIT_TOOLS,
+  EDIT_TOOLS, ASK_TOOLS,
   pruneFrequentFiles, topFrequentFiles, prettyModelName, toText,
   COUNTER_MAX_FILES, freshCounter, normalizeCounter, parkAgents, unparkAgents, pruneCounters,
-  creditSession, creditEndFor, touchCounter, localDay,
+  creditSession, creditEndFor, touchCounter, localDay, firstSeenFor,
 } = require('../lib/state-machine');
 
 // -- State file writing ------------------------------------------------
@@ -73,9 +73,15 @@ function writeSessionState(sessionId, state, detail = '', stopped = false, extra
   try {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
     const filename = safeFilename(sessionId) + '.json';
+    // Rebuilt from scratch, so the one field that must outlive every write
+    // -- when the file was born, which update-state.js's foreign-session
+    // classifier compares with an agent's start -- is carried by hand.
+    let prev = null;
+    try { prev = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, filename), 'utf8')); } catch {}
     const data = {
       session_id: sessionId, state, detail: cleanDetail(detail),
       timestamp: nextTimestamp(), cwd: process.cwd(), stopped,
+      firstSeenAt: firstSeenFor(prev && typeof prev === 'object' ? prev : null, Date.now()),
       ...pidField(),
       ...extra,
     };
@@ -302,9 +308,17 @@ function handleToolStart(stats, toolName, toolInput) {
   return result;
 }
 
+// An interrupted tool (the user's Esc) shows `interrupted` but leaves the
+// streak alone, neither broken nor extended -- the rule update-state.js
+// applies to Codex's Interrupt. Breaking it there counted the same Esc twice
+// for OpenCode (the aborted tool and the aborted turn), and a second break
+// zeroed brokenStreak, so the face never reacted to the first.
+// A neutral result leaves it alone too, as in update-state.js: a background
+// launch (nothing has run yet) or a predicate's "no" (grep finding nothing,
+// diff finding a difference -- an answer, not a verdict on the work).
 function handleToolEnd(stats, toolName, toolInput, toolResponse, isError) {
   const result = classifyToolResult(toolName, toolInput, toolResponse, isError);
-  updateStreak(stats, result.state === 'error');
+  if (!(toolResponse && toolResponse.interrupted) && !result.neutral) updateStreak(stats, result.state === 'error');
   // Same rule as update-state.js: a commit counts for this session.
   if (result.state === 'proud' && result.detail === 'committed') {
     stats.session.commitCount = (stats.session.commitCount || 0) + 1;
@@ -448,20 +462,29 @@ function processJsonlStream(stream, handler) {
 // Options:
 //   defaultModel   - model name fallback (e.g. 'opencode', 'openclaw')
 //   defaultEditor  - editor provenance fallback (e.g. 'opencode', 'openclaw')
-//   normaliseEvent - fn(data) => { event, toolName, toolInput, toolOutput, isError, sessionId, modelName, editor }
+//   normaliseEvent - fn(data) => { event, toolName, toolInput, toolOutput, isError, sessionId, modelName, editor,
+//                                  exitCode, interrupted } or { skip: true }
 //   mapEvent       - fn(event, toolName, toolInput, toolOutput, isError, data)
-//                    => { state, detail, stopped, extra } or null to use defaults
+//                    => { state, detail, stopped, breakStreak, extra } or null to use defaults
 //
-// normaliseEvent extracts adapter-specific fields from the parsed JSON.
-// mapEvent handles adapter-specific event types (like OpenCode's message_update).
+// normaliseEvent extracts adapter-specific fields from the parsed JSON, and
+// returns { skip: true } for an event that belongs to no session and must not
+// be drawn at all. mapEvent handles adapter-specific event types (like
+// OpenCode's message_update); `breakStreak` on its result counts a failure.
 // Common events (tool_start, tool_end, turn_end, error, waiting) are handled
 // automatically if mapEvent returns null.
+//
+// `turnError` (a detail string, in extra) marks a turn that ENDED in failure.
+// The editor's ordinary turn end can follow it -- OpenCode publishes
+// session.idle right after a session.error -- and that one keeps the error
+// face, the way a Stop after StopFailure would, instead of "all done!".
 
 function runStdinAdapter(options) {
   const { defaultModel, defaultEditor, normaliseEvent, mapEvent } = options;
 
   processStdinEvent((data) => {
     const norm = normaliseEvent(data);
+    if (!norm || norm.skip) return;
     const event = norm.event || '';
     const toolName = norm.toolName || '';
     const toolInput = norm.toolInput || {};
@@ -587,10 +610,23 @@ function runStdinAdapter(options) {
         ? mapEvent(event, toolName, toolInput, toolOutput, isError, data)
         : null;
 
-      if (custom) {
+      // The turn already ended in failure (see turnError above): its own turn
+      // end keeps that face, and the failure is not counted a second time.
+      const failedTurnEnd = (event === 'turn_end' || event === 'Stop')
+        && !!prevSession && typeof prevSession.turnError === 'string' && !!prevSession.turnError
+        && !!(prevSession.turnEnded || prevSession.stopped);
+
+      if (failedTurnEnd) {
+        state = 'error';
+        detail = prevSession.turnError;
+        stopped = true;
+        extra.turnError = prevSession.turnError;
+      }
+      else if (custom) {
         state = custom.state || state;
         detail = custom.detail || detail;
         stopped = custom.stopped || false;
+        if (custom.breakStreak) updateStreak(stats, true);
         if (custom.extra) Object.assign(extra, custom.extra);
       }
       // Common event handling
@@ -599,10 +635,17 @@ function runStdinAdapter(options) {
       }
       else if (event === 'tool_end' || event === 'PostToolUse') {
         const toolResponse = { stdout: toolOutput, stderr: norm.stderr || '', isError };
+        // How the tool ended, when the editor reports it outside the output
+        // text (OpenCode's shell metadata): classifyToolResult reads both.
+        if (typeof norm.exitCode === 'number') toolResponse.exitCode = norm.exitCode;
+        if (norm.interrupted) toolResponse.interrupted = true;
         const result = handleToolEnd(stats, toolName, toolInput, toolResponse, isError);
         state = result.state;
         detail = result.detail;
         extra.diffInfo = result.diffInfo;
+        // The question came back: the renderer drops a wait still queued
+        // behind the reward (update-state.js does the same).
+        if (ASK_TOOLS.test(toolName)) extra.answered = true;
       }
       else if (event === 'turn_end' || event === 'Stop' || event === 'session_end') {
         state = 'happy';
@@ -652,6 +695,11 @@ function runStdinAdapter(options) {
       if (lateToolEnd && !stopped) {
         if (prevSession.stopped) sessionStopped = true;
         else sessionExtra.turnEnded = true;
+        // And that it ended in failure: an Esc's aborted tool lands after the
+        // turn end that the abort itself produced.
+        if (typeof prevSession.turnError === 'string' && prevSession.turnError) {
+          sessionExtra.turnError = prevSession.turnError;
+        }
       }
       // The turn end's number, kept on every later write of this plugin's.
       if (seq && pluginId && stopped) { sessionExtra.endSeq = seq; sessionExtra.pluginId = pluginId; }

@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 'use strict';
 
 // +================================================================+
@@ -794,12 +793,39 @@ describe('platform -- renderer.js source-level fixes', () => {
   test('prefs palette index is normalized', () => {
     assert.ok(src.includes('normalizePaletteIndex(prefs.paletteIndex'));
   });
-  test('cleanup closes the file watchers and clears the session debounce timer', () => {
-    const i = src.indexOf('function cleanup() {');
-    const body = src.slice(i, i + 900);
-    assert.ok(body.includes('stateWatcher'), 'cleanup should close stateWatcher');
-    assert.ok(body.includes('sessionWatcher'), 'cleanup should close sessionWatcher');
-    assert.ok(body.includes('clearTimeout(sessionWatchTimer)'));
+  // Was a source grep for two watcher names. Review round 5 folded them into
+  // one self-healing watcher, and runUnifiedMode's seams let the test watch
+  // cleanup do its job instead.
+  test('cleanup closes the file watcher and cancels every pending timer', () => {
+    const renderer = require('../renderer');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-clean-'));
+    const timers = new Set();
+    const handles = [];
+    const watch = (d, cb) => {
+      const h = { cb, closed: false, on() {}, close() { this.closed = true; } };
+      handles.push(h);
+      return h;
+    };
+    let code = null;
+    const rt = renderer.runUnifiedMode({
+      sessionsDir: dir, watch, installHandlers: false,
+      schedule: (fn, ms) => { const t = { fn, ms }; timers.add(t); return t; },
+      cancel: (t) => { timers.delete(t); },
+      write: () => {}, exit: (c) => { code = c; },
+    });
+    try {
+      assert.strictEqual(handles.length, 1, 'one watcher on the sessions folder');
+      handles[0].cb('change', null);   // arms the read throttle and the ring reload
+      assert.ok(timers.size >= 3, 'a frame, the throttle and the reload are pending');
+      rt.cleanup();
+      assert.strictEqual(code, 0);
+      assert.ok(handles.every(h => h.closed), 'the watcher is closed');
+      assert.strictEqual(timers.size, 0, 'no timer is left to fire');
+    } finally {
+      rt.dispose();
+      try { fs.unlinkSync(shared.QUIT_FLAG_FILE); } catch {}
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -884,7 +910,7 @@ describe('platform -- setup.js is a module first, a CLI second', () => {
       assert.strictEqual(typeof setup[k], k === 'HOOK_EVENTS' ? 'object' : 'function', k);
     }
     assert.ok(setup.HOOK_EVENTS.includes('UserPromptSubmit'));
-    assert.strictEqual(setup.HOOK_EVENTS.length, 22);
+    assert.strictEqual(setup.HOOK_EVENTS.length, 23);
   });
 });
 
@@ -902,7 +928,7 @@ describe('platform -- setupClaude never clobbers settings.json', () => {
       const r = setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
       assert.strictEqual(r.ok, true);
       const s = readJSON(settingsPath);
-      assert.strictEqual(Object.keys(s.hooks).length, 22);
+      assert.strictEqual(Object.keys(s.hooks).length, 23);
       assert.ok(s.hooks.UserPromptSubmit[0].hooks[0].command.includes(HOOK));
     } finally { cleanup(dir); }
   });
@@ -996,12 +1022,66 @@ describe('platform -- setupClaude never clobbers settings.json', () => {
       setup.setupClaude({ settingsPath, hookPath: '/somewhere/else/update-state.js', ...quiet });
       const r = setup.uninstallClaude({ settingsPath, ...quiet });
       assert.strictEqual(r.ok, true);
-      assert.strictEqual(r.removed, 22);
+      assert.strictEqual(r.removed, 23);
       const s = readJSON(settingsPath);
       assert.deepStrictEqual(Object.keys(s.hooks), ['PreToolUse']);
       assert.strictEqual(s.hooks.PreToolUse.length, 1);
       assert.strictEqual(s.hooks.PreToolUse[0].hooks[0].command, 'node other-tool.js');
       assert.deepStrictEqual(s.permissions, { allow: ['x'] });
+    } finally { cleanup(dir); }
+  });
+
+  // -- Review round 5 (hooks): async per-tool hooks -----------------------
+  // Pre + Post on every tool call blocked the editor ~170 ms on Windows.
+  const ASYNC = ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'];
+
+  test('the per-tool hooks are async and nothing else is, in settings.json and hooks.json alike', () => {
+    const built = setup.buildFaceHooks(HOOK);
+    const shipped = readJSON(path.join(ROOT, 'hooks', 'hooks.json')).hooks;
+    assert.deepStrictEqual(Object.keys(shipped).sort(), [...setup.HOOK_EVENTS].sort(),
+      'the plugin registers exactly what the installer does');
+    for (const event of setup.HOOK_EVENTS) {
+      for (const [label, cfg] of [['buildFaceHooks', built], ['hooks.json', shipped]]) {
+        const hh = cfg[event][0].hooks[0];
+        if (ASYNC.includes(event)) assert.strictEqual(hh.async, true, `${label}: ${event} is async`);
+        else assert.strictEqual(hh.async, undefined, `${label}: ${event} stays synchronous`);
+      }
+    }
+  });
+
+  test('PermissionDenied is registered for Claude Code, synchronously, and not for Codex', () => {
+    assert.ok(setup.HOOK_EVENTS.includes('PermissionDenied'));
+    assert.ok(!setup.CODEX_HOOK_EVENTS.includes('PermissionDenied'), 'codex 0.156 has no such event');
+    const shipped = readJSON(path.join(ROOT, 'hooks', 'hooks.json')).hooks;
+    assert.ok(/update-state\.js" PermissionDenied$/.test(shipped.PermissionDenied[0].hooks[0].command));
+    const built = setup.buildFaceHooks(HOOK);
+    assert.ok(built.PermissionDenied[0].hooks[0].command.endsWith('update-state.js" PermissionDenied'));
+  });
+
+  test('re-running setup upgrades a pre-async install in place, once', () => {
+    const { dir, settingsPath } = env();
+    try {
+      // The shape every install before this change has: no async anywhere,
+      // plus a user hook of their own beside ours.
+      const old = setup.buildFaceHooks(HOOK);
+      for (const groups of Object.values(old)) for (const g of groups) for (const hh of g.hooks) delete hh.async;
+      delete old.PermissionDenied;
+      old.Stop[0].hooks[0].async = true;   // ours, wrongly async: it must not stay so
+      old.PreToolUse[0].hooks.push({ type: 'command', command: 'node mine.js' });
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      fs.writeFileSync(settingsPath, JSON.stringify({ hooks: old }), 'utf8');
+      const r = setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
+      assert.strictEqual(r.modified, true);
+      assert.strictEqual(r.upgraded, 4, 'three made async, Stop made synchronous');
+      assert.strictEqual(r.added, 1, 'and the new PermissionDenied added');
+      const s = readJSON(settingsPath);
+      assert.strictEqual(s.hooks.PreToolUse.length, 1, 'upgraded, not duplicated');
+      assert.strictEqual(s.hooks.PreToolUse[0].hooks[0].async, true);
+      assert.deepStrictEqual(s.hooks.PreToolUse[0].hooks[1], { type: 'command', command: 'node mine.js' },
+        'the user\'s own hook is untouched');
+      assert.strictEqual(s.hooks.Stop[0].hooks[0].async, undefined);
+      const again = setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
+      assert.strictEqual(again.modified, false, 'idempotent');
     } finally { cleanup(dir); }
   });
 
@@ -1311,7 +1391,9 @@ describe('platform -- setupOpenCode writes a real OpenCode config', () => {
     const { dir, configPath } = env();
     try {
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.writeFileSync(configPath, '{ "plugin": [ "x", ] }', 'utf8');
+      // Round 5: a trailing comma is valid JSONC, which OpenCode reads -- a
+      // cut-off file is what corrupt means now.
+      fs.writeFileSync(configPath, '{ "plugin": [ "x" ', 'utf8');
       const before = fs.readFileSync(configPath, 'utf8');
       const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
       assert.strictEqual(r.ok, false);
@@ -1448,7 +1530,7 @@ describe('platform -- third review pass: setup keeps the user\'s own hooks', () 
       setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
       assert.deepStrictEqual(readJSON(settingsPath).hooks.PreToolUse[0], theirs);
       const r = setup.uninstallClaude({ settingsPath, ...quiet });
-      assert.strictEqual(r.removed, 22);
+      assert.strictEqual(r.removed, 23);
       assert.deepStrictEqual(readJSON(settingsPath).hooks.PreToolUse, [theirs]);
     } finally { cleanup(dir); }
   });
@@ -1709,6 +1791,217 @@ describe('platform -- third review pass: launchers', () => {
     const lines = raw.split('\r\n').filter(l => l && !/^(::|@echo)/i.test(l));
     assert.deepStrictEqual(lines, ['node.exe "%~dp0launch.js" %*']);
     assert.ok(!/[^\r]\n/.test(raw), 'every line ends in CRLF');
+  });
+});
+
+// -- Review round 5 ----------------------------------------------------------
+// Each block below was run against the pre-fix sources first and failed.
+
+const SETUP_CLI = path.join(ROOT, 'setup.js');
+
+// A home for one setup.js run: none of the editors' config-dir variables
+// leak in from the real environment (`extra` sets the ones a test wants).
+function setupHome(prefix) {
+  const dir = tmpDir(prefix);
+  fs.writeFileSync(path.join(dir, '.code-crumb-prefs.json'), '{"autolaunch":false}');
+  return dir;
+}
+function runSetup(dir, args, extra = {}) {
+  const env = { ...process.env, HOME: dir, USERPROFILE: dir, CODE_CRUMB_STATE: path.join(dir, '.code-crumb-state') };
+  for (const k of ['CODEX_HOME', 'XDG_CONFIG_HOME', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG']) delete env[k];
+  Object.assign(env, extra);
+  try {
+    return { status: 0, out: execFileSync(process.execPath, [SETUP_CLI, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 }).toString() };
+  } catch (e) { return { status: e.status, out: String(e.stdout || '') }; }
+}
+
+describe('platform -- Review round 5: Codex setup', () => {
+  const quiet = { log: () => {} };
+  const OUR_LINE = /^notify = \["node", ".*codex-notify\.js"\]$/m;
+
+  test('codex-notify keeps a BOM first and the file\'s CRLF line endings', () => {
+    const dir = setupHome('crumb-r5-bom-');
+    try {
+      const cfg = path.join(dir, '.codex', 'config.toml');
+      fs.mkdirSync(path.dirname(cfg), { recursive: true });
+      fs.writeFileSync(cfg, '\uFEFFmodel = "o3"\r\n[tui]\r\nnotifications = true\r\n', 'utf8');
+      runSetup(dir, ['codex-notify']);
+      const out = fs.readFileSync(cfg, 'utf8');
+      assert.strictEqual(out.indexOf('\uFEFF'), 0, 'the BOM is the first character');
+      assert.strictEqual(out.lastIndexOf('\uFEFF'), 0, 'and nowhere else');
+      assert.ok(OUR_LINE.test(out.replace(/\r/g, '')), 'the notify line was added');
+      assert.ok(!/[^\r]\n/.test(out), 'no LF-only line in a CRLF file');
+      assert.ok(out.endsWith('model = "o3"\r\n[tui]\r\nnotifications = true\r\n'), 'the rest is untouched');
+    } finally { cleanup(dir); }
+  });
+
+  test('`setup.js uninstall` takes the notify line out again, BOM and all else kept', () => {
+    const dir = setupHome('crumb-r5-unnotify-');
+    try {
+      const cfg = path.join(dir, '.codex', 'config.toml');
+      fs.mkdirSync(path.dirname(cfg), { recursive: true });
+      const original = '\uFEFFmodel = "o3"\r\n[tui]\r\nnotifications = true\r\n';
+      fs.writeFileSync(cfg, original, 'utf8');
+      runSetup(dir, ['codex-notify']);
+      assert.ok(OUR_LINE.test(fs.readFileSync(cfg, 'utf8').replace(/\r/g, '')), 'fixture');
+      runSetup(dir, ['uninstall']);
+      assert.strictEqual(fs.readFileSync(cfg, 'utf8'), original, 'byte for byte what it was');
+    } finally { cleanup(dir); }
+  });
+
+  test('installing the hooks removes a Code Crumb notify line, never a foreign one', () => {
+    const dir = setupHome('crumb-r5-hooks-notify-');
+    try {
+      const hooksPath = path.join(dir, '.codex', 'hooks.json');
+      const configPath = path.join(dir, '.codex', 'config.toml');
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      const ours = '# Code Crumb integration\nnotify = ["node", "/old/repo/adapters/codex-notify.js"]\n\n';
+      fs.writeFileSync(configPath, ours + 'model = "o3"\n', 'utf8');
+      const r = setup.setupCodex({ hooksPath, configPath, repoRoot: '/repo', ...quiet });
+      assert.strictEqual(r.ok, true);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), 'model = "o3"\n');
+      assert.strictEqual(fs.readFileSync(configPath + '.bak', 'utf8'), ours + 'model = "o3"\n', 'backed up first');
+
+      // Codex's own computer-use notify program is someone else's line.
+      const foreign = 'notify = [ "C:\\\\x\\\\codex-computer-use.exe", "turn-ended" ]\nmodel = "o3"\n';
+      fs.writeFileSync(configPath, foreign, 'utf8');
+      setup.setupCodex({ hooksPath, configPath, repoRoot: '/repo', ...quiet });
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), foreign);
+    } finally { cleanup(dir); }
+  });
+
+  test('a notify array spread over several lines is recognised and removed whole', () => {
+    const dir = setupHome('crumb-r5-multiline-');
+    try {
+      const configPath = path.join(dir, 'config.toml');
+      fs.writeFileSync(configPath, 'a = 1\nnotify = [\n  "node",\n  "/r/adapters/codex-notify.js", # ours\n]\nb = 2\n', 'utf8');
+      const r = setup.removeCodexNotify({ configPath, ...quiet });
+      assert.deepStrictEqual([r.ok, r.removed], [true, 1]);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), 'a = 1\nb = 2\n');
+    } finally { cleanup(dir); }
+  });
+
+  test('an unreadable config.toml is left alone', () => {
+    const dir = setupHome('crumb-r5-unreadable-');
+    try {
+      const configPath = path.join(dir, 'config.toml');
+      fs.mkdirSync(configPath);                    // EISDIR on read
+      const r = setup.removeCodexNotify({ configPath, ...quiet });
+      assert.strictEqual(r.ok, false);
+      const n = setup.setupCodexNotify({ configPath, ...quiet });
+      assert.strictEqual(n.ok, false);
+      assert.ok(fs.statSync(configPath).isDirectory(), 'nothing was written over it');
+    } finally { cleanup(dir); }
+  });
+
+  test('CODEX_HOME is where codex reads its hooks and config', () => {
+    const dir = setupHome('crumb-r5-codexhome-');
+    try {
+      const home = path.join(dir, 'codex-home');
+      fs.mkdirSync(home);
+      runSetup(dir, ['codex'], { CODEX_HOME: home });
+      assert.ok(fs.existsSync(path.join(home, 'hooks.json')), '$CODEX_HOME/hooks.json');
+      assert.ok(!fs.existsSync(path.join(dir, '.codex', 'hooks.json')), 'not ~/.codex');
+      runSetup(dir, ['codex-notify'], { CODEX_HOME: home });
+      assert.ok(OUR_LINE.test(fs.readFileSync(path.join(home, 'config.toml'), 'utf8')));
+      runSetup(dir, ['uninstall'], { CODEX_HOME: home });
+      assert.ok(!OUR_LINE.test(fs.readFileSync(path.join(home, 'config.toml'), 'utf8')), 'uninstall finds it there too');
+      assert.ok(!fs.readFileSync(path.join(home, 'hooks.json'), 'utf8').includes('update-state.js'));
+    } finally { cleanup(dir); }
+  });
+});
+
+describe('platform -- Review round 5: OpenCode setup', () => {
+  const PLUGIN = '/repo/adapters/opencode-plugin.mjs';
+  const quiet = { log: () => {} };
+  const ourEntry = (file) => fs.readFileSync(file, 'utf8').includes('adapters/opencode-plugin.mjs');
+
+  test('XDG_CONFIG_HOME is where OpenCode reads its config', () => {
+    const dir = setupHome('crumb-r5-xdg-');
+    try {
+      const xdg = path.join(dir, 'xdg');
+      runSetup(dir, ['opencode', '--install'], { XDG_CONFIG_HOME: xdg });
+      assert.ok(fs.existsSync(path.join(xdg, 'opencode', 'opencode.json')), '$XDG_CONFIG_HOME/opencode/opencode.json');
+      assert.ok(!fs.existsSync(path.join(dir, '.config', 'opencode', 'opencode.json')), 'not ~/.config');
+      runSetup(dir, ['opencode', '--uninstall'], { XDG_CONFIG_HOME: xdg });
+      assert.ok(!ourEntry(path.join(xdg, 'opencode', 'opencode.json')), 'and --uninstall looks there too');
+    } finally { cleanup(dir); }
+  });
+
+  test('OPENCODE_CONFIG_DIR, when set, is where setup writes', () => {
+    const dir = setupHome('crumb-r5-ocdir-');
+    try {
+      const cfgDir = path.join(dir, 'dotfiles', 'opencode');
+      runSetup(dir, ['opencode', '--install'], { OPENCODE_CONFIG_DIR: cfgDir });
+      assert.ok(ourEntry(path.join(cfgDir, 'opencode.json')));
+      assert.ok(!fs.existsSync(path.join(dir, '.config', 'opencode', 'opencode.json')));
+    } finally { cleanup(dir); }
+  });
+
+  test('an existing opencode.jsonc is the file edited, not a new opencode.json', () => {
+    const dir = setupHome('crumb-r5-jsoncfile-');
+    try {
+      const jsonc = path.join(dir, '.config', 'opencode', 'opencode.jsonc');
+      fs.mkdirSync(path.dirname(jsonc), { recursive: true });
+      fs.writeFileSync(jsonc, '{\n  // mine\n  "model": "x"\n}\n');
+      const r = runSetup(dir, ['opencode', '--install']);
+      assert.strictEqual(r.status, 0, r.out);
+      assert.ok(ourEntry(jsonc));
+      assert.ok(fs.readFileSync(jsonc, 'utf8').includes('// mine'));
+      assert.ok(!fs.existsSync(path.join(path.dirname(jsonc), 'opencode.json')));
+    } finally { cleanup(dir); }
+  });
+
+  test('a commented config with trailing commas is installed into, every comment kept', () => {
+    const dir = setupHome('crumb-r5-jsonc-');
+    try {
+      const configPath = path.join(dir, 'opencode.json');
+      const original = '{\n  // my model\n  "model": "anthropic/claude-opus-5",\n}\n';
+      fs.writeFileSync(configPath, original);
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.deepStrictEqual([r.ok, r.added], [true, 1], 'refused as "not valid JSON" before');
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'),
+        `{\n  "plugin": ["${PLUGIN}"],\n  // my model\n  "model": "anthropic/claude-opus-5",\n}\n`);
+      assert.strictEqual(fs.readFileSync(configPath + '.bak', 'utf8'), original, 'backed up first');
+      const again = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.strictEqual(again.modified, false, 'and found again on a re-run');
+    } finally { cleanup(dir); }
+  });
+
+  test('a moved entry in a multi-line JSONC list is replaced in place, and uninstall takes the lines out', () => {
+    const dir = setupHome('crumb-r5-jsonc-move-');
+    try {
+      const configPath = path.join(dir, 'opencode.jsonc');
+      fs.writeFileSync(configPath, [
+        '{', '  /* plugins */', '  "plugin": [', '    "./plugins/other.js",',
+        '    "/old/adapters/opencode-plugin.mjs",', '  ],', '  "model": "x", // trailing', '}', '',
+      ].join('\n'));
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.deepStrictEqual([r.ok, r.replaced], [true, 1]);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), [
+        '{', '  /* plugins */', '  "plugin": [', '    "./plugins/other.js",',
+        `    "${PLUGIN}"`, '  ],', '  "model": "x", // trailing', '}', '',
+      ].join('\n'));
+      fs.writeFileSync(configPath, `{\n  /* plugins */\n  "plugin": [\n    "${PLUGIN}",\n  ],\n  "model": "x", // trailing\n}\n`);
+      const u = setup.uninstallOpenCode({ configPath, ...quiet });
+      assert.deepStrictEqual([u.ok, u.removed], [true, 1]);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), '{\n  /* plugins */\n  "model": "x", // trailing\n}\n');
+    } finally { cleanup(dir); }
+  });
+
+  test('a comment inside the plugin list is never lost: setup refuses and says what to add', () => {
+    const dir = setupHome('crumb-r5-jsonc-refuse-');
+    try {
+      const configPath = path.join(dir, 'opencode.json');
+      const original = '{ "plugin": [ // keep me\n  "/old/adapters/opencode-plugin.mjs" ] }\n';
+      fs.writeFileSync(configPath, original);
+      const lines = [];
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, log: (l) => lines.push(l), quiet: true });
+      assert.strictEqual(r.ok, false);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), original, 'byte-identical');
+      assert.strictEqual(fs.existsSync(configPath + '.bak'), false);
+      assert.ok(lines.join('\n').includes(PLUGIN), 'names the entry to add by hand');
+    } finally { cleanup(dir); }
   });
 });
 

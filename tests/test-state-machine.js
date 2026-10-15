@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 'use strict';
 
 // +================================================================+
@@ -74,7 +73,7 @@ function conductingStats(ownerId, subId, subStartedAt, topLevelSessions = {}) {
       }],
     },
     recentMilestone: null,
-    daily: { date: new Date().toISOString().slice(0, 10), sessionCount: 1, cumulativeMs: 0 },
+    daily: { date: require('../lib/state-machine').localDay(), sessionCount: 1, cumulativeMs: 0 },
     frequentFiles: {},
     topLevelSessions,
   };
@@ -181,8 +180,11 @@ describe('state-machine.js -- toolToState', () => {
     assert.strictEqual(toolToState('Bash', { command: 'pip install flask' }).state, 'installing');
   });
 
-  test('Bash with cargo build → installing', () => {
-    assert.strictEqual(toolToState('Bash', { command: 'cargo build' }).state, 'installing');
+  // Review round 5: cargo build is a build, shown like every other build
+  // (it used to say "installing" for as long as it compiled); cargo add installs.
+  test('Bash with cargo build → executing, like any build; cargo add → installing', () => {
+    assert.strictEqual(toolToState('Bash', { command: 'cargo build' }).state, 'executing');
+    assert.strictEqual(toolToState('Bash', { command: 'cargo add serde' }).state, 'installing');
   });
 
   test('Bash with pnpm add → installing', () => {
@@ -1944,6 +1946,13 @@ describe('state-machine.js -- classifyTruncatedInput', () => {
     const r = classifyTruncatedInput('PermissionRequest', '');
     assert.strictEqual(r.state, 'waiting');
     assert.strictEqual(r.detail, 'needs permission');
+  });
+
+  // A denied Write of a huge file is over 1 MB; it said "large input".
+  test('PermissionDenied maps to thinking / permission denied, like writeFallback', () => {
+    const r = classifyTruncatedInput('PermissionDenied', '');
+    assert.strictEqual(r.state, 'thinking');
+    assert.strictEqual(r.detail, 'permission denied');
   });
 
   test('unknown event falls back to thinking', () => {
@@ -3869,7 +3878,7 @@ describe('update-state -- review round: a session counts once per day', () => {
   test('a legacy `counted: true` entry is not counted again on upgrade', () => {
     const { normalizeCounter } = require('../lib/state-machine');
     const c = normalizeCounter({ toolCalls: 1, counted: true }, Date.now());
-    assert.strictEqual(c.countedDay, new Date().toISOString().slice(0, 10));
+    assert.strictEqual(c.countedDay, require('../lib/state-machine').localDay());
     assert.strictEqual(c.counted, undefined);
   });
 });
@@ -3963,8 +3972,8 @@ describe('update-state -- third review pass: autolaunch quit flag', () => {
     assert.ok(body.indexOf('fs.unlinkSync(QUIT_FLAG_FILE)') > 0);
     assert.ok(body.indexOf('fs.unlinkSync(QUIT_FLAG_FILE)') < body.indexOf('fs.accessSync(QUIT_FLAG_FILE)'),
       'the unlink must come before the access check');
-    assert.ok(src.includes("/^(startup|resume)$/.test(_rawField(input, 'source'))"),
-      'only an editor start clears it: compact and clear happen inside a running session');
+    // Which sources clear it is pinned behaviourally (startup, resume and
+    // fork do; compact and clear do not) in "Review round 5 (hooks)" below.
   });
 });
 
@@ -4162,6 +4171,788 @@ describe('state-machine -- round 4', () => {
       assert.strictEqual(post(c).detail, 'build succeeded', c);
     }
     assert.strictEqual(post('npx eslint .').detail, 'command succeeded');
+  });
+});
+
+// -- Review round 5 (Oct 2026) -----------------------------------------------
+// Each block below was reproduced against the pre-fix sources first. Claude
+// Code 2.1.300 was watched with a logging hook: a failing Bash fires
+// PostToolUseFailure, never PostToolUse, and a successful one merges stderr
+// into stdout and leaves `stderr` empty.
+
+describe('state-machine -- review round 5: a trusted success is not searched', () => {
+  const sm = require('../lib/state-machine');
+  const TRUST = { trustSuccess: true };
+  // A successful Claude Code result: stderr merged into stdout.
+  const ok = (cmd, stdout, opts = TRUST, extra = {}) =>
+    classifyToolResult('Bash', { command: cmd }, { stdout, stderr: '', interrupted: false, ...extra }, false, opts);
+
+  test('commit subjects, branch names and stashes are not failures', () => {
+    const cases = [
+      ['git commit -m "Treat a delete-pending lock (win32 EPERM) as held, not free"',
+        '[main 1a2b3c4] Treat a delete-pending lock (win32 EPERM) as held, not free\n 1 file changed, 3 insertions(+)'],
+      ['git commit -am "fix syntax error in config loader"', '[fix 9f8e7d6] fix syntax error in config loader\n 1 file changed'],
+      ['git push -u origin fix/error-toast',
+        "To github.com:me/app.git\n * [new branch]      fix/error-toast -> fix/error-toast\nbranch 'fix/error-toast' set up to track 'origin/fix/error-toast'."],
+      ['git stash', 'Saved working directory and index state WIP on main: 1a2b3c4 Handle ENOENT on missing config'],
+      ['git cherry-pick 1a2b3c4', '[main 5d6e7f8] Fix FATAL crash on boot\n Date: Mon Oct 12 10:00:00 2026\n 1 file changed'],
+      ['node app.js', 'loader handles permission denied gracefully\nENOENT is retried\nall good'],
+    ];
+    for (const [cmd, out] of cases) {
+      assert.notStrictEqual(ok(cmd, out).state, 'error', cmd);
+    }
+    assert.deepStrictEqual([ok(cases[0][0], cases[0][1]).state, ok(cases[0][0], cases[0][1]).detail], ['proud', 'committed']);
+    assert.strictEqual(ok(cases[2][0], cases[2][1]).detail, 'pushed!');
+  });
+
+  test('a green test run whose test names sound like failures is a green run', () => {
+    // This repo's own suite names its tests after what they detect.
+    const suiteOut = [
+      '  state-machine.js -- isMergeConflict',
+      '    \u2713 detects "CONFLICT (content): Merge conflict in a.js"',
+      '    \u2713 exits with exit code 1 on a bad flag',
+      '    \u2713 detects "command not found"',
+      '', '  All 2454 tests passed in 31.2s',
+    ].join('\n');
+    const r = ok('node tests/run.js', suiteOut);
+    assert.deepStrictEqual([r.state, r.detail], ['relieved', '2454 tests passed']);
+    const jest = 'PASS src/loader.test.js\n  loader\n    reports permission denied (1 ms)\n    syntax error in json (2 ms)\nTests:       2 passed, 2 total';
+    assert.strictEqual(ok('npx jest --verbose', jest).state, 'relieved');
+  });
+
+  test('a trusted success infers no exit code from the output', () => {
+    assert.strictEqual(ok('node scripts/report.js', 'step 3 exited with code 1, retried\ndone').state, 'relieved');
+  });
+
+  test('a command line whose failure can still exit 0 is searched anyway', () => {
+    for (const cmd of ['npm test 2>&1 | tail -5', 'npm test || true', 'npm test; echo done',
+      'npm test && echo ok || echo bad', 'if npm test; then echo y; fi', 'npm test &']) {
+      assert.strictEqual(sm.shellIntent(cmd).masked, true, cmd);
+      const r = ok(cmd, 'Tests: 2 failed, 9 passed, 11 total');
+      assert.deepStrictEqual([r.state, r.detail], ['error', 'tests failed'], cmd);
+    }
+    for (const cmd of ['cd app && npm test', 'npm run build && npm test', 'git log | head -5',
+      'cat a.txt; npm test', '(npm test)', 'grep -rn x src | wc -l']) {
+      assert.strictEqual(sm.shellIntent(cmd).masked, false, cmd);
+    }
+  });
+
+  test('explicit signals still count when trusted', () => {
+    assert.strictEqual(ok('sleep 100', '', TRUST, { interrupted: true }).detail, 'interrupted');
+    assert.strictEqual(ok('make', 'x', TRUST, { exitCode: 2 }).state, 'error');
+    assert.strictEqual(classifyToolResult('Bash', { command: 'make' }, { stdout: 'x', stderr: '' }, true, TRUST).state, 'error');
+  });
+
+  test('BashOutput still reads the job it reports on', () => {
+    const r = classifyToolResult('BashOutput', {}, { stdout: 'Tests: 3 failed', stderr: '' }, false, TRUST);
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('a non-shell tool under trust skips the stderr scan but keeps isError', () => {
+    assert.strictEqual(classifyToolResult('mcp__x__run_job', {}, { stdout: '', stderr: 'error: retrying' }, false, TRUST).state, 'satisfied');
+    assert.strictEqual(classifyToolResult('mcp__x__run_job', {}, { stdout: '', stderr: 'error: retrying', isError: true }, false, TRUST).state, 'error');
+  });
+
+  test('end to end: a Claude PostToolUse is trusted, a Codex one is still read', () => {
+    const run = (args) => {
+      const t = makeTempEnv('trust-1');
+      const env = { ...t.env };
+      delete env.CODE_CRUMB_EDITOR;
+      try {
+        runUpdateState('PostToolUse', {
+          session_id: 'trust-1', tool_name: 'Bash',
+          tool_input: { command: 'git commit -m "Fix permission denied when writing prefs"' },
+          tool_response: { stdout: '[main 1a2b3c4] Fix permission denied when writing prefs\n 2 files changed', stderr: '', interrupted: false },
+        }, env, { args });
+        runUpdateState('PostToolUse', {
+          session_id: 'trust-1', tool_name: 'Bash', tool_input: { command: 'node app.js' },
+          tool_response: { stdout: 'handles permission denied gracefully', stderr: '' },
+        }, env, { args });
+        const st = readJSON(t.statsFile);
+        const s = readJSON(pathMod.join(t.sessionsDir, 'trust-1.json'));
+        return { commits: st.sessionCounters['trust-1'].commitCount, streak: st.streak, state: s.state };
+      } finally { cleanup(t.tmp); }
+    };
+    assert.deepStrictEqual(run([]), { commits: 1, streak: 2, state: 'relieved' });
+    // Codex: the commit echo is dropped, but plain output is still searched.
+    assert.deepStrictEqual(run(['--editor', 'codex']), { commits: 1, streak: 0, state: 'error' });
+  });
+});
+
+describe('state-machine -- review round 5: untrusted output drops what it only echoes', () => {
+  const post = (cmd, stdout, stderr = '') => classifyToolResult('Bash', { command: cmd }, { stdout, stderr }, false);
+
+  test('git echoes subjects and ref names: commit, push, fetch, stash, reset', () => {
+    const cases = [
+      ['git commit -m "Treat a delete-pending lock (win32 EPERM) as held, not free"',
+        '[main 1a2b3c4] Treat a delete-pending lock (win32 EPERM) as held, not free\n 1 file changed, 3 insertions(+)\n create mode 100644 src/panic-button.js', ''],
+      ['git commit -m "x"', '[main (root-commit) 1a2b3c4] Fix ENOENT\n src/panic.rs | 2 +-', ''],
+      ['git push -u origin fix/error-toast', '',
+        "remote: Create a pull request for 'fix/error-toast' on GitHub by visiting:\nremote:      https://github.com/me/app/pull/new/fix/error-toast\nTo github.com:me/app.git\n * [new branch]      fix/error-toast -> fix/error-toast\nbranch 'fix/error-toast' set up to track 'origin/fix/error-toast'."],
+      ['git fetch', '', 'From github.com:me/app\n * [new branch]      fix-failed-login -> origin/fix-failed-login\n   1a2b3c4..5d6e7f8  main -> origin/main'],
+      ['git pull', 'Updating 1a2b3c4..5d6e7f8\nFast-forward', 'From github.com:me/app\n * branch            fix-failed-x -> FETCH_HEAD'],
+      ['git stash', 'Saved working directory and index state WIP on main: 1a2b3c4 Handle ENOENT on missing config', ''],
+      ['git stash pop', 'Dropped refs/stash@{0} (1a2b3c4d5e6f)', ''],
+      ['git reset --hard HEAD~1', 'HEAD is now at 1a2b3c4 Fix FATAL crash in loader', ''],
+      ['git checkout -b fix/error-toast', '', "Switched to a new branch 'fix/error-toast'"],
+      ['git rebase main', '', 'Successfully rebased and updated refs/heads/fix-failed-login.'],
+    ];
+    for (const [cmd, out, err] of cases) {
+      assert.notStrictEqual(post(cmd, out, err).state, 'error', cmd);
+    }
+  });
+
+  test('Claude Code\'s cwd-reset notice is not the command failing', () => {
+    for (const dir of ['C:\\Users\\me\\code\\error-tracker', '/home/me/src/panic-button']) {
+      const r = post('cd .. && npm run lint', 'ok', `\nShell cwd was reset to ${dir}`);
+      assert.strictEqual(r.state, 'relieved', dir);
+    }
+  });
+
+  test('a green run\'s pass-marked test names are not failures', () => {
+    const out = '  cli\n    \u2713 prints syntax error for bad json\n    \u221a reports permission denied\n    \u2714 detects "CONFLICT (content): x"\nok 3 - exits with exit code 2\n\n  4 passing (12ms)';
+    const r = post('npm test', out);
+    assert.deepStrictEqual([r.state, r.detail], ['relieved', '4 tests passed']);
+    assert.strictEqual(post('pytest -v', 'tests/t.py::test_x[permission denied] PASSED [100%]\n== 1 passed ==').state, 'relieved');
+  });
+
+  test('a real failure on the same paths is still a failure', () => {
+    assert.strictEqual(post('npm test 2>&1 | tail -5', '    \u2713 one\n  1 passing\n  2 failing').state, 'error');
+    const rejected = 'To github.com:me/app.git\n ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to \'github.com:me/app.git\'';
+    assert.deepStrictEqual([post('git push', '', rejected).state, post('git push', '', rejected).detail], ['error', 'push rejected']);
+    // Merged into stdout (a masked pipe, OpenCode): stdout had no pattern for it.
+    assert.strictEqual(post('git push 2>&1 | tail -3', rejected).state, 'error');
+    assert.strictEqual(post('git status', '', 'fatal: not a git repository (or any of the parent directories): .git').state, 'error');
+    assert.strictEqual(post('git pull 2>&1 | cat', 'fatal: not a git repository (or any of the parent directories): .git').state, 'error');
+    const conflict = 'error: could not apply 1a2b3c4... Fix ENOENT\nCONFLICT (content): Merge conflict in a.js';
+    assert.strictEqual(post('git cherry-pick 1a2b3c4', conflict).detail, 'merge conflict!');
+  });
+
+  test('git listings, GitHub listings and container logs print content', () => {
+    const SCARY = '* main 1a2b3c4 Fix permission denied on Windows\n2026-10-14 FATAL could not connect\nhandle ENOENT';
+    for (const cmd of ['git branch -vv', 'git branch -a --contains 1a2b3c4', 'git branch --list "fix/*"', 'git reflog -5',
+      'git stash list', 'git stash show -p', 'git remote -v', 'git -C ../app rev-parse HEAD', 'gh pr list', 'gh run view 42 --log-failed',
+      'gh issue view 7', 'gh pr checks', 'docker logs api --tail 50', 'docker compose -f dev.yml logs web',
+      'docker-compose logs', 'kubectl -n prod logs pod/api', 'kubectl get pods', 'journalctl -u api']) {
+      assert.strictEqual(post(cmd, SCARY).state, 'relieved', cmd);
+    }
+    for (const cmd of ['git branch fix-x', 'git branch -d old', 'git branch -m a b', 'git stash', 'git reflog expire --all',
+      'gh pr create --fill', 'docker run img', 'kubectl apply -f x.yml']) {
+      assert.strictEqual(post(cmd, SCARY).state, 'error', cmd);
+    }
+  });
+});
+
+describe('state-machine -- review round 5: a background job has no verdict yet', () => {
+  const BG = { tool_response: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bu3bftxrt' } };
+
+  test('a background launch is launched, neutral, whatever it runs', () => {
+    const norm = normalizeToolResponse(BG);
+    assert.strictEqual(norm.backgroundTaskId, 'bu3bftxrt');
+    for (const command of ['npm test', '.\\gradlew.bat build', 'pnpm install', 'git commit -m "x"']) {
+      const r = classifyToolResult('Bash', { command, run_in_background: true }, norm, false, { trustSuccess: true });
+      assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'launched in background', true], command);
+    }
+    // The flag with no task id counts only with no output.
+    const flagOnly = classifyToolResult('Bash', { command: 'npm test', run_in_background: true }, { stdout: '', stderr: '' }, false);
+    assert.strictEqual(flagOnly.neutral, true);
+    const ran = classifyToolResult('Bash', { command: 'npm test', run_in_background: true }, { stdout: '3 passed', stderr: '' }, false);
+    assert.deepStrictEqual([ran.detail, ran.neutral], ['tests passed', undefined]);
+  });
+
+  test('a failed launch is still an error', () => {
+    const r = classifyToolResult('Bash', { command: 'npm test', run_in_background: true }, normalizeToolResponse(BG), true);
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('end to end: a background launch moves neither the streak nor the commit count', () => {
+    const t = makeTempEnv('bg-1');
+    try {
+      runUpdateState('PostToolUse', {
+        session_id: 'bg-1', tool_name: 'Bash', tool_input: { command: 'npm test' },
+        tool_response: { stdout: 'ok', stderr: '' },
+      }, t.env);
+      runUpdateState('PostToolUse', {
+        session_id: 'bg-1', tool_name: 'Bash', tool_input: { command: 'git commit -m "x"', run_in_background: true },
+        ...BG,
+      }, t.env);
+      const st = readJSON(t.statsFile);
+      assert.strictEqual(st.streak, 1, 'only the foreground call counted');
+      assert.strictEqual(st.sessionCounters['bg-1'].commitCount, 0);
+      const s = readJSON(pathMod.join(t.sessionsDir, 'bg-1.json'));
+      assert.deepStrictEqual([s.state, s.detail], ['satisfied', 'launched in background']);
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('state-machine -- review round 5: git global options', () => {
+  const pre = (command) => toolToState('Bash', { command }).state;
+  const post = (command, stdout = '') => classifyToolResult('Bash', { command }, { stdout, stderr: '' }, false).detail;
+
+  test('a commit or push past -C, -c, --no-pager or --git-dir is still one', () => {
+    for (const cmd of ['git -C ../app commit -m "wip"', 'git --no-pager commit -m x', 'git -c user.name=me commit -m x',
+      'git --git-dir=.git commit -m x', 'git --git-dir .git --work-tree . commit -m x', 'C:\\Git\\cmd\\git.exe -C app commit -m x']) {
+      assert.strictEqual(pre(cmd), 'committing', cmd);
+      assert.strictEqual(post(cmd, '[main 1a2b3c4] wip'), 'committed', cmd);
+    }
+    assert.strictEqual(pre('git -C ../app push'), 'committing');
+    assert.strictEqual(post('git -C ../app push'), 'pushed!');
+    assert.strictEqual(post('git -C ../app merge feature'), 'merged clean');
+    assert.strictEqual(post('git -C ../app status'), 'git done');
+  });
+
+  test('end to end: git -C commit is counted', () => {
+    const t = makeTempEnv('gitc-1');
+    try {
+      runUpdateState('PostToolUse', {
+        session_id: 'gitc-1', tool_name: 'Bash', tool_input: { command: 'git -C ../app commit -m "wip"' },
+        tool_response: { stdout: '[main 1a2b3c4] wip\n 1 file changed', stderr: '' },
+      }, t.env);
+      assert.strictEqual(readJSON(t.statsFile).sessionCounters['gitc-1'].commitCount, 1);
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('state-machine -- review round 5: linear-time command matching', () => {
+  // `pnpm -C -C ...` had exponentially many readings in the old install
+  // regex: twenty pairs held toolToState for over a minute.
+  // Relative, so a loaded runner cannot fail it (a flat 50ms budget did, on
+  // windows/node 18): eight times the input costs about ten times as much in
+  // a linear matcher and sixty-four in a quadratic one (the old `python
+  // python ...` went 24ms -> 1.5s). Best of three, the sizes interleaved.
+  test('install, git, make, node and training checks stay linear', () => {
+    const cost = (cmd) => {
+      const t0 = process.hrtime.bigint();
+      toolToState('Bash', { command: cmd });
+      classifyToolResult('Bash', { command: cmd }, { stdout: 'ok', stderr: '' }, false);
+      return Number(process.hrtime.bigint() - t0) / 1e6;
+    };
+    const cmds = (k) => [
+      'pnpm' + ' -C -C'.repeat(100 * k) + ' zz', 'npm' + ' --filter'.repeat(1000 * k) + ' x',
+      'git' + ' -C x'.repeat(2000 * k), 'make' + ' lint'.repeat(4000 * k), 'node' + ' -r x'.repeat(2000 * k),
+      'python '.repeat(2000 * k), 'nohup '.repeat(2000 * k), 'cat <<A\n'.repeat(2000 * k),
+    ];
+    const small = cmds(1), big = cmds(8);
+    for (let i = 0; i < small.length; i++) {
+      let tSmall = Infinity, tBig = Infinity;
+      for (let run = 0; run < 3; run++) {
+        tSmall = Math.min(tSmall, cost(small[i]));
+        tBig = Math.min(tBig, cost(big[i]));
+      }
+      assert.ok(tBig < tSmall * 20 + 5, `${small[i].slice(0, 20)}... x8 took ${tBig.toFixed(1)}ms, x1 ${tSmall.toFixed(1)}ms`);
+    }
+    assert.strictEqual(toolToState('Bash', { command: 'pnpm -C web install' }).state, 'installing', 'still matches');
+    assert.strictEqual(toolToState('Bash', { command: 'python train.py' }).state, 'training');
+  });
+});
+
+describe('state-machine -- review round 5: what a command is', () => {
+  const pre = (command) => toolToState('Bash', { command }).state;
+  const post = (command) => classifyToolResult('Bash', { command }, { stdout: 'ok', stderr: '' }, false).detail;
+
+  test('gradle and maven test runs are test runs, through their wrappers', () => {
+    for (const cmd of ['./gradlew test', 'gradlew.bat test', '.\\gradlew.bat :app:testDebugUnitTest', 'gradle check',
+      './gradlew connectedAndroidTest', './mvnw test', 'mvn test', 'mvnw verify', 'mvn -pl core -am verify', 'mvn clean test']) {
+      assert.strictEqual(pre(cmd), 'testing', cmd);
+      assert.strictEqual(post(cmd), 'tests passed', cmd);
+    }
+    for (const cmd of ['./gradlew build -x test', 'mvn clean install', './gradlew assemble', 'mvn compile']) {
+      assert.strictEqual(post(cmd), 'build succeeded', cmd);
+    }
+  });
+
+  test('only a build target makes make a build', () => {
+    for (const cmd of ['make', 'make -j8', 'make -j 8 all', 'make -C build', 'make build', 'make release', 'make CC=clang']) {
+      assert.strictEqual(post(cmd), 'build succeeded', cmd);
+    }
+    assert.strictEqual(post('make lint'), 'make lint done');
+    assert.strictEqual(post('make clean'), 'make clean done');
+    assert.strictEqual(post('make -C web format'), 'make format done');
+    assert.strictEqual(pre('make -C build test'), 'testing');
+    assert.strictEqual(post('make check'), 'tests passed');
+  });
+
+  test('cargo build is shown like any other build', () => {
+    assert.strictEqual(pre('cargo build --release'), 'executing');
+    assert.strictEqual(post('cargo build --release'), 'build succeeded');
+  });
+
+  test('node runs tests from tests/, test/, test.js and *.test.js files', () => {
+    for (const cmd of ['node tests/run.js', 'node tests/run.js grid face', 'node ./test/index.js', 'node test.js',
+      'node tests\\run.js --quiet', 'node --test', 'node --watch --test', 'node src/a.test.mjs',
+      'node --experimental-vm-modules tests/x.js', 'node -r ts-node/register test/a.spec.ts']) {
+      assert.strictEqual(pre(cmd), 'testing', cmd);
+      assert.strictEqual(post(cmd), 'tests passed', cmd);
+    }
+    for (const cmd of ['node scripts/build.js', 'node -e "test"', 'node testing.js', 'node setup.js', 'node']) {
+      assert.notStrictEqual(pre(cmd), 'testing', cmd);
+    }
+  });
+
+  test('a heredoc body is data, not commands', () => {
+    assert.strictEqual(pre("cat > notes.md <<'EOF'\nrun npm install first\nthen pytest\nEOF"), 'executing');
+    assert.strictEqual(pre('cat > x.sh <<EOF\nnpm install\nEOF\nnpm test'), 'testing', 'the line after the delimiter is a command');
+    assert.strictEqual(pre('git commit -F - <<EOF\nRun the build\nEOF'), 'committing');
+    assert.strictEqual(require('../lib/state-machine').shellIntent('git commit -F - <<EOF\nmsg; npm test\nEOF').masked, false);
+  });
+});
+
+describe('state-machine -- review round 5: a merge conflict is a git command\'s', () => {
+  test('PostToolUseFailure: a git conflict says so, a test run naming one does not', () => {
+    const merge = normalizeToolResponse({ error: 'Exit code 1\nAuto-merging a.txt\nCONFLICT (content): Merge conflict in a.txt\nAutomatic merge failed; fix conflicts and then commit the result.', is_interrupt: false });
+    assert.strictEqual(classifyToolResult('Bash', { command: 'git merge feature' }, merge, true).detail, 'merge conflict!');
+    const tests = normalizeToolResponse({ error: 'Exit code 1\n    \u2713 detects "CONFLICT (content): x"\n  test x: Automatic merge failed fixture\n  1 failed, 9 passed', is_interrupt: false });
+    assert.strictEqual(classifyToolResult('Bash', { command: 'node tests/run.js' }, tests, true).detail, 'tests failed');
+  });
+
+  test('a truncated PostToolUseFailure reports a git conflict', () => {
+    const raw = (cmd) => `{"hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"${cmd}"},"error":"Exit code 1\\nCONFLICT (content): Merge conflict in a.txt\\n` + 'x'.repeat(2000);
+    assert.strictEqual(classifyTruncatedInput('PostToolUseFailure', raw('git merge feature')).detail, 'merge conflict!');
+    assert.strictEqual(classifyTruncatedInput('PostToolUseFailure', raw('npm test')).detail, 'tool failed');
+  });
+});
+
+describe('state-machine -- review round 5: very large output is searched in two windows', () => {
+  const sm = require('../lib/state-machine');
+  test('the head and the tail are kept, whole lines only', () => {
+    assert.strictEqual(sm.scanWindow('short'), 'short');
+    const big = 'Exit code 2\n' + 'filler line\n'.repeat(100000) + 'Tests: 2 failed';
+    const w = sm.scanWindow(big);
+    assert.ok(w.length <= sm.SCAN_HEAD_BYTES + sm.SCAN_TAIL_BYTES + 1, `window is ${w.length}`);
+    assert.ok(w.startsWith('Exit code 2\n'));
+    assert.ok(w.endsWith('Tests: 2 failed'));
+    assert.ok(w.split('\n').every(l => l === '' || l === 'filler line' || l === 'Exit code 2' || l === 'Tests: 2 failed'), 'no cut lines');
+  });
+
+  // Relative, so it holds on any machine: a 900 KB result costs what an
+  // 80 KB one does (it used to cost eleven times as much), best of three.
+  test('a 900 KB result costs no more than an 80 KB one, and its verdict is still found', () => {
+    const best = (fn) => {
+      let ms = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const t0 = process.hrtime.bigint();
+        fn();
+        ms = Math.min(ms, Number(process.hrtime.bigint() - t0) / 1e6);
+      }
+      return ms;
+    };
+    const out = (n) => 'ok fine\n'.repeat(n) + '  2 failing\n';
+    const post = (stdout) => classifyToolResult('Bash', { command: 'npm test' }, { stdout, stderr: '' }, false);
+    const small = out(10000), big = out(115000);
+    assert.strictEqual(post(big).state, 'error', 'the verdict at the end is found');
+    const tSmall = best(() => post(small)), tBig = best(() => post(big));
+    assert.ok(tBig < tSmall * 3 + 5, `900 KB took ${tBig.toFixed(1)}ms, 80 KB ${tSmall.toFixed(1)}ms`);
+    const raw = (n) => '{"tool_name":"Bash","tool_response":{"stdout":"' + 'ok fine\\n'.repeat(n);
+    const rSmall = raw(10000), rBig = raw(115000);
+    const uSmall = best(() => classifyTruncatedInput('PostToolUse', rSmall));
+    const uBig = best(() => classifyTruncatedInput('PostToolUse', rBig));
+    assert.ok(uBig < uSmall * 3 + 5, `truncated: 900 KB took ${uBig.toFixed(1)}ms, 80 KB ${uSmall.toFixed(1)}ms`);
+  });
+});
+
+// -- Review round 5 (hooks) --------------------------------------------------
+
+describe('update-state -- review round 5 (hooks): SessionStart sources', () => {
+  // Same isolation as the quit-flag tests above: autolaunch on, the flag
+  // present, and a live PID file so no window is ever opened.
+  function withQuitFlag(fn) {
+    const { tmp, sessionsDir, env } = makeTempEnv('src-1');
+    try {
+      const flag = pathMod.join(tmp, '.code-crumb-quit');
+      fsMod.writeFileSync(flag, String(Date.now()), 'utf8');
+      fsMod.writeFileSync(pathMod.join(tmp, '.code-crumb-prefs.json'), '{"autolaunch":true}', 'utf8');
+      fsMod.writeFileSync(pathMod.join(tmp, '.code-crumb.pid'), String(process.pid), 'utf8');
+      fn(env, flag, sessionsDir);
+    } finally { cleanup(tmp); }
+  }
+
+  // 2.1.300 adds `fork`: the resumed transcript under a new session id.
+  test('a fork is the user starting a session: it clears the quit flag and is attention', () => {
+    withQuitFlag((env, flag, sessionsDir) => {
+      runUpdateState('SessionStart', { session_id: 'src-1', source: 'fork' }, env);
+      assert.strictEqual(fsMod.existsSync(flag), false, 'a forked session relaunches a closed face');
+      const f = readJSON(pathMod.join(sessionsDir, 'src-1.json'));
+      assert.ok(f.lastPromptAt > 0, 'and takes the center');
+    });
+  });
+
+  test('a /clear inside a running editor leaves the flag alone', () => {
+    withQuitFlag((env, flag) => {
+      runUpdateState('SessionStart', { session_id: 'src-1', source: 'clear' }, env);
+      assert.strictEqual(fsMod.existsSync(flag), true);
+    });
+  });
+});
+
+describe('update-state -- review round 5 (hooks): async ordering', () => {
+  const sf = (dir, id) => pathMod.join(dir, `${id}.json`);
+  const patch = (fp, over) => fsMod.writeFileSync(fp, JSON.stringify({ ...readJSON(fp), ...over }), 'utf8');
+  const read = { tool_name: 'Read', tool_input: { file_path: 'a.js' } };
+
+  // A fast Read: both hooks start within milliseconds, and the Pre lands last.
+  test('a PreToolUse that lands after its own PostToolUse draws nothing, but counts', () => {
+    const { tmp, sessionsDir, stateFile, statsFile, env } = makeTempEnv('ord-1');
+    try {
+      runUpdateState('PostToolUse', { session_id: 'ord-1', ...read, tool_use_id: 'toolu_01ORD1',
+        tool_response: { type: 'text', file: { content: 'x' } } }, env);
+      const post = readJSON(sf(sessionsDir, 'ord-1'));
+      const calls = readJSON(statsFile).totalToolCalls || 0;
+      runUpdateState('PreToolUse', { session_id: 'ord-1', ...read, tool_use_id: 'toolu_01ORD1' }, env);
+      const after = readJSON(sf(sessionsDir, 'ord-1'));
+      assert.strictEqual(after.state, post.state, 'the finished call is not resurrected as "reading"');
+      assert.strictEqual(after.timestamp, post.timestamp, 'no write at all');
+      assert.strictEqual(readJSON(stateFile).state, post.state, 'nor on the global file');
+      assert.strictEqual(readJSON(statsFile).totalToolCalls, calls + 1, 'the call still counts');
+    } finally { cleanup(tmp); }
+  });
+
+  // The permission check runs after the Pre hooks fire, so this Pre is older
+  // than the prompt however the two spawns raced.
+  test('a PreToolUse for the call a permission prompt is waiting on does not replace the wait', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('ord-2');
+    try {
+      const call = { session_id: 'ord-2', tool_name: 'Bash', tool_input: { command: 'rm -rf dist' } };
+      runUpdateState('PermissionRequest', call, env);
+      runUpdateState('PreToolUse', { ...call, tool_use_id: 'toolu_01ORD2' }, env);
+      const f = readJSON(sf(sessionsDir, 'ord-2'));
+      assert.strictEqual(f.state, 'waiting');
+      assert.strictEqual(f.detail, 'allow Bash?');
+    } finally { cleanup(tmp); }
+  });
+
+  // syncAt in the future stands for "the synchronous event fired after this
+  // async hook did" -- the inversion itself cannot be staged sequentially.
+  test('an async event older than the newest synchronous write is not drawn', () => {
+    const { tmp, sessionsDir, statsFile, env } = makeTempEnv('ord-3');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'ord-3', prompt: 'next' }, env);
+      const fp = sf(sessionsDir, 'ord-3');
+      assert.strictEqual(readJSON(fp).syncEvent, 'UserPromptSubmit');
+      patch(fp, { syncAt: Date.now() + 20000 });
+      const ups = readJSON(fp);
+      fsMod.writeFileSync(statsFile, JSON.stringify({ ...readJSON(statsFile), streak: 4 }), 'utf8');
+      runUpdateState('PostToolUseFailure', { session_id: 'ord-3', tool_name: 'Bash',
+        tool_input: { command: 'make' }, tool_use_id: 'toolu_01ORD3', error: 'Exit code 2' }, env);
+      runUpdateState('PreToolUse', { session_id: 'ord-3', tool_name: 'Bash',
+        tool_input: { command: 'ls' }, tool_use_id: 'toolu_01ORD4' }, env);
+      const f = readJSON(fp);
+      assert.strictEqual(f.state, 'thinking', 'the previous turn\'s failure stays off "reading your message"');
+      assert.strictEqual(f.detail, 'reading your message');
+      assert.strictEqual(f.timestamp, ups.timestamp);
+      assert.strictEqual(readJSON(statsFile).streak, 0, 'its failure still breaks the streak');
+    } finally { cleanup(tmp); }
+  });
+
+  test('after a turn end a late tool END keeps the carry rules; a late PreToolUse is dropped', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('ord-4');
+    try {
+      runUpdateState('Stop', { session_id: 'ord-4' }, env);
+      const fp = sf(sessionsDir, 'ord-4');
+      patch(fp, { syncAt: Date.now() + 20000 });
+      runUpdateState('PreToolUse', { session_id: 'ord-4', tool_name: 'Bash',
+        tool_input: { command: 'npm test' }, tool_use_id: 'toolu_01ORD5' }, env);
+      let f = readJSON(fp);
+      assert.strictEqual(f.state, 'idle', 'no "still running" after the turn is over');
+      assert.strictEqual(f.turnEnded, true);
+      runUpdateState('PostToolUseFailure', { session_id: 'ord-4', tool_name: 'Bash',
+        tool_input: { command: 'npm test' }, tool_use_id: 'toolu_01ORD5', error: 'Exit code 1' }, env);
+      f = readJSON(fp);
+      assert.strictEqual(f.state, 'error', 'a late failure after Stop still shows its error');
+      assert.strictEqual(f.turnEnded, true, 'and the turn stays over');
+    } finally { cleanup(tmp); }
+  });
+
+  // A sync write minutes "ahead" is a clock that stepped back, not an
+  // inversion: treating it as one froze every tool write until the clock
+  // caught up.
+  test('a clock stepped back does not freeze the async writes', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('ord-7');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'ord-7', prompt: 'go' }, env);
+      const fp = sf(sessionsDir, 'ord-7');
+      patch(fp, { syncAt: Date.now() + 5 * 60000 });
+      runUpdateState('PreToolUse', { session_id: 'ord-7', tool_name: 'Bash',
+        tool_input: { command: 'npm test' }, tool_use_id: 'toolu_01ORD7' }, env);
+      assert.strictEqual(readJSON(fp).state, 'testing');
+    } finally { cleanup(tmp); }
+  });
+
+  test('a tool end records its id in a bounded list; the sync clock is carried', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('ord-5');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'ord-5', prompt: 'go' }, env);
+      const fp = sf(sessionsDir, 'ord-5');
+      const ups = readJSON(fp);
+      assert.strictEqual(typeof ups.eventAt, 'number');
+      assert.strictEqual(ups.syncAt, ups.eventAt, 'a synchronous write is its own sync clock');
+      const old = Array.from({ length: 16 }, (_, i) => `old${i}`);
+      patch(fp, { doneToolIds: old });
+      runUpdateState('PostToolUse', { session_id: 'ord-5', ...read,
+        tool_use_id: 'toolu_01ABCDEFGHIJKLMNOPQRSTUV', tool_response: { type: 'text' } }, env);
+      const f = readJSON(fp);
+      assert.strictEqual(f.doneToolIds.length, 16, 'bounded');
+      assert.strictEqual(f.doneToolIds[0], 'old1', 'the oldest goes');
+      assert.strictEqual(f.doneToolIds[15], 'GHIJKLMNOPQRSTUV', 'the newest last, kept to its 16-char tail');
+      assert.ok(f.eventAt > ups.eventAt, 'every write has its own event time');
+      assert.strictEqual(f.syncAt, ups.syncAt, 'an async write carries the sync clock');
+      assert.strictEqual(f.syncEvent, 'UserPromptSubmit');
+      assert.strictEqual(readJSON(pathMod.join(tmp, '.code-crumb-state')).doneToolIds, undefined,
+        'the ordering fields are the session file\'s alone');
+    } finally { cleanup(tmp); }
+  });
+
+  // Over 1 MB the payload is cut before tool_use_id (serialized after
+  // tool_response); the tail of the stream still has it.
+  test('a truncated PostToolUse still records its call, so its late Pre is dropped', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('ord-6');
+    try {
+      runUpdateState('PostToolUse', JSON.stringify({
+        session_id: 'ord-6', hook_event_name: 'PostToolUse', ...read,
+        tool_response: { stdout: 'y'.repeat(1200000) }, tool_use_id: 'toolu_01BIGBIGBIGBIG01',
+      }), env);
+      const fp = sf(sessionsDir, 'ord-6');
+      const post = readJSON(fp);
+      assert.ok(post.doneToolIds && post.doneToolIds.includes('01BIGBIGBIGBIG01'), JSON.stringify(post.doneToolIds));
+      runUpdateState('PreToolUse', { session_id: 'ord-6', ...read, tool_use_id: 'toolu_01BIGBIGBIGBIG01' }, env);
+      assert.strictEqual(readJSON(fp).timestamp, post.timestamp);
+    } finally { cleanup(tmp); }
+  });
+});
+
+describe('update-state -- review round 5 (hooks): firstSeenAt', () => {
+  const sf = (dir, id) => pathMod.join(dir, `${id}.json`);
+
+  // writeJsonAtomic renames a temp file over the old one, which replaces it:
+  // birthtime is the LAST write, so the unregistered window was classified
+  // parallel on its first event and the conductor's subagent on its next.
+  test('an unregistered parallel window stays parallel past its first write', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('w2-unreg');
+    try {
+      runUpdateState('PreToolUse', { session_id: 'w2-unreg', tool_name: 'Read',
+        tool_input: { file_path: 'a.js' }, tool_use_id: 'toolu_w2_1' }, env);
+      runUpdateState('SessionStart', { session_id: 'w1-owner', source: 'startup' }, env);
+      runUpdateState('UserPromptSubmit', { session_id: 'w1-owner', prompt: 'go' }, env);
+      runUpdateState('SubagentStart', { session_id: 'w1-owner', agent_id: 'a1', agent_type: 'Explore' }, env);
+      const bash = { session_id: 'w2-unreg', tool_name: 'Bash', tool_input: { command: 'ls' } };
+      runUpdateState('PreToolUse', { ...bash, tool_use_id: 'toolu_w2_2' }, env);
+      assert.strictEqual(readJSON(sf(sessionsDir, 'w2-unreg')).parentSession, undefined, 'first event: parallel');
+      runUpdateState('PostToolUse', { ...bash, tool_use_id: 'toolu_w2_2', tool_response: { stdout: 'a' } }, env);
+      const f = readJSON(sf(sessionsDir, 'w2-unreg'));
+      assert.strictEqual(f.parentSession, undefined, 'its next event: still parallel, never the owner\'s subagent');
+    } finally { cleanup(tmp); }
+  });
+
+  test('a file from before the field is seeded from its own last write, then kept', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('fs-1');
+    try {
+      fsMod.mkdirSync(sessionsDir, { recursive: true });
+      const old = Date.now() - 3600000;
+      fsMod.writeFileSync(sf(sessionsDir, 'fs-1'), JSON.stringify({
+        session_id: 'fs-1', state: 'idle', timestamp: old, editor: 'claude',
+      }), 'utf8');
+      runUpdateState('UserPromptSubmit', { session_id: 'fs-1', prompt: 'hi' }, env);
+      assert.strictEqual(readJSON(sf(sessionsDir, 'fs-1')).firstSeenAt, old);
+      runUpdateState('PreToolUse', { session_id: 'fs-1', tool_name: 'Bash', tool_input: { command: 'ls' },
+        tool_use_id: 'toolu_fs_1' }, env);
+      assert.strictEqual(readJSON(sf(sessionsDir, 'fs-1')).firstSeenAt, old, 'sticky');
+    } finally { cleanup(tmp); }
+  });
+});
+
+// -- Review round 5 (integration): a predicate's "no" is not a failure ------
+// grep/rg/findstr exit 1 for "no match", diff/cmp for "the files differ",
+// test/[ for "false", which/where for "not found". Claude Code reports any
+// non-zero exit as PostToolUseFailure ("Exit code 1"), Codex and OpenCode as
+// a numeric exit code -- and every empty search was an error face that broke
+// the streak. Exit 2 is how these tools report a real failure.
+
+describe('state-machine.js -- review round 5: a predicate command answering no', () => {
+  const sm = require('../lib/state-machine');
+  const claudeFail = (command, error) =>
+    sm.classifyToolResult('Bash', { command }, sm.normalizeToolResponse({ error, is_interrupt: false }), true);
+  const exited = (command, exitCode, stdout = '') =>
+    sm.classifyToolResult('Bash', { command }, { stdout, stderr: '', exitCode }, false);
+
+  test('an empty search is no matches, and neutral', () => {
+    for (const cmd of ['grep -rn "TODO" src', 'rg -n deprecated lib', 'git grep -n foo',
+      'findstr /s /i "needle" *.js', 'cd lib && grep -c x shared.js | grep -v 0', 'cat a.txt | grep -q needle',
+      'bash -lc "rg needle"']) {
+      const r = claudeFail(cmd, 'Exit code 1');
+      assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'no matches', true], cmd);
+    }
+    const r = exited('rg TODO', 1);
+    assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'no matches', true], 'numeric exit');
+  });
+
+  test('a difference, a false test and a missing command are answers too', () => {
+    const d = claudeFail('diff a.txt b.txt', 'Exit code 1\n1c1\n< old\n---\n> new');
+    assert.deepStrictEqual([d.state, d.detail, d.neutral], ['satisfied', 'files differ', true]);
+    assert.strictEqual(claudeFail('git diff --quiet', 'Exit code 1').detail, 'files differ');
+    for (const cmd of ['test -f dist/index.js', '[ -d node_modules ]', '[[ -n "$CI" ]']) {
+      assert.deepStrictEqual([claudeFail(cmd, 'Exit code 1').detail, claudeFail(cmd, 'Exit code 1').neutral],
+        ['condition false', true], cmd);
+    }
+    assert.strictEqual(claudeFail('which pnpm', 'Exit code 1').detail, 'not found');
+    assert.strictEqual(claudeFail('pgrep -f renderer.js', 'Exit code 1').detail, 'no process');
+  });
+
+  test('a real failure is still an error', () => {
+    const cases = [
+      ['grep foo missing.txt', 'Exit code 2\ngrep: missing.txt: No such file or directory'],
+      ['cat nope.txt | grep x', 'Exit code 1\ncat: nope.txt: No such file or directory'],
+      ['cd nowhere && grep x y', 'Exit code 1\nbash: cd: nowhere: No such file or directory'],
+      ['npm test && grep x y', 'Exit code 1'],          // npm test may be the one that failed
+      ['grep x y; npm test', 'Exit code 1'],
+      ['diff a b && npm test', 'Exit code 1\nnpm ERR! Test failed'],
+      ['git diff --stat', 'Exit code 1'],              // without --quiet/--exit-code, 1 is trouble
+      ['npm test', 'Exit code 1'],
+    ];
+    for (const [cmd, err] of cases) {
+      const r = claudeFail(cmd, err);
+      assert.strictEqual(r.state, 'error', cmd);
+      assert.ok(!r.neutral, cmd);
+    }
+    assert.strictEqual(exited('rg x', 2).state, 'error');
+    assert.strictEqual(claudeFail('grep x y', 'interrupted').state, 'error');
+  });
+
+  test('end to end: an empty grep through PostToolUseFailure keeps the streak', () => {
+    const { tmp, statsFile, sessionsDir, env } = makeTempEnv('pred-1');
+    try {
+      fsMod.writeFileSync(statsFile, JSON.stringify({ streak: 6, bestStreak: 6 }), 'utf8');
+      const call = { session_id: 'pred-1', tool_name: 'Bash', tool_input: { command: 'grep -rn needle src' } };
+      runUpdateState('PreToolUse', { ...call, tool_use_id: 'toolu_p1' }, env);
+      runUpdateState('PostToolUseFailure', { ...call, tool_use_id: 'toolu_p1', error: 'Exit code 1', is_interrupt: false }, env);
+      const f = readJSON(pathMod.join(sessionsDir, 'pred-1.json'));
+      assert.deepStrictEqual([f.state, f.detail], ['satisfied', 'no matches']);
+      assert.strictEqual(readJSON(statsFile).streak, 6, 'neither broken nor extended');
+    } finally { cleanup(tmp); }
+  });
+});
+
+// -- Review round 5 (docs-pass bugs): predicates and git's fatal: ----------
+// `git diff --exit-code` prints the diff it found, so the "silent" rule made
+// every difference an error face. which/where print a line of their own on a
+// miss (checked on this machine: Git Bash's GNU which 2.23 and System32's
+// where.exe), so they almost never counted. And a masked `git push | tail`
+// that ended in `fatal:` was an error face reading "something went wrong".
+
+describe('state-machine.js -- Review round 5 (docs-pass bugs): predicates and git failures', () => {
+  const sm = require('../lib/state-machine');
+  const claudeFail = (command, error) =>
+    sm.classifyToolResult('Bash', { command }, sm.normalizeToolResponse({ error, is_interrupt: false }), true);
+  const exited = (command, exitCode, stdout = '', stderr = '') =>
+    sm.classifyToolResult('Bash', { command }, { stdout, stderr, exitCode }, false);
+  const DIFF = 'diff --git a/x.js b/x.js\nindex 1a2b3c4..5d6e7f8 100644\n--- a/x.js\n+++ b/x.js\n@@ -1 +1 @@\n-old\n+new';
+
+  test('git diff --exit-code that finds differences is files differ, its diff and all', () => {
+    for (const cmd of ['git diff --exit-code', 'git diff --exit-code -- src', 'git -C repo diff --stat --exit-code HEAD~1']) {
+      const r = claudeFail(cmd, `Exit code 1\n${DIFF}`);
+      assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'files differ', true], cmd);
+    }
+    const n = exited('git diff --exit-code', 1, DIFF);
+    assert.deepStrictEqual([n.state, n.detail, n.neutral], ['satisfied', 'files differ', true], 'numeric exit');
+  });
+
+  test('git diff --exit-code must stand alone, like diff; --quiet stays silent', () => {
+    assert.strictEqual(claudeFail('cd repo && git diff --exit-code', `Exit code 1\n${DIFF}`).state, 'error');
+    assert.strictEqual(claudeFail('npm run gen && git diff --exit-code', `Exit code 1\n${DIFF}`).state, 'error');
+    assert.strictEqual(claudeFail('git diff --quiet', 'Exit code 1').detail, 'files differ');
+    assert.strictEqual(claudeFail('git diff --quiet --exit-code', 'Exit code 1').detail, 'files differ');
+    // 128 is git's trouble, not a difference
+    assert.strictEqual(exited('git diff --exit-code nope', 128, '', 'fatal: bad revision \'nope\'').state, 'error');
+  });
+
+  test('which/where: their own miss message is the answer', () => {
+    const gnu = 'which: no pnpm in (/c/Users/me/bin:/mingw64/bin:/c/Program Files (x86)/Tools:/usr/bin)';
+    const win = 'INFO: Could not find files for the given pattern(s).';
+    for (const [cmd, msg] of [['which pnpm', gnu], ['where pnpm', win], ['where.exe pnpm', win],
+      ['/usr/bin/which pnpm', gnu], ['where pnpm yarn', win]]) {
+      const r = claudeFail(cmd, `Exit code 1\n${msg}`);
+      assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'not found', true], cmd);
+    }
+    // Codex / OpenCode: a numeric exit, the message on either stream
+    assert.strictEqual(exited('which pnpm', 1, gnu).detail, 'not found');
+    assert.strictEqual(exited('where pnpm', 1, '', `${win}\r\n`).detail, 'not found');
+    // and printing nothing at all still counts (Debian's which, macOS)
+    assert.strictEqual(claudeFail('which pnpm', 'Exit code 1').detail, 'not found');
+  });
+
+  test('which/where: any other message is still an error', () => {
+    const gnu = 'which: no pnpm in (/usr/bin)';
+    const win = 'INFO: Could not find files for the given pattern(s).';
+    for (const [cmd, err] of [
+      ['which pnpm', `Exit code 1\n${gnu}\nsomething else`],
+      ['where pnpm', `Exit code 1\n${gnu}`],                      // the other tool's wording
+      ['which pnpm', `Exit code 1\n${win}`],
+      ['where pnpm', 'Exit code 1\nINFORMACIÓN: no se pudo encontrar ningún archivo.'],
+      ['cd nowhere && which pnpm', `Exit code 1\nbash: cd: nowhere: No such file or directory\n${gnu}`],
+      ['which pnpm', 'Exit code 1\n/usr/bin/which: line 3: syntax error'],
+    ]) {
+      const r = claudeFail(cmd, err);
+      assert.strictEqual(r.state, 'error', `${cmd} / ${err}`);
+      assert.ok(!r.neutral, cmd);
+    }
+  });
+
+  test('a masked git push ending in fatal: says the push failed', () => {
+    const trusted = (command, stdout) =>
+      sm.classifyToolResult('Bash', { command }, { stdout, stderr: '' }, false, { trustSuccess: true });
+    const host = "fatal: unable to access 'https://github.com/x/y.git/': Could not resolve host: github.com";
+    for (const cmd of ['git push origin main 2>&1 | tail -5', 'git push || true', 'git -C repo push -u origin fix 2>&1 | cat']) {
+      assert.deepStrictEqual([trusted(cmd, host).state, trusted(cmd, host).detail], ['error', 'push failed'], cmd);
+    }
+    // Codex: the exit code, then the same detail instead of a bare "exit 128"
+    assert.strictEqual(exited('git push', 128, '', 'fatal: Authentication failed for \'https://github.com/x/y.git/\'').detail, 'push failed');
+    // Another git command: git failed
+    const fetch = trusted('git fetch origin nope 2>&1 | tail -3', "fatal: couldn't find remote ref nope");
+    assert.deepStrictEqual([fetch.state, fetch.detail], ['error', 'git failed']);
+    assert.strictEqual(exited('git commit -m wip', 128, '', "fatal: Unable to create '.git/index.lock': File exists.").detail, 'git failed');
+  });
+
+  test('a fatal: line names git only for a git command, and a named cause still wins', () => {
+    const trusted = (command, stdout) =>
+      sm.classifyToolResult('Bash', { command }, { stdout, stderr: '' }, false, { trustSuccess: true });
+    assert.strictEqual(trusted('make deploy 2>&1 | tail', 'fatal: something broke').detail, 'something went wrong');
+    assert.strictEqual(sm.errorDetail('fatal: not a git repository', ''), 'something went wrong', 'no command, no git');
+    assert.strictEqual(trusted('git push 2>&1 | tail',
+      'git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.').detail, 'permission denied');
+    assert.strictEqual(trusted('git push 2>&1 | tail',
+      ' ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs').detail, 'push rejected');
+  });
+});
+
+// -- Review round 5 (integration): the last predicate gaps ------------------
+// With core.autocrlf=true (git for Windows' default), `git diff --quiet` on a
+// changed LF file prints git's line-ending warning and exits 1 -- checked with
+// git 2.50.0.windows.1 -- so the silent rule kept it an error face. GNU which
+// (Git Bash) exits with the NUMBER of names it did not find: `which a b` with
+// both missing exits 2, past the exit-1 rule.
+
+describe('state-machine.js -- review round 5: line-ending warnings and which a b', () => {
+  const sm = require('../lib/state-machine');
+  const claudeFail = (command, error) =>
+    sm.classifyToolResult('Bash', { command }, sm.normalizeToolResponse({ error, is_interrupt: false }), true);
+  const CRLF = "warning: in the working copy of 'f.txt', LF will be replaced by CRLF the next time Git touches it";
+  const OLD_CRLF = 'warning: LF will be replaced by CRLF in f.txt.\nThe file will have its original line endings in your working directory';
+  const miss = (n) => `which: no ${n} in (/usr/bin:/c/Program Files (x86)/x)`;
+
+  test('git diff --quiet with git\'s line-ending warning is files differ', () => {
+    for (const out of [CRLF, `${CRLF}\n${CRLF.replace('f.txt', 'g.txt')}`, OLD_CRLF]) {
+      const r = claudeFail('git diff --quiet', `Exit code 1\n${out}`);
+      assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'files differ', true], out);
+    }
+    assert.strictEqual(claudeFail('git diff --quiet', 'Exit code 1\nfatal: bad revision').state, 'error');
+    assert.strictEqual(claudeFail('git diff --quiet', `Exit code 1\n${CRLF}\nerror: something else`).state, 'error');
+  });
+
+  test('which with several names missing is not found', () => {
+    const r = claudeFail('which pnpm yarn', `Exit code 2\n${miss('pnpm')}\n${miss('yarn')}`);
+    assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'not found', true]);
+    // The count must match: exit 2 with one miss line is which's own trouble.
+    assert.strictEqual(claudeFail('which pnpm', `Exit code 2\n${miss('pnpm')}`).state, 'error');
+    assert.strictEqual(claudeFail('which -z x', 'Exit code 2\nIllegal option -z').state, 'error');
+    assert.strictEqual(claudeFail('grep x y', 'Exit code 2').state, 'error', 'only which counts its misses');
   });
 });
 

@@ -13,7 +13,8 @@
 // |  Hook shapes (@opencode-ai/plugin 1.18):                       |
 // |    event(input)                    input  = { event }          |
 // |    tool.execute.before(in, out)    out    = { args }           |
-// |    tool.execute.after(in, out)     out    = { title, output }  |
+// |    tool.execute.after(in, out)     out    = { title, output,   |
+// |                                               metadata }       |
 // |    permission.ask(input, out)      input  = Permission         |
 // |                                                                |
 // |  Turn boundaries, reasoning and errors are NOT hooks: they     |
@@ -41,8 +42,37 @@ function nodeBinary() {
 }
 
 // Never embed tool output in a state file: the adapter only needs enough
-// text for the error forensics.
+// text for the error forensics. Both ends of it, though -- a test runner's
+// or a build's verdict is its LAST lines, an early crash its first, and
+// keeping only the head read "2 failing" at the bottom of a long run as
+// success.
 const MAX_OUTPUT = 4000;
+const OUTPUT_HEAD = 1000;
+const OUTPUT_GAP = '\n...\n';
+
+function clipOutput(s) {
+  if (s.length <= MAX_OUTPUT) return s;
+  const tail = MAX_OUTPUT - OUTPUT_HEAD - OUTPUT_GAP.length;
+  return s.slice(0, OUTPUT_HEAD) + OUTPUT_GAP + s.slice(s.length - tail);
+}
+
+// OpenCode 1.18's shell tool reports how a command ended only in its result
+// metadata -- `exit` is the exit code, null when the command was aborted or
+// timed out -- never in the output text, so a failed `test -f x` (output
+// "(no output)") read as success. The two null cases are told apart by the
+// note the tool appends to the output.
+function shellOutcome(metadata, output) {
+  const out = {};
+  const m = metadata && typeof metadata === 'object' ? metadata : {};
+  if (typeof m.exit === 'number') out.exit = m.exit;
+  // The note is the last thing in the output.
+  const tail = typeof output === 'string' ? output.slice(-1000) : '';
+  const at = tail.lastIndexOf('<shell_metadata>');
+  const note = at === -1 ? '' : tail.slice(at);
+  if (m.interrupted === true || note.includes('User aborted the command')) out.interrupted = true;
+  if (note.includes('terminated command after exceeding timeout')) out.timedOut = true;
+  return out;
+}
 
 // The adapter reads at most 1 MB of stdin, and anything over it is judged
 // from the raw text alone: a batch over the cap lost every event in it. So
@@ -95,8 +125,26 @@ function translate(hook, input, output) {
       }
       case 'session.idle':
         return { type: 'session.idle', sessionId: p.sessionID };
-      case 'session.error':
-        return { type: 'session.error', sessionId: p.sessionID, error: errorText(p.error) };
+      // sessionID is optional in 1.18: a plugin that fails to load or a skill
+      // that fails to parse publishes an error that belongs to no session.
+      // Forwarded, it minted a phantom opencode-<pid> session wearing the
+      // error face, counted a session, took the stats owner and broke the
+      // streak. The SDK error's `name` goes along: the adapter tells a turn
+      // that failed from an Esc (MessageAbortedError) and from a context
+      // overflow that auto-compaction is about to deal with
+      // (ContextOverflowError) -- names checked against the 1.18.21 binary
+      // (SessionProcessor.halt).
+      case 'session.error': {
+        if (typeof p.sessionID !== 'string' || !p.sessionID) return null;
+        const name = p.error && typeof p.error === 'object' && typeof p.error.name === 'string' ? p.error.name : '';
+        return name
+          ? { type: 'session.error', sessionId: p.sessionID, error: errorText(p.error), errorName: name }
+          : { type: 'session.error', sessionId: p.sessionID, error: errorText(p.error) };
+      }
+      // Published once auto-compaction has summarised the conversation and
+      // the turn carries on.
+      case 'session.compacted':
+        return { type: 'session.compacted', sessionId: p.sessionID };
       // 1.18.21 emits permission.asked; permission.updated is the older
       // spelling of the same Permission payload.
       case 'permission.asked':
@@ -104,15 +152,22 @@ function translate(hook, input, output) {
         return { type: 'permission.asked', sessionId: p.sessionID, title: p.title || p.type };
       case 'permission.replied':
         return { type: 'permission.replied', sessionId: p.sessionID, response: p.response };
+      // The question tool -- and plan_exit, which asks "switch to the build
+      // agent?" through the same service -- waits on the user. Without these
+      // the face decayed to idle and then sleep while OpenCode was asking.
+      case 'question.asked':
+      case 'question.replied':
+      case 'question.rejected':
+        return { type: ev.type, sessionId: p.sessionID };
       // An assistant message names the provider model it ran on. This is the
       // only place OpenCode reports it, and it is NOT forwarded as an event
       // of its own -- `send` records it and spawns nothing, then stamps it
       // onto the payloads already going out. Otherwise a streaming turn would
       // cost a node start per message update.
       //
-      // UNVERIFIED against a live OpenCode: the field names below are the
-      // documented SDK shape, but nobody has watched a real message.updated
-      // go past. Guarded so a wrong guess simply yields no model.
+      // The shape (properties.info, an assistant message with modelID) was
+      // checked against the 1.18.21 binary's own event schema. Guarded all
+      // the same, so a future change simply yields no model.
       case 'message.updated': {
         const info = p.info || {};
         return info.modelID
@@ -125,6 +180,11 @@ function translate(hook, input, output) {
           return { type: 'thinking', sessionId: part.sessionID };
         }
         if (part.type === 'tool' && part.state && part.state.status === 'error') {
+          // A tool still running when the turn stops (Esc) is marked
+          // "Tool execution aborted" with metadata.interrupted -- OpenCode's
+          // own UI reads that as cancelled, not failed.
+          const meta = part.state.metadata && typeof part.state.metadata === 'object' ? part.state.metadata : {};
+          const interrupted = meta.interrupted === true || part.state.error === 'Tool execution aborted';
           return {
             type: 'tool.error',
             sessionId: part.sessionID,
@@ -132,6 +192,7 @@ function translate(hook, input, output) {
             tool: part.tool,
             toolInput: capInput(part.state.input || {}),
             error: errorText(part.state.error),
+            ...(interrupted ? { interrupted: true } : {}),
           };
         }
         return null;
@@ -159,7 +220,8 @@ function translate(hook, input, output) {
       tool: i.tool,
       toolInput: capInput(i.args || {}),
       title: o.title,
-      output: typeof o.output === 'string' ? o.output.slice(0, MAX_OUTPUT) : '',
+      output: typeof o.output === 'string' ? clipOutput(o.output) : '',
+      ...shellOutcome(o.metadata, o.output),
     };
   }
   if (hook === 'permission.ask') {
@@ -228,6 +290,34 @@ const MAX_MODEL_KEYS = 64;
 // costs nothing once the child has written once.
 const parentBySession = new Map();
 const MAX_PARENT_KEYS = 256;
+
+// Sessions whose context overflowed and that have not compacted since. With
+// auto-compaction on (the default) OpenCode publishes the overflow as a
+// session.error, compacts, publishes session.compacted and carries on: that
+// is no failure. With it off -- or when even the compaction cannot fit --
+// the same error is followed by session.idle with nothing in between, and
+// the turn really did fail. Only the order tells the two apart, and this is
+// the one process that sees it: such a session.idle goes out marked
+// `overflowFailed`.
+const overflowPending = new Set();
+const MAX_OVERFLOW_KEYS = 64;
+
+function trackOverflow(payload) {
+  const id = payload.sessionId || '';
+  if (payload.type === 'session.error') {
+    if (payload.errorName === 'ContextOverflowError') {
+      if (overflowPending.size >= MAX_OVERFLOW_KEYS) overflowPending.clear();
+      overflowPending.add(id);
+    } else {
+      overflowPending.delete(id);   // the turn failed for a reason of its own
+    }
+  } else if (payload.type === 'session.compacted') {
+    overflowPending.delete(id);
+  } else if (payload.type === 'session.idle' && overflowPending.delete(id)) {
+    return { ...payload, overflowFailed: true };
+  }
+  return payload;
+}
 
 // Per-session delivery order for the async payloads. Each one used to be its
 // own node process and nothing ordered two of them: for a fast tool the
@@ -338,6 +428,7 @@ function send(payload) {
       parentBySession.set(payload.sessionId, payload.parentSession);
     }
     if (throttled(payload, Date.now())) return false;
+    payload = trackOverflow(payload);
     const known = lastModelBySession.get(payload.sessionId || '');
     if (known && !payload.model) payload = { ...payload, model: known };
     const parent = parentBySession.get(payload.sessionId || '');

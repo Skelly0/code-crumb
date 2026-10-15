@@ -1,5 +1,8 @@
 root = true
 
+# Markdown is trimmed too: CI's whitespace gate fails a push on trailing
+# whitespace in js/mjs/md/json/yml, so a two-space hard break cannot land
+# anyway (use a blank line or <br>).
 [*]
 charset = utf-8
 end_of_line = lf
@@ -10,6 +13,3 @@ trim_trailing_whitespace = true
 
 [*.cmd]
 end_of_line = crlf
-
-[*.md]
-trim_trailing_whitespace = false

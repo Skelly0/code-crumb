@@ -325,16 +325,36 @@ function applyItem(item, phase, countTool) {
 // -- JSONL event dispatcher --------------------------------------------
 
 // Whether codex's native hooks are writing this session too. They write the
-// same file (same id) with the editor tag `codex` and never this process's
-// pid -- a hook's pid is codex's (Unix) or absent (win32) -- so a hook write
-// newer than this wrapper is proof. Checked before each write until seen.
+// same file (same id) and never with this process's pid -- a hook's pid is
+// codex's (Unix) or absent (win32) -- so a hook write newer than this wrapper
+// is proof. Checked before each write until seen.
+//
+// The editor tag is `codex` since setup.js tags the commands `--editor
+// codex`, but a hooks.json written before that tag runs update-state.js
+// untagged, and its writes say `claude` (its default): the wrapper never went
+// quiet for those installs, and counted every tool call and success twice.
+// Such a write is still told apart from anything else: the file is named
+// after this run's codex thread id, which no Claude Code session carries, and
+// `isWorktree` is a field update-state.js computes -- no adapter does, so no
+// other wrapper resuming the same thread writes one.
+//
+// codex-notify is the exception to both tests: editor `codex`, codex's pid
+// (Unix), and the hooks' isWorktree carried forward. Its turn-end write is
+// not a hook, and it says so (`writer: 'notify'`); taking it for one quieted
+// a wrapper that had no hooks beside it from the first turn end on.
+function isHookWrite(f) {
+  if (!f || typeof f !== 'object' || f.pid === process.pid) return false;
+  if ((f.timestamp || 0) < WRAPPER_START) return false;
+  if (f.writer === 'notify') return false;
+  return f.editor === 'codex' || (f.editor === 'claude' && 'isWorktree' in f);
+}
+
 function hooksAreLive() {
   if (!threadStarted) return false;
   try {
     const f = JSON.parse(fs.readFileSync(
       path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));
-    if (!hooksLive && f && f.editor === 'codex' && f.pid !== process.pid
-        && (f.timestamp || 0) >= WRAPPER_START) hooksLive = true;
+    if (!hooksLive && isHookWrite(f)) hooksLive = true;
     // Follow what the hooks last wrote, so the run's final frame (see
     // closeOutcome) is their state, carrying their attention stamp and model,
     // and not whatever this wrapper wrote before it went quiet.
@@ -421,15 +441,19 @@ function handleEvent(event) {
 // The final frame and exit code when codex closes. Pure, so every branch is
 // testable without a real codex or a real signal.
 //   code / signal - what the child's 'close' reported
-//   caught        - a signal the WRAPPER received (Ctrl+C, a kill), or null
+//   caught        - a signal the WRAPPER received (Ctrl+C, a kill), or null;
+//                   SIGPIPE when the reader of its output went away
 // A child killed by a signal reports code null: `code || 0` used to read that
 // as success and leave the last work face standing.
 function closeOutcome({ code, signal, caught, turnOutcome: outcome, lastState: ls, lastDetail: ld }) {
   const sig = caught || signal || null;
   if (sig) {
+    const detail = sig === 'SIGINT' ? 'interrupted'
+      : sig === 'SIGPIPE' ? 'output closed'
+      : `codex killed (${sig})`;
     return {
       state: 'error',
-      detail: sig === 'SIGINT' ? 'interrupted' : `codex killed (${sig})`,
+      detail,
       stopped: true,
       exitCode: signalExitCode(sig),
     };
@@ -501,9 +525,29 @@ function main() {
 
   processJsonlStream(codex.stdout, handleEvent);
 
-  // Also pass through to our stdout so user sees output
+  // A signal the wrapper caught, or SIGPIPE for a reader that went away.
+  let caught = null;
+
+  // Also pass through to our stdout so the user sees the output. A reader
+  // that leaves early (`| head`, quitting `less`) turns the next write into
+  // EPIPE, which crashed the wrapper with the session never retired. It now
+  // ends the run the way a closed pipe ends any CLI: the session is retired
+  // at once, and our end of codex's own output pipe is closed, so codex meets
+  // the same broken pipe at its next write -- just as `codex exec | head`
+  // would without the wrapper, and through any shell shim, on every platform.
+  // The wrapper then leaves with codex, 128+SIGPIPE (141) where that exists.
+  let outputClosed = false;
+  const onOutputClosed = () => {
+    if (outputClosed) return;
+    outputClosed = true;
+    if (!caught) caught = 'SIGPIPE';
+    finishSession(closeOutcome({ code: null, signal: null, caught }));
+    try { codex.stdout.destroy(); } catch {}
+  };
+  process.stdout.on('error', onOutputClosed);
   codex.stdout.on('data', (chunk) => {
-    process.stdout.write(chunk);
+    if (outputClosed) return;
+    try { process.stdout.write(chunk); } catch { onOutputClosed(); }
   });
 
   codex.on('error', (err) => {
@@ -517,9 +561,8 @@ function main() {
   // until it went stale. Now the session is retired at once, the signal is
   // passed on to codex, and 'close' exits 128+N when codex goes. If codex
   // ignores it, a short grace timer exits anyway; a second signal exits now.
-  let caught = null;
   const onSignal = (sig) => {
-    if (caught) process.exit(signalExitCode(caught));
+    if (caught && caught !== 'SIGPIPE') process.exit(signalExitCode(caught));
     caught = sig;
     finishSession(closeOutcome({ code: null, signal: null, caught: sig }));
     try { codex.kill(sig); } catch {}
@@ -540,7 +583,9 @@ function main() {
     // and a signal (ours or anyone's) is an interruption.
     const outcome = closeOutcome({ code, signal, caught, turnOutcome, lastState, lastDetail });
     finishSession(outcome);
-    exitWhenFlushed(outcome.exitCode);
+    // Nothing is left to flush into a pipe nobody reads.
+    if (outputClosed) process.exit(outcome.exitCode);
+    else exitWhenFlushed(outcome.exitCode);
   };
   codex.on('close', onClose);
   // But 'close' waits for every holder of the stdout pipe, and anything codex
