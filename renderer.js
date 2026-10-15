@@ -780,9 +780,9 @@ function runUnifiedMode(opts = {}) {
 
   const minimal = (process.argv.includes('--minimal') || process.env.MINIMAL_BOOT === '1');
   const face = new ClaudeFace();
-  // Wall time at start, for comparing against the files' JSON timestamps;
-  // the monotonic one for how long the renderer has actually run.
-  const rendererStartTime = Date.now();
+  // Monotonic, for how long the renderer has actually run. Its start on the
+  // wall clock is re-expressed at each read as `now - uptime` (see
+  // startupGate), so no wall-clock start is kept.
   const rendererStartMono = monoNow();
   face.setState('starting');
   const orbital = new OrbitalSystem();

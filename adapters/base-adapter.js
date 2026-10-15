@@ -313,8 +313,9 @@ function handleToolStart(stats, toolName, toolInput) {
 // applies to Codex's Interrupt. Breaking it there counted the same Esc twice
 // for OpenCode (the aborted tool and the aborted turn), and a second break
 // zeroed brokenStreak, so the face never reacted to the first.
-// A neutral result (a background launch: nothing has run yet) leaves it alone
-// too, as in update-state.js.
+// A neutral result leaves it alone too, as in update-state.js: a background
+// launch (nothing has run yet) or a predicate's "no" (grep finding nothing,
+// diff finding a difference -- an answer, not a verdict on the work).
 function handleToolEnd(stats, toolName, toolInput, toolResponse, isError) {
   const result = classifyToolResult(toolName, toolInput, toolResponse, isError);
   if (!(toolResponse && toolResponse.interrupted) && !result.neutral) updateStreak(stats, result.state === 'error');

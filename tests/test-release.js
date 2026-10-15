@@ -810,6 +810,34 @@ describe('release -- Review round 5 (docs-pass bugs): setup and doctor agree', (
     }
   });
 
+  // The CI gate fails a push on trailing whitespace in these files, so the
+  // editor config must trim them all -- it exempted Markdown.
+  test('.editorconfig trims trailing whitespace in every file type the CI gate checks', () => {
+    const gate = fs.readFileSync(path.join(REPO, '.github', 'workflows', 'test.yml'), 'utf8')
+      .split('\n').find(l => l.includes('git grep') && l.includes('[[:space:]]+$'));
+    assert.ok(gate, 'the whitespace gate');
+    const exts = [...gate.matchAll(/'\*\.(\w+)'/g)].map(m => m[1]);
+    assert.ok(exts.includes('md') && exts.includes('js'), exts.join(','));
+    const trim = {};
+    let section = null;
+    const sections = [];
+    for (const raw of fs.readFileSync(path.join(REPO, '.editorconfig'), 'utf8').split(/\r?\n/)) {
+      const l = raw.trim();
+      const head = /^\[(.+)\]$/.exec(l);
+      if (head) { section = head[1]; continue; }
+      const kv = /^trim_trailing_whitespace\s*=\s*(\w+)$/.exec(l);
+      if (kv && section) sections.push([section, kv[1] === 'true']);
+    }
+    // Later sections win, as in EditorConfig: '*' or '*.ext' or '*.{a,b}'.
+    const matches = (glob, ext) => glob === '*' || glob === `*.${ext}`
+      || new RegExp(`^\\*\\.\\{(?:[^}]*,)?${ext}(?:,[^}]*)?\\}$`).test(glob);
+    for (const ext of exts) {
+      trim[ext] = false;
+      for (const [glob, on] of sections) if (matches(glob, ext)) trim[ext] = on;
+      assert.strictEqual(trim[ext], true, `*.${ext} is not trimmed, but the gate checks it`);
+    }
+  });
+
   test('cleanup', () => { for (const h of homes) cleanup(h); });
 });
 
