@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js 18+](https://img.shields.io/badge/node-18%2B-brightgreen.svg)](https://nodejs.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-blue.svg)](#)
-[![2692 Tests](https://img.shields.io/badge/tests-2692-brightgreen.svg)](#)
+[![2713 Tests](https://img.shields.io/badge/tests-2713-brightgreen.svg)](#)
 
 A terminal tamagotchi that shows what your AI coding assistant is doing.
 
@@ -133,7 +133,7 @@ node "${CRUMB}setup.js" doctor     # plugin install ($CRUMB from above)
 node "$crumb\setup.js" doctor      # plugin install ($crumb from above)
 ```
 
-`doctor` only reads. It checks that `node` is new enough and on `PATH`, whether the renderer is running, your Claude Code hooks (manual, plugin, or — a problem — both), the Codex hooks, autolaunch, and when a hook last wrote anything, and it prints a fix for every problem it finds. It exits 1 when it found one. With the plugin installed it also prints the exact command that starts the plugin's renderer.
+`doctor` only reads. It checks that `node` is new enough and on `PATH`, whether the renderer is running, your Claude Code hooks (manual, plugin, or — a problem — both), the Codex hooks, the OpenCode plugin entry, autolaunch, and when a hook last wrote anything, and it prints a fix for every problem it finds. It looks in the same files setup writes, so it honours `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME` too. It exits 1 when it found one. With the plugin installed it also prints the exact command that starts the plugin's renderer.
 
 ### Try the demo
 
@@ -298,7 +298,7 @@ Any key closes the help overlay or the session list. `t` is disabled when `NO_CO
 > [!NOTE]
 > Agent teams support requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. When enabled, team members appear in the orbital display with role labels and accent colors.
 
-**Manual hooks**: `node setup.js` writes the same 23 hooks into `~/.claude/settings.json` (backing the file up to `settings.json.bak` first and refusing to touch a file it cannot parse). `node setup.js uninstall` removes them again. Use either the plugin or the manual hooks, not both — with both installed every event fires twice. See the [manual config](#manual-hook-setup) section for the JSON shape.
+**Manual hooks**: `node setup.js` writes the same 23 hooks into `~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json` when you set that (backing the file up to `settings.json.bak` first and refusing to touch a file it cannot parse). `node setup.js uninstall` removes them again. Use either the plugin or the manual hooks, not both — with both installed every event fires twice. See the [manual config](#manual-hook-setup) section for the JSON shape.
 
 ### Codex CLI
 
@@ -378,7 +378,8 @@ Uses Pi's extension system. Run `node setup.js openclaw` for instructions. The a
 | `CODE_CRUMB_EDITOR` | `claude` (adapters set their own) | Editor tag shown in the session list; beats the `--editor` hook argument |
 | `CODE_CRUMB_NODE` | `node` | Node binary the OpenCode plugin spawns for the adapter |
 | `CODEX_HOME` | `~/.codex` | Where `setup.js codex` / `uninstall` / `doctor` find Codex's `hooks.json` and `config.toml` |
-| `OPENCODE_CONFIG_DIR` | `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode` | Where `setup.js opencode` finds OpenCode's config |
+| `OPENCODE_CONFIG_DIR` | `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode` | Where `setup.js opencode` and `doctor` find OpenCode's config |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code's config folder: where `setup.js` / `uninstall` / `doctor` find its `settings.json` |
 | `CLAUDE_SESSION_ID` | `<editor>-<parent PID>` | Session identifier |
 | `NO_COLOR` | unset | Disable colour output (also disables the `t` key) |
 | `MINIMAL_BOOT` | unset | Start in minimal mode (same as `--minimal`) |
@@ -550,7 +551,7 @@ rm -rf ~/.code-crumb-* ~/.code-crumb.pid*
 Remove-Item -Recurse -Force "$HOME\.code-crumb-*", "$HOME\.code-crumb.pid*"
 ```
 
-If you pointed `CODE_CRUMB_STATE` somewhere else, delete that file too. Setup's backups (`~/.claude/settings.json.bak`, `~/.codex/hooks.json.bak`) are yours to keep or delete.
+If you pointed `CODE_CRUMB_STATE` somewhere else, delete that file too. Setup's backups (`~/.claude/settings.json.bak`, `~/.codex/hooks.json.bak`, or the same names under `CLAUDE_CONFIG_DIR` / `CODEX_HOME`) are yours to keep or delete.
 
 ## License
 

@@ -52,7 +52,8 @@ launch.js        Opens the renderer, then starts and supervises the editor (--ed
 setup.js         setup.js [claude|codex|codex-notify|opencode|openclaw|uninstall|doctor] [--autolaunch]; opencode also --install/--uninstall.
                  `uninstall` removes the Claude Code hooks, the Codex hooks file and a Code Crumb notify line in Codex's config.toml.
                  Exports each editor's setup/uninstall, buildFaceHooks, buildCodexHooks, setupCodexNotify/removeCodexNotify, codexHome,
-                 opencodeConfigDir/opencodeConfigPath, enableAutolaunch, doctor, HOOK_EVENTS, CODEX_HOOK_EVENTS, printClaudeUsage
+                 claudeConfigDir/claudeSettingsPath, opencodeConfigDir/opencodeConfigPath, enableAutolaunch, doctor, HOOK_EVENTS,
+                 CODEX_HOOK_EVENTS, printClaudeUsage
                  (its demo hint prints only when demo/single.js exists; the npm tarball omits it)
 code-crumb.sh    Unix shell wrapper for launch.js (resolves its own symlink)
 code-crumb.cmd   Windows batch wrapper for launch.js (runs `node.exe`, never a bare `node` cmd.exe would find in the project folder first)
@@ -65,7 +66,7 @@ lib/
   transition.js    SwapTransition: dissolve/swap/materialize animation state machine
   accessories.js   Accessory definitions (hats, glasses, ears, etc.) and rendering helpers
   state-machine.js Pure logic: tool→state mapping, result classification, diff counting, streaks, stats helpers
-  shared.js        Paths, face state sets, PERMISSION_CONFIRM_MS, prefs, writeJsonAtomic, spawn/stats locks, shell quoting,
+  shared.js        Paths, face state sets, PERMISSION_CONFIRM_MS/PERMISSION_TOOL_STATES, prefs, writeJsonAtomic, spawn/stats locks, shell quoting,
                    buildRendererCommands/spawnRendererWindow, isRendererAlive, display width (charWidth/strWidth/sliceToWidth/sliceFromEndToWidth)
 adapters/
   base-adapter.js      Base adapter class shared by all adapters
@@ -482,7 +483,7 @@ Editors without a model are unchanged.
 
 **`face.forceState(state, detail, minMs)`** applies a state at once, skipping the buffer, dropping the queue, and recording the change for caffeine. Rescue paths (a missed Stop, a dead editor) use it, except on `RESCUE_EXCLUDE` states. Those include `error`, which decays by itself so a late `PostToolUseFailure` after Stop still shows.
 
-**Shared sets.** `ACTIVE_WORK_STATES`, `COMPLETION_STATES` and `INTERRUPTIBLE_STATES` are defined once in shared.js, and imported by face.js, grid.js and renderer.js.
+**Shared sets.** `ACTIVE_WORK_STATES`, `COMPLETION_STATES` and `INTERRUPTIBLE_STATES` are defined once in shared.js, and imported by face.js, grid.js and renderer.js. So is `PERMISSION_TOOL_STATES` (see Permission waits), for grid.js and renderer.js.
 
 #### The Timeout Cascade (`idleCascade`)
 
@@ -559,7 +560,7 @@ Editors without a model are unchanged.
 **`PermissionRequest`** writes `waiting` / `allow <tool>?` with `waitingOn`, a digest of the tool's name and input (`toolCallKey`).
 
 - **Unconfirmed waits.** Claude Code with the notification on writes an **unconfirmed** wait: `waitKind: 'permission'`, `waitConfirmed: false`, and `permState`/`permDetail`, the tool's work face from `toolToState`.
-- **No `waitKind`.** Codex, or the notification disabled (`1|true|yes|on`), gets no `waitKind`, so the wait is never resolved early.
+- **No `waitKind`.** Codex, or the notification disabled, gets no `waitKind`, so the wait is never resolved early. "Disabled" is Claude Code's own parse (2.1.300 reads the switch through its env table as `D.bool()`): `1|true|yes|on`, any case, trimmed. `0`, `false` or empty leave the notification on.
 
 **The Notification confirms** the wait (`waitConfirmed: true`), keeping its detail and `permState`/`permDetail`. It carries only the session id, so it also confirms the session's agents' unconfirmed waits (`_confirmAgentWaits`), if they are at least `PERMISSION_CONFIRM_MIN_AGE_MS` (5s) old, measured from `syncAt`.
 
@@ -570,8 +571,8 @@ Editors without a model are unchanged.
 
 **An unconfirmed wait older than `PERMISSION_CONFIRM_MS`** (8s, shared.js) was allowed, and its tool is running. Only an `editor: 'claude'` wait with `waitConfirmed === false` converts.
 
-- **The renderer.** `isUnconfirmedPermission` converts 8s after the write's timestamp or after first sight, whichever comes first. It re-reads the file to confirm it is the same unconfirmed write, then drops the wait and shows `permState`/`permDetail`. A `permState` outside `PERMISSION_TOOL_STATES` (thinking + `ACTIVE_WORK_STATES` − responding) stays waiting.
-- **`MiniFace._permWait`** does the same in `tick`. It uses `PERMITTED_TOOL_STATES`, which has no thinking, and falls back to `executing`.
+- **The renderer.** `isUnconfirmedPermission` converts 8s after the write's timestamp or after first sight, whichever comes first. It re-reads the file to confirm it is the same unconfirmed write, then drops the wait and shows `permState`/`permDetail`. A `permState` outside `PERMISSION_TOOL_STATES` (shared.js: thinking + `ACTIVE_WORK_STATES` − responding) stays waiting.
+- **`MiniFace._permWait`** does the same in `tick`, with the same set, and shows any other `permState` as `executing`.
 - **tmux.** `tmuxDisplayState` maps the wait to `permState`.
 
 **`waitKind`/`waitConfirmed`/`permState`/`permDetail` live and die with `waitingOn`** (`WAIT_FIELDS`). The waited call's tool end, any other answer, or a turn-closing event clears them all.
@@ -631,6 +632,7 @@ Text over 80 K characters is scanned as its first `SCAN_HEAD_BYTES` (16 K) plus 
 - **Merge conflicts** count only for a command containing `git`, an empty command, or a non-shell tool (`errorDetail`'s `opts.conflicts`). They never count for a read-only git command, nor a trusted success, since git exits 1 on a conflict.
 - **`cd` failures** count only in a chain with `cd`/`pushd`/`popd` (`SHELL_MOVE_RE`). There they are errors even though the chain is read-only, because adapters with merged output and no exit code rely on it.
 - **Push rejection.** `errorDetail` also names `push rejected`.
+- **git's `fatal:`.** For a command containing git (`opts.git`), a `fatal: ` line reads `push failed` for a push and `git failed` otherwise, so a masked `git push … | tail` (or Codex's exit 128) no longer says "something went wrong". It comes after merge conflict, push rejected, command not found and permission denied, and before the generic matches, which inside git's message are fragments of it.
 
 **Shell intent.** `shellIntent(cmd)` returns `{ unquoted, intent, readOnly, masked, segments }`.
 
@@ -661,14 +663,17 @@ Claude Code's `PostToolUseFailure` has **no** `tool_response`. It is `{tool_name
 |---|---|---|
 | `grep`/`egrep`/`fgrep`/`rg`/`ag`/`ack`/`findstr`/`git grep` | `no matches` | silent |
 | `diff`, `cmp` | `files differ` | alone |
-| `git diff --quiet` / `--exit-code` | `files differ` | silent |
+| `git diff --quiet` | `files differ` | silent |
+| `git diff --exit-code` (no `--quiet`) | `files differ` | alone |
 | `test`, `[`, `[[` | `condition false` | silent |
-| `which`, `where` | `not found` | silent |
+| `which` | `not found` | miss line: `which: no <name> in (<PATH>)` (`WHICH_MISS_RE`) |
+| `where` | `not found` | miss line: `INFO: Could not find files for the given pattern(s).` (`WHERE_MISS_RE`) |
 | `pgrep` | `no process` | silent |
 
 - **Position.** The predicate must be the **last** segment, reached only via `&&` or `|` from read-only segments.
 - **Silent** means it printed nothing but the editor's `Exit code N` line (`withoutExitTrailer`). A failing `cd`/`cat` in front would print its complaint.
-- **Alone** means a single segment, since diff's output is its answer.
+- **Alone** means a single segment, since the output (diff's, or `git diff --exit-code`'s diff) is the answer.
+- **Miss line** means nothing, or only that tool's own miss message on every non-blank line: GNU which's (Git Bash, Fedora, Arch) and System32 where.exe's, as worded on Windows 11. A localized where.exe, or anything else printed alongside, stays an error.
 - **Where the status comes from.** The numeric `exitCode`, or else the trailer: on stderr when `isError` is set, otherwise on stdout.
 - **Order.** The check runs after `interrupted` and before `isError`, so it overrides Claude's forced error. Shell-management tools are excluded.
 
@@ -915,6 +920,7 @@ Tool patterns are shared constants in state-machine.js: `EDIT_TOOLS`, `BASH_TOOL
 **Living alongside the hooks.** The session id is codex's **bare** thread id, which is the hooks' `session_id` too (before `thread.started` it is `codex-<pid>`). `setup.js codex` installs the hooks *and* suggests the wrapper.
 
 - **Going quiet.** The wrapper goes quiet once the hooks write that session (`hooksAreLive()`/`isHookWrite`). That means editor `codex`, or a legacy untagged `claude` write carrying `isWorktree`, with a pid that is not the wrapper's and a timestamp from this run.
+- **codex-notify is not a hook.** Its turn-end write passes every one of those tests (it carries `isWorktree` forward), so it stamps `writer: 'notify'` on the session file (not sticky), and `isHookWrite` refuses it. Before, a notify line beside the wrapper with no hooks silenced every turn after the first.
 - **While quiet**, it stops writing what the hooks report better (`HOOK_COVERED`). It still writes `turn.failed`, retries and the run's end, which it closes on the hooks' last frame, stamp and model.
 
 #### The OpenCode 1.18 plugin contract
@@ -992,16 +998,17 @@ The adapter's `TOOL_ALIASES` map `question` → `AskUserQuestion`, `plan_exit` �
 
 ### Setup and `doctor`
 
-**Claude Code.** `node setup.js` merges `buildFaceHooks` into `~/.claude/settings.json`.
+**One resolver per editor config.** Setup writes, and doctor reads, through the same functions, each taking `(env, home)`: `claudeConfigDir`/`claudeSettingsPath`, `codexHome` and `opencodeConfigDir`/`opencodeConfigPath`. doctor once honoured `CLAUDE_CONFIG_DIR` while setup did not, and read an OpenCode path setup no longer wrote.
+
+**Claude Code.** `node setup.js` merges `buildFaceHooks` into `claudeSettingsPath()`: `<CLAUDE_CONFIG_DIR>/settings.json`, else `~/.claude/settings.json`. That is Claude Code's own rule (2.1.300: `CLAUDE_CONFIG_DIR ?? ~/.claude`, resolved); an empty value counts as unset. `uninstall` and the `.bak` follow it.
 
 - It writes a `.bak` first, aborts on unreadable or invalid JSON, and uses `writeJsonAtomic`.
 - It strips only our own commands (`isOurCommand`: our argv shape, ending in a real event).
 - It syncs `async` flags in place.
-- It ignores `CLAUDE_CONFIG_DIR`.
 
 **Codex.** `setup.js codex` writes `<CODEX_HOME or ~/.codex>/hooks.json` (`codexHome(env)`). It then removes a Code Crumb `notify` line from the neighbouring `config.toml` (`removeCodexNotify`, `notifyRemoved`), and `uninstall` does the same.
 
-- Only a key naming `codex-notify.js` is touched, never a foreign notify.
+- Only a key whose value names `codex-notify.js` is touched (`ourNotifyKeys`, a one-line key or an array over several lines), never a foreign notify. Comments are not the value, so `notify = [...]  # replaced codex-notify.js` is foreign.
 - `config.toml` edits are textual: a `.bak` first, an abort on any read error but `ENOENT`, a BOM kept first, and the file's own line ending.
 - `setupCodexNotify` follows the same rules.
 
@@ -1009,7 +1016,7 @@ The adapter's `TOOL_ALIASES` map `question` → `AskUserQuestion`, `plan_exit` �
 
 - **The directory** (`opencodeConfigDir`) is `$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`. That holds on Windows too, since OpenCode uses xdg-basedir off `os.homedir()` (1.18.21 binary).
 - **The file** (`opencodeConfigPath`) is `opencode.json`, or an existing `opencode.jsonc` when there is no `opencode.json`. `OPENCODE_CONFIG` is deliberately unused.
-- **JSONC.** A strict-JSON config is rewritten. A JSONC config is edited textually: only the `plugin` member is rewritten, or added after `{`, so comments survive.
+- **JSONC.** `parseOpenCodeConfig` (pure) reads strict JSON, then JSONC; setup and doctor both use it. A strict-JSON config is rewritten. A JSONC config is edited textually: only the `plugin` member is rewritten, or added after `{`, so comments survive.
 - **Comments in the list.** A comment **inside** the plugin list makes install and uninstall refuse, leaving the file byte-identical; install prints the entry to add by hand.
 - **The key** is `plugin`, **singular**, and the `.bak` rule applies.
 
@@ -1020,11 +1027,11 @@ The adapter's `TOOL_ALIASES` map `question` → `AskUserQuestion`, `plan_exit` �
 - It checks:
   - node ≥18 and on PATH;
   - the renderer (`isRendererAlive`, with the beat's age), autolaunch, and the quit flag;
-  - the manual hooks (missing events, duplicates, a moved `update-state.js`);
-  - the plugin (enabled, found via `<CLAUDE_CONFIG_DIR or ~/.claude>/plugins/installed_plugins.json`, or older than this copy);
+  - the manual hooks in `claudeSettingsPath` (missing events, duplicates, a moved `update-state.js`);
+  - the plugin (enabled, found via `<claudeConfigDir>/plugins/installed_plugins.json`, or older than this copy);
   - the plugin and manual hooks both installed;
-  - the Codex hooks under `CODEX_HOME`, and a leftover notify line;
-  - the OpenCode entry;
+  - the Codex hooks under `CODEX_HOME`, and a leftover notify line (`ourNotifyKeys`: exactly what setup would remove);
+  - the OpenCode entry, in `opencodeConfigPath` read as JSONC;
   - the newest hook write (warning past `DOCTOR_QUIET_MS`, 1h).
 - With the plugin installed, it prints the plugin's renderer command.
 
@@ -1068,7 +1075,7 @@ To develop: `npm run demo` in one terminal and `npm start` in another (orbitals:
   - setup.js writes a `.bak` first, and aborts on unreadable or invalid JSON rather than replacing it.
   - The `config.toml` edits do the same, treating only `ENOENT` as "no config".
 - **Whitespace and headers**:
-  - No trailing whitespace anywhere. The CI gate covers js/mjs/md/json/yml, although `.editorconfig` does not trim `*.md`.
+  - No trailing whitespace anywhere. The CI gate covers js/mjs/md/json/yml, and `.editorconfig` trims all of them (test-release checks the two agree).
   - Boxed headers keep the `|` rail aligned to the `+===+` border.
   - Non-ASCII glyphs in code strings use `uXXXX` escapes, **control characters included; never a raw NUL**. grid.js's group-cache separator is `\u0000`, so git and ripgrep treat the file as text. Comments may use literal Unicode.
 - **Cross-platform paths**: `process.env.USERPROFILE || process.env.HOME`, with backslashes normalized to forward slashes.
@@ -1138,7 +1145,7 @@ To develop: `npm run demo` in one terminal and `npm start` in another (orbitals:
 | `CODE_CRUMB_MODEL` | Display name (`modelName`; default `claude`, adapters their own). A known `model` still outranks it. |
 | `CODE_CRUMB_EDITOR` | Editor tag; beats `--editor`. |
 | `CODE_CRUMB_NODE` | Node binary the OpenCode plugin spawns, resolved per spawn. |
-| `CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS` | Claude Code's switch for the 6 s permission notification. At `1`, `true`, `yes` or `on`, waits are written without `waitKind`. |
+| `CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS` | Claude Code's switch for the 6 s permission notification. At `1`, `true`, `yes` or `on` (any case, trimmed: Claude Code's own parse), waits are written without `waitKind`. |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `1` enables agent teams and teammate orbitals. |
 | `NO_COLOR` | Disables colour and the `t` key. |
 | `MINIMAL_BOOT` | Same as `--minimal`. |
@@ -1149,8 +1156,8 @@ To develop: `npm run demo` in one terminal and `npm start` in another (orbitals:
 | Variable | Effect |
 |---|---|
 | `CODEX_HOME` | Codex's config dir (default `~/.codex`), for setup, uninstall and doctor. |
-| `OPENCODE_CONFIG_DIR` / `XDG_CONFIG_HOME` | Where setup looks for OpenCode's config. `OPENCODE_CONFIG` is ignored. |
-| `CLAUDE_CONFIG_DIR` | Read by `doctor` only. |
+| `OPENCODE_CONFIG_DIR` / `XDG_CONFIG_HOME` | Where setup and doctor look for OpenCode's config. `OPENCODE_CONFIG` is ignored. |
+| `CLAUDE_CONFIG_DIR` | Claude Code's config dir (default `~/.claude`): the `settings.json` setup, uninstall and doctor use, and doctor's `plugins/installed_plugins.json`. |
 
 **Test-only (set by `tests/run.js`)**
 
@@ -1185,23 +1192,23 @@ Run `npm test`, or `node tests/run.js [--serial] [--jobs=N] [--quiet] [filter...
 - **Other flags.** `--quiet` prints only the summary. A filter that matches nothing exits 2.
 - **CI** (`.github/workflows/test.yml`) runs `node --check`, the whitespace gate, and `node tests/run.js --quiet` on ubuntu/windows/macos × node 18/20/22.
 
-**Counts.** **2692 tests across 17 files on win32**:
+**Counts.** **2713 tests across 17 files on win32**:
 
 | File | Tests | File | Tests |
 |---|---|---|---|
 | test-shared | 51 | test-launch | 49 |
-| test-state-machine | 656 | test-adapters | 310 |
+| test-state-machine | 662 | test-adapters | 312 |
 | test-themes | 72 | test-transition | 31 |
 | test-animations | 42 | test-emotions | 261 |
 | test-particles | 49 | test-platform | 153 |
 | test-face | 305 | test-subagents | 74 |
-| test-grid | 394 | test-attention | 135 |
-| test-accessories | 24 | test-release | 43 |
+| test-grid | 396 | test-attention | 139 |
+| test-accessories | 24 | test-release | 50 |
 | test-teams | 43 | | |
 
-**2705 on Linux/macOS**, which match each other. Three files are platform-conditional:
+**2726 on Linux/macOS**, which match each other. Three files are platform-conditional:
 
-- **test-adapters** has 320 there. It adds 11 POSIX-only tests: the wrapper/engmux/demo SIGTERM and SIGHUP tests, the wrapper's late-event retirement and exit grace, and the OpenCode plugin's per-session ordering and turn-end drain, which need a shell-script stand-in for node. It drops 1 win32-only test, the `codex.cmd` shadow.
+- **test-adapters** has 322 there. It adds 11 POSIX-only tests: the wrapper/engmux/demo SIGTERM and SIGHUP tests, the wrapper's late-event retirement and exit grace, and the OpenCode plugin's per-session ordering and turn-end drain, which need a shell-script stand-in for node. It drops 1 win32-only test, the `codex.cmd` shadow.
 - **test-launch** has 50: 2 POSIX-only tests (Ctrl+C reaches the editor, SIGTERM is forwarded), minus the win32 `claude.cmd` shadow.
 - **test-platform** has 155: 3 POSIX-only tests (backup modes, a read-only settings backup, the `code-crumb.sh` symlink), minus the win32 `shell:true` quoting round-trip.
 
@@ -1221,13 +1228,13 @@ Check the total. `test-shared.js › getIsWorktree` fails inside a git worktree 
 | test-accessories | accessory definitions and rendering |
 | test-teams | team colours/labels/grouping, teammate routing by `agent_id`, the lead heal |
 | test-launch | launcher logic, `--editor`, editor supervision and exit codes, the `.cmd` shadow |
-| test-adapters | every adapter; codex-wrapper vs a fake `codex` (incl. `\| head`, legacy hooks); codex-notify; the OpenCode plugin contract; PID liveness; provenance; `firstSeenAt` and neutral results; stats-lock contention; demo signal cleanup |
+| test-adapters | every adapter; codex-wrapper vs a fake `codex` (incl. `\| head`, legacy hooks); codex-notify, alone and beside the wrapper; the OpenCode plugin contract; PID liveness; provenance; `firstSeenAt` and neutral results; stats-lock contention; demo signal cleanup |
 | test-transition | `SwapTransition` phases and `dimFactor` |
 | test-emotions | shell commands → states, the timing table, `idleCascade`, waiting and `buildTitle`, `startupGate`, `needsRescue`, tmux, `splitKeys`; the renderer runtime via `runUnifiedMode` (watcher, allowed prompts, clock steps, failed reads, crash/exit restore, deadlines, low power) |
 | test-platform | quoting, `writeJsonAtomic`, the spawn and stats locks, `isRendererAlive`, setup.js on temp configs (Codex notify and `CODEX_HOME`, OpenCode dir and JSONC), launch.js exit codes, `code-crumb.sh` via a symlink |
 | test-subagents | `agent_id` attribution, per-agent model, the family heartbeat, the conducting hold, `ESCALATING_STATES` |
 | test-attention | `pickMainSession` and the fields feeding it, adapter stamp rules, the main's model, the session list, `readState(path)`, permission-wait confirmation, `PermissionDenied`, informational notifications |
-| test-release | packaging (require graph vs `"files"`), plugin manifests and `hooks.json` vs `HOOK_EVENTS`, npm scripts, the runner contract (via `CRUMB_TEST_FILES`), the direct-run refusal, `doctor` |
+| test-release | packaging (require graph vs `"files"`), plugin manifests and `hooks.json` vs `HOOK_EVENTS`, npm scripts, the runner contract (via `CRUMB_TEST_FILES`), the direct-run refusal, `doctor` and its agreement with setup (`CLAUDE_CONFIG_DIR`, OpenCode's dir and JSONC, notify arrays), `.editorconfig` vs the CI whitespace gate |
 
 **Conventions the suite relies on:**
 
@@ -1241,7 +1248,7 @@ Check the total. `test-shared.js › getIsWorktree` fails inside a git worktree 
   - For a definite PID verdict, seed `_pidStartCache` with a start time before the write, or install `grid._setPidResolver(fn)` (`null` restores the real one).
   - Renderer-runtime tests drive `runUnifiedMode(opts)` with a temp `sessionsDir`, a fake `watch`, manual `schedule`/`cancel`, captured `write`/`exit`, `installHandlers: false` and `start: false`.
 - **Behaviour over source.** The remaining `source:` tests are deliberate lint tests for properties with no runtime observable (render-loop lint, adapter hygiene, autolaunch helpers, CLI paths the suite cannot drive portably). Don't add new ones where a behaviour can be driven.
-- **A regression test must fail first.** Every review-pass test was checked against the pre-fix sources, in labelled blocks (`Third review pass`, `review fixes`, `round 3`, `round 4`, `review round 5`). `CHANGELOG.md` says what each pass fixed.
+- **A regression test must fail first.** Every review-pass test was checked against the pre-fix sources, in labelled blocks (`Third review pass`, `review fixes`, `round 3`, `round 4`, `review round 5`, `Review round 5 (docs-pass bugs)`). `CHANGELOG.md` says what each pass fixed.
 - **"Today"** in a test is `localDay()`, never the UTC date.
 
 ### Visual Verification
@@ -1270,18 +1277,6 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 
 ## Known Follow-ups
 
-**Open bugs (found in the round-5 docs pass, not fixed yet):**
-
-- **`doctor` checks the wrong OpenCode file.** It hardcodes `~/.config/opencode/opencode.json` as strict JSON, and ignores `OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME` and `.jsonc`.
-- **setup ignores `CLAUDE_CONFIG_DIR`, but doctor honours it.** Hooks land where Claude Code doesn't read them, and doctor then reports them missing.
-- **Likely: the notify-disable switch is parsed more narrowly than Claude Code's.** Claude Code treats any truthy value as off. A `0` would disable the notification, while we still write unconfirmed waits that resolve after 8 s with the dialog open.
-- **An orbital settles a `thinking` permission as `executing`.** grid's `PERMITTED_TOOL_STATES` lacks `thinking`, e.g. for `ExitPlanMode` or `TodoWrite`.
-- **`git diff --exit-code` that finds differences** prints the diff, fails the predicate's "silent" rule, and is still an error.
-- **`which`/`where` on Windows print a message on a miss**, so they rarely count as predicates.
-- **A masked `git push … | tail` ending in `fatal:`** gets the generic detail, because `errorDetail` has no `fatal:` branch.
-- **doctor's notify check misses a multi-line `notify` array.**
-- **Suspected: codex-notify plus the wrapper, without hooks, may quiet the wrapper.** A notify write satisfies `isHookWrite`. This predates round 5.
-
 **Hooks (Claude Code 2.1.300):**
 
 - **A user's "no" fires no hook.** Only the auto-mode classifier fires `PermissionDenied`. What follows a "no" is unchecked; if nothing arrives within 8 s, the refused tool shows as running until the next write.
@@ -1292,6 +1287,8 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **Exec-form hooks** (`"command": "node", "args": [...]`) would skip Git Bash on 2.1.300, a real Windows latency win, but they break older Claude Code.
 - **`TaskCompleted` fire sites changed.** In 2.1.280 `TaskUpdate` fired it for any session; in 2.1.300 only the teammate stop path does, per the binary. Re-check on the next bump.
 - **Installs predating 1.3.0** lack `PermissionDenied` and the async flags (older ones also `PostModelSwitch`). `npm run setup` fixes them; `npm run doctor` reports missing events.
+- **`git diff --quiet` under `core.autocrlf=true` is still an error face.** git prints `warning: in the working copy of '<file>', LF will be replaced by CRLF the next time Git touches it` on stderr and exits 1 (git 2.50 on Windows), so the "silent" rule fails. Allowing exactly that line, as `which`/`where` allow their miss lines, would fix it. `--exit-code` is unaffected (alone).
+- **`which a b` with both missing exits 2** (GNU which counts its misses), so it is an error face. Only exit 1 is a predicate's "no".
 
 **Launcher and Windows:**
 
@@ -1329,4 +1326,5 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **Unconfirmed: the orbital `+N more` text** (`mainPos.row + mainPos.h + 7`, capped at `rows - 2`) may overdraw the lowest ring face.
 - **Four `StopFailure` branches are unasserted:** `max_output_tokens`, `authentication_failed`, `billing_error` and the `'API error'` default.
 - **A state file without a `timestamp` is never applied.** Every writer stamps one.
+- **`TEAMS_DIR` (shared.js) is unused**, and still names `~/.claude/teams` where Claude Code uses `<CLAUDE_CONFIG_DIR>/teams`. Only test-shared reads it.
 - **`docs/` is gitignored.** The attention-main spec and plan in `docs/superpowers/` won't survive a fresh clone.

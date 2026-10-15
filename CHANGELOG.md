@@ -31,6 +31,16 @@ This release is review round 5 plus everything merged since 1.2.0 (listed under 
 - **A forked session** (`SessionStart` source `fork`) clears the quit flag like `startup` and `resume`, so autolaunch reopens a face you had closed.
 - **Parallel windows are not misclassified as subagents.** The legacy classifier read the session file's birthtime, which `writeJsonAtomic`'s rename resets on every write, so an unregistered parallel window became the owner's subagent on its second event. It now reads a sticky `firstSeenAt`, which the adapters carry too.
 - **A wall clock stepped back freezes nothing.** The face times itself on a monotonic clock, and the hooks' write ordering ignores a write more than 60 s ahead.
+- **Docs-pass fixes.** Writing up round 5 turned up nine suspects. Eight were bugs, each fixed with a test that failed first:
+  - `setup.js` follows `CLAUDE_CONFIG_DIR` (settings, `uninstall`, `.bak`) as Claude Code does. doctor already did, so it reported setup's hooks missing.
+  - doctor reads OpenCode's config where setup writes it (`OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `opencode.jsonc`), as JSONC. Setup and doctor now share one resolver per editor config.
+  - doctor sees a multi-line Code Crumb `notify = [` array, by the same scan setup removes it with. A foreign notify whose *comment* names codex-notify.js is no longer flagged, or removed.
+  - An orbital settles an allowed `thinking` prompt (ExitPlanMode, TodoWrite) as `thinking`, not `executing`: one `PERMISSION_TOOL_STATES` for both faces.
+  - `git diff --exit-code` finding differences reads `files differ`, its diff allowed, if it is the whole command. `which`/`where` count when they print only their own miss line (`which: no x in (…)`, `INFO: Could not find files…`).
+  - A git `fatal:` line reads `push failed` for a push and `git failed` otherwise, not "something went wrong" (or "exit 128").
+  - A codex-notify write no longer quiets the codex wrapper as if the hooks were live, so every turn after the first is reported again. Notify writes carry `writer: 'notify'`.
+  - Checked, not changed: Claude Code 2.1.300 parses `CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS` as `1|true|yes|on` (any case, trimmed), exactly as the hooks already did; `0` leaves it on. A test pins it.
+  - `.editorconfig` trims Markdown like the CI gate; a dead `rendererStartTime` and stale comments are gone.
 - **Classification details:**
   - git's global options (`git -C x commit`) no longer hide a commit or push.
   - `cargo build` is a build, not an install.
@@ -69,7 +79,7 @@ This release is review round 5 plus everything merged since 1.2.0 (listed under 
 
 - **Parallel test runner.** `node tests/run.js` runs the 17 test files in parallel child processes (`--jobs=N`, default min(4, cpus), slowest first), each with its own throwaway home. Output prints in list order, and a file that crashes or times out (5 min) counts as failed. A full run fell from ~31 s to ~15 s on win32. `--serial` keeps the one-process mode, and a single selected file runs in-process. The runner also clears `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `OPENCODE_CONFIG_DIR` and `OPENCODE_CONFIG`.
 - **A test file run directly refuses to start.** `node tests/test-adapters.js` used to run against the real home, writing the live state files under a running renderer. `createSuite()` now exits 1 unless `CRUMB_TEST_HOME` names the HOME in use, and the test files lost their shebangs.
-- **`tests/test-release.js`** (43 tests) covers packaging (the require graph from every entry point, against `package.json` `"files"`), the plugin manifests (identical copies, agreeing versions, `hooks.json` registering exactly `HOOK_EVENTS`), the npm scripts, the runner, and `doctor`.
+- **`tests/test-release.js`** (50 tests) covers packaging (the require graph from every entry point, against `package.json` `"files"`), the plugin manifests (identical copies, agreeing versions, `hooks.json` registering exactly `HOOK_EVENTS`), the npm scripts, the runner, and `doctor`.
 - **`readState`** returns `failed: true` for a read that is not data, so the renderer changes nothing on one. It also sanitises counters, `frequentFiles`, milestones and diff info.
 - **The fresh-read block and `FRESH_READ_STATES` are gone.** The 2 s forced read catches a missed Stop.
 - **Smaller changes:**
@@ -80,8 +90,7 @@ This release is review round 5 plus everything merged since 1.2.0 (listed under 
   - `runUnifiedMode(opts)` takes test seams.
 - **Local-day tests.** Eight test sites compared against the UTC day and failed between local and UTC midnight; they now use `localDay()`.
 - **Smoke runs.** Before the merge, a live run with Claude Code 2.1.300 (`-p`, async hooks included) and a fake 120×40 renderer both passed.
-- **Test count.** The suite is 2692 tests in 17 files on win32, up from 2454 in 16 files before the round.
-- **Open findings.** The documentation pass found some bugs that are not fixed yet; they are listed under Known Follow-ups in `CLAUDE.md`.
+- **Test count.** The suite is 2713 tests in 17 files on win32, up from 2454 in 16 files before the round.
 
 ### Also in 1.3.0 (merged before review round 5)
 
