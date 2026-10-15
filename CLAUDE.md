@@ -1252,6 +1252,7 @@ Check the total. `test-shared.js › getIsWorktree` fails inside a git worktree 
 - **Behaviour over source.** The remaining `source:` tests are deliberate lint tests for properties with no runtime observable (render-loop lint, adapter hygiene, autolaunch helpers, CLI paths the suite cannot drive portably). Don't add new ones where a behaviour can be driven.
 - **A regression test must fail first.** Every review-pass test was checked against the pre-fix sources, in labelled blocks (`Third review pass`, `review fixes`, `round 3`, `round 4`, `review round 5`, `Review round 5 (docs-pass bugs)`). `CHANGELOG.md` says what each pass fixed.
 - **"Today"** in a test is `localDay()`, never the UTC date.
+- **Timing tests compare growth, not a flat budget.** A linear-time check times n against 8n (best of three, the sizes interleaved) and allows ×20: linear code measures ~×10, quadratic ×64. A loaded CI runner failed a flat 50ms budget. The round-3 fuzz tests keep a deliberately loose 250ms bound against a 1.4s regression.
 
 ### Visual Verification
 

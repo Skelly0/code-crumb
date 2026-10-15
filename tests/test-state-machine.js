@@ -4416,18 +4416,30 @@ describe('state-machine -- review round 5: git global options', () => {
 describe('state-machine -- review round 5: linear-time command matching', () => {
   // `pnpm -C -C ...` had exponentially many readings in the old install
   // regex: twenty pairs held toolToState for over a minute.
+  // Relative, so a loaded runner cannot fail it (a flat 50ms budget did, on
+  // windows/node 18): eight times the input costs about ten times as much in
+  // a linear matcher and sixty-four in a quadratic one (the old `python
+  // python ...` went 24ms -> 1.5s). Best of three, the sizes interleaved.
   test('install, git, make, node and training checks stay linear', () => {
-    const cmds = [
-      'pnpm' + ' -C -C'.repeat(200) + ' zz', 'npm' + ' --filter'.repeat(2000) + ' x',
-      'git' + ' -C x'.repeat(4000), 'make' + ' lint'.repeat(8000), 'node' + ' -r x'.repeat(4000),
-      'python '.repeat(4000), 'nohup '.repeat(4000), 'cat <<A\n'.repeat(4000),
-    ];
-    for (const cmd of cmds) {
-      const t0 = Date.now();
+    const cost = (cmd) => {
+      const t0 = process.hrtime.bigint();
       toolToState('Bash', { command: cmd });
       classifyToolResult('Bash', { command: cmd }, { stdout: 'ok', stderr: '' }, false);
-      const ms = Date.now() - t0;
-      assert.ok(ms < 50, `${cmd.slice(0, 20)}... took ${ms}ms`);
+      return Number(process.hrtime.bigint() - t0) / 1e6;
+    };
+    const cmds = (k) => [
+      'pnpm' + ' -C -C'.repeat(100 * k) + ' zz', 'npm' + ' --filter'.repeat(1000 * k) + ' x',
+      'git' + ' -C x'.repeat(2000 * k), 'make' + ' lint'.repeat(4000 * k), 'node' + ' -r x'.repeat(2000 * k),
+      'python '.repeat(2000 * k), 'nohup '.repeat(2000 * k), 'cat <<A\n'.repeat(2000 * k),
+    ];
+    const small = cmds(1), big = cmds(8);
+    for (let i = 0; i < small.length; i++) {
+      let tSmall = Infinity, tBig = Infinity;
+      for (let run = 0; run < 3; run++) {
+        tSmall = Math.min(tSmall, cost(small[i]));
+        tBig = Math.min(tBig, cost(big[i]));
+      }
+      assert.ok(tBig < tSmall * 20 + 5, `${small[i].slice(0, 20)}... x8 took ${tBig.toFixed(1)}ms, x1 ${tSmall.toFixed(1)}ms`);
     }
     assert.strictEqual(toolToState('Bash', { command: 'pnpm -C web install' }).state, 'installing', 'still matches');
     assert.strictEqual(toolToState('Bash', { command: 'python train.py' }).state, 'training');

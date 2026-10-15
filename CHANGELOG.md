@@ -89,6 +89,7 @@ This release is review round 5 plus everything merged since 1.2.0 (listed under 
   - `PERMISSION_CONFIRM_MS` lives in `shared.js`.
   - `runUnifiedMode(opts)` takes test seams.
 - **Local-day tests.** Eight test sites compared against the UTC day and failed between local and UTC midnight; they now use `localDay()`.
+- **Relative timing.** The linear-time command test gave each command a flat 50ms. On CI's windows/node 18 runner, one cold `make lint …` took 73ms while the matcher was linear (6ms locally). It now compares 8× the input against 1× and allows ×20. The pre-fix `python …`/`nohup …` matchers still fail it at ×60, and the old `pnpm`/`npm` regexes still hang.
 - **Smoke runs.** Before the merge, a live run with Claude Code 2.1.300 (`-p`, async hooks included) and a fake 120×40 renderer both passed.
 - **Test count.** The suite is 2713 tests in 17 files on win32, up from 2454 in 16 files before the round.
 
