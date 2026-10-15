@@ -335,11 +335,17 @@ function applyItem(item, phase, countTool) {
 // quiet for those installs, and counted every tool call and success twice.
 // Such a write is still told apart from anything else: the file is named
 // after this run's codex thread id, which no Claude Code session carries, and
-// `isWorktree` is a field only update-state.js writes -- never an adapter, so
-// never another wrapper resuming the same thread.
+// `isWorktree` is a field update-state.js computes -- no adapter does, so no
+// other wrapper resuming the same thread writes one.
+//
+// codex-notify is the exception to both tests: editor `codex`, codex's pid
+// (Unix), and the hooks' isWorktree carried forward. Its turn-end write is
+// not a hook, and it says so (`writer: 'notify'`); taking it for one quieted
+// a wrapper that had no hooks beside it from the first turn end on.
 function isHookWrite(f) {
   if (!f || typeof f !== 'object' || f.pid === process.pid) return false;
   if ((f.timestamp || 0) < WRAPPER_START) return false;
+  if (f.writer === 'notify') return false;
   return f.editor === 'codex' || (f.editor === 'claude' && 'isWorktree' in f);
 }
 

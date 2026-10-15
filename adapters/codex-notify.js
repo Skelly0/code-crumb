@@ -83,6 +83,12 @@ try {
     const sessionExtra = { ...globalExtra };
     delete sessionExtra.stopped;
     if (turnEnded) sessionExtra.turnEnded = true;
+    // Who wrote this, for codex-wrapper: it goes quiet once codex's hooks
+    // write its session, and a notify write looks like one (editor codex,
+    // another pid, isWorktree carried below) -- so a notify line beside the
+    // wrapper, with no hooks, silenced every turn after the first. Not in
+    // CARRIED_FIELDS: the next write by anyone else is not a notify write.
+    sessionExtra.writer = 'notify';
     let prev = null;
     try {
       prev = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), 'utf8'));

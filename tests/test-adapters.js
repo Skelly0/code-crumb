@@ -5110,4 +5110,71 @@ describe('adapters -- Review round 5: OpenCode', () => {
   });
 });
 
+// -- Review round 5 (docs-pass bugs): codex-notify is not a hook ------------
+// The wrapper goes quiet once codex's native hooks write its session, and it
+// told a hook write by editor `codex` (or a legacy `claude` write carrying
+// isWorktree) from another process. codex-notify's turn-end write is both --
+// it carries isWorktree forward -- so with the notify line and the wrapper
+// but no hooks, the first turn end silenced the wrapper and every later turn
+// went unreported: nothing counted it, nothing drew it.
+
+describe('adapters -- Review round 5 (docs-pass bugs): codex-notify beside the wrapper', () => {
+  const WRAPPER = path.join(ADAPTERS_DIR, 'codex-wrapper.js');
+  const NOTIFY = path.join(ADAPTERS_DIR, 'codex-notify.js');
+
+  test('a notify turn end does not quiet a wrapper running without hooks', () => {
+    const t = round5Env('notify-wrapper');
+    try {
+      const T = '019a-notify-wrapper';
+      writeFakeCodex(t.binDir, [
+        "'use strict';",
+        "const fs = require('fs');",
+        "const path = require('path');",
+        "const { execFileSync } = require('child_process');",
+        `const file = path.join(process.env.USERPROFILE || process.env.HOME, '.code-crumb-sessions', ${JSON.stringify(T + '.json')});`,
+        "const out = (o) => fs.writeSync(1, JSON.stringify(o) + '\\n');",
+        "const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);",
+        "const tool = (id) => {",
+        "  out({ type: 'item.started', item: { id, type: 'command_execution', command: 'ls', status: 'in_progress' } });",
+        "  out({ type: 'item.completed', item: { id, type: 'command_execution', command: 'ls', aggregated_output: 'a', exit_code: 0, status: 'completed' } });",
+        "};",
+        `out({ type: 'thread.started', thread_id: ${JSON.stringify(T)} });`,
+        "out({ type: 'turn.started' });",
+        "tool('i1');",
+        "out({ type: 'turn.completed', usage: {} });",
+        // Codex runs its notify program at the turn end. Wait for the
+        // wrapper's own turn-end write, so the notify write is the newest.
+        "for (const end = Date.now() + 10000; Date.now() < end; sleep(20)) {",
+        "  try { if (JSON.parse(fs.readFileSync(file, 'utf8')).turnEnded) break; } catch {}",
+        "}",
+        `execFileSync(process.execPath, [${JSON.stringify(NOTIFY)}, JSON.stringify({ type: 'agent-turn-complete', 'thread-id': ${JSON.stringify(T)}, 'last-assistant-message': 'Done.' })]);`,
+        "out({ type: 'turn.started' });",
+        "tool('i2');",
+        "out({ type: 'turn.completed', usage: {} });",
+        '',
+      ].join('\n'));
+      execFileSync(NODE, [WRAPPER, 'x'], { env: t.env, timeout: 30000, stdio: 'pipe' });
+      assert.strictEqual(readJSON(t.statsFile).totalToolCalls, 2, 'the second turn was dropped as hook-covered');
+      const f = readJSON(path.join(t.sessionsDir, `${T}.json`));
+      assert.strictEqual(f.stopped, true, 'retired');
+      assert.strictEqual(f.writer, undefined, 'the wrapper\'s own last write');
+    } finally { cleanup(t.tmp); }
+  });
+
+  test('the notify write says who wrote it, and that is not sticky', () => {
+    const t = round5Env('notify-writer');
+    try {
+      const T = '019a-notify-writer';
+      const notify = () => execFileSync(NODE, [NOTIFY, JSON.stringify({ type: 'agent-turn-complete', 'thread-id': T })],
+        { env: t.env, stdio: 'ignore', timeout: 10000 });
+      notify();
+      const file = path.join(t.sessionsDir, `${T}.json`);
+      assert.strictEqual(readJSON(file).writer, 'notify');
+      runUpdateState(null, { session_id: T, hook_event_name: 'UserPromptSubmit', prompt: 'go' },
+        t.env, { args: ['--editor', 'codex', 'UserPromptSubmit'] });
+      assert.strictEqual(readJSON(file).writer, undefined, 'a hook write after it is a hook write');
+    } finally { cleanup(t.tmp); }
+  });
+});
+
 module.exports = suite;
