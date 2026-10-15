@@ -4818,4 +4818,96 @@ describe('state-machine.js -- review round 5: a predicate command answering no',
   });
 });
 
+// -- Review round 5 (docs-pass bugs): predicates and git's fatal: ----------
+// `git diff --exit-code` prints the diff it found, so the "silent" rule made
+// every difference an error face. which/where print a line of their own on a
+// miss (checked on this machine: Git Bash's GNU which 2.23 and System32's
+// where.exe), so they almost never counted. And a masked `git push | tail`
+// that ended in `fatal:` was an error face reading "something went wrong".
+
+describe('state-machine.js -- Review round 5 (docs-pass bugs): predicates and git failures', () => {
+  const sm = require('../lib/state-machine');
+  const claudeFail = (command, error) =>
+    sm.classifyToolResult('Bash', { command }, sm.normalizeToolResponse({ error, is_interrupt: false }), true);
+  const exited = (command, exitCode, stdout = '', stderr = '') =>
+    sm.classifyToolResult('Bash', { command }, { stdout, stderr, exitCode }, false);
+  const DIFF = 'diff --git a/x.js b/x.js\nindex 1a2b3c4..5d6e7f8 100644\n--- a/x.js\n+++ b/x.js\n@@ -1 +1 @@\n-old\n+new';
+
+  test('git diff --exit-code that finds differences is files differ, its diff and all', () => {
+    for (const cmd of ['git diff --exit-code', 'git diff --exit-code -- src', 'git -C repo diff --stat --exit-code HEAD~1']) {
+      const r = claudeFail(cmd, `Exit code 1\n${DIFF}`);
+      assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'files differ', true], cmd);
+    }
+    const n = exited('git diff --exit-code', 1, DIFF);
+    assert.deepStrictEqual([n.state, n.detail, n.neutral], ['satisfied', 'files differ', true], 'numeric exit');
+  });
+
+  test('git diff --exit-code must stand alone, like diff; --quiet stays silent', () => {
+    assert.strictEqual(claudeFail('cd repo && git diff --exit-code', `Exit code 1\n${DIFF}`).state, 'error');
+    assert.strictEqual(claudeFail('npm run gen && git diff --exit-code', `Exit code 1\n${DIFF}`).state, 'error');
+    assert.strictEqual(claudeFail('git diff --quiet', 'Exit code 1').detail, 'files differ');
+    assert.strictEqual(claudeFail('git diff --quiet --exit-code', 'Exit code 1').detail, 'files differ');
+    // 128 is git's trouble, not a difference
+    assert.strictEqual(exited('git diff --exit-code nope', 128, '', 'fatal: bad revision \'nope\'').state, 'error');
+  });
+
+  test('which/where: their own miss message is the answer', () => {
+    const gnu = 'which: no pnpm in (/c/Users/me/bin:/mingw64/bin:/c/Program Files (x86)/Tools:/usr/bin)';
+    const win = 'INFO: Could not find files for the given pattern(s).';
+    for (const [cmd, msg] of [['which pnpm', gnu], ['where pnpm', win], ['where.exe pnpm', win],
+      ['/usr/bin/which pnpm', gnu], ['where pnpm yarn', win]]) {
+      const r = claudeFail(cmd, `Exit code 1\n${msg}`);
+      assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'not found', true], cmd);
+    }
+    // Codex / OpenCode: a numeric exit, the message on either stream
+    assert.strictEqual(exited('which pnpm', 1, gnu).detail, 'not found');
+    assert.strictEqual(exited('where pnpm', 1, '', `${win}\r\n`).detail, 'not found');
+    // and printing nothing at all still counts (Debian's which, macOS)
+    assert.strictEqual(claudeFail('which pnpm', 'Exit code 1').detail, 'not found');
+  });
+
+  test('which/where: any other message is still an error', () => {
+    const gnu = 'which: no pnpm in (/usr/bin)';
+    const win = 'INFO: Could not find files for the given pattern(s).';
+    for (const [cmd, err] of [
+      ['which pnpm', `Exit code 1\n${gnu}\nsomething else`],
+      ['where pnpm', `Exit code 1\n${gnu}`],                      // the other tool's wording
+      ['which pnpm', `Exit code 1\n${win}`],
+      ['where pnpm', 'Exit code 1\nINFORMACIÓN: no se pudo encontrar ningún archivo.'],
+      ['cd nowhere && which pnpm', `Exit code 1\nbash: cd: nowhere: No such file or directory\n${gnu}`],
+      ['which pnpm', 'Exit code 1\n/usr/bin/which: line 3: syntax error'],
+    ]) {
+      const r = claudeFail(cmd, err);
+      assert.strictEqual(r.state, 'error', `${cmd} / ${err}`);
+      assert.ok(!r.neutral, cmd);
+    }
+  });
+
+  test('a masked git push ending in fatal: says the push failed', () => {
+    const trusted = (command, stdout) =>
+      sm.classifyToolResult('Bash', { command }, { stdout, stderr: '' }, false, { trustSuccess: true });
+    const host = "fatal: unable to access 'https://github.com/x/y.git/': Could not resolve host: github.com";
+    for (const cmd of ['git push origin main 2>&1 | tail -5', 'git push || true', 'git -C repo push -u origin fix 2>&1 | cat']) {
+      assert.deepStrictEqual([trusted(cmd, host).state, trusted(cmd, host).detail], ['error', 'push failed'], cmd);
+    }
+    // Codex: the exit code, then the same detail instead of a bare "exit 128"
+    assert.strictEqual(exited('git push', 128, '', 'fatal: Authentication failed for \'https://github.com/x/y.git/\'').detail, 'push failed');
+    // Another git command: git failed
+    const fetch = trusted('git fetch origin nope 2>&1 | tail -3', "fatal: couldn't find remote ref nope");
+    assert.deepStrictEqual([fetch.state, fetch.detail], ['error', 'git failed']);
+    assert.strictEqual(exited('git commit -m wip', 128, '', "fatal: Unable to create '.git/index.lock': File exists.").detail, 'git failed');
+  });
+
+  test('a fatal: line names git only for a git command, and a named cause still wins', () => {
+    const trusted = (command, stdout) =>
+      sm.classifyToolResult('Bash', { command }, { stdout, stderr: '' }, false, { trustSuccess: true });
+    assert.strictEqual(trusted('make deploy 2>&1 | tail', 'fatal: something broke').detail, 'something went wrong');
+    assert.strictEqual(sm.errorDetail('fatal: not a git repository', ''), 'something went wrong', 'no command, no git');
+    assert.strictEqual(trusted('git push 2>&1 | tail',
+      'git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.').detail, 'permission denied');
+    assert.strictEqual(trusted('git push 2>&1 | tail',
+      ' ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs').detail, 'push rejected');
+  });
+});
+
 module.exports = suite;
