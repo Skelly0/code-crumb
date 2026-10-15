@@ -36,14 +36,35 @@ const HOOK_SCRIPT = path.resolve(__dirname, 'update-state.js');
 // Normalise to forward slashes -- works in Node on all platforms
 // and avoids JSON escaping nightmares with backslashes
 const DEFAULT_HOOK_PATH = HOOK_SCRIPT.replace(/\\/g, '/');
-const DEFAULT_SETTINGS_PATH = path.join(HOME, '.claude', 'settings.json');
+
+// Where each editor keeps its config. setup and doctor both resolve through
+// these, so the file setup writes is the file doctor checks: doctor once
+// honoured CLAUDE_CONFIG_DIR while setup did not, and read OpenCode's config
+// from a path setup no longer wrote. Resolved per call, from `env` and
+// `home`, so tests (and doctor's own opts) can point them anywhere.
+
+// Claude Code's config home is $CLAUDE_CONFIG_DIR, else ~/.claude, and the
+// user settings are its settings.json (2.1.300: `(CLAUDE_CONFIG_DIR ??
+// join(homedir(), ".claude")).normalize("NFC")`, resolved, then
+// "settings.json"). Setup wrote ~/.claude regardless, so a CLAUDE_CONFIG_DIR
+// user got hooks Claude Code never read, and doctor (which followed the
+// variable) reported them missing. An empty value counts as unset: Claude
+// Code would resolve "" against its own working directory, no place for
+// setup to write.
+function claudeConfigDir(env = process.env, home = HOME) {
+  return env.CLAUDE_CONFIG_DIR ? path.resolve(env.CLAUDE_CONFIG_DIR) : path.join(home, '.claude');
+}
+function claudeSettingsPath(env = process.env, home = HOME) {
+  return path.join(claudeConfigDir(env, home), 'settings.json');
+}
+const DEFAULT_SETTINGS_PATH = claudeSettingsPath();
 
 // Codex keeps everything under CODEX_HOME when it is set -- codex refuses to
 // start unless it then names an existing directory -- and under ~/.codex
 // otherwise. Setup used to write ~/.codex regardless, so a CODEX_HOME user
-// got hooks codex never read. Resolved per call: tests pass their own env.
-function codexHome(env = process.env) {
-  return env.CODEX_HOME ? path.resolve(env.CODEX_HOME) : path.join(HOME, '.codex');
+// got hooks codex never read.
+function codexHome(env = process.env, home = HOME) {
+  return env.CODEX_HOME ? path.resolve(env.CODEX_HOME) : path.join(home, '.codex');
 }
 const DEFAULT_CODEX_HOOKS_PATH = path.join(codexHome(), 'hooks.json');
 
@@ -289,7 +310,7 @@ ${demoHint}${pluginHint}
 // opts: { settingsPath, hookPath, log, quiet }
 // Returns { ok, modified, added, replaced, error? }.
 function setupClaude(opts = {}) {
-  const settingsPath = opts.settingsPath || DEFAULT_SETTINGS_PATH;
+  const settingsPath = opts.settingsPath || claudeSettingsPath();
   const hookPath = opts.hookPath || DEFAULT_HOOK_PATH;
   const log = opts.log || console.log;
   const faceHooks = buildFaceHooks(hookPath);
@@ -354,7 +375,7 @@ function setupClaude(opts = {}) {
 // Remove every Code Crumb hook entry (any path) and drop event arrays that
 // end up empty. opts: { settingsPath, log }. Returns { ok, removed, error? }.
 function uninstallClaude(opts = {}) {
-  const settingsPath = opts.settingsPath || DEFAULT_SETTINGS_PATH;
+  const settingsPath = opts.settingsPath || claudeSettingsPath();
   const log = opts.log || console.log;
 
   log('\n  Code Crumb Uninstall (Claude Code)');
@@ -613,11 +634,27 @@ function bracketDepth(s) {
   return depth;
 }
 
+// One TOML line without its comment (a `#` outside a string, to the end).
+function tomlLineCode(line) {
+  let quote = '';
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === '\\' && quote === '"') i++;
+      else if (c === quote) quote = '';
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === '#') return line.slice(0, i);
+  }
+  return line;
+}
+
 // Every `notify = ...` key in the file, one line or an array spread over
 // several, as { start, end, ours, topLevel }: whole-line character ranges
-// (end past the last terminator), `ours` when it names codex-notify.js, and
-// `topLevel` when no [table] header comes before it -- the only place the
-// key means anything to codex.
+// (end past the last terminator), `ours` when its value names
+// codex-notify.js, and `topLevel` when no [table] header comes before it --
+// the only place the key means anything to codex. Comments are not the
+// value: a foreign notify whose comment mentions codex-notify.js ("# replaced
+// codex-notify.js") was ours, and removeCodexNotify deleted it.
 function findNotifyKeys(text) {
   const keys = [];
   const re = /^[ \t]*notify[ \t]*=/gm;
@@ -633,12 +670,20 @@ function findNotifyKeys(text) {
     }
     keys.push({
       start, end,
-      ours: /codex-notify\.js/.test(text.slice(start, end)),
+      ours: /codex-notify\.js/.test(text.slice(start, end).split('\n').map(tomlLineCode).join('\n')),
       topLevel: !/^[ \t]*\[/m.test(text.slice(0, start)),
     });
     re.lastIndex = end;
   }
   return keys;
+}
+
+// The Code Crumb notify keys in config.toml's text (after any BOM): what
+// removeCodexNotify takes out, and what doctor reports -- one scan, so the
+// two cannot disagree. doctor's own one-line regex missed a `notify = [`
+// array spread over lines, and read a comment naming us as ours.
+function ourNotifyKeys(body) {
+  return findNotifyKeys(body).filter(k => k.ours);
 }
 
 // Read config.toml for an edit. A missing file is empty; anything else that
@@ -678,7 +723,7 @@ function removeCodexNotify(opts = {}) {
   const log = opts.log || console.log;
   const read = readCodexConfig(configPath, log);
   if (read.error) return { ok: false, removed: 0, error: read.error };
-  const ours = findNotifyKeys(read.body).filter(k => k.ours);
+  const ours = ourNotifyKeys(read.body);
   if (!ours.length) {
     if (!opts.quiet) log('  [ok] No Code Crumb notify line found -- nothing to do');
     return { ok: true, removed: 0 };
@@ -791,15 +836,15 @@ const OPENCODE_SCHEMA = 'https://opencode.ai/config.json';
 // config there, so setup writes there. Setup used to write ~/.config
 // regardless and report success over a file OpenCode never read. In the
 // directory, an existing opencode.jsonc is used when there is no
-// opencode.json (OpenCode reads both). Resolved per call: tests pass an env.
-function opencodeConfigDir(env = process.env) {
+// opencode.json (OpenCode reads both). doctor checks the same file.
+function opencodeConfigDir(env = process.env, home = HOME) {
   if (env.OPENCODE_CONFIG_DIR) return path.resolve(env.OPENCODE_CONFIG_DIR);
-  const base = env.XDG_CONFIG_HOME ? path.resolve(env.XDG_CONFIG_HOME) : path.join(HOME, '.config');
+  const base = env.XDG_CONFIG_HOME ? path.resolve(env.XDG_CONFIG_HOME) : path.join(home, '.config');
   return path.join(base, 'opencode');
 }
 
-function opencodeConfigPath(env = process.env) {
-  const dir = opencodeConfigDir(env);
+function opencodeConfigPath(env = process.env, home = HOME) {
+  const dir = opencodeConfigDir(env, home);
   const json = path.join(dir, 'opencode.json');
   const jsonc = path.join(dir, 'opencode.jsonc');
   return !fs.existsSync(json) && fs.existsSync(jsonc) ? jsonc : json;
@@ -967,8 +1012,31 @@ function editJsoncPlugin(raw, blanked, list) {
   return raw.slice(0, at) + ' ' + member + (top.empty ? ' ' : ',') + raw.slice(at);
 }
 
-// readJsonConfig for opencode.json: strict JSON first, then JSONC. Same
-// result shape, plus `jsonc` (blankJsonc's texts) when the file needed it.
+// opencode.json's text as OpenCode reads it: strict JSON first, then JSONC.
+// { settings, jsonc } (jsonc: blankJsonc's texts when the file needed it), or
+// { error, notObject }. Pure, so doctor reads the file exactly as setup does.
+function parseOpenCodeConfig(raw) {
+  let settings;
+  let jsonc = null;
+  try {
+    settings = JSON.parse(raw);
+  } catch {
+    jsonc = blankJsonc(raw);
+    try {
+      if (!jsonc) throw new Error('unterminated comment');
+      settings = JSON.parse(jsonc.clean);
+    } catch (err) {
+      return { error: err };
+    }
+  }
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    return { error: new Error('OpenCode config is not an object'), notObject: true };
+  }
+  return { settings, jsonc };
+}
+
+// readJsonConfig for opencode.json: parseOpenCodeConfig with the log lines
+// and the missing-file case. Same result shape, plus `jsonc`.
 function readOpenCodeConfig(filePath, log) {
   let raw;
   try {
@@ -982,25 +1050,17 @@ function readOpenCodeConfig(filePath, log) {
     log('       Leaving it untouched. Fix or move the file, then re-run setup.');
     return { error: err };
   }
-  let settings;
-  let jsonc = null;
-  try {
-    settings = JSON.parse(raw);
-  } catch {
-    jsonc = blankJsonc(raw);
-    try {
-      if (!jsonc) throw new Error('unterminated comment');
-      settings = JSON.parse(jsonc.clean);
-    } catch (err) {
-      log(`  [!!] ${filePath} is not valid JSON or JSONC (${err.message}).`);
-      log('       Leaving it untouched so nothing is lost. Fix the file, then re-run setup.');
-      return { error: err };
-    }
-  }
-  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+  const parsed = parseOpenCodeConfig(raw);
+  if (parsed.notObject) {
     log(`  [!!] ${filePath} is not a JSON object. Leaving it untouched.`);
-    return { error: new Error('OpenCode config is not an object') };
+    return { error: parsed.error };
   }
+  if (parsed.error) {
+    log(`  [!!] ${filePath} is not valid JSON or JSONC (${parsed.error.message}).`);
+    log('       Leaving it untouched so nothing is lost. Fix the file, then re-run setup.');
+    return { error: parsed.error };
+  }
+  const { settings, jsonc } = parsed;
   log(`  [ok] Found existing OpenCode config${jsonc ? ' (JSONC -- its comments are kept)' : ''}`);
   return { settings, existed: true, raw, jsonc };
 }
@@ -1322,8 +1382,10 @@ const AUTOLAUNCH_COMMANDS = new Set(['claude', 'claude-code', 'codex', 'openai']
 // the CLI exits 1 when any `!` was printed.
 //
 // opts: { home, env, log, now, nodeVersion } -- every path is derived from
-// `home` and `env` the way shared.js and setup.js derive them, so a test
-// can point it at a temp home.
+// `home` and `env` the way shared.js derives its own, and each editor's
+// config through the resolver setup itself writes with (claudeConfigDir,
+// codexHome, opencodeConfigPath), so a test can point it at a temp home and
+// doctor never checks a file setup did not write.
 
 const { PID_FILE, PREFS_FILE, SESSIONS_DIR, isRendererAlive } = require('./lib/shared');
 
@@ -1483,12 +1545,12 @@ function doctor(opts = {}) {
   const prefsFile = path.join(home, path.basename(PREFS_FILE));
   const sessionsDir = path.join(home, path.basename(SESSIONS_DIR));
   const stateFile = env.CODE_CRUMB_STATE || path.join(home, '.code-crumb-state');
-  const claudeDir = env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
-  const settingsPath = path.join(claudeDir, 'settings.json');
-  const codexHome = env.CODEX_HOME || path.join(home, '.codex');
-  const codexHooksPath = path.join(codexHome, 'hooks.json');
-  const codexConfigPath = path.join(codexHome, 'config.toml');
-  const opencodePath = path.join(home, '.config', 'opencode', 'opencode.json');
+  const claudeDir = claudeConfigDir(env, home);
+  const settingsPath = claudeSettingsPath(env, home);
+  const codexDir = codexHome(env, home);
+  const codexHooksPath = path.join(codexDir, 'hooks.json');
+  const codexConfigPath = path.join(codexDir, 'config.toml');
+  const opencodePath = opencodeConfigPath(env, home);
   const ownRenderer = fwd(path.resolve(__dirname, 'renderer.js'));
   const ownSetup = fwd(path.resolve(__dirname, 'setup.js'));
   const pkg = doctorReadJson(path.join(__dirname, 'package.json'));
@@ -1533,11 +1595,14 @@ function doctor(opts = {}) {
 
   const codexRead = doctorReadJson(codexHooksPath);
   const codex = doctorOurCommands(codexRead.data);
-  const notifyLine = /^\s*notify\s*=.*codex-notify\.js/m.test(doctorReadText(codexConfigPath));
+  // What removeCodexNotify would take out, by the same scan.
+  const notifyLine = ourNotifyKeys(doctorReadText(codexConfigPath).replace(/^﻿/, '')).length > 0;
 
-  const opencodeRead = doctorReadJson(opencodePath);
-  const opencodeEntries = doctorIsObject(opencodeRead.data) && Array.isArray(opencodeRead.data.plugin)
-    ? opencodeRead.data.plugin.filter(isOurPlugin).map(pluginEntryPath)
+  // Read as setup reads it: JSONC (comments, trailing commas) included.
+  const opencodeText = doctorReadText(opencodePath);
+  const opencodeRead = opencodeText ? parseOpenCodeConfig(opencodeText) : {};
+  const opencodeEntries = opencodeRead.settings && Array.isArray(opencodeRead.settings.plugin)
+    ? opencodeRead.settings.plugin.filter(isOurPlugin).map(pluginEntryPath)
     : [];
 
   // -- node --
@@ -1867,6 +1932,8 @@ module.exports = {
   uninstallOpenCode,
   opencodeConfigDir,
   opencodeConfigPath,
+  claudeConfigDir,
+  claudeSettingsPath,
   buildFaceHooks,
   setupCodex,
   uninstallCodex,

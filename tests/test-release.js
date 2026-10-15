@@ -687,4 +687,130 @@ describe('release -- setup.js doctor', () => {
   test('cleanup', () => { for (const h of homes) cleanup(h); });
 });
 
+// -- Review round 5 (docs-pass bugs): setup and doctor agree ---------------
+// doctor kept its own idea of where each editor's config lives, and setup
+// another: doctor read ~/.config/opencode/opencode.json as strict JSON
+// (setup follows OPENCODE_CONFIG_DIR / XDG_CONFIG_HOME and reads JSONC),
+// honoured CLAUDE_CONFIG_DIR where setup did not (so setup's hooks landed
+// where Claude Code never reads them, and doctor called them missing), and
+// matched a codex-notify line with a one-line regex (setup's own scan finds a
+// `notify = [` array spread over lines, and a regex over the whole line read
+// a comment as ours).
+
+describe('release -- Review round 5 (docs-pass bugs): setup and doctor agree', () => {
+  const homes = [];
+  function mkHome() {
+    const h = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-agree-'));
+    homes.push(h);
+    // The renderer "alive" and a fresh hook write: only the checks under test can complain.
+    put(h, '.code-crumb.pid', String(process.pid));
+    put(h, '.code-crumb-prefs.json', { autolaunch: false });
+    put(h, '.code-crumb-sessions/s1.json', { state: 'idle' });
+    return h;
+  }
+  function put(home, rel, data) {
+    const p = path.join(home, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, typeof data === 'string' ? data : JSON.stringify(data, null, 2));
+    return p;
+  }
+  function doctor(home, env = {}) {
+    const lines = [];
+    const r = setup.doctor({ home, env: { PATH: path.dirname(NODE), PATHEXT: process.env.PATHEXT || '', ...env },
+      log: l => lines.push(l) });
+    return { problems: r.problems, text: lines.join('\n'), bad: lines.filter(l => l.startsWith('  ! ')) };
+  }
+  const PLUGIN = setup.DEFAULT_OPENCODE_PLUGIN;
+  const NOTIFY_JS = toPosix(path.join(REPO, 'adapters', 'codex-notify.js'));
+
+  test('doctor reads the OpenCode config setup writes: OPENCODE_CONFIG_DIR, XDG_CONFIG_HOME, JSONC', () => {
+    const cases = [
+      ['OPENCODE_CONFIG_DIR', (h) => ({ OPENCODE_CONFIG_DIR: path.join(h, 'oc') }), 'oc/opencode.json'],
+      ['XDG_CONFIG_HOME', (h) => ({ XDG_CONFIG_HOME: path.join(h, 'xdg') }), 'xdg/opencode/opencode.json'],
+      ['opencode.jsonc', () => ({}), '.config/opencode/opencode.jsonc'],
+    ];
+    for (const [label, envOf, rel] of cases) {
+      const home = mkHome();
+      const env = envOf(home);
+      const file = put(home, rel, rel.endsWith('.jsonc')
+        ? `{\n  // OpenCode's own docs write comments\n  "plugin": [${JSON.stringify(PLUGIN)}],\n}\n`
+        : { plugin: [PLUGIN] });
+      assert.strictEqual(path.resolve(setup.opencodeConfigPath(env, home)), path.resolve(file), `${label}: setup's file`);
+      const r = doctor(home, env);
+      assert.ok(r.text.includes(`${TICK} OpenCode: plugin registered in ${file}`), `${label}\n${r.text}`);
+      assert.strictEqual(r.problems, 0, `${label}\n${r.text}`);
+    }
+  });
+
+  test('doctor sees exactly what setup.js opencode --install wrote', () => {
+    const home = mkHome();
+    const env = { XDG_CONFIG_HOME: path.join(home, 'xdg') };
+    const configPath = setup.opencodeConfigPath(env, home);
+    put(home, 'xdg/opencode/opencode.jsonc', '{ /* keep me */ "theme": "dark" }\n');
+    const jsonc = setup.opencodeConfigPath(env, home);
+    assert.ok(jsonc.endsWith('opencode.jsonc') && jsonc !== configPath, 'an existing .jsonc is the file');
+    assert.strictEqual(setup.setupOpenCode({ configPath: jsonc, install: true, log: () => {}, quiet: true }).ok, true);
+    assert.ok(fs.readFileSync(jsonc, 'utf8').includes('/* keep me */'), 'comments kept');
+    const r = doctor(home, env);
+    assert.ok(r.text.includes(`${TICK} OpenCode: plugin registered in ${jsonc}`), r.text);
+  });
+
+  test('setup, uninstall and doctor all follow CLAUDE_CONFIG_DIR, .bak included', () => {
+    const home = mkHome();
+    const alt = path.join(home, 'alt-claude');
+    put(alt, 'settings.json', { env: { KEEP: '1' } });
+    const env = { ...process.env, HOME: home, USERPROFILE: home,
+      CODE_CRUMB_STATE: path.join(home, '.code-crumb-state'), CLAUDE_CONFIG_DIR: alt };
+    const run = (...args) => spawnSync(NODE, [path.join(REPO, 'setup.js'), ...args], { env, encoding: 'utf8', timeout: 30000 });
+    const s = run('claude');
+    assert.strictEqual(s.status, 0, s.stdout + s.stderr);
+    const settings = JSON.parse(fs.readFileSync(path.join(alt, 'settings.json'), 'utf8'));
+    assert.deepStrictEqual(Object.keys(settings.hooks).sort(), [...setup.HOOK_EVENTS].sort());
+    assert.strictEqual(settings.env.KEEP, '1');
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(alt, 'settings.json.bak'), 'utf8')), { env: { KEEP: '1' } });
+    assert.ok(!fs.existsSync(path.join(home, '.claude')), 'nothing under ~/.claude');
+    const r = doctor(home, { CLAUDE_CONFIG_DIR: alt });
+    assert.ok(r.text.includes(`manual hooks for all ${setup.HOOK_EVENTS.length} events in ${path.join(alt, 'settings.json')}`), r.text);
+    assert.strictEqual(r.problems, 0, r.text);
+    const u = run('uninstall');
+    assert.strictEqual(u.status, 0, u.stdout + u.stderr);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(alt, 'settings.json'), 'utf8')), { env: { KEEP: '1' } });
+    assert.strictEqual(setup.claudeSettingsPath({ CLAUDE_CONFIG_DIR: alt }, home), path.join(alt, 'settings.json'));
+    assert.strictEqual(setup.claudeSettingsPath({}, home), path.join(home, '.claude', 'settings.json'));
+  });
+
+  test('doctor reports a multi-line Code Crumb notify array, as setup would remove it', () => {
+    const home = mkHome();
+    put(home, '.claude/settings.json', { hooks: setup.buildFaceHooks(setup.DEFAULT_HOOK_PATH) });
+    put(home, '.codex/hooks.json', setup.buildCodexHooks(REPO));
+    const config = put(home, '.codex/config.toml',
+      `model = "gpt-5"\n# Code Crumb integration\nnotify = [\n  "node",\n  "${NOTIFY_JS}",\n]\n\n[features]\nx = 1\n`);
+    const r = doctor(home);
+    assert.strictEqual(r.problems, 1, r.text);
+    assert.ok(r.bad[0].includes('codex-notify line'), r.text);
+    assert.strictEqual(setup.removeCodexNotify({ configPath: config, log: () => {}, quiet: true }).removed, 1);
+    assert.strictEqual(doctor(home).problems, 0, 'and once setup removed it, doctor is satisfied');
+  });
+
+  test('a foreign notify line is never flagged, nor removed -- a comment naming us included', () => {
+    for (const line of [
+      'notify = [ "C:\\\\Users\\\\me\\\\AppData\\\\Local\\\\OpenAI\\\\Codex\\\\bin\\\\codex-computer-use.exe", "turn-ended" ]',
+      'notify = ["python3", "/home/me/notify.py"]  # replaced codex-notify.js',
+      'notify = [\n  "python3",  # was codex-notify.js\n  "/home/me/notify.py",\n]',
+    ]) {
+      const home = mkHome();
+      put(home, '.claude/settings.json', { hooks: setup.buildFaceHooks(setup.DEFAULT_HOOK_PATH) });
+      put(home, '.codex/hooks.json', setup.buildCodexHooks(REPO));
+      const text = `${line}\n[features]\nx = 1\n`;
+      const config = put(home, '.codex/config.toml', text);
+      const r = doctor(home);
+      assert.strictEqual(r.problems, 0, `${line}\n${r.text}`);
+      assert.strictEqual(setup.removeCodexNotify({ configPath: config, log: () => {}, quiet: true }).removed, 0, line);
+      assert.strictEqual(fs.readFileSync(config, 'utf8'), text, line);
+    }
+  });
+
+  test('cleanup', () => { for (const h of homes) cleanup(h); });
+});
+
 module.exports = suite;
