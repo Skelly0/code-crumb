@@ -1869,6 +1869,81 @@ describe('review round 5 -- permission wait confirmation', () => {
     } finally { cleanup(t.tmp); }
   });
 
+  // Two agents asking at once: the parent stands in for both, and goes back
+  // only when the second is answered. The shrunk list was computed and never
+  // written, so the second answer still found the first id and never released.
+  test('with two agents asking, the parent goes back after the second answer', () => {
+    const t = makeTempEnv('pw-7');
+    try {
+      const id = 'pw-7';
+      runUpdateState('UserPromptSubmit', { session_id: id, prompt: 'go' }, t.env);
+      runUpdateState('PreToolUse', { session_id: id, tool_name: 'Agent', tool_use_id: 'toolu_task',
+        tool_input: { description: 'two at once', subagent_type: 'general-purpose', prompt: 'go' } }, t.env);
+      const before = readJSON(sessionFile(t.sessionsDir, id));
+      const calls = ['ag1', 'ag2'].map((ag, i) => ({ session_id: id, agent_id: ag, agent_type: 'general-purpose',
+        tool_name: 'Bash', tool_input: { command: `npm run job${i}` } }));
+      for (const [i, call] of calls.entries()) {
+        runUpdateState('SubagentStart', { session_id: id, agent_id: call.agent_id, agent_type: 'general-purpose' }, t.env);
+        runUpdateState('PreToolUse', { ...call, tool_use_id: `toolu_j${i}` }, t.env);
+        runUpdateState('PermissionRequest', call, t.env);
+        const fp = sessionFile(t.sessionsDir, `${id}-agent-${call.agent_id}`);
+        const a = readJSON(fp);
+        fs.writeFileSync(fp, JSON.stringify({ ...a, syncAt: a.syncAt - 10000 }), 'utf8');
+      }
+      runUpdateState('Notification', { session_id: id, notification_type: 'permission_prompt' }, t.env);
+      assert.deepStrictEqual(readJSON(sessionFile(t.sessionsDir, id)).waitForAgents.sort(), [`${id}-agent-ag1`, `${id}-agent-ag2`]);
+      runUpdateState('PostToolUse', { ...calls[0], tool_use_id: 'toolu_j0', tool_response: { stdout: 'ok' } }, t.env);
+      const mid = readJSON(sessionFile(t.sessionsDir, id));
+      assert.strictEqual(mid.state, 'waiting', 'still asking for the second agent');
+      assert.deepStrictEqual(mid.waitForAgents, [`${id}-agent-ag2`]);
+      runUpdateState('PostToolUse', { ...calls[1], tool_use_id: 'toolu_j1', tool_response: { stdout: 'ok' } }, t.env);
+      const after = readJSON(sessionFile(t.sessionsDir, id));
+      assert.strictEqual(after.state, before.state);
+      assert.strictEqual(after.waitForAgents, undefined);
+    } finally { cleanup(t.tmp); }
+  });
+
+  // Agents asking a few seconds apart get a notification each. The second one
+  // replaced the parent's list with only the agent IT confirmed (or, if it
+  // confirmed nothing, dropped the list), so the first agent was forgotten.
+  test('a later notification adds to the parent\'s agents, never replaces them', () => {
+    const t = makeTempEnv('pw-8');
+    try {
+      const id = 'pw-8';
+      runUpdateState('UserPromptSubmit', { session_id: id, prompt: 'go' }, t.env);
+      runUpdateState('PreToolUse', { session_id: id, tool_name: 'Agent', tool_use_id: 'toolu_task',
+        tool_input: { description: 'staggered', subagent_type: 'general-purpose', prompt: 'go' } }, t.env);
+      const before = readJSON(sessionFile(t.sessionsDir, id));
+      const ask = (ag, i) => {
+        const call = { session_id: id, agent_id: ag, agent_type: 'general-purpose',
+          tool_name: 'Bash', tool_input: { command: `npm run step${i}` } };
+        runUpdateState('SubagentStart', { session_id: id, agent_id: ag, agent_type: 'general-purpose' }, t.env);
+        runUpdateState('PreToolUse', { ...call, tool_use_id: `toolu_s${i}` }, t.env);
+        runUpdateState('PermissionRequest', call, t.env);
+        const fp = sessionFile(t.sessionsDir, `${id}-agent-${ag}`);
+        const a = readJSON(fp);
+        fs.writeFileSync(fp, JSON.stringify({ ...a, syncAt: a.syncAt - 10000 }), 'utf8');
+        return call;
+      };
+      const c1 = ask('ag1', 1);
+      runUpdateState('Notification', { session_id: id, notification_type: 'permission_prompt' }, t.env);
+      const c2 = ask('ag2', 2);
+      runUpdateState('Notification', { session_id: id, notification_type: 'permission_prompt' }, t.env);
+      runUpdateState('Notification', { session_id: id, notification_type: 'permission_prompt' }, t.env); // confirms nothing
+      assert.deepStrictEqual(readJSON(sessionFile(t.sessionsDir, id)).waitForAgents.sort(),
+        [`${id}-agent-ag1`, `${id}-agent-ag2`]);
+      runUpdateState('PostToolUse', { ...c2, tool_use_id: 'toolu_s2', tool_response: { stdout: 'ok' } }, t.env);
+      assert.strictEqual(readJSON(sessionFile(t.sessionsDir, id)).state, 'waiting', 'ag1 still asking');
+      runUpdateState('PostToolUse', { ...c1, tool_use_id: 'toolu_s1', tool_response: { stdout: 'ok' } }, t.env);
+      const after = readJSON(sessionFile(t.sessionsDir, id));
+      // ag2's SubagentStart put the parent on "conducting 2" before the second
+      // prompt: that is the face it goes back to.
+      assert.deepStrictEqual([after.state, after.detail], ['subagent', 'conducting 2'], 'back to the pre-prompt face');
+      assert.strictEqual(before.state, 'subagent', 'fixture');
+      assert.strictEqual(after.waitForAgents, undefined);
+    } finally { cleanup(t.tmp); }
+  });
+
   test('the parent\'s own prompt is not released by an agent\'s answer', () => {
     const t = makeTempEnv('pw-6');
     try {

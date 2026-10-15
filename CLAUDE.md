@@ -563,10 +563,10 @@ Editors without a model are unchanged.
 
 **The Notification confirms** the wait (`waitConfirmed: true`), keeping its detail and `permState`/`permDetail`. It carries only the session id, so it also confirms the session's agents' unconfirmed waits (`_confirmAgentWaits`), if they are at least `PERMISSION_CONFIRM_MIN_AGE_MS` (5s) old, measured from `syncAt`.
 
-**The parent stands in for its agents.** When the notification confirmed agent waits but was not about the parent's own question, the parent records `waitForAgents` (≤8 agent file names) and `waitPrev` (`{ state, detail }`, when it was not already waiting).
+**The parent stands in for its agents.** `_confirmAgentWaits` returns every agent whose prompt is open and confirmed once it returns (just now or by an earlier notification). When that is not the parent's own question, the parent records `waitForAgents` (≤8 agent file names) and `waitPrev` (`{ state, detail }`, from before it started waiting).
 
-- When an agent is answered (its tool end on the waited call, or a PermissionDenied), `_releaseParentWait` restores the parent file, and the global file when owned. It goes back to `waitPrev`, or else `subagent` / `conducting`, with `answered: true`, a fresh timestamp, and no wait fields.
-- This is broken with two or more agents (see Known Follow-ups).
+- A later notification merges with the list the parent already holds, never replaces it. Agents asking seconds apart each get their own notification, and one that confirms nothing new must not forget the first agent.
+- When an agent is answered (its tool end on the waited call, or a PermissionDenied), `_releaseParentWait` drops it from the list. When the last one goes, it restores the parent file, and the global file when owned: back to `waitPrev`, or else `subagent` / `conducting`, with `answered: true`, a fresh timestamp, and no wait fields.
 
 **An unconfirmed wait older than `PERMISSION_CONFIRM_MS`** (8s, shared.js) was allowed, and its tool is running. Only an `editor: 'claude'` wait with `waitConfirmed === false` converts.
 
@@ -1272,7 +1272,6 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 
 **Open bugs (found in the round-5 docs pass, not fixed yet):**
 
-- **A parent standing in for ≥2 agents is never released.** `_releaseParentWait` computes the remaining `waitForAgents` but never writes it back. After A and then B are answered, each still sees the other pending. A second notification that confirms nothing also drops the list. Only one agent is tested.
 - **`doctor` checks the wrong OpenCode file.** It hardcodes `~/.config/opencode/opencode.json` as strict JSON, and ignores `OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME` and `.jsonc`.
 - **setup ignores `CLAUDE_CONFIG_DIR`, but doctor honours it.** Hooks land where Claude Code doesn't read them, and doctor then reports them missing.
 - **Likely: the notify-disable switch is parsed more narrowly than Claude Code's.** Claude Code treats any truthy value as off. A `0` would disable the notification, while we still write unconfirmed waits that resolve after 8 s with the dialog open.

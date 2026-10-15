@@ -343,7 +343,10 @@ function _healLeadFile(leadId) {
 // 6 s); if it was answered meanwhile, being confirmed early only means it
 // waits for its PostToolUse, as every wait did before.
 const PERMISSION_CONFIRM_MIN_AGE_MS = 5000;
-// Returns the agent session-file names (no .json) it confirmed.
+// Returns the agent session-file names (no .json) whose prompt is open and
+// confirmed once this returns -- just now, or by an earlier notification:
+// the parent stands in for all of them (an agent's SubagentStart can have
+// overwritten the parent's own list in between).
 function _confirmAgentWaits(sessionId) {
   const confirmed = [];
   try {
@@ -354,7 +357,9 @@ function _confirmAgentWaits(sessionId) {
       let s = null;
       try { s = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch {}
       if (!s || typeof s !== 'object' || s.stopped || s.state !== 'waiting') continue;
-      if (s.waitKind !== 'permission' || s.waitConfirmed !== false) continue;
+      if (s.waitKind !== 'permission') continue;
+      if (s.waitConfirmed === true) { confirmed.push(name.slice(0, -'.json'.length)); continue; }
+      if (s.waitConfirmed !== false) continue;
       // The request's own time: syncAt (an async write since, a parallel
       // tool of the agent's, moves eventAt but carries syncAt).
       const askedAt = typeof s.syncAt === 'number' ? s.syncAt : s.eventAt;
@@ -378,7 +383,10 @@ function _confirmAgentWaits(sessionId) {
 function _releaseParentWait(parentId, agentFile) {
   const restore = (s) => {
     const rest = s.waitForAgents.filter(id => id !== agentFile);
-    if (rest.length) return null;    // still asking on another agent's behalf
+    // Still asking on another agent's behalf: keep waiting, minus this one --
+    // or the next answer still finds it and the parent never goes back.
+    // (Same timestamp: nothing the renderer needs to redraw.)
+    if (rest.length) return { ...s, waitForAgents: rest };
     const next = { ...s, timestamp: Date.now(), answered: true };
     for (const field of [...WAIT_FIELDS, 'waitForAgents', 'waitPrev']) delete next[field];
     const prev = s.waitPrev && typeof s.waitPrev.state === 'string' ? s.waitPrev : null;
@@ -1347,10 +1355,18 @@ process.stdin.on('end', () => {
         if (!agentId) {
           const agents = _confirmAgentWaits(sessionId);
           // Not the parent's own question: it stands in for its agents' (see
-          // _releaseParentWait), and remembers what to go back to.
-          if (!asking && agents.length) {
-            waitFields.waitForAgents = agents.slice(0, 8);
-            if (prev && typeof prev.state === 'string' && prev.state !== 'waiting') {
+          // _releaseParentWait), and remembers what to go back to. Agents
+          // asking seconds apart get a notification each -- add to the list
+          // the parent already holds, never replace it (a later notification
+          // that confirms nothing new would otherwise forget the first agent).
+          const standingIn = prev && prev.state === 'waiting' && Array.isArray(prev.waitForAgents)
+            ? prev.waitForAgents.filter(a => typeof a === 'string') : [];
+          const all = [...new Set([...standingIn, ...agents])].slice(0, 8);
+          if (!asking && all.length) {
+            waitFields.waitForAgents = all;
+            if (standingIn.length && prev.waitPrev && typeof prev.waitPrev.state === 'string') {
+              waitFields.waitPrev = prev.waitPrev;
+            } else if (prev && typeof prev.state === 'string' && prev.state !== 'waiting') {
               waitFields.waitPrev = { state: prev.state, detail: typeof prev.detail === 'string' ? prev.detail : '' };
             }
           }
