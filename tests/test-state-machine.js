@@ -4910,4 +4910,38 @@ describe('state-machine.js -- Review round 5 (docs-pass bugs): predicates and gi
   });
 });
 
+// -- Review round 5 (integration): the last predicate gaps ------------------
+// With core.autocrlf=true (git for Windows' default), `git diff --quiet` on a
+// changed LF file prints git's line-ending warning and exits 1 -- checked with
+// git 2.50.0.windows.1 -- so the silent rule kept it an error face. GNU which
+// (Git Bash) exits with the NUMBER of names it did not find: `which a b` with
+// both missing exits 2, past the exit-1 rule.
+
+describe('state-machine.js -- review round 5: line-ending warnings and which a b', () => {
+  const sm = require('../lib/state-machine');
+  const claudeFail = (command, error) =>
+    sm.classifyToolResult('Bash', { command }, sm.normalizeToolResponse({ error, is_interrupt: false }), true);
+  const CRLF = "warning: in the working copy of 'f.txt', LF will be replaced by CRLF the next time Git touches it";
+  const OLD_CRLF = 'warning: LF will be replaced by CRLF in f.txt.\nThe file will have its original line endings in your working directory';
+  const miss = (n) => `which: no ${n} in (/usr/bin:/c/Program Files (x86)/x)`;
+
+  test('git diff --quiet with git\'s line-ending warning is files differ', () => {
+    for (const out of [CRLF, `${CRLF}\n${CRLF.replace('f.txt', 'g.txt')}`, OLD_CRLF]) {
+      const r = claudeFail('git diff --quiet', `Exit code 1\n${out}`);
+      assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'files differ', true], out);
+    }
+    assert.strictEqual(claudeFail('git diff --quiet', 'Exit code 1\nfatal: bad revision').state, 'error');
+    assert.strictEqual(claudeFail('git diff --quiet', `Exit code 1\n${CRLF}\nerror: something else`).state, 'error');
+  });
+
+  test('which with several names missing is not found', () => {
+    const r = claudeFail('which pnpm yarn', `Exit code 2\n${miss('pnpm')}\n${miss('yarn')}`);
+    assert.deepStrictEqual([r.state, r.detail, r.neutral], ['satisfied', 'not found', true]);
+    // The count must match: exit 2 with one miss line is which's own trouble.
+    assert.strictEqual(claudeFail('which pnpm', `Exit code 2\n${miss('pnpm')}`).state, 'error');
+    assert.strictEqual(claudeFail('which -z x', 'Exit code 2\nIllegal option -z').state, 'error');
+    assert.strictEqual(claudeFail('grep x y', 'Exit code 2').state, 'error', 'only which counts its misses');
+  });
+});
+
 module.exports = suite;

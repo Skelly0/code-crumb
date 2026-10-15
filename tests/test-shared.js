@@ -197,7 +197,7 @@ describe('shared.js -- getIsWorktree', () => {
 });
 
 describe('shared.js -- path constants', () => {
-  const { HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PID_FILE, QUIT_FLAG_FILE, TEAMS_DIR, TMUX_FILE } = require('../lib/shared');
+  const { HOME, STATE_FILE, SESSIONS_DIR, STATS_FILE, PID_FILE, QUIT_FLAG_FILE, TMUX_FILE } = require('../lib/shared');
 
   test('HOME is a non-empty string', () => {
     assert.ok(typeof HOME === 'string' && HOME.length > 0);
@@ -223,8 +223,10 @@ describe('shared.js -- path constants', () => {
     assert.ok(typeof QUIT_FLAG_FILE === 'string' && QUIT_FLAG_FILE.length > 0);
   });
 
-  test('TEAMS_DIR is a non-empty string', () => {
-    assert.ok(typeof TEAMS_DIR === 'string' && TEAMS_DIR.length > 0);
+  // Nothing read it, and it was ~/.claude/teams even under CLAUDE_CONFIG_DIR
+  // -- a wrong path waiting for its first caller. Gone, not exported.
+  test('there is no TEAMS_DIR', () => {
+    assert.strictEqual(require('../lib/shared').TEAMS_DIR, undefined);
   });
 
   test('TMUX_FILE is a non-empty string', () => {

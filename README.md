@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js 18+](https://img.shields.io/badge/node-18%2B-brightgreen.svg)](https://nodejs.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-blue.svg)](#)
-[![2713 Tests](https://img.shields.io/badge/tests-2713-brightgreen.svg)](#)
+[![2715 Tests](https://img.shields.io/badge/tests-2715-brightgreen.svg)](#)
 
 A terminal tamagotchi that shows what your AI coding assistant is doing.
 

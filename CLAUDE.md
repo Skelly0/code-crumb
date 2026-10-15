@@ -663,7 +663,7 @@ Claude Code's `PostToolUseFailure` has **no** `tool_response`. It is `{tool_name
 |---|---|---|
 | `grep`/`egrep`/`fgrep`/`rg`/`ag`/`ack`/`findstr`/`git grep` | `no matches` | silent |
 | `diff`, `cmp` | `files differ` | alone |
-| `git diff --quiet` | `files differ` | silent |
+| `git diff --quiet` | `files differ` | git's line-ending warning only (`GIT_EOL_WARNING_RE`) |
 | `git diff --exit-code` (no `--quiet`) | `files differ` | alone |
 | `test`, `[`, `[[` | `condition false` | silent |
 | `which` | `not found` | miss line: `which: no <name> in (<PATH>)` (`WHICH_MISS_RE`) |
@@ -674,6 +674,8 @@ Claude Code's `PostToolUseFailure` has **no** `tool_response`. It is `{tool_name
 - **Silent** means it printed nothing but the editor's `Exit code N` line (`withoutExitTrailer`). A failing `cd`/`cat` in front would print its complaint.
 - **Alone** means a single segment, since the output (diff's, or `git diff --exit-code`'s diff) is the answer.
 - **Miss line** means nothing, or only that tool's own miss message on every non-blank line: GNU which's (Git Bash, Fedora, Arch) and System32 where.exe's, as worded on Windows 11. A localized where.exe, or anything else printed alongside, stays an error.
+- **`git diff --quiet`** may print git's line-ending warning and nothing else: under `core.autocrlf=true` (git for Windows' default) a changed LF file makes it say `warning: in the working copy of '<file>', LF will be replaced by CRLF the next time Git touches it` (git 2.37+; the older `warning: LF will be replaced by CRLF in <file>.` pair also counts).
+- **GNU which exits with the number of names it did not find**, so `which a b` with both missing exits 2. Exit N > 1 is an answer for `which` only, and only with exactly N miss lines.
 - **Where the status comes from.** The numeric `exitCode`, or else the trailer: on stderr when `isError` is set, otherwise on stdout.
 - **Order.** The check runs after `interrupted` and before `isError`, so it overrides Claude's forced error. Shell-management tools are excluded.
 
@@ -1192,12 +1194,12 @@ Run `npm test`, or `node tests/run.js [--serial] [--jobs=N] [--quiet] [filter...
 - **Other flags.** `--quiet` prints only the summary. A filter that matches nothing exits 2.
 - **CI** (`.github/workflows/test.yml`) runs `node --check`, the whitespace gate, and `node tests/run.js --quiet` on ubuntu/windows/macos × node 18/20/22.
 
-**Counts.** **2713 tests across 17 files on win32**:
+**Counts.** **2715 tests across 17 files on win32**:
 
 | File | Tests | File | Tests |
 |---|---|---|---|
 | test-shared | 51 | test-launch | 49 |
-| test-state-machine | 662 | test-adapters | 312 |
+| test-state-machine | 664 | test-adapters | 312 |
 | test-themes | 72 | test-transition | 31 |
 | test-animations | 42 | test-emotions | 261 |
 | test-particles | 49 | test-platform | 153 |
@@ -1206,7 +1208,7 @@ Run `npm test`, or `node tests/run.js [--serial] [--jobs=N] [--quiet] [filter...
 | test-accessories | 24 | test-release | 50 |
 | test-teams | 43 | | |
 
-**2726 on Linux/macOS**, which match each other. Three files are platform-conditional:
+**2728 on Linux/macOS**, which match each other. Three files are platform-conditional:
 
 - **test-adapters** has 322 there. It adds 11 POSIX-only tests: the wrapper/engmux/demo SIGTERM and SIGHUP tests, the wrapper's late-event retirement and exit grace, and the OpenCode plugin's per-session ordering and turn-end drain, which need a shell-script stand-in for node. It drops 1 win32-only test, the `codex.cmd` shadow.
 - **test-launch** has 50: 2 POSIX-only tests (Ctrl+C reaches the editor, SIGTERM is forwarded), minus the win32 `claude.cmd` shadow.
@@ -1287,8 +1289,6 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **Exec-form hooks** (`"command": "node", "args": [...]`) would skip Git Bash on 2.1.300, a real Windows latency win, but they break older Claude Code.
 - **`TaskCompleted` fire sites changed.** In 2.1.280 `TaskUpdate` fired it for any session; in 2.1.300 only the teammate stop path does, per the binary. Re-check on the next bump.
 - **Installs predating 1.3.0** lack `PermissionDenied` and the async flags (older ones also `PostModelSwitch`). `npm run setup` fixes them; `npm run doctor` reports missing events.
-- **`git diff --quiet` under `core.autocrlf=true` is still an error face.** git prints `warning: in the working copy of '<file>', LF will be replaced by CRLF the next time Git touches it` on stderr and exits 1 (git 2.50 on Windows), so the "silent" rule fails. Allowing exactly that line, as `which`/`where` allow their miss lines, would fix it. `--exit-code` is unaffected (alone).
-- **`which a b` with both missing exits 2** (GNU which counts its misses), so it is an error face. Only exit 1 is a predicate's "no".
 
 **Launcher and Windows:**
 
@@ -1326,5 +1326,4 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **Unconfirmed: the orbital `+N more` text** (`mainPos.row + mainPos.h + 7`, capped at `rows - 2`) may overdraw the lowest ring face.
 - **Four `StopFailure` branches are unasserted:** `max_output_tokens`, `authentication_failed`, `billing_error` and the `'API error'` default.
 - **A state file without a `timestamp` is never applied.** Every writer stamps one.
-- **`TEAMS_DIR` (shared.js) is unused**, and still names `~/.claude/teams` where Claude Code uses `<CLAUDE_CONFIG_DIR>/teams`. Only test-shared reads it.
 - **`docs/` is gitignored.** The attention-main spec and plan in `docs/superpowers/` won't survive a fresh clone.
