@@ -2036,4 +2036,33 @@ describe('review round 5 -- notifications that ask for nothing', () => {
   });
 });
 
+// -- Review round 5 (docs-pass bugs): the notify-disable switch -------------
+// Suspected: Claude Code turns the 6 s notification off for ANY non-empty
+// CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS, so a `0` would leave our
+// unconfirmed wait to resolve after 8 s with the dialog still open. It does
+// not: 2.1.300 reads it through its env table as `D.bool()`, which is
+// `["1","true","yes","on"].includes(String(v).toLowerCase().trim())` -- the
+// same switch update-state.js already reads. Pinned, so neither side drifts
+// from the binary without a test saying so.
+
+describe('review round 5 (docs-pass bugs) -- the notify-disable switch reads like Claude Code', () => {
+  const ask = { session_id: 'nd-1', tool_name: 'Bash', tool_input: { command: 'npm test' } };
+  const waitKindWith = (value) => {
+    const t = makeTempEnv('nd-1');
+    try {
+      runUpdateState('PermissionRequest', ask,
+        { ...t.env, CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS: value });
+      return readJSON(sessionFile(t.sessionsDir, 'nd-1')).waitKind;
+    } finally { cleanup(t.tmp); }
+  };
+
+  test('0, false and an empty value leave the notification on: the wait is unconfirmed', () => {
+    for (const v of ['0', 'false', '']) assert.strictEqual(waitKindWith(v), 'permission', JSON.stringify(v));
+  });
+
+  test('1/true/yes/on in any case, padded, turn it off: no unconfirmed wait', () => {
+    for (const v of [' On ', 'TRUE']) assert.strictEqual(waitKindWith(v), undefined, JSON.stringify(v));
+  });
+});
+
 module.exports = suite;
