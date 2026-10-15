@@ -5297,4 +5297,43 @@ describe('grid.js -- Review round 5', () => {
   });
 });
 
+// -- Review round 5 (docs-pass bugs): one set of permitted tool faces -------
+// An allowed prompt for ExitPlanMode or TodoWrite asks with permState
+// `thinking`. The renderer's set had it; grid's own copy did not, so the same
+// wait settled as `thinking` on the main face and as `executing` on its
+// orbital.
+
+describe('grid.js -- Review round 5 (docs-pass bugs): permission settles', () => {
+  const grid = require('../lib/grid');
+  const renderer = require('../renderer');
+  const { STATE_NAMES } = require('../lib/themes');
+  const permWait = (over = {}) => ({
+    session_id: 's', state: 'waiting', detail: 'allow?', editor: 'claude',
+    waitKind: 'permission', waitConfirmed: false, permState: 'executing', permDetail: 'npm test',
+    waitingOn: 'abc123', timestamp: Date.now() - grid.PERMISSION_CONFIRM_MS - 1000, ...over,
+  });
+  const settle = (data) => {
+    const f = new MiniFace('s');
+    f.updateFromFile(data, data.timestamp);
+    f.tick(16);
+    return f;
+  };
+
+  test('an orbital settles an allowed plan prompt as thinking, not executing', () => {
+    const f = settle(permWait({ permState: 'thinking', permDetail: 'planning' }));
+    assert.deepStrictEqual([f.state, f.detail], ['thinking', 'planning']);
+  });
+
+  test('the orbital and the main face settle into exactly the same states', () => {
+    for (const s of STATE_NAMES) {
+      const write = permWait({ permState: s });
+      // The renderer converts a wait only into a permitted face; the orbital
+      // shows a permitted face as itself and anything else as `executing`.
+      const mainTakesIt = renderer.isUnconfirmedPermission(write);
+      const orbitalShowsIt = settle(write).state === s;
+      assert.strictEqual(orbitalShowsIt, mainTakesIt, s);
+    }
+  });
+});
+
 module.exports = suite;

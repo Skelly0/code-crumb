@@ -107,10 +107,10 @@ function needsRescue(face, lastStopped, editorDead, liveChildren = 0) {
 // Only for that contract: a confirmed wait, a wait without the fields (an
 // older hook), and every other editor (Codex has no Notification hook at all)
 // keep waiting exactly as before.
-const { PERMISSION_CONFIRM_MS } = require('./lib/shared');  // 8s: the 6s timer, plus slack
-// What an answered prompt may turn into: the asking tool's own face.
-const PERMISSION_TOOL_STATES = new Set(['thinking',
-  ...[...ACTIVE_WORK_STATES].filter((s) => s !== 'responding')]);
+// PERMISSION_CONFIRM_MS: 8s, the 6s timer plus slack. PERMISSION_TOOL_STATES:
+// what an answered prompt may turn into, the asking tool's own face -- one
+// set with the orbitals (grid.js), in shared.js.
+const { PERMISSION_CONFIRM_MS, PERMISSION_TOOL_STATES } = require('./lib/shared');
 
 // Pure: a Claude Code permission wait its 6s Notification has not confirmed.
 // `waitConfirmed` must be an explicit false -- anything else is a wait this
