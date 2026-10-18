@@ -601,10 +601,11 @@ Editors without a model are unchanged.
 
 **Patterns.**
 
-- There are 42 failure patterns (33 stdout, 9 stderr) and 14 false-positive guards. Guards apply **per line**.
+- There are 44 failure patterns (35 stdout, 9 stderr) and 14 false-positive guards. Guards apply **per line**.
+- A stdout panic is a crash's own words: Go's `^panic: `, Rust's `panicked at`, or an upper-case `PANIC`. cargo's passing `test x - should panic ... ok` is not one.
 - Merged-output git failures are stdout patterns: `^fatal: `, `^error: failed to push some refs`, `^ ! [rejected]`.
 - The CONFLICT pattern `\bCONFLICT\s+\([^)\r\n]{1,40}\):` is shared with `isMergeConflict`.
-- Every pattern is linear-time, and so is `stripAnsi` (OSC ending in BEL or ESC `\`).
+- Every pattern is linear-time, and so is `stripAnsi` (OSC ending in BEL or ESC `\`). Two adjacent `\s*` runs, or a `.*` restarted from every match of an earlier part, are quadratic: `EXIT_TRAILER_RE` ends `\s*(?:\.\s*)?$`, and the pytest echo is `^(?=\S*::).* PASSED\b`.
 
 **`trustSuccess`.** Claude Code 2.1.300 reports a failing Bash as `PostToolUseFailure`, so its `PostToolUse` is a success the host vouches for. update-state.js passes `{ trustSuccess: EDITOR === 'claude' && hookEvent === 'PostToolUse' }`.
 
@@ -636,7 +637,7 @@ Text over 80 K characters is scanned as its first `SCAN_HEAD_BYTES` (16 K) plus 
 
 **Shell intent.** `shellIntent(cmd)` returns `{ unquoted, intent, readOnly, masked, segments }`.
 
-- **Unwrapping.** A wrapper is unwrapped first (`unwrapShell`, at most twice, stripping only a whole-script quote pair): `pwsh`/`powershell -Command|-c`, `cmd /c|/k`, or `sh`/`bash`/`zsh`/`dash -c|-lc`, even when named by a path. Codex runs every command through one.
+- **Unwrapping.** A wrapper is unwrapped first (`unwrapShell`, at most twice): `pwsh`/`powershell -Command|-c`, `cmd /c|/k`, or `sh`/`bash`/`zsh`/`dash -c|-lc`, even when named by a path. Codex runs every command through one. Only a script that is one quoted shell word is unquoted (`shellWord`), the way the shell reads it: a run of quoted pieces (shlex quotes `it's` as `'it'"'"'s'`), with `\"`, `\\`, `\$` and `` \` `` unescaped inside double quotes. Two wrapped scripts in a chain are never joined.
 - **Quotes.** Quoted arguments are emptied and heredoc bodies dropped (`stripQuotedArgs`, linear).
 - **Segments.** Read-only segments are dropped. Splitting happens on `&&`, `||`, `;`, `|`, `&` and newlines, but never on a redirect's `&` (`2>&1`, `>&2`, `&>file`, `<&3`). `cd`/`pushd`/`popd` are read-only.
 - **Words.** `segmentWords` strips a leading `(`/`{` and a trailing `)`. `cmdName` drops the directory and `.exe`/`.cmd`/`.bat`/`.ps1`.
@@ -645,13 +646,16 @@ Text over 80 K characters is scanned as its first `SCAN_HEAD_BYTES` (16 K) plus 
 **Command tables.**
 
 - **The read-only table** covers:
-  - plain reads, `journalctl`, and git's listing subcommands (log/show/diff/reflog/rev-parse/ls-*/stash list/branch and remote listings…);
+  - plain reads, `journalctl`, and git's listing subcommands (log/show/diff/reflog/rev-parse/ls-*/stash list/branch, remote and tag listings…). `git tag` lists when it has no tag to make: bare, `-l`, `--list` or `-n`;
+  - the text filters a read is piped through (`sort`, `uniq`, `cut`, `tr`, `nl`, `jq`, `column`…). `sed` and `awk` read unless told to edit in place (`sed -i`/`-Ei`/`-i.bak`/`--in-place`, `gawk -i inplace`), and `xargs` is whatever it runs (`xargs grep` reads, `xargs rm` acts). Without them `grep … | sort | head` was masked, and Codex's `sed -n '1,120p' x.js` had its content scanned;
   - `gh` list/view/status/diff/checks, docker/podman/compose `logs|ps|images|inspect`, and `kubectl logs|get|describe|top`;
   - the PowerShell reads and `findstr`.
 - **Builds** are judged by command and subcommand, never an argument (`isBuildCommand`): a build tool by name, or a subcommand-style tool whose subcommand or `run` script is `build`/`compile`. Flags, workspace selectors and `exec`/`dlx`/`compose`/`-p` are skipped.
+- **Task runners** (`turbo`, `nx`, `bazel`/`bazelisk`, also behind a package manager or runner) are judged by their task (`runnerTasks`): `turbo [run] <task>…`, `nx <target>`, `nx run <project>:<target>`, `nx run-many|affected -t a,b`, `bazel <command>`. A `build`/`compile` task is a build and a `test`/`e2e`/`coverage` task a test run; `turbo run lint` just finishes.
 - **`make`** is a build when bare, or when a target is `all|compile|release|debug|dist|bundle` or contains "build". A test target is a test run, and any other target finishes `make <target> done`.
-- **Installs** use one token-based table for both sides of a call (`isPkgInstall`/`isInstallCommand`). Flags, selectors or a `corepack` prefix may come before `install|i|add|ci`, and a bare `yarn` counts. `cargo build` is a build.
-- **Test runs** (`isToolTestRun`): `node --test` or a test script, gradle/maven test tasks (never one excluded by `-x`), make test targets, and `deno test`. `isTrainingCommand` is linear.
+- **Installs** use one token-based table for both sides of a call (`isPkgInstall`/`isInstallCommand`). Flags, selectors or a `corepack` prefix may come before `install|i|add|ci`, and a bare `yarn` counts, but not `yarn --version`/`-v`/`--help`. `cargo build` is a build.
+- **Test runs** (`isToolTestRun`): `node --test` or a test script (also under `tsx`/`ts-node`), gradle/maven test tasks (never one excluded by `-x`), make test targets, task-runner test tasks, `deno test`, and a test runner (`TEST_RUNNERS`: jest, vitest, mocha, pytest, rspec…) **as the command word** (`isRunnerTest`). It may be reached through `npx`/`bunx`/`pnpx`, a package manager's `exec`/`dlx` or bare bin (`yarn mocha`), `python -m`, or `xargs`; `playwright` counts only as `playwright test` and `cypress` as `cypress run`. An argument never counts: `npm i -D jest`, `pip install pytest` and `git add a.test.js` are not test runs. `isTrainingCommand` is linear.
+- **Success details** follow toolToState's order: push/commit, test, build, install, then git (`git done`/`merged clean`), then `make <target> done`. A read-only git step names the result only when nothing else in the command acts: `git status && npm install` finished as `installed`.
 
 **Explicit signals.** `normalizeToolResponse` carries `interrupted`, `isError`/`is_error`, numeric `exitCode`/`exit_code`, `backgroundTaskId` and `status`.
 
@@ -662,6 +666,7 @@ Claude Code's `PostToolUseFailure` has **no** `tool_response`. It is `{tool_name
 | Exit 1 from | Detail | Rule |
 |---|---|---|
 | `grep`/`egrep`/`fgrep`/`rg`/`ag`/`ack`/`findstr`/`git grep` | `no matches` | silent |
+| `grep -c`/`--count` (and `egrep`/`fgrep`) | `no matches` | every line a zero count, `0` or `file:0` (`GREP_ZERO_COUNT_RE`) |
 | `diff`, `cmp` | `files differ` | alone |
 | `git diff --quiet` | `files differ` | git's line-ending warning only (`GIT_EOL_WARNING_RE`) |
 | `git diff --exit-code` (no `--quiet`) | `files differ` | alone |
@@ -683,10 +688,12 @@ Claude Code's `PostToolUseFailure` has **no** `tool_response`. It is `{tool_name
 
 **Neutral results** leave the streak alone. update-state.js skips `updateStreak` and `commitCount`, and base-adapter's `handleToolEnd` skips `updateStreak`, as it does for an interrupted tool end.
 
+**Commits** are counted by the result's `committed` flag, never its detail. A successful `git commit` sets it, also under `git commit && git push`, whose face is `pushed!`.
+
 **Diff counts.**
 
 - **With a patch.** Claude Code's `tool_response.structuredPatch` wins when present: `diffFromPatch` sums `+`/`-` lines across hunks, so a same-length replacement is `+1 -1`.
-- **Without one.** `diffFromInput` counts the edit's inputs, including `MultiEdit`'s `edits[]` and `NotebookEdit`'s `new_source`.
+- **Without one.** `diffFromInput` counts the edit's inputs, including `MultiEdit`'s `edits[]` and `NotebookEdit`'s `new_source`. A final newline ends the last line rather than starting another (`lineCount`): `'a\nb\n'` is two lines.
 - **What is stored.** Only the two totals are persisted.
 
 #### Other events

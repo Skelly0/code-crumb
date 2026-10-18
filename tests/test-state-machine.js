@@ -2166,7 +2166,8 @@ describe('state-machine.js -- subagent tool state propagation', () => {
   test('all output fields are present', () => {
     const result = buildSubagentSessionState({}, { id: 's1', description: 'd' }, 'p', '/c');
     const keys = Object.keys(result).sort();
-    assert.deepStrictEqual(keys, ['cwd', 'editor', 'gitBranch', 'modelName', 'parentSession', 'sessionId', 'taskDescription']);
+    assert.deepStrictEqual(keys, ['cwd', 'editor', 'gitBranch', 'modelName', 'parentSession', 'sessionId', 'synthetic', 'taskDescription']);
+    assert.strictEqual(result.synthetic, true, 'a parent-written orbital is synthetic (MiniFace may cycle it)');
   });
 });
 
@@ -4953,6 +4954,203 @@ describe('state-machine.js -- review round 5: line-ending warnings and which a b
     assert.strictEqual(claudeFail('which pnpm', `Exit code 2\n${miss('pnpm')}`).state, 'error');
     assert.strictEqual(claudeFail('which -z x', 'Exit code 2\nIllegal option -z').state, 'error');
     assert.strictEqual(claudeFail('grep x y', 'Exit code 2').state, 'error', 'only which counts its misses');
+  });
+});
+
+// Review round 6: what each command is, read token by token. Every case
+// below was wrong before this pass (checked against the pre-fix sources).
+describe('state-machine.js -- review round 6: commands are their command word, not their arguments', () => {
+  const sm = require('../lib/state-machine');
+  const { shellIntent } = sm;
+  const TRUST = { trustSuccess: true };
+  const pre = (command) => toolToState('Bash', { command }).state;
+  // Claude Code: a trusted PostToolUse with stderr merged into stdout.
+  const claudeOk = (command, stdout) =>
+    classifyToolResult('Bash', { command }, { stdout, stderr: '', interrupted: false }, false, TRUST);
+  const claudeFail = (command, error) =>
+    classifyToolResult('Bash', { command }, sm.normalizeToolResponse({ error, is_interrupt: false }), true);
+  // Codex and the adapters: no trust, a numeric exit code.
+  const codex = (command, stdout, exitCode = 0) =>
+    classifyToolResult('Bash', { command }, { stdout, stderr: '', exitCode }, false);
+  const SRC = "const cfg = load();\nif (err.code === 'ENOENT') return {};\nthrow new Error('FATAL: permission denied');";
+
+  test('text filters only read: sorting or slicing a read does not make its content a verdict', () => {
+    for (const cmd of [
+      'grep -rn "ENOENT" lib | sort | head -20',
+      "grep -rn ENOENT lib | awk -F: '{print $1\":\"$2}' | head",
+      'grep -rn ENOENT lib | cut -d: -f1 | uniq -c | sort -rn',
+      "rg -n ENOENT | sed -n '1,40p' | nl",
+    ]) {
+      assert.strictEqual(shellIntent(cmd).readOnly, true, cmd);
+      assert.strictEqual(claudeOk(cmd, SRC).state, 'relieved', cmd);
+    }
+    // Codex reads files with sed -n and nl.
+    for (const cmd of ["sed -n '1,120p' src/config.js", "nl -ba src/config.js | sed -n '1,120p'",
+      'jq .scripts package.json', 'cat a.log | tr -d "\\r" | tail -50', 'awk \'/ENOENT/\' app.log']) {
+      assert.strictEqual(codex(cmd, SRC).state, 'relieved', cmd);
+    }
+  });
+
+  test('a filter that edits in place still acts', () => {
+    for (const cmd of ["sed -i 's/a/b/' x.js", "sed -Ei.bak 's/a/b/' x.js", "sed --in-place=.orig -e 's/a/b/' x",
+      "gawk -i inplace '{print}' x", 'xargs rm -f', 'find . -name "*.tmp" | xargs rm']) {
+      assert.strictEqual(shellIntent(cmd).readOnly, false, cmd);
+    }
+    assert.strictEqual(shellIntent('find . -name "*.js" | xargs grep -l ENOENT').readOnly, true);
+    assert.strictEqual(shellIntent('git ls-files | xargs -n 50 -I {} wc -l {}').readOnly, true);
+    assert.strictEqual(codex('find . -name "*.js" | xargs grep -l ENOENT', 'src/a.js: ENOENT').state, 'relieved');
+    // An edit that fails is still caught.
+    assert.strictEqual(codex("sed -i 's/a/b/' x.js", "sed: can't read x.js: No such file or directory").state, 'error');
+  });
+
+  test('a test runner named as an argument is not a test run', () => {
+    for (const [cmd, want] of [
+      ['npm install --save-dev jest', 'installing'], ['npm i -D vitest', 'installing'],
+      ['pip install pytest', 'installing'], ['yarn add -D mocha', 'installing'],
+      ['pnpm add -D @playwright/test', 'installing'], ['npx playwright install --with-deps', 'executing'],
+      ['git add src/foo.test.js', 'executing'], ['rm src/old.spec.ts', 'executing'],
+      ['cat jest.config.js && ls cypress', 'executing'],
+    ]) assert.strictEqual(pre(cmd), want, cmd);
+    assert.strictEqual(claudeOk('npm i -D vitest', 'added 1 package').detail, 'installed');
+    assert.strictEqual(claudeOk('git add src/foo.test.js', '').detail, 'git done');
+    assert.strictEqual(pre('find . -name "*.test.js" | xargs jest'), 'testing', 'a runner run by xargs');
+    assert.strictEqual(pre('git ls-files | xargs -n 20 npx vitest run'), 'testing');
+  });
+
+  test('a test runner as the command word still is one', () => {
+    for (const cmd of ['jest', 'npx jest --watchAll=false', 'pnpm exec vitest run', 'yarn mocha', 'bunx vitest',
+      'pytest -q', 'python -m pytest tests/', 'python3 -m unittest discover', 'npx playwright test',
+      'cypress run', './node_modules/.bin/jest src', 'npx tsx src/foo.test.ts', 'rspec spec/a_spec.rb',
+      'npm test', 'npm run test:unit', 'go test ./...', 'cargo test', 'node --test', 'nosetests']) {
+      assert.strictEqual(pre(cmd), 'testing', cmd);
+    }
+  });
+
+  test('task runners are judged by their task: turbo, nx and bazel', () => {
+    for (const [cmd, want] of [
+      ['turbo test', 'testing'], ['turbo run test', 'testing'], ['nx test web', 'testing'],
+      ['bazel test //...', 'testing'], ['pnpm turbo test', 'testing'], ['nx affected -t test', 'testing'],
+      ['turbo run lint', 'executing'], ['turbo build', 'executing'],
+    ]) assert.strictEqual(pre(cmd), want, cmd);
+    for (const [cmd, want] of [
+      ['turbo run lint', 'command succeeded'], ['nx run-many -t lint', 'command succeeded'],
+      ['turbo build', 'build succeeded'], ['turbo run build --filter web', 'build succeeded'],
+      ['nx build web', 'build succeeded'], ['nx run web:build:production', 'build succeeded'],
+      ['nx run-many -t build,test', 'tests passed'], ['nx run-many --targets=build', 'build succeeded'],
+      ['bazel build //...', 'build succeeded'], ['pnpm turbo build', 'build succeeded'],
+      ['npx nx build web', 'build succeeded'], ['bazel run //app', 'command succeeded'],
+    ]) assert.strictEqual(claudeOk(cmd, 'done').detail, want, cmd);
+  });
+
+  test('yarn asked for its version or help is not an install', () => {
+    for (const cmd of ['yarn --version', 'yarn -v', 'yarn --help', 'npm -v']) {
+      assert.strictEqual(pre(cmd), 'executing', cmd);
+      assert.strictEqual(claudeOk(cmd, '1.22.19').detail, 'command succeeded', cmd);
+    }
+    assert.strictEqual(pre('yarn'), 'installing', 'a bare yarn is yarn install');
+    assert.strictEqual(pre('yarn --frozen-lockfile'), 'installing');
+  });
+
+  test('a path through homebrew is not an install', () => {
+    assert.strictEqual(pre('/opt/homebrew/bin/python3 manage.py migrate'), 'executing');
+    assert.strictEqual(pre('export PATH=/opt/homebrew/bin:$PATH && make lint'), 'executing');
+    assert.strictEqual(pre('brew install jq'), 'installing');
+  });
+
+  test('a read-only git step does not name the result of the command it precedes', () => {
+    for (const [cmd, want] of [
+      ['git status && npm install', 'installed'], ['git log --oneline -3 && npm ci', 'installed'],
+      ['git fetch && pip install -r requirements.txt', 'installed'], ['git diff --stat; make lint', 'make lint done'],
+      ['git status && ./deploy.sh', 'command succeeded'],
+      ['git status', 'git done'], ['git fetch', 'git done'], ['git pull --rebase', 'merged clean'],
+    ]) assert.strictEqual(claudeOk(cmd, 'ok').detail, want, cmd);
+  });
+
+  test('git tag lists unless it is given a tag to make', () => {
+    for (const cmd of ['git tag', 'git tag -l', 'git tag --list "v1.*"', 'git tag -n', 'git tag -l --sort=-v:refname']) {
+      assert.strictEqual(shellIntent(cmd).readOnly, true, cmd);
+      assert.notStrictEqual(pre(cmd), 'committing', cmd);
+    }
+    for (const cmd of ['git tag v1.0.0', 'git tag -a v1 -m "release"', 'git tag -d v1']) {
+      assert.strictEqual(pre(cmd), 'committing', cmd);
+    }
+  });
+
+  test('a commit counts when it is pushed in the same command', () => {
+    const both = claudeOk('git commit -am "x" && git push', '[main 1a2b3c4] x\n 1 file changed');
+    assert.deepStrictEqual([both.state, both.detail, both.committed], ['proud', 'pushed!', true]);
+    assert.strictEqual(claudeOk('git commit -m "x"', '[main 1a2b3c4] x').committed, true);
+    assert.strictEqual(claudeOk('git push', 'To github.com:a/b.git').committed, undefined);
+    assert.strictEqual(claudeOk('git log -1', 'x').committed, undefined);
+    // A failed commit is no commit.
+    assert.strictEqual(claudeFail('git commit -m x', 'Exit code 1\nnothing to commit').committed, undefined);
+  });
+
+  test('"panic" is a crash only in a crash\'s own words', () => {
+    const cargo = 'running 3 tests\ntest tests::greater_than_100 - should panic ... ok\ntest tests::adds ... ok\n\n' +
+      'test result: ok. 3 passed; 0 failed; 0 ignored';
+    assert.strictEqual(codex('cargo test', cargo).state, 'relieved');
+    assert.strictEqual(codex('git rm src/panic.rs', "rm 'src/panic.rs'").state, 'relieved');
+    assert.strictEqual(codex('git stash pop', 'On branch main\n\tmodified:   src/panic.rs').state, 'relieved');
+    for (const out of ['panic: runtime error: index out of range [3] with length 3\n\ngoroutine 1 [running]:',
+      "thread 'main' panicked at src/main.rs:2:5:\nexplicit panic", 'Kernel PANIC - not syncing']) {
+      assert.strictEqual(codex('./run', out).state, 'error', out);
+    }
+  });
+
+  test('grep -c finding nothing answers no', () => {
+    for (const [cmd, out] of [['grep -c TODO src/a.js', '0'], ['grep -c TODO a.js b.js', 'a.js:0\nb.js:0'],
+      ['grep -rc FIXME src', 'src/a.js:0\nsrc/b.js:0'], ['grep --count x f', '0']]) {
+      const c = claudeFail(cmd, `Exit code 1\n${out}`);
+      assert.deepStrictEqual([c.state, c.detail, c.neutral], ['satisfied', 'no matches', true], cmd);
+      const x = codex(cmd, out + '\n', 1);
+      assert.deepStrictEqual([x.state, x.detail], ['satisfied', 'no matches'], cmd);
+    }
+    // A count is only a "no" from grep -c, and only when every count is zero.
+    assert.strictEqual(claudeFail('grep TODO a.js', 'Exit code 1\n0').state, 'error');
+    assert.strictEqual(claudeFail('grep -c TODO a.js', 'Exit code 1\ngrep: a.js: Permission denied\n0').state, 'error');
+  });
+
+  test('a trailing newline is not another line', () => {
+    assert.deepStrictEqual(diffFromInput({ content: 'a\nb\n' }), { added: 2, removed: 0 });
+    assert.deepStrictEqual(diffFromInput({ old_string: 'x\n', new_string: 'y\n' }), { added: 1, removed: 1 });
+    assert.deepStrictEqual(diffFromInput({ old_string: 'x', new_string: 'y\nz' }), { added: 2, removed: 1 });
+    assert.deepStrictEqual(diffFromInput({ edits: [{ old_string: 'a\n', new_string: 'b\nc\n' }] }), { added: 2, removed: 1 });
+    assert.deepStrictEqual(diffFromInput({ new_source: 'print(1)\n' }), { added: 1, removed: 0 });
+  });
+
+  test('a wrapped script is unquoted the way the shell would', () => {
+    // An escaped quote inside a double-quoted script is a quote, not text:
+    // the `|` inside it split the script, and its tail read as acting.
+    assert.strictEqual(shellIntent('bash -lc "rg -n \\"TODO|FIXME\\" src"').readOnly, true);
+    assert.strictEqual(codex('bash -lc "rg -n \\"ENOENT|EPERM\\" src"', 'src/a.js:3: ENOENT').state, 'relieved');
+    // shlex quotes an apostrophe as a run of quoted pieces; the commit inside
+    // used to be lost ("executing", never counted).
+    const apostrophe = `bash -lc 'git commit -m "it'"'"'s done"'`;
+    assert.strictEqual(pre(apostrophe), 'committing');
+    assert.strictEqual(claudeOk(apostrophe, '[main 1a2b3c4] it\'s done').committed, true);
+    // Two scripts are still two scripts, never joined into one read.
+    assert.strictEqual(shellIntent('bash -lc "cat a" && bash -lc "npm install"').readOnly, false);
+    assert.strictEqual(shellIntent("bash -lc 'cat a' && bash -lc 'npm install'").readOnly, false);
+  });
+
+  test('the exit trailer and pytest echo patterns stay linear', () => {
+    // Relative, as in round 5: eight times the input, at most twenty times the cost.
+    const cost = (fn) => { const t0 = process.hrtime.bigint(); fn(); return Number(process.hrtime.bigint() - t0) / 1e6; };
+    const cases = [
+      (k) => () => classifyToolResult('Bash', { command: 'cat x' }, { stdout: 'Exit code 1' + ' '.repeat(2000 * k) + 'x', stderr: '' }, false),
+      (k) => () => sm.dropEchoedLines('a::'.repeat(2000 * k)),
+    ];
+    for (const make of cases) {
+      let tSmall = Infinity, tBig = Infinity;
+      for (let run = 0; run < 3; run++) {
+        tSmall = Math.min(tSmall, cost(make(1)));
+        tBig = Math.min(tBig, cost(make(8)));
+      }
+      assert.ok(tBig < tSmall * 20 + 5, `x8 took ${tBig.toFixed(1)}ms, x1 ${tSmall.toFixed(1)}ms`);
+    }
+    assert.strictEqual(sm.dropEchoedLines('tests/test_a.py::TestX::test_y PASSED  [ 50%]'), '');
+    assert.strictEqual(classifyToolResult('Bash', { command: 'cat x' }, { stdout: 'data\nExit code 1 .', stderr: '' }, false).state, 'error');
   });
 });
 
