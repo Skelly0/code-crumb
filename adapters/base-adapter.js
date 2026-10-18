@@ -493,6 +493,11 @@ function runStdinAdapter(options) {
   const { defaultModel, defaultEditor, normaliseEvent, mapEvent } = options;
 
   processStdinEvent((data) => {
+    // Payload recorder (lib/recorder.js), one record per batch element; the
+    // env check first, so a disabled recorder is never even loaded.
+    if (process.env.CODE_CRUMB_RECORD) {
+      try { require('../lib/recorder').record({ source: defaultEditor, editor: defaultEditor, payload: data }); } catch {}
+    }
     const norm = normaliseEvent(data);
     if (!norm || norm.skip) return;
     const event = norm.event || '';
@@ -736,6 +741,13 @@ function runStdinAdapter(options) {
       if (releaseStats) releaseStats();
     }
   }, (err, trunc) => {
+    // Payload recorder: stdin as received; a marker of its ids when oversized.
+    if (process.env.CODE_CRUMB_RECORD) {
+      try {
+        require('../lib/recorder').record({ source: defaultEditor, editor: defaultEditor,
+          raw: (trunc && typeof trunc.raw === 'string') ? trunc.raw : '', truncated: !err && !!trunc });
+      } catch {}
+    }
     // Fallback on unparseable or oversized stdin -- still this session's
     // event, so it goes through the ownership guard, under the payload's own
     // id when a truncated one still names it, else the same editor-prefixed

@@ -1,0 +1,66 @@
+{
+  "fixture": "codex-interrupt.jsonl",
+  "regenerate": "CRUMB_UPDATE_GOLDEN=1 node tests/run.js replay",
+  "steps": [
+    {
+      "step": 1,
+      "event": "UserPromptSubmit",
+      "sessions": {
+        "s1": {
+          "state": "thinking",
+          "detail": "reading your message",
+          "answered": true,
+          "prompt": 1,
+          "editor": "codex",
+          "model": "gpt-5.1-codex"
+        }
+      },
+      "global": {
+        "state": "thinking",
+        "detail": "reading your message",
+        "sessionId": "s1"
+      },
+      "streak": 0
+    },
+    {
+      "step": 2,
+      "event": "PreToolUse",
+      "sessions": {
+        "s1": {
+          "state": "executing",
+          "detail": "bash -lc 'npm run dev'",
+          "prompt": 1,
+          "editor": "codex",
+          "model": "gpt-5.1-codex"
+        }
+      },
+      "global": {
+        "state": "executing",
+        "detail": "bash -lc 'npm run dev'",
+        "sessionId": "s1"
+      },
+      "streak": 0
+    },
+    {
+      "step": 3,
+      "event": "Interrupt",
+      "sessions": {
+        "s1": {
+          "state": "error",
+          "detail": "interrupted",
+          "turnEnded": true,
+          "prompt": 1,
+          "editor": "codex",
+          "model": "gpt-5.1-codex"
+        }
+      },
+      "global": {
+        "state": "error",
+        "detail": "interrupted",
+        "sessionId": "s1",
+        "stopped": true
+      },
+      "streak": 0
+    }
+  ]
+}

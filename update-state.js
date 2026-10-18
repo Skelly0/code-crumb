@@ -848,6 +848,14 @@ function _tailField(key) {
   return last;
 }
 process.stdin.on('end', () => {
+  // Payload recorder (lib/recorder.js): stdin exactly as received, before any
+  // state logic. The env check first, so a disabled recorder is never loaded.
+  if (process.env.CODE_CRUMB_RECORD) {
+    try {
+      require('./lib/recorder').record({ source: `${EDITOR}-hook`, editor: EDITOR, event: hookEvent,
+        argv: process.argv.slice(2), raw: input, tail: inputTail, truncated: inputTruncated });
+    } catch {}
+  }
   ensureRendererRunning(
     (hookEvent || _rawField(input, 'hook_event_name')) === 'SessionStart'
     && EDITOR_START_SOURCES.has(_rawField(input, 'source')));

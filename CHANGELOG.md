@@ -60,6 +60,25 @@ Six reviewers read the hook handler, the classifier, the renderer and face, the 
 - The test runner unsets the developer's Code Crumb and Claude Code variables (`npm test` inside Claude Code inherits `CLAUDE_CODE_SESSION_ID`), and a hook killed by its timeout now fails a test instead of passing it.
 - New residuals, each checked or explicitly unverified, are listed under Known Follow-ups in CLAUDE.md.
 
+### After the fixes: one lifecycle, one carry, recordings and fuzzing
+
+Most of the round's bugs came in families, so four follow-ups went after the families rather than their members. The suite grew to 2925 tests on Linux/macOS (2904 on win32).
+
+- **One permission-wait lifecycle (`lib/wait.js`).** The hook, the renderer, the orbitals and tmux mode each kept their own copy of a prompt's rules, with its own idea of when a prompt was asked, confirmed, allowed or answered. They are now one pure module under one diagram. `waitPhase(write, now)` names the phase (`none`, `open`, `asked`, `confirmed`, `allowed`), `carryWait` decides what a write keeps, and the parent standing in for an asking agent is `notificationWait`/`releaseStandIn`. No behaviour changed.
+- **One session-file carry (`lib/carry.js`).** The hook's main path and its >1 MB fallback each kept their own copy of "what does this write keep from the file before it", and that is where the round's tombstone and wait drift came from. Both now write through `nextSessionFile(prev, w)`, and decide the global `stopped` with `stopsGlobal`. On a session file `stopped` is a tombstone: only SessionEnd writes it, every echo keeps it, and only the session starting again clears it. test-lifecycle drives both paths with the same events and compares what they keep. Against the hook before this round, two of its permission-wait scenarios fail: the drift the reviewers found by hand.
+- **Payload recording (`CODE_CRUMB_RECORD=1`).** The hooks, adapters and codex-wrapper can append every payload they receive to `~/.code-crumb-record/<day>.jsonl`, for bug reports and test fixtures.
+  - The default mode anonymises. Ids become keyed pseudonyms, commands and paths keep their shape (`git commit -m "fix acme login"` is kept as `git commit -m "x x login"`), IPv4 addresses become `x.x.x.x`, and all other text becomes its length and line count. `full` keeps payloads raw.
+  - `tests/fixtures/replay` holds six replays (a Claude Code turn, permission prompt and subagent; a Codex interrupt and `codex exec` run; an OpenCode turn), driven through the real hooks, adapters and wrapper against goldens. `import-recording.js` turns a recording into one.
+  - A disabled recorder costs one environment read. README: "Recording payloads for a bug report".
+- **Invariant fuzzing of the shell classifier.** A seeded generator builds commands and checks rules that must hold for any of them: an argument never decides what a command is, a read piped through a filter is still a read, a wrapper changes nothing, a trusted success stays a success, and every check is linear. It found:
+  - Redirects read as words: `make 2>&1` finished as `make 2>&1 done` instead of a build, and `git tag 2>/dev/null` (a listing) showed `committing`.
+  - A task runner named anywhere after a runner counted: `npx jest bazel` (a test folder) was a bazel call, so no test run at all.
+  - `python` inside a path (`cp ml/python/train.py out/`) or a word (`mv python-train x`) launched `training`.
+  - A word `git` made a git step: `cat git | cut -f1` finished `git done`.
+  - Three quadratic scans: a run of `xargs` (3,000 took 1.9 s and a few thousand more overflowed the stack), escaped quotes in an unclosed string (40,000 took 5 s), and the `cd` check over a run of newlines (40,000 took 2.2 s). Each is now linear.
+  - Three more findings are listed, unfixed, under Known Follow-ups.
+- **The OpenCode plugin keeps a busy session in order.** Its chain timer started when a child was spawned. When the plugin's own event loop was held (a burst of synchronous turn ends), the child got its input late, the timer had already run out, and the next batch overtook it. The wait now counts from when the child has its input, and extends only once, so a hung child still lets go within 6 s. This was also the cause of the plugin ordering test's rare failure.
+
 ## 1.3.0 — 2026-10-15
 
 This release is review round 5 plus everything merged since 1.2.0 (listed under "Also in 1.3.0" below).

@@ -1,0 +1,83 @@
+{
+  "fixture": "opencode-turn.jsonl",
+  "regenerate": "CRUMB_UPDATE_GOLDEN=1 node tests/run.js replay",
+  "steps": [
+    {
+      "step": 1,
+      "event": "session.created",
+      "sessions": {
+        "s1": {
+          "state": "starting",
+          "detail": "session started",
+          "prompt": 1,
+          "editor": "opencode"
+        }
+      },
+      "global": {
+        "state": "starting",
+        "detail": "session started",
+        "sessionId": "s1"
+      },
+      "streak": 0
+    },
+    {
+      "step": 2,
+      "event": "tool.execute.before",
+      "sessions": {
+        "s1": {
+          "state": "testing",
+          "detail": "npm test",
+          "prompt": 1,
+          "editor": "opencode",
+          "model": "Sonnet"
+        }
+      },
+      "global": {
+        "state": "testing",
+        "detail": "npm test",
+        "sessionId": "s1"
+      },
+      "streak": 0
+    },
+    {
+      "step": 3,
+      "event": "tool.execute.after",
+      "sessions": {
+        "s1": {
+          "state": "relieved",
+          "detail": "tests passed",
+          "prompt": 1,
+          "editor": "opencode",
+          "model": "Sonnet"
+        }
+      },
+      "global": {
+        "state": "relieved",
+        "detail": "tests passed",
+        "sessionId": "s1"
+      },
+      "streak": 1
+    },
+    {
+      "step": 4,
+      "event": "session.idle",
+      "sessions": {
+        "s1": {
+          "state": "happy",
+          "detail": "all done!",
+          "turnEnded": true,
+          "prompt": 1,
+          "editor": "opencode",
+          "model": "Sonnet"
+        }
+      },
+      "global": {
+        "state": "happy",
+        "detail": "all done!",
+        "sessionId": "s1",
+        "stopped": true
+      },
+      "streak": 1
+    }
+  ]
+}

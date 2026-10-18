@@ -384,6 +384,8 @@ Uses Pi's extension system. Run `node setup.js openclaw` for instructions. The a
 | `NO_COLOR` | unset | Disable colour output (also disables the `t` key) |
 | `MINIMAL_BOOT` | unset | Start in minimal mode (same as `--minimal`) |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | unset | `1` enables agent-team orbitals |
+| `CODE_CRUMB_RECORD` | unset | `1` records every payload the hooks and adapters receive, anonymised; `full` records them raw. See [Recording payloads for a bug report](#recording-payloads-for-a-bug-report) |
+| `CODE_CRUMB_RECORD_FILE` | `~/.code-crumb-record/<date>.jsonl` | Where recordings go; a relative path is taken from your home folder |
 
 Renderer flags: `--minimal` (face + status only), `--tmux` (write a status line for tmux instead of drawing), `--no-color`.
 
@@ -496,6 +498,31 @@ rm -rf ~/.code-crumb-sessions
 Remove-Item -Recurse -Force "$HOME\.code-crumb-sessions"
 ```
 
+## Recording payloads for a bug report
+
+When the face does something odd, the quickest fix starts from exactly what your editor sent. Set `CODE_CRUMB_RECORD=1` in the environment your editor starts from:
+
+- POSIX shells: `export CODE_CRUMB_RECORD=1`
+- PowerShell: `$env:CODE_CRUMB_RECORD=1`
+- cmd: `set CODE_CRUMB_RECORD=1`
+
+Code Crumb then appends every payload its Claude Code and Codex hooks, its OpenCode and OpenClaw adapters and `codex-wrapper.js` receive to `~/.code-crumb-record/<YYYY-MM-DD>.jsonl`, one JSON line each. A day's file stops growing at 20 MB. `CODE_CRUMB_RECORD_FILE` chooses the file. Unset the variable to stop. With it unset, the hooks pay for one environment read and nothing else.
+
+**What the default mode keeps.** Event names, sources, reasons, tool names, models, flags, statuses and exit codes stay, as does every key and every value's type. Session, agent and tool-call ids become stable pseudonyms (`s-3f9a…`), so you can still see which events belong together. Commands and paths keep their shape but lose their words: `git commit -m "fix acme login"` is recorded as `git commit -m "x x login"`, `/home/you/acme/src/app.ts` as `/home/x/x/src/app.ts`, and an IP address as `x.x.x.x`. Only common command names, subcommands, extensions, directory names and a few common words survive, even inside quotes, because a wrapped script (`bash -lc '…'`) is all quotes and its command words are the point.
+
+**What it drops.** Prompts, tool output, file contents, descriptions and messages become `<text len~N lines=L>`: their size and line count are kept, their content is not. A payload over 1 MB is recorded as its ids only. The pseudonyms are keyed by `.code-crumb-record.key`, which sits beside the recording. **Never share that file**: it is what stops a recording being matched back to your real sessions. Read a recording before you attach it.
+
+**`CODE_CRUMB_RECORD=full`** records payloads exactly as received, including prompts, file contents, paths, command lines and any secrets in them. It is for debugging on your own machine. Never attach a full recording to an issue; import it as a fixture instead, which anonymises it.
+
+**Turning a recording into a test.** In a clone of this repo:
+
+```
+node tests/fixtures/replay/import-recording.js ~/.code-crumb-record/2026-10-18.jsonl my-bug [--session s-3f9a…] [--from N --to M]
+CRUMB_UPDATE_GOLDEN=1 node tests/run.js replay
+```
+
+The first command writes `tests/fixtures/replay/my-bug.jsonl`, renumbering ids to `s1`, `a1`, `t1` (and anonymising a full recording). The second writes `my-bug.golden.json`, which records what the face does today. Edit the golden to say what it should do, and the test fails until the code agrees.
+
 ## Project Layout
 
 The root holds only what gets run by path. Your installed hooks point at `update-state.js` here, and the shell wrappers point at `launch.js`.
@@ -516,6 +543,9 @@ The root holds only what gets run by path. Your installed hooks point at `update
 | `lib/particles.js` | ParticleSystem — 16 visual effect styles |
 | `lib/themes.js` | ANSI codes, palettes, color math, thought bubbles |
 | `lib/state-machine.js` | Tool mapping, error detection, streaks |
+| `lib/wait.js` | The permission-wait lifecycle, shared by the hook and every reader |
+| `lib/carry.js` | What each hook write keeps from the session file before it |
+| `lib/recorder.js` | Opt-in payload recorder and anonymiser (`CODE_CRUMB_RECORD`) |
 | `lib/shared.js` | Shared constants, paths, utilities |
 | `lib/transition.js` | SwapTransition — dissolve/swap/materialize animations |
 | `lib/accessories.js` | Accessory definitions (hats, glasses, ears) and rendering |
@@ -529,6 +559,7 @@ The root holds only what gets run by path. Your installed hooks point at `update
 | `hooks/hooks.json` | Hook registrations used by the Claude Code plugin |
 | `demo/single.js` | Cycles through all 23 states (`npm run demo`) |
 | `demo/orbital.js` | Orbital subagent demo (`npm run demo:orbital`) |
+| `tests/fixtures/replay/` | Recorded payloads replayed as golden tests; `import-recording.js` turns a recording into one |
 | `tests/run.js`, `tests/` | Test runner and suite (`npm test`; files run in parallel, `--serial` for one process). Run the suite only through `tests/run.js` — a test file started directly refuses to run, because it would use your real `~/.code-crumb*` files |
 
 </details>

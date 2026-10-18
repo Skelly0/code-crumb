@@ -1,0 +1,161 @@
+{
+  "fixture": "claude-permission.jsonl",
+  "regenerate": "CRUMB_UPDATE_GOLDEN=1 node tests/run.js replay",
+  "steps": [
+    {
+      "step": 1,
+      "event": "UserPromptSubmit",
+      "sessions": {
+        "s1": {
+          "state": "thinking",
+          "detail": "reading your message",
+          "answered": true,
+          "prompt": 1,
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "thinking",
+        "detail": "reading your message",
+        "sessionId": "s1"
+      },
+      "streak": 0
+    },
+    {
+      "step": 2,
+      "event": "PermissionRequest",
+      "sessions": {
+        "s1": {
+          "state": "waiting",
+          "detail": "allow Bash?",
+          "waiting": true,
+          "waitConfirmed": false,
+          "prompt": 1,
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "waiting",
+        "detail": "allow Bash?",
+        "sessionId": "s1"
+      },
+      "streak": 0
+    },
+    {
+      "step": 3,
+      "event": "PostToolUse",
+      "sessions": {
+        "s1": {
+          "state": "proud",
+          "detail": "pushed!",
+          "answered": true,
+          "prompt": 1,
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "proud",
+        "detail": "pushed!",
+        "sessionId": "s1"
+      },
+      "streak": 1
+    },
+    {
+      "step": 4,
+      "event": "PreToolUse",
+      "sessions": {
+        "s1": {
+          "state": "coding",
+          "detail": "editing login.js",
+          "prompt": 1,
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "coding",
+        "detail": "editing login.js",
+        "sessionId": "s1"
+      },
+      "streak": 1
+    },
+    {
+      "step": 5,
+      "event": "PermissionRequest",
+      "sessions": {
+        "s1": {
+          "state": "waiting",
+          "detail": "allow Edit?",
+          "waiting": true,
+          "waitConfirmed": false,
+          "prompt": 1,
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "waiting",
+        "detail": "allow Edit?",
+        "sessionId": "s1"
+      },
+      "streak": 1
+    },
+    {
+      "step": 6,
+      "event": "Notification",
+      "sessions": {
+        "s1": {
+          "state": "waiting",
+          "detail": "allow Edit?",
+          "waiting": true,
+          "waitConfirmed": true,
+          "prompt": 1,
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "waiting",
+        "detail": "allow Edit?",
+        "sessionId": "s1"
+      },
+      "streak": 1
+    },
+    {
+      "step": 7,
+      "event": "PostToolUse",
+      "sessions": {
+        "s1": {
+          "state": "proud",
+          "detail": "saved login.js",
+          "answered": true,
+          "prompt": 1,
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "proud",
+        "detail": "saved login.js",
+        "sessionId": "s1"
+      },
+      "streak": 2
+    },
+    {
+      "step": 8,
+      "event": "Stop",
+      "sessions": {
+        "s1": {
+          "state": "idle",
+          "detail": "between turns",
+          "turnEnded": true,
+          "prompt": 1,
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "responding",
+        "detail": "wrapping up",
+        "sessionId": "s1",
+        "stopped": true
+      },
+      "streak": 2
+    }
+  ]
+}

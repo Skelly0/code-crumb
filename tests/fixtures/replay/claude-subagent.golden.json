@@ -1,0 +1,192 @@
+{
+  "fixture": "claude-subagent.jsonl",
+  "regenerate": "CRUMB_UPDATE_GOLDEN=1 node tests/run.js replay",
+  "steps": [
+    {
+      "step": 1,
+      "event": "PreToolUse",
+      "sessions": {
+        "s1": {
+          "state": "subagent",
+          "detail": "~~~~~~~~~~~~~~~~~~~~~~",
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "subagent",
+        "detail": "~~~~~~~~~~~~~~~~~~~~~~",
+        "sessionId": "s1"
+      },
+      "streak": 0
+    },
+    {
+      "step": 2,
+      "event": "SubagentStart",
+      "sessions": {
+        "s1-agent-a1": {
+          "state": "spawning",
+          "detail": "Explore",
+          "parentSession": "s1",
+          "editor": "claude"
+        },
+        "s1": {
+          "state": "subagent",
+          "detail": "conducting 1",
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "subagent",
+        "detail": "conducting 1",
+        "sessionId": "s1"
+      },
+      "streak": 0
+    },
+    {
+      "step": 3,
+      "event": "PreToolUse",
+      "sessions": {
+        "s1-agent-a1": {
+          "state": "searching",
+          "detail": "looking for \"function xLogin\"",
+          "parentSession": "s1",
+          "editor": "claude"
+        },
+        "s1": {
+          "state": "subagent",
+          "detail": "conducting 1",
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "subagent",
+        "detail": "conducting 1",
+        "sessionId": "s1"
+      },
+      "streak": 0
+    },
+    {
+      "step": 4,
+      "event": "PostToolUse",
+      "sessions": {
+        "s1-agent-a1": {
+          "state": "satisfied",
+          "detail": "found \"function xLogin\"",
+          "parentSession": "s1",
+          "editor": "claude"
+        },
+        "s1": {
+          "state": "subagent",
+          "detail": "conducting 1",
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "subagent",
+        "detail": "conducting 1",
+        "sessionId": "s1"
+      },
+      "streak": 1
+    },
+    {
+      "step": 5,
+      "event": "SubagentStop",
+      "sessions": {
+        "s1-agent-a1": {
+          "state": "happy",
+          "detail": "done",
+          "stopped": true,
+          "parentSession": "s1",
+          "editor": "claude"
+        },
+        "s1": {
+          "state": "happy",
+          "detail": "subagent done",
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "happy",
+        "detail": "subagent done",
+        "sessionId": "s1"
+      },
+      "streak": 1
+    },
+    {
+      "step": 6,
+      "event": "PostToolUse",
+      "sessions": {
+        "s1-agent-a1": {
+          "state": "happy",
+          "detail": "done",
+          "stopped": true,
+          "parentSession": "s1",
+          "editor": "claude"
+        },
+        "s1": {
+          "state": "happy",
+          "detail": "agent done",
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "happy",
+        "detail": "agent done",
+        "sessionId": "s1"
+      },
+      "streak": 2
+    },
+    {
+      "step": 7,
+      "event": "Stop",
+      "sessions": {
+        "s1-agent-a1": {
+          "state": "happy",
+          "detail": "done",
+          "stopped": true,
+          "parentSession": "s1",
+          "editor": "claude"
+        },
+        "s1": {
+          "state": "idle",
+          "detail": "between turns",
+          "turnEnded": true,
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "responding",
+        "detail": "wrapping up",
+        "sessionId": "s1",
+        "stopped": true
+      },
+      "streak": 2
+    },
+    {
+      "step": 8,
+      "event": "SessionEnd",
+      "sessions": {
+        "s1-agent-a1": {
+          "state": "happy",
+          "detail": "done",
+          "stopped": true,
+          "parentSession": "s1",
+          "editor": "claude"
+        },
+        "s1": {
+          "state": "responding",
+          "detail": "session ending",
+          "stopped": true,
+          "editor": "claude"
+        }
+      },
+      "global": {
+        "state": "responding",
+        "detail": "session ending",
+        "sessionId": "s1",
+        "stopped": true
+      },
+      "streak": 2
+    }
+  ]
+}

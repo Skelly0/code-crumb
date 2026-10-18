@@ -47,6 +47,7 @@ const TEST_MODULES = [
   './test-attention.js',
   './test-release.js',
   './test-lifecycle.js',
+  './test-replay.js',
 ];
 
 // The subprocess-heavy files, slowest first (serial times on win32, Oct
@@ -99,6 +100,9 @@ const DEVELOPER_VARS = [
   'CLAUDE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID',
   'CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS', 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
   'MINIMAL_BOOT', 'NO_COLOR', 'ENGMUX_PYTHON', 'PYTHON',
+  // A recording developer's CODE_CRUMB_RECORD_FILE would collect every
+  // test hook's payload into their real recording.
+  'CODE_CRUMB_RECORD', 'CODE_CRUMB_RECORD_FILE',
 ];
 function isolate() {
   const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-test-home-'));

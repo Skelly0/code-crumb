@@ -958,6 +958,8 @@ describe('release -- Review round 6: the runner and the harness', () => {
     CLAUDE_SESSION_ID: 'outer', CLAUDE_CODE_SESSION_ID: 'outer-cc',
     CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS: '1', CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
     MINIMAL_BOOT: '1', NO_COLOR: '1', ENGMUX_PYTHON: '/nowhere/python', PYTHON: '/nowhere/python',
+    // A recording developer's file would collect every test hook's payload.
+    CODE_CRUMB_RECORD: '1', CODE_CRUMB_RECORD_FILE: '/nowhere/record.jsonl',
   };
 
   test('no variable the code reads leaks from the developer\'s shell into a test file', () => {

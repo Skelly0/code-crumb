@@ -547,7 +547,16 @@ function main() {
     stdio: ['inherit', 'pipe', 'inherit'],
   });
 
-  processJsonlStream(codex.stdout, handleEvent);
+  // Payload recorder (lib/recorder.js): every ThreadEvent, the run's argv on
+  // the first. The env check first, so a disabled recorder is never loaded.
+  let recordArgv = args;
+  processJsonlStream(codex.stdout, (event) => {
+    if (process.env.CODE_CRUMB_RECORD) {
+      try { require('../lib/recorder').record({ source: 'codex-exec', editor: EDITOR, payload: event, argv: recordArgv }); } catch {}
+      recordArgv = undefined;
+    }
+    handleEvent(event);
+  });
 
   // A signal the wrapper caught, or SIGPIPE for a reader that went away.
   let caught = null;
