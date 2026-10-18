@@ -2,6 +2,86 @@
 
 Notable changes to Code Crumb. Dates are commit dates; issue and PR numbers refer to [Skelly0/code-crumb](https://github.com/Skelly0/code-crumb). The format is loosely [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased — review round 6
+
+Six reviewers read the hook handler, the classifier, the renderer and face, the orbital grid, the adapters, and setup/launch side by side with CLAUDE.md, and reproduced every finding with a script before it counted. About fifty bugs survived that check. Each fix below came with a regression test that failed against the old sources first. The suite went from 2728 to 2844 tests on Linux/macOS (2715 to 2824 on win32).
+
+**Plugin users:** as with 1.3.0, these fixes reach a cached plugin only once `package.json` and both plugin manifests carry a new version.
+
+### Fixed
+
+- **Reads piped through filters are reads.** `sort`, `uniq`, `cut`, `tr`, `nl`, `jq` and friends only read; `sed` and `awk` read unless they edit in place; `xargs` is whatever it runs. `grep -rn ENOENT lib | sort | head` used to count as masked (so even a trusted success had its matches scanned) and Codex's `sed -n '1,120p' x.js` had the file's content read as a failure.
+- **A test runner is a test run only as the command.** `npm i -D jest`, `pip install pytest` and `git add a.test.js` showed "testing" and finished "tests passed". Runners are now matched as the command word, through `npx`, `pnpm exec`, `yarn <bin>`, `python -m` or `xargs`; `playwright install` is not a test.
+- **turbo, nx and bazel are judged by their task.** `turbo test` and `nx run-many -t lint` finished as "build succeeded".
+- **`panic` is a crash only in a crash's own words.** cargo's passing `test x - should panic ... ok`, and every file named `panic.rs`, broke the streak for Codex and the adapters.
+- **Smaller classification fixes:** `grep -c` finding nothing answers "no matches"; `yarn --version` is not an install, nor is any path through `/opt/homebrew`; `git tag` with no tag lists; `git status && npm install` finishes as "installed", not "git done"; a commit counts under `git commit && git push`; a final newline is not an extra line in the "+N -M" estimate; two regexes that went quadratic on long lines are linear; a wrapped script quoted in pieces (shlex's `'it'"'"'s'`) or with escaped quotes is unquoted the way the shell reads it.
+- **An open prompt stays on the face until it is answered.** A background agent finishing ("subagent done") or a parallel tool's write while a permission dialog was open replaced the wait, and the face drifted to sleep with the question still on screen in the editor. The write now shows briefly and the prompt comes back. An allowed prompt still turns into its tool after 8 s, even when a parallel write carries the wait on. A renderer started on an open prompt shows it, and the 30-minute silence bound runs on the monotonic clock.
+- **Hook bookkeeping (update-state.js):**
+  - SessionEnd retires running agents exactly as SubagentStop does, so a late async PreToolUse cannot bring one back as a live orbital.
+  - An ended session stays ended through every echo: a background agent's SubagentStop after SessionEnd made the closed window a center candidate again.
+  - An agent's StopFailure no longer reopens its parent's finished turn.
+  - An agent's permission notification no longer re-confirms the parent's own prompt that was allowed long before; the parent stands in for the agent and goes back when it is answered.
+  - A >1 MB tool result (an MCP screenshot) no longer wipes an open prompt, and the allowed call's own huge result answers it, releasing a parent that was standing in for its agent.
+  - The global file keeps the turn's end through a between-turns wait, and a legacy subagent never takes it.
+- **Orbitals (grid.js):**
+  - On win32 a window's session file is kept for 30 minutes of silence instead of two, so a long tool cannot cost it its attention stamp. The adapters used to re-stamp the recreated file and hand that window the center.
+  - OpenCode task sessions no longer have invented reading/searching/coding painted over their real tool: only parent-written subagents, now marked `synthetic: true`, cycle.
+  - One unreadable read of a parent's file no longer drops and respawns its live children.
+  - `+N more` no longer draws over a ring face; labels follow the main session at once; a folder named `constructor` labels its face; the session list nests a task's own tasks.
+- **Adapters:**
+  - A failed OpenCode turn shows its error once. Every later text-only turn used to end on the old error.
+  - A context overflow, or OpenClaw's generic error, that opens a turn stamps attention.
+  - A late codex-notify write no longer revives a session codex-wrapper retired.
+  - engmux streams its output through instead of cutting it at 1 MB.
+  - codex-wrapper counts items reported only as `item.completed`, keeps an MCP `{message}` error's text, and retires on SIGHUP (engmux too).
+  - OpenCode child sessions keep their parents fresh on win32, and OpenCode edits get diff counts.
+- **Setup and doctor:**
+  - `setup.js codex-notify` could add a second top-level `notify` (an invalid config.toml) when a multi-line string or nested array held a line starting with `[`.
+  - Setup wrote through a symlinked `settings.json` by replacing the link with a plain file; it now writes the link's target.
+  - An event counts as installed only with exactly our command for that event (a `Stop` running `... Notification` was "installed"), and a command with `2>/dev/null || true` appended is ours to setup, uninstall and doctor alike.
+  - Setup reads a `settings.json` saved with a BOM, as doctor did.
+  - A moved clone's notify line is repaired.
+  - An OpenCode JSONC install no longer lands inside a block comment.
+  - `node setup.js codex uninstall` is an error rather than an install.
+  - doctor warns when no Linux terminal is available for autolaunch.
+- **Locks dated in the future** (a clock stepped back) are stale, so autolaunch is not blocked until the clock catches up.
+- **Labelled agent ids no longer collide.** `safeFilename` cut names at 64 characters, so a session's agents with the same label (`a<label>-<hex>`) shared one orbital file; long names now end in a hash.
+- **Renderer:**
+  - An editor closed while the face said "waiting for you" no longer gets a fake "wrapping up → done!".
+  - `h` no longer opens an invisible help overlay in a tiny window.
+  - Application-mode arrows move through the session list.
+  - The watcher re-opens after the sessions folder is deleted and recreated on Linux.
+  - A wait queued behind "wrapping up" is not wiped by the timeout cascade.
+- **Display width:** the coloured circles and squares (🟢), mahjong, cards and enclosed ideographs are two columns; zero-width spaces and joiners, and decomposed Hangul (macOS folder names), measure as drawn.
+- **`launch.js --editor=codex`** is understood; `code-crumb.sh` works with an exported `CDPATH`.
+
+### Internals and tests
+
+- The test runner unsets the developer's Code Crumb and Claude Code variables (`npm test` inside Claude Code inherits `CLAUDE_CODE_SESSION_ID`), and a hook killed by its timeout now fails a test instead of passing it.
+- New residuals, each checked or explicitly unverified, are listed under Known Follow-ups in CLAUDE.md.
+
+### After the fixes: one lifecycle, one carry, recordings and fuzzing
+
+Most of the round's bugs came in families, so the follow-up work went after the families rather than their members. The suite grew to 2936 tests on Linux/macOS (2915 on win32).
+
+- **One permission-wait lifecycle (`lib/wait.js`).** The hook, the renderer, the orbitals and tmux mode each kept their own copy of a prompt's rules, with its own idea of when a prompt was asked, confirmed, allowed or answered. They are now one pure module under one diagram. `waitPhase(write, now)` names the phase (`none`, `open`, `asked`, `confirmed`, `allowed`), `carryWait` decides what a write keeps, and the parent standing in for an asking agent is `notificationWait`/`releaseStandIn`. No behaviour changed.
+- **One session-file carry (`lib/carry.js`).** The hook's main path and its >1 MB fallback each kept their own copy of "what does this write keep from the file before it", and that is where the round's tombstone and wait drift came from. Both now write through `nextSessionFile(prev, w)`, and decide the global `stopped` with `stopsGlobal`. On a session file `stopped` is a tombstone: only SessionEnd writes it, every echo keeps it, and only the session starting again clears it. test-lifecycle drives both paths with the same events and compares what they keep. Against the hook before this round, two of its permission-wait scenarios fail: the drift the reviewers found by hand.
+- **Payload recording (`CODE_CRUMB_RECORD=1`).** The hooks, adapters and codex-wrapper can append every payload they receive to `~/.code-crumb-record/<day>.jsonl`, for bug reports and test fixtures.
+  - The default mode anonymises. Ids become keyed pseudonyms, commands and paths keep their shape (`git commit -m "fix acme login"` is kept as `git commit -m "x x login"`), IPv4 addresses become `x.x.x.x`, and all other text becomes its length and line count. `full` keeps payloads raw.
+  - `tests/fixtures/replay` holds six replays (a Claude Code turn, permission prompt and subagent; a Codex interrupt and `codex exec` run; an OpenCode turn), driven through the real hooks, adapters and wrapper against goldens. `import-recording.js` turns a recording into one.
+  - A disabled recorder costs one environment read. README: "Recording payloads for a bug report".
+- **Invariant fuzzing of the shell classifier.** A seeded generator builds commands and checks rules that must hold for any of them: an argument never decides what a command is, a read piped through a filter is still a read, a wrapper changes nothing, a trusted success stays a success, and every check is linear. It found:
+  - Redirects read as words: `make 2>&1` finished as `make 2>&1 done` instead of a build, and `git tag 2>/dev/null` (a listing) showed `committing`.
+  - A task runner named anywhere after a runner counted: `npx jest bazel` (a test folder) was a bazel call, so no test run at all.
+  - `python` inside a path (`cp ml/python/train.py out/`) or a word (`mv python-train x`) launched `training`.
+  - A word `git` made a git step: `cat git | cut -f1` finished `git done`.
+  - Three quadratic scans: a run of `xargs` (3,000 took 1.9 s and a few thousand more overflowed the stack), escaped quotes in an unclosed string (40,000 took 5 s), and the `cd` check over a run of newlines (40,000 took 2.2 s). Each is now linear.
+  - Two argument words could spell a command: `cp go test` was a test run and `mv go get x` an install, because the npm/go/pip/brew phrase tables matched anywhere in a segment. They were there to reach past wrappers (`xvfb-run npm test`, `docker exec api npm test`), so the fix is a wrapper table. Every table now judges the command a wrapper runs, past `sudo`, `env`, `timeout`, `nice`, `xvfb-run`, `nohup`, `xargs`, `uv`/`poetry`/`conda run`, `srun`/`mpirun`, and the containers, pods and hosts of `docker`/`podman` `exec`/`run`, `docker compose`, `kubectl exec --` and `ssh`. The phrases became each manager's own subcommand, found past its flags. So `timeout 60 git push` is now a push, `sudo -E npm install` an install, `uv run pytest` and `pnpm -r test` test runs, and `docker exec api cat x` a read. The same fuzz property caught the training rule doing the same (`touch accelerate python-train`), so a launcher must now be the command too.
+  - A numeric `exitCode: 0` did not stop an exit code being read from the output: a build that printed `Exit code 1` and exited 0 was an error for Codex and OpenCode. The host's own code now wins, unless the command line can mask a failure (`make | tee log` exits with tee's 0).
+  - `find -delete` and `find -exec rm {} \;` were reads, so their failures were never looked for. find now acts when it deletes, writes a file, or runs a command that acts; `-exec grep` still reads. The escaped `\;` itself split the command in two, leaving a phantom `-print` segment: an unquoted `\;`, `\|` or `\&` is now a word, as bash reads it.
+- **A huge tool result ends on its own success face.** A result over 1 MB (a long build log, an MCP screenshot) is judged from its raw text, and with no error in it fell through to `thinking` / `large input`. It now gets its tool's success face, from the tool's input when that survived the cut (`tests passed`, `read big.log`, `playwright done`), on the hook and adapter paths alike. Claude Code's huge PostToolUse is also trusted as the main path trusts it, so a passing run's output is no longer searched for failure words unless the command can mask one. Found by the recorder: the `claude-turn` replay's golden changed with it.
+- **The OpenCode plugin keeps a busy session in order.** Its chain timer started when a child was spawned. When the plugin's own event loop was held (a burst of synchronous turn ends), the child got its input late, the timer had already run out, and the next batch overtook it. The wait now counts from when the child has its input, and extends only once, so a hung child still lets go within 6 s. This was also the cause of the plugin ordering test's rare failure.
+
 ## 1.3.0 — 2026-10-15
 
 This release is review round 5 plus everything merged since 1.2.0 (listed under "Also in 1.3.0" below).

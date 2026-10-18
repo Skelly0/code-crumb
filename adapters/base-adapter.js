@@ -69,6 +69,15 @@ function writeState(state, detail = '', extra = {}) {
   try { writeJsonAtomic(STATE_FILE, data, 0o600); } catch {}
 }
 
+// Refresh one session file's mtime without rewriting it: the family
+// heartbeat (update-state.js has the same one for Claude Code's agents).
+function touchSessionFile(sessionId) {
+  try {
+    const now = new Date();
+    fs.utimesSync(path.join(SESSIONS_DIR, safeFilename(sessionId) + '.json'), now, now);
+  } catch {}
+}
+
 function writeSessionState(sessionId, state, detail = '', stopped = false, extra = {}) {
   try {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
@@ -320,7 +329,7 @@ function handleToolEnd(stats, toolName, toolInput, toolResponse, isError) {
   const result = classifyToolResult(toolName, toolInput, toolResponse, isError);
   if (!(toolResponse && toolResponse.interrupted) && !result.neutral) updateStreak(stats, result.state === 'error');
   // Same rule as update-state.js: a commit counts for this session.
-  if (result.state === 'proud' && result.detail === 'committed') {
+  if (result.committed) {
     stats.session.commitCount = (stats.session.commitCount || 0) + 1;
   }
   return result;
@@ -477,12 +486,18 @@ function processJsonlStream(stream, handler) {
 // `turnError` (a detail string, in extra) marks a turn that ENDED in failure.
 // The editor's ordinary turn end can follow it -- OpenCode publishes
 // session.idle right after a session.error -- and that one keeps the error
-// face, the way a Stop after StopFailure would, instead of "all done!".
+// face, the way a Stop after StopFailure would, instead of "all done!". Only
+// that one: it does not pass turnError on.
 
 function runStdinAdapter(options) {
   const { defaultModel, defaultEditor, normaliseEvent, mapEvent } = options;
 
   processStdinEvent((data) => {
+    // Payload recorder (lib/recorder.js), one record per batch element; the
+    // env check first, so a disabled recorder is never even loaded.
+    if (process.env.CODE_CRUMB_RECORD) {
+      try { require('../lib/recorder').record({ source: defaultEditor, editor: defaultEditor, payload: data }); } catch {}
+    }
     const norm = normaliseEvent(data);
     if (!norm || norm.skip) return;
     const event = norm.event || '';
@@ -546,7 +561,12 @@ function runStdinAdapter(options) {
       // and a grandchild pointing at its direct parent made that child the
       // stats owner -- counted as a session of its own, the root credited
       // and its time counted twice.
+      // Every ancestor's file is touched on the way up: a parent waiting on
+      // its task tool writes nothing, and on win32 (no pid) it went stale at
+      // 90s -- leaving the center, and taking its silent children with it,
+      // since a child lives on its parent's freshness.
       let statsId = parentSession || sessionId;
+      if (parentSession) touchSessionFile(parentSession);
       for (let depth = 0; parentSession && depth < 4; depth++) {
         let up = '';
         try {
@@ -555,6 +575,7 @@ function runStdinAdapter(options) {
         } catch {}
         if (!up || up === statsId || up === sessionId) break;
         statsId = up;
+        touchSessionFile(up);
       }
 
       // Delivery order. The OpenCode plugin numbers every payload (`seq`, per
@@ -578,28 +599,16 @@ function runStdinAdapter(options) {
       extra.sessionId = sessionId;
       if (parentSession) extra.parentSession = parentSession;
 
-      // Attention stamp for the renderer's main-face policy: the first event
-      // of a session, or the first after a turn end, starts a new turn and
-      // stamps now; anything else carries the old stamp forward.
       // The session file is the only memory an adapter has, and a plugin that
       // restarts holds no model until its next message: carry it forward.
       if (prevSession && prevSession.model && !extra.model) extra.model = prevSession.model;
-      const endsTurn = event === 'turn_end' || event === 'Stop' || event === 'session_end' || event === 'error';
       // A tool end can straggle in after the turn (or session) it belongs to
       // has ended. It is not a new turn: it must neither re-stamp attention
       // (that stole the center for a session the user had finished with) nor
       // erase the turn end. update-state.js treats a late PostToolUse the same.
       const isToolEnd = event === 'tool_end' || event === 'PostToolUse';
       const lateToolEnd = isToolEnd && !!prevSession && !!(prevSession.stopped || prevSession.turnEnded);
-      // A live file with no stamp self-heals rather than staying blind for the
-      // whole turn: an `error` can be the first event a session ever writes,
-      // and an upgrade can land mid-turn over a pre-feature session file.
-      if (!endsTurn && !lateToolEnd && !parentSession &&
-          (!prevSession || prevSession.stopped || prevSession.turnEnded || !prevSession.lastPromptAt)) {
-        extra.lastPromptAt = Date.now();
-      } else if (prevSession && prevSession.lastPromptAt) {
-        extra.lastPromptAt = prevSession.lastPromptAt;
-      }
+      const isTurnEnd = event === 'turn_end' || event === 'Stop';
 
       let state = 'thinking';
       let detail = '';
@@ -612,7 +621,7 @@ function runStdinAdapter(options) {
 
       // The turn already ended in failure (see turnError above): its own turn
       // end keeps that face, and the failure is not counted a second time.
-      const failedTurnEnd = (event === 'turn_end' || event === 'Stop')
+      const failedTurnEnd = isTurnEnd
         && !!prevSession && typeof prevSession.turnError === 'string' && !!prevSession.turnError
         && !!(prevSession.turnEnded || prevSession.stopped);
 
@@ -620,7 +629,6 @@ function runStdinAdapter(options) {
         state = 'error';
         detail = prevSession.turnError;
         stopped = true;
-        extra.turnError = prevSession.turnError;
       }
       else if (custom) {
         state = custom.state || state;
@@ -661,6 +669,28 @@ function runStdinAdapter(options) {
       else if (event === 'waiting' || event === 'Notification') {
         state = 'waiting';
         detail = 'needs attention';
+      }
+
+      // A turn end shows a failed turn once and never passes turnError on. A
+      // text-only turn reaches the adapter as its session.idle alone, and an
+      // idle that carried turnError ended every later turn on the old error.
+      if (isTurnEnd) delete extra.turnError;
+
+      // Attention stamp for the renderer's main-face policy: the first event
+      // of a session, or the first after a turn end, starts a new turn and
+      // stamps now; anything else carries the old stamp forward. A turn end
+      // is what the event turned out to be, not its name: an `error` that
+      // does not stop (a context overflow being compacted, OpenClaw's
+      // generic error) is the next turn under way, and counting it a turn
+      // end cleared turnEnded while that turn kept the old stamp.
+      // A live file with no stamp self-heals rather than staying blind for the
+      // whole turn: an `error` can be the first event a session ever writes,
+      // and an upgrade can land mid-turn over a pre-feature session file.
+      if (!stopped && !lateToolEnd && !parentSession &&
+          (!prevSession || prevSession.stopped || prevSession.turnEnded || !prevSession.lastPromptAt)) {
+        extra.lastPromptAt = Date.now();
+      } else if (prevSession && prevSession.lastPromptAt) {
+        extra.lastPromptAt = prevSession.lastPromptAt;
       }
 
       // Update extra with latest counters
@@ -711,6 +741,13 @@ function runStdinAdapter(options) {
       if (releaseStats) releaseStats();
     }
   }, (err, trunc) => {
+    // Payload recorder: stdin as received; a marker of its ids when oversized.
+    if (process.env.CODE_CRUMB_RECORD) {
+      try {
+        require('../lib/recorder').record({ source: defaultEditor, editor: defaultEditor,
+          raw: (trunc && typeof trunc.raw === 'string') ? trunc.raw : '', truncated: !err && !!trunc });
+      } catch {}
+    }
     // Fallback on unparseable or oversized stdin -- still this session's
     // event, so it goes through the ownership guard, under the payload's own
     // id when a truncated one still names it, else the same editor-prefixed
@@ -759,6 +796,12 @@ function runStdinAdapter(options) {
       'brokenStreak', 'brokenStreakAt', 'dailySessions', 'dailyCumulativeMs', 'frequentFiles']) {
       if (prev && prev[k] !== undefined && prev[k] !== null) extra[k] = prev[k];
     }
+    // A payload that opens the next turn stamps attention, as on the main
+    // path: a big Write starting a turn carried the finished turn's stamp
+    // onto a live write, and the rest of that turn kept it.
+    const ended = !!(prev && (prev.stopped || prev.turnEnded || prev.turnOver));
+    const turnEnd = kind === 'turn_end' || kind === 'Stop' || kind === 'session_end';
+    if (ended && !toolEnd && !turnEnd && !extra.parentSession) extra.lastPromptAt = Date.now();
     if (!extra.parentSession) {
       guardedWriteState(sessionId, shown.state, shown.detail, { ...extra }, { toolEnd });
     }

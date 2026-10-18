@@ -1,0 +1,8 @@
+{"v":1,"kind":"header","synthetic":true,"note":"built from documented 2.1.300 shapes","scenario":"codex exec --json via codex-wrapper.js: a command, a file_change seen only as item.completed, turn.completed"}
+{"v":1,"at":0,"source":"codex-exec","editor":"codex","event":"thread.started","mode":"shape","argv":["-m","gpt-5.1-codex","<text len~19 lines=1>"],"payload":{"type":"thread.started","thread_id":"s1"}}
+{"v":1,"at":700,"source":"codex-exec","editor":"codex","event":"turn.started","mode":"shape","payload":{"type":"turn.started"}}
+{"v":1,"at":1400,"source":"codex-exec","editor":"codex","event":"item.started","mode":"shape","payload":{"type":"item.started","item":{"id":"i1","type":"command_execution","command":"bash -lc 'npm test'","aggregated_output":"","exit_code":null,"status":"in_progress"}}}
+{"v":1,"at":2100,"source":"codex-exec","editor":"codex","event":"item.completed","mode":"shape","payload":{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"bash -lc 'npm test'","aggregated_output":"<text len~19 lines=2 eol>","exit_code":0,"status":"completed"}}}
+{"v":1,"at":2800,"source":"codex-exec","editor":"codex","event":"item.completed","mode":"shape","payload":{"type":"item.completed","item":{"id":"i2","type":"file_change","changes":[{"path":"/home/x/x/src/login.js","kind":"update"}],"status":"completed"}}}
+{"v":1,"at":3500,"source":"codex-exec","editor":"codex","event":"item.completed","mode":"shape","payload":{"type":"item.completed","item":{"id":"i3","type":"agent_message","text":"<text len~38 lines=1>"}}}
+{"v":1,"at":4200,"source":"codex-exec","editor":"codex","event":"turn.completed","mode":"shape","payload":{"type":"turn.completed","usage":{"input_tokens":12000,"cached_input_tokens":4000,"output_tokens":800}}}

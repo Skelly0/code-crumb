@@ -165,20 +165,25 @@ const CODEX_WRAPPER = path.join(__dirname, '..', 'adapters', 'codex-wrapper.js')
 //
 // update-state.js ends with process.exit(0), which execFileSync can still
 // surface as an error on some platforms, so by default only a real non-zero
-// status fails. `strict` rethrows every error, with the hook's stderr.
-function runUpdateState(event, input, env, { args = [], strict = false } = {}) {
+// status fails -- or a signal: the hook was killed (by `timeout`, most
+// likely), and a hung hook used to count as a pass. `strict` rethrows every
+// error, with the hook's stderr.
+function runUpdateState(event, input, env, { args = [], strict = false, timeout = 10000 } = {}) {
   const argv = [UPDATE_STATE, ...(event ? [event] : []), ...args];
   try {
     execFileSync(NODE, argv, {
       input: typeof input === 'string' ? input : JSON.stringify(input),
       env,
-      timeout: 10000,
+      timeout,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch (e) {
     if (strict) {
       const stderr = e.stderr ? e.stderr.toString() : '';
       throw new Error(`update-state.js ${argv.slice(1).join(' ')} failed: ${stderr || e.message}`);
+    }
+    if (e.status === null && e.signal) {
+      throw new Error(`update-state.js ${argv.slice(1).join(' ')} was killed (${e.signal}) -- did it hang past ${timeout}ms?`);
     }
     if (e.status !== 0 && e.status !== null) throw e;
   }
@@ -229,6 +234,8 @@ function runFakeCodex(events, seedStats, args = []) {
       env, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch (e) {
+    // As in runUpdateState: a signal is a wrapper the timeout killed.
+    if (e.status === null && e.signal) throw new Error(`codex-wrapper was killed (${e.signal})`);
     if (e.status !== 0 && e.status !== null) throw e;
   }
   return base;

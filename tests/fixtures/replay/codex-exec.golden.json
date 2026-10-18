@@ -1,0 +1,27 @@
+{
+  "fixture": "codex-exec.jsonl",
+  "regenerate": "CRUMB_UPDATE_GOLDEN=1 node tests/run.js replay",
+  "steps": [
+    {
+      "step": 7,
+      "event": "codex exec (whole run)",
+      "sessions": {
+        "s1": {
+          "state": "responding",
+          "detail": "wrapping up",
+          "stopped": true,
+          "prompt": 1,
+          "editor": "codex",
+          "model": "gpt-5.1-codex"
+        }
+      },
+      "global": {
+        "state": "responding",
+        "detail": "wrapping up",
+        "sessionId": "s1",
+        "stopped": true
+      },
+      "streak": 2
+    }
+  ]
+}

@@ -871,12 +871,14 @@ describe('emotions -- the write clock behind the waiting bound', () => {
     // sneak past, and so a comparison (`==`/`===`) is not miscounted.
     // The one other site is _executeSwap seeding the clock from the adopted
     // write's own JSON timestamp -- the write's age, not a read marker.
+    // (Round 6: the clock is monotonic, so "none yet" is null -- that clock
+    // can read 0 -- and the seed carries the write's age onto it.)
     const assignments = src.match(/lastNewWriteAt\s*=[^=]/g) || [];
     assert.strictEqual(assignments.length, 4,
       'lastNewWriteAt: declaration, the adoptMain reset, noteNewWrite, and the swap seed');
-    const resets = src.match(/lastNewWriteAt\s*=\s*0\s*;/g) || [];
+    const resets = src.match(/lastNewWriteAt\s*=\s*null\s*;/g) || [];
     assert.strictEqual(resets.length, 2, 'the declaration and the adoptMain reset');
-    const seeds = src.match(/lastNewWriteAt\s*=\s*ts\s*;/g) || [];
+    const seeds = src.match(/lastNewWriteAt\s*=\s*ts <= wallNow \? monoNow\(\) - \(wallNow - ts\)/g) || [];
     assert.strictEqual(seeds.length, 1, 'the swap seeds from the write timestamp');
     assert.strictEqual(assignments.length - resets.length - seeds.length, 1,
       'only noteNewWrite may move the write clock forward');
@@ -983,7 +985,8 @@ describe('emotions -- a dead editor stays dead after the center moves away', () 
   // Source lint: the tracker lives inside runUnifiedMode's closure, which the
   // suite cannot drive without spawning a TTY renderer.
   test('source: death detection records the session, and a newer write clears it', () => {
-    assert.ok(/if \(!isProcessAlive\(lastEditorPid\)\) markMainDead\(\);/.test(RENDERER_SRC));
+    // (Round 6 gates the inner test on the turn not being over: `!(...) && `.)
+    assert.ok(/!isProcessAlive\(lastEditorPid\)\) markMainDead\(\);/.test(RENDERER_SRC));
     assert.ok(/deadSessions\.set\(mainSessionId, lastAppliedTimestamp\)/.test(RENDERER_SRC));
     assert.ok(/policySessions\(orbital\.faces\.values\(\),/.test(RENDERER_SRC));
   });
@@ -1227,6 +1230,11 @@ function r5Runtime({ granularity = 0 } = {}) {
       mono = end;
     },
     titles() { return writes.join('').match(/\u001b\]0;[^\u0007]*\u0007/g) || []; },
+    // Hand the real clocks back while a test awaits something real (a child
+    // process exiting) -- every later test in the file runs meanwhile, and
+    // fakes and restores the clocks itself -- then take them again.
+    suspend() { Date.now = realNow; face._setClock(null); },
+    resume() { Date.now = () => wall; face._setClock(() => mono); },
     done() {
       try { rt.dispose(); } catch {}
       Date.now = realNow;
@@ -1251,9 +1259,13 @@ describe('review round 5 -- one self-healing watcher on the sessions folder', ()
   const STORM = '\\\\?\\C:\\Users\\me\\.code-crumb-sessions';
 
   function fakeFs() {
-    const st = { present: true, blocked: false, mkdirs: 0, handles: [], timers: [] };
+    const st = { present: true, blocked: false, mkdirs: 0, handles: [], timers: [], ino: 1 };
     st.exists = () => st.present;
-    st.mkdir = () => { st.mkdirs++; st.present = true; };
+    st.mkdir = () => { st.mkdirs++; st.present = true; st.ino++; };
+    st.stat = () => {
+      if (!st.present) { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; }
+      return { dev: 7, ino: st.ino };
+    };
     st.watch = (dir, cb) => {
       if (st.blocked || !st.present) { const e = new Error('EPERM'); e.code = 'EPERM'; throw e; }
       const w = {
@@ -1273,7 +1285,7 @@ describe('review round 5 -- one self-healing watcher on the sessions folder', ()
   function make(st) {
     const out = { events: [], reopened: 0 };
     out.w = createDirWatcher({
-      dir: '/s', exists: st.exists, mkdir: st.mkdir, watch: st.watch,
+      dir: '/s', exists: st.exists, mkdir: st.mkdir, watch: st.watch, stat: st.stat,
       schedule: st.schedule, cancel: st.cancel,
       onEvent: (e, f) => out.events.push([e, f]), onReopen: () => { out.reopened++; },
     });
@@ -2071,6 +2083,402 @@ describe('review round 5 -- frames on deadlines, and a resting face at low power
         assert.strictEqual(next.length, 1, label);
         assert.strictEqual(next[0].due, h.mono, `${label} draws the next frame now`);
       }
+    } finally { h.done(); }
+  });
+});
+
+// -- Review round 6 (renderer) ------------------------------------------------
+// Each test below was run against the pre-fix sources first and failed there.
+
+// A write the renderer can tell from the last one by its mtime. These tests
+// write faster than the filesystem's timestamp tick (a jiffy on Linux), and a
+// file rewritten inside one keeps its mtime -- the change is then seen only
+// by the next forced read, up to 2s later.
+function r6Write(h, id, data) {
+  h.write(id, data);
+  const t = new Date(h.wall);
+  fs.utimesSync(h.file(id), t, t);
+}
+
+// The loop's state poll, coarsely: whole seconds of face time, then a read.
+// (31 minutes of real frames would be ~28,000 renders.)
+function r6Tick(h, ms) {
+  for (let t = 0; t < ms; t += 1000) {
+    h.advance(1000);
+    h.rt.face.update(1000);
+    h.rt.checkState();
+  }
+}
+
+describe('review round 6 -- an open prompt stays on the face until it is answered', () => {
+  const PROMPT = { waitingOn: 'Bash:abc', waitKind: 'permission', permState: 'testing', permDetail: 'npm test' };
+  function say(h, data) {
+    r6Write(h, 'S', data);
+    h.event('S.json');
+  }
+
+  test('a background agent finishing while the prompt is open: the reward shows, then the prompt again', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'thinking', detail: 'reading your message' });
+      h.rt.loop();
+      h.runFor(2000);
+      say(h, { state: 'waiting', detail: 'allow Bash?', ...PROMPT, waitConfirmed: false });
+      h.runFor(6000);
+      say(h, { state: 'waiting', detail: 'allow Bash?', ...PROMPT, waitConfirmed: true });
+      h.runFor(1000);
+      assert.strictEqual(h.rt.face.state, 'waiting', 'precondition: a confirmed prompt');
+      // SubagentStop: update-state keeps the wait fields on the write.
+      say(h, { state: 'happy', detail: 'subagent done', ...PROMPT, waitConfirmed: true });
+      assert.strictEqual(h.rt.face.state, 'happy', 'the reward may show');
+      h.runFor(3000);
+      assert.strictEqual(h.rt.face.state, 'waiting', 'the face decayed instead of asking again');
+      assert.strictEqual(h.rt.face.stateDetail, 'allow Bash?', 'with the prompt\u2019s own detail');
+      h.writes.length = 0;
+      h.runFor(60000);
+      assert.strictEqual(h.rt.face.state, 'waiting', 'held while unanswered');
+      assert.strictEqual(h.rt.face.waitEscalated(), true);
+      assert.ok(h.titles().some(t => t.includes('WAITING FOR YOU')), 'the title flashes');
+      // The answer ends it for good.
+      say(h, { state: 'relieved', detail: 'tests passed', answered: true });
+      assert.strictEqual(h.rt.face.state, 'relieved');
+      let asked = false;
+      for (let i = 0; i < 40; i++) { h.runFor(500); if (h.rt.face.state === 'waiting') asked = true; }
+      assert.ok(!asked, 'an answered prompt never comes back');
+    } finally { h.done(); }
+  });
+
+  test('another editor: a parallel tool\u2019s write over the prompt does not end it', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'thinking', detail: 'x', editor: 'codex' });
+      h.rt.loop();
+      h.runFor(2000);
+      say(h, { state: 'waiting', detail: 'allow Bash?', waitingOn: 'k1', editor: 'codex' });
+      h.runFor(2000);
+      say(h, { state: 'satisfied', detail: 'read a.js', waitingOn: 'k1', editor: 'codex' });
+      h.runFor(5000);
+      assert.strictEqual(h.rt.face.state, 'waiting');
+      assert.strictEqual(h.rt.face.stateDetail, 'allow Bash?');
+      h.runFor(40000);
+      assert.strictEqual(h.rt.face.state, 'waiting');
+      assert.strictEqual(h.rt.face.waitEscalated(), true);
+    } finally { h.done(); }
+  });
+
+  test('an allowed prompt still turns into its tool when a parallel write carries the wait on', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'testing', detail: 'npm test' });
+      h.rt.loop();
+      h.runFor(1500);
+      say(h, { state: 'waiting', detail: 'allow Bash?', ...PROMPT, waitConfirmed: false });
+      h.runFor(3000);
+      say(h, { state: 'satisfied', detail: 'read a.js', ...PROMPT, waitConfirmed: false });
+      h.runFor(6000);
+      assert.strictEqual(h.rt.face.state, 'testing', 'unconfirmed 8s on: allowed, and running');
+      assert.strictEqual(h.rt.face.stateDetail, 'npm test');
+      h.writes.length = 0;
+      h.runFor(60000);
+      assert.strictEqual(h.rt.face.state, 'testing', 'the long-tool hold keeps it');
+      assert.ok(!h.titles().some(t => t.includes('WAITING FOR YOU')), 'the title never shouted');
+    } finally { h.done(); }
+  });
+});
+
+describe('review round 6 -- an editor that dies between turns is never given a "done!"', () => {
+  const { spawn } = require('child_process');
+
+  test('a wait after the turn (turnOver) stays a wait when the armed editor goes away', () => {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    const pid = child.pid;
+    const h = r5Runtime();
+    const settle = () => {
+      h.done();
+      grid._pidStartCache.delete(pid);
+      try { child.kill('SIGKILL'); } catch {}
+    };
+    try {
+      // The editor started before any of its writes, so its pid arms.
+      grid._pidStartCache.set(pid, { value: h.wall - 60000, resolvedAt: h.wall });
+      r5Session(h, { state: 'coding', detail: 'edit a.js', pid });
+      h.advance(2600);
+      h.rt.checkState();
+      r6Write(h, 'S', { state: 'idle', detail: 'between turns', turnEnded: true, pid });
+      r6Tick(h, 20000);
+      // The idle_prompt notification after Stop: waiting, with turnOver.
+      r6Write(h, 'S', { state: 'waiting', detail: 'waiting for you', turnOver: true, pid });
+      r6Tick(h, 3000);
+      assert.strictEqual(h.rt.face.state, 'waiting', 'precondition');
+      h.suspend();
+    } catch (e) { settle(); throw e; }
+    return new Promise((resolve) => { child.once('exit', resolve); child.kill('SIGKILL'); })
+      .then(() => {
+        h.resume();
+        r6Tick(h, 4000);
+        assert.strictEqual(h.rt.trackers().editorDead, false, 'turnOver is never rescued');
+        assert.strictEqual(h.rt.face.state, 'waiting');
+        assert.strictEqual(h.rt.face.stateDetail, 'waiting for you');
+        // Control: the same dead pid during a live turn is still caught.
+        r6Write(h, 'S', { state: 'coding', detail: 'edit b.js', pid });
+        r6Tick(h, 3000);
+        assert.strictEqual(h.rt.trackers().editorDead, true, 'the pid was armed all along');
+      })
+      .finally(settle);
+  });
+});
+
+describe('review round 6 -- a renderer started on an open prompt shows it', () => {
+  const { startupGate } = renderer;
+  const START = 10000000;
+  // [label, ts, stopped, now, waiting, expected]
+  const table = [
+    ['a live wait 20s older than boot applies', START - 20000, false, START + 1000, true, 'apply'],
+    ['so does one 29 minutes older', START - WAIT_HOLD_STALE_MS + 60000, false, START + 1000, true, 'apply'],
+    ['one past the silence bound is recorded', START - WAIT_HOLD_STALE_MS - 2000, false, START + 1000, true, 'record'],
+    ['a wait on a finished turn is still recorded', START - 20000, true, START + 1000, true, 'record'],
+    ['any other live write 20s older is still recorded', START - 20000, false, START + 1000, false, 'record'],
+    ['after the window, an open wait is not skipped', START - 180000, false, START + 7000, true, 'apply'],
+    ['after the window, anything else that old still is', START - 180000, false, START + 7000, false, 'skip'],
+  ];
+  for (const [label, ts, stopped, now, waiting, expected] of table) {
+    test(label, () => assert.strictEqual(startupGate(ts, stopped, now, START, now - START, waiting), expected));
+  }
+
+  test('the runtime: the prompt is shown at boot and held', () => {
+    const h = r5Runtime();
+    try {
+      h.write('S', { state: 'waiting', detail: 'allow Bash?', waitingOn: 'k1', editor: 'codex',
+        timestamp: h.wall - 20000, lastPromptAt: h.wall - 25000 });
+      h.load();
+      h.rt.checkState();
+      assert.strictEqual(h.rt.mainSession(), 'S');
+      h.rt.loop();
+      h.runFor(2000);
+      assert.strictEqual(h.rt.face.state, 'waiting', 'recorded at boot and never shown');
+      assert.strictEqual(h.rt.face.stateDetail, 'allow Bash?');
+      h.runFor(70000);
+      assert.strictEqual(h.rt.face.state, 'waiting');
+    } finally { h.done(); }
+  });
+
+  test('the runtime: its silence bound counts from the write, not from the boot', () => {
+    const h = r5Runtime();
+    try {
+      h.write('S', { state: 'waiting', detail: 'allow Bash?', waitingOn: 'k1', editor: 'codex',
+        timestamp: h.wall - (WAIT_HOLD_STALE_MS - 60000), lastPromptAt: h.wall - WAIT_HOLD_STALE_MS });
+      h.load();
+      h.rt.checkState();
+      r6Tick(h, 2000);
+      assert.strictEqual(h.rt.face.state, 'waiting', 'shown at boot');
+      r6Tick(h, 90000);
+      assert.notStrictEqual(h.rt.face.state, 'waiting', '30 minutes after the write, not after the boot');
+    } finally { h.done(); }
+  });
+});
+
+describe('review round 6 -- the help overlay opens only where it can be drawn', () => {
+  function withSize(cols, rows, fn) {
+    const oc = process.stdout.columns;
+    const or = process.stdout.rows;
+    process.stdout.columns = cols;
+    process.stdout.rows = rows;
+    try { return fn(); } finally { process.stdout.columns = oc; process.stdout.rows = or; }
+  }
+
+  test('below the face minimum `h` does nothing, so the next key is not swallowed', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'idle', detail: '' });
+      withSize(36, 18, () => {
+        const stats = h.rt.face.showStats;
+        h.rt.onKeys('h');
+        assert.strictEqual(h.rt.face.showHelp, false, 'open, and drawn nowhere');
+        h.rt.onKeys('?');
+        assert.strictEqual(h.rt.face.showHelp, false);
+        h.rt.onKeys('s');
+        assert.notStrictEqual(h.rt.face.showStats, stats, '`s` was eaten closing an invisible overlay');
+        h.rt.onKeys('s');
+      });
+      withSize(38, 20, () => {
+        h.rt.onKeys('h');
+        assert.strictEqual(h.rt.face.showHelp, true, 'at the minimum it opens');
+        assert.ok(h.rt.face.render().includes('Keybindings'), 'and is drawn');
+        h.rt.onKeys('x');
+      });
+    } finally { h.done(); }
+  });
+
+  test('a shrink below the minimum closes it (and the face may rest again)', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'idle', detail: '' });
+      withSize(100, 40, () => h.rt.onKeys('h'));
+      assert.strictEqual(h.rt.face.showHelp, true);
+      withSize(36, 18, () => h.rt.onResize());
+      assert.strictEqual(h.rt.face.showHelp, false, 'left open and invisible');
+    } finally { h.done(); }
+  });
+});
+
+describe('review round 6 -- application-mode (SS3) arrows move through the session list', () => {
+  test('ESC O B / ESC O A navigate instead of closing the list', () => {
+    const oc = process.stdout.columns;
+    const or = process.stdout.rows;
+    process.stdout.columns = 100;
+    process.stdout.rows = 40;
+    const h = r5Runtime();
+    try {
+      h.advance(6000);
+      h.write('A', { state: 'coding', lastPromptAt: h.wall - 10 });
+      h.write('B', { state: 'reading', lastPromptAt: h.wall - 5000 });
+      h.write('C', { state: 'testing', lastPromptAt: h.wall - 9000 });
+      h.load();
+      h.rt.checkState();
+      h.rt.onKeys('l');
+      h.rt.loop();
+      assert.deepStrictEqual(h.rt.face.sessionListIds, ['A', 'B', 'C']);
+      h.rt.onKeys('\u001bOB');
+      assert.strictEqual(h.rt.face.showSessionList, true, 'an SS3 down closed the list');
+      assert.strictEqual(h.rt.face.sessionListSelectedId, 'B');
+      h.rt.onKeys('\u001bOB\u001bOB');
+      assert.strictEqual(h.rt.face.sessionListSelectedId, 'C');
+      h.rt.onKeys('\u001bOA');
+      assert.strictEqual(h.rt.face.sessionListSelectedId, 'B');
+      assert.strictEqual(h.rt.face.showSessionList, true);
+    } finally {
+      process.stdout.columns = oc;
+      process.stdout.rows = or;
+      h.done();
+    }
+  });
+});
+
+describe('review round 6 -- the wait\'s silence bound is measured on the monotonic clock', () => {
+  for (const [label, step] of [['back', -2 * 3600000], ['forward', 2 * 3600000]]) {
+    test(`the wall clock stepped ${label} two hours neither stretches nor cuts the 30 minutes`, () => {
+      const h = r5Runtime();
+      try {
+        r5Session(h, { state: 'waiting', detail: 'allow Bash?', waitingOn: 'k1', editor: 'codex' });
+        r6Tick(h, 2000);
+        assert.strictEqual(h.rt.face.state, 'waiting', 'precondition');
+        h.stepWall(step);
+        r6Tick(h, 60000);
+        assert.strictEqual(h.rt.face.state, 'waiting', 'a minute after the step');
+        r6Tick(h, WAIT_HOLD_STALE_MS);
+        assert.notStrictEqual(h.rt.face.state, 'waiting', 'still shouting 31 minutes into the silence');
+      } finally { h.done(); }
+    });
+  }
+
+  test('a face swapped in on a wait: the bound is seeded with the write\'s age, and survives a step', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'coding', detail: 'edit a.js' });
+      h.rt.loop();
+      h.runFor(500);
+      h.write('B', { state: 'waiting', detail: 'allow Bash?', waitingOn: 'k1', editor: 'codex',
+        timestamp: h.wall - 60000, lastPromptAt: h.wall });
+      h.load();
+      h.runFor(2000);
+      assert.strictEqual(h.rt.mainSession(), 'B');
+      assert.strictEqual(h.rt.face.state, 'waiting', 'precondition');
+      h.stepWall(-2 * 3600000);
+      r6Tick(h, WAIT_HOLD_STALE_MS - 60000);
+      assert.notStrictEqual(h.rt.face.state, 'waiting', 'the swap seeded a wall-clock stamp');
+    } finally { h.done(); }
+  });
+});
+
+describe('review round 6 -- the watcher hears the folder replaced under it', () => {
+  const { createDirWatcher } = renderer;
+  function fake() {
+    const st = { ino: 1, handles: [], timers: [] };
+    st.stat = () => ({ dev: 7, ino: st.ino });
+    st.watch = (dir, cb) => {
+      const w = { cb, closed: false, on() { return w; }, close() { w.closed = true; } };
+      st.handles.push(w);
+      return w;
+    };
+    st.schedule = (fn, ms) => { const t = { fn, ms, live: true }; st.timers.push(t); return t; };
+    st.cancel = (t) => { t.live = false; };
+    st.live = () => st.timers.filter(t => t.live);
+    const out = { events: [], reopened: 0 };
+    out.w = createDirWatcher({
+      dir: '/home/me/.code-crumb-sessions', exists: () => true, stat: st.stat, mkdir: () => {},
+      watch: st.watch, schedule: st.schedule, cancel: st.cancel,
+      onEvent: (e, f) => out.events.push([e, f]), onReopen: () => { out.reopened++; },
+    });
+    return { st, out };
+  }
+
+  test('Linux names the deleted folder itself: re-open, though it exists again by then', () => {
+    const { st, out } = fake();
+    // A change to the folder's own attributes names it too, and is no break.
+    st.handles[0].cb('change', '.code-crumb-sessions');
+    assert.strictEqual(st.handles[0].closed, false);
+    st.ino = 2;   // deleted, and recreated by a hook before the event is handled
+    st.handles[0].cb('rename', '.code-crumb-sessions');
+    assert.strictEqual(st.handles[0].closed, true, 'the handle on the dead folder was kept');
+    assert.strictEqual(out.events.length, 1, 'only the attribute change got through');
+    const t = st.live()[0];
+    t.live = false;
+    t.fn();
+    assert.strictEqual(st.handles.length, 2);
+    assert.strictEqual(out.reopened, 1, 'the caller re-reads what it missed');
+  });
+
+  test('check() notices a folder replaced without a word (same path, new inode)', () => {
+    const { st, out } = fake();
+    out.w.check();
+    assert.strictEqual(st.handles[0].closed, false, 'nothing to do while healthy');
+    st.ino = 2;
+    out.w.check();
+    assert.strictEqual(st.handles[0].closed, true, 'check() only asked whether the path exists');
+    assert.strictEqual(st.live().length, 1, 'a re-open is scheduled');
+  });
+});
+
+describe('review round 6 -- the loop wakes for a change the trailing watcher read brings in', () => {
+  const { LOW_POWER_FRAME_MS, FRAME_INTERVAL_MS } = renderer;
+  test('a write folded into the 50ms throttle is drawn at once, not at the next low-power frame', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'idle', detail: '' });
+      h.rt.face.blinkTimer = Infinity;    // a blink (random) keeps a frame off low power
+      h.rt.loop();
+      h.runFor(5000);
+      assert.strictEqual(h.rt.trackers().frameInterval, LOW_POWER_FRAME_MS, 'precondition: resting');
+      h.event('S.json');                 // read at once (nothing new), wakes a frame
+      h.runFor(10);
+      assert.strictEqual(h.rt.trackers().frameInterval, LOW_POWER_FRAME_MS, 'resting again');
+      r6Write(h, 'S', { state: 'coding', detail: 'edit a.js' });
+      h.event('S.json');                 // inside the window: folded into the trailing read
+      h.runFor(60);
+      assert.strictEqual(h.rt.face.state, 'coding', 'the trailing read applied it');
+      assert.strictEqual(h.rt.trackers().frameInterval, FRAME_INTERVAL_MS, 'no frame has drawn it yet');
+    } finally { h.done(); }
+  });
+});
+
+describe('review round 6 -- the cascade never clears a state queued for the next frame', () => {
+  test('a wait queued behind "wrapping up" is not cleared by responding -> done!', () => {
+    const h = r5Runtime();
+    try {
+      r5Session(h, { state: 'coding', detail: 'edit a.js' });
+      h.advance(2100);
+      r6Write(h, 'S', { state: 'idle', detail: 'between turns', turnEnded: true });
+      h.rt.checkState();
+      assert.strictEqual(h.rt.face.state, 'responding', 'precondition');
+      h.advance(500);
+      r6Write(h, 'S', { state: 'waiting', detail: 'waiting for you', turnOver: true });
+      h.rt.checkState();
+      assert.strictEqual(h.rt.face.pendingState, 'waiting', 'precondition: queued');
+      h.advance(2600);                    // responding's 3s are up, no frame yet
+      h.rt.checkState();
+      h.rt.face.update(66);
+      assert.strictEqual(h.rt.face.state, 'waiting', 'the cascade\u2019s happy wiped the queued wait');
+      assert.strictEqual(h.rt.face.stateDetail, 'waiting for you');
     } finally { h.done(); }
   });
 });

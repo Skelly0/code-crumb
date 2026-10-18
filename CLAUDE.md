@@ -22,6 +22,8 @@ This file states the rules. The stories behind them, meaning how each bug showed
 | `q` / Ctrl+C | Quit |
 
 - **Any key closes** the help overlay or the session list, so `h`/`?` is not a strict toggle once open.
+- **Help needs the face.** `h`/`?` open help only where the face fits (`faceFits`, 38×20), and a resize below that closes it, as the session list's own guard does: an invisible overlay swallowed the next key.
+- **Arrows** are accepted as CSI (`ESC [ A/B`) or SS3 (`ESC O A/B`, application cursor mode).
 - **The session list selects by session id**, not row index. Only live rows are selectable (see Main Session Policy).
 - **Minimal mode** (`--minimal` / `MINIMAL_BOOT=1`) disables every key except `space` and `q`.
 - **Key splitting.** Each stdin chunk is split into keys by `splitKeys` (renderer.js, pure: a CSI/SS3 sequence stays whole, anything else is one code point). Each key is handled on its own, so a held arrow or a fast `qq` works.
@@ -48,24 +50,28 @@ Everything else lives in a folder. This document names modules bare (`grid.js`, 
 ```
 renderer.js      Entry point: runtime loop, PID guard, state polling, re-exports for tests; runUnifiedMode(opts) is the test seam
 update-state.js  Hook handler: editor events via stdin → state files; takes `[--editor <name>] <Event>`
-launch.js        Opens the renderer, then starts and supervises the editor (--editor flag); package.json `bin`
+launch.js        Opens the renderer, then starts and supervises the editor (--editor <name> / --editor=<name>); package.json `bin`
 setup.js         setup.js [claude|codex|codex-notify|opencode|openclaw|uninstall|doctor] [--autolaunch]; opencode also --install/--uninstall.
                  `uninstall` removes the Claude Code hooks, the Codex hooks file and a Code Crumb notify line in Codex's config.toml.
+                 A second command word is a usage error (exit 1, no changes): `codex uninstall` used to install.
                  Exports each editor's setup/uninstall, buildFaceHooks, buildCodexHooks, setupCodexNotify/removeCodexNotify, codexHome,
                  claudeConfigDir/claudeSettingsPath, opencodeConfigDir/opencodeConfigPath, enableAutolaunch, doctor, HOOK_EVENTS,
                  CODEX_HOOK_EVENTS, printClaudeUsage
                  (its demo hint prints only when demo/single.js exists; the npm tarball omits it)
-code-crumb.sh    Unix shell wrapper for launch.js (resolves its own symlink)
+code-crumb.sh    Unix shell wrapper for launch.js (resolves its own symlink; ignores an exported CDPATH)
 code-crumb.cmd   Windows batch wrapper for launch.js (runs `node.exe`, never a bare `node` cmd.exe would find in the project folder first)
 lib/
   themes.js        ANSI codes, color math, theme definitions, thought bubble data
   animations.js    Eye and mouth animation functions (full-size and grid)
   particles.js     ParticleSystem: 16 visual effect styles (incl. stream, fire, bigquestion)
-  face.js          ClaudeFace: main face state machine and rendering; monoNow/_setClock (the face clock), cleanMilestone
+  face.js          ClaudeFace: main face state machine and rendering; monoNow/_setClock (the face clock), cleanMilestone, faceFits
   grid.js          MiniFace + OrbitalSystem: orbitals, session loading, PID liveness, the session list
   transition.js    SwapTransition: dissolve/swap/materialize animation state machine
   accessories.js   Accessory definitions (hats, glasses, ears, etc.) and rendering helpers
   state-machine.js Pure logic: tool→state mapping, result classification, diff counting, streaks, stats helpers
+  wait.js          Pure: the permission-wait lifecycle (asked → confirmed | allowed → answered), for the hook and every reader
+  carry.js         Pure: the turn-end contract and nextSessionFile/stopsGlobal, the one carry both update-state.js write paths use
+  recorder.js      Opt-in payload recorder (CODE_CRUMB_RECORD): record(), the shape-mode anonymiser, the replay helpers
   shared.js        Paths, face state sets, PERMISSION_CONFIRM_MS/PERMISSION_TOOL_STATES, prefs, writeJsonAtomic, spawn/stats locks, shell quoting,
                    buildRendererCommands/spawnRendererWindow, isRendererAlive, display width (charWidth/strWidth/sliceToWidth/sliceFromEndToWidth)
 adapters/
@@ -80,10 +86,12 @@ adapters/
 demo/single.js     `npm run demo`: cycles all face states; writes a `demo-main` session file (with `lastPromptAt`) so the policy picks it,
                    unlinked on exit and on SIGINT, SIGTERM and SIGHUP
 demo/orbital.js    `npm run demo:orbital`: subagents orbiting the main face; same `demo-main` file plus its children
-tests/run.js       `npm test`: runs the 17 test files, in parallel child processes by default, each with its own throwaway home
+tests/run.js       `npm test`: runs the 19 test files, in parallel child processes by default, each with its own throwaway home
 tests/_harness.js  describe/test runner, temp-home and subprocess helpers; refuses to run outside tests/run.js
 tests/test-*.js    shared, state-machine, themes, animations, particles, face, grid, accessories, teams, launch, adapters,
-                   transition, emotions, platform, subagents, attention, release
+                   transition, emotions, platform, subagents, attention, release, lifecycle, replay
+tests/fixtures/replay/  Replay fixtures (<name>.jsonl, the recorder's format) and goldens (<name>.golden.json);
+                   import-recording.js turns a recording into a fixture
 hooks/hooks.json   Claude Code plugin hooks (23 events; PreToolUse/PostToolUse/PostToolUseFailure are "async": true)
 .claude-plugin/    plugin.json (manifest) and marketplace.json (source "." so the plugin cache holds the whole repo; it has no version)
 plugin.json        Byte-identical copy of .claude-plugin/plugin.json (the plugin cache reads it here); keep both in sync
@@ -131,7 +139,7 @@ Per-session state for **every** session: subagents, parallel windows, and the ma
 - **Sticky fields** are set once and kept: `taskDescription`, `parentSession`, `agentType`, `editor`, `model`, `lastPromptAt`, `firstSeenAt`, and the team fields.
 - **Per-write extras:**
   - the ordering fields `eventAt`/`syncAt`/`syncEvent`/`doneToolIds`, on the session file only;
-  - the wait fields `waitingOn`/`waitKind`/`waitConfirmed`/`permState`/`permDetail`, plus `waitForAgents`/`waitPrev`;
+  - the wait fields `waitingOn`/`waitKind`/`waitConfirmed`/`permState`/`permDetail`/`waitAskedAt`, plus `waitForAgents`/`waitPrev`;
   - an adapter's `turnError`;
   - OpenCode's `endSeq`/`pluginId`.
 - **`SessionStart`** writes a file too (`isSessionStart: true`), so a fresh window can take the center before its first tool call. It unlinks a stale predecessor first, **except** for `source === 'compact'`. That is the same live session, which keeps its sticky fields and `stats.session` (counters, clock, `activeSubagents`); every other source resets them.
@@ -140,16 +148,23 @@ Per-session state for **every** session: subagents, parallel windows, and the ma
 
 A non-agent `Stop` writes `idle` / `between turns` with `turnEnded: true` and **no** `stopped`: the session is between turns, not over.
 
+**These rules live in carry.js**, and both of update-state.js's write paths, the main one and the >1 MB fallback, go through it. They used to keep a copy each, and every review round found the copies drifted apart.
+
+- **`nextSessionFile(prev, w)`** (pure) turns the file before a write into the file after it: `{ state, detail, stopped, fields }`. It applies the session's tombstone, the turn's end, the open wait (`carryWait`, wait.js), `workSince` and the sticky fields, plus what the write itself ends (`writeEnds`: `session`, `turn` or `failed`).
+- **`stopsGlobal(prev, w)`** decides the global file's `stopped`.
+- **Both are tombstones.** `stopped` (the session ended) and `turnEnded`/`turnOver` (the turn ended) each survive every write that only echoes them, and only a new start clears them.
+- **Tests.** test-lifecycle tables both functions, and drives the real hook down both paths with the same events to check they keep the same facts.
+
 - **Carrying the turn end.** Every event outside `TURN_OPENING_EVENTS` (PreToolUse, UserPromptSubmit, SessionStart, SubagentStart, PreCompact, Setup, PostModelSwitch) carries the turn end forward, along with the global file's `stopped` (`carriesTurnEnd`).
 - **Which flag is carried** (`inheritedTurnEnd`):
   - A reward or an error (`TURN_END_SAFE_STATES`) carries `turnEnded`.
   - Any other face carries `turnOver`. The renderer folds `turnEnded` into `stopped` and rescues faces outside `RESCUE_EXCLUDE` to "wrapping up", so a non-reward echo would replay the turn-end celebration.
   - `turnOver` means "not active" (the short idle timeout) but is never rescued. The next echo with a reward or an error turns it back into `turnEnded`.
 - **`AMBIENT_EVENTS`** (`PreCompact`, `PostModelSwitch`, `SessionStart`, `Setup`) also happen *between* turns: a `/compact`, a `/model`, or a subagent's auto-compaction sent with the parent's `session_id` and no `agent_id`. After a finished turn they carry `turnOver` instead of clearing it, and all but `SessionStart` re-stamp the global `stopped`. A mid-turn compaction is live work.
-- **Failed and interrupted turns.** `StopFailure` fires instead of `Stop` and follows the same contract with an `error` face. So does Codex's `Interrupt` (Esc, which runs no `Stop`), as `error` / `interrupted`, without breaking the streak.
-- **`stopped` on a session file is reserved for `SessionEnd`.** A turn-end `stopped` there would retire a live window in the orbital loader.
+- **Failed and interrupted turns.** `StopFailure` fires instead of `Stop` and follows the same contract with an `error` face. So does Codex's `Interrupt` (Esc, which runs no `Stop`), as `error` / `interrupted`, without breaking the streak. An agent's `StopFailure` writes the parent's file but ends nothing there: it is an echo (`closesTurn`) and carries the turn end.
+- **`stopped` on a session file is reserved for `SessionEnd`.** A turn-end `stopped` there would retire a live window in the orbital loader. Once set, every event that carries the turn end keeps it, on both paths (`echoesTurnEnd`: `carriesTurnEnd`, plus the ambient events except `SessionStart`), so a late SubagentStop or TaskCompleted cannot bring an ended window back as a candidate.
   - The owner's late `PostToolUse` carries `turnEnded`, like a parallel window's.
-  - The global file's `stopped` re-stamp uses a separate `globalStopped` flag.
+  - The global file's `stopped` re-stamp uses a separate `globalStopped` flag, set from the global file's own `stopped` for this session or from the session file's `stopped`/`turnEnded`/`turnOver` (a between-turns wait clears the global one).
   - The renderer folds `stopped || turnEnded` for the face.
 
 #### `~/.code-crumb-stats.json`
@@ -188,6 +203,7 @@ Persistent stats.
 - **`~/.code-crumb-spawn.lock`** lets exactly one of the parallel hooks that notice a dead renderer open a terminal (`acquireSpawnLock`, O_EXCL, 5s staleness).
   - Nothing deletes it, so later launches are stale takeovers. Those are exclusive too: only the hook that creates `<lock>.claim` (O_EXCL) may overwrite the lock, and only while it is still the stale lock it saw.
   - A dead hook's claim is cleared once stale.
+  - A lock or claim further in the future than its stale bound is stale (`lockIsStale`: |now − mtime| > staleMs), so a clock stepped back cannot block autolaunch (or the stats lock) until it catches up; a little ahead is clock skew and still held. `isRendererAlive` keeps `now − mtime`: a live renderer's pid file is future-dated for up to 10 s after a backward step, and judging that dead would open a second renderer.
 - **`~/.code-crumb-quit`** is written on every normal renderer exit, never by the crash handler. While it exists, autolaunch launches nothing.
   - A `SessionStart` from `EDITOR_START_SOURCES` (`startup`, `resume`, `fork`) clears it, and so does `setup.js --autolaunch`.
   - `/clear` and compaction do not.
@@ -201,6 +217,7 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 
 - **Rename retries.** A rename refused with `EPERM`/`EACCES`/`EBUSY` (a Windows scanner or another hook holding the target) is retried 3 times, 2ms apart, before the direct write.
 - **Birthtime.** The rename resets a file's birthtime on every write, which is why classification reads `firstSeenAt` instead.
+- **Symlinks.** A symlinked target is followed (`writeTarget`, dangling included) and the temp file goes beside the real file, so a dotfile manager's link (stow, chezmoi, home-manager) survives instead of being replaced by a regular file.
 
 #### Editor PID Liveness
 
@@ -212,7 +229,7 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 
 **PID liveness is identity-checked.** `isOwnedByLiveProcess(pid, lastWriteMs)` (grid.js) lets a PID protect a session only if the process's **start time predates the session's last write** (+`SLACK_MS`). A recycled PID always fails this.
 
-- **The start-time cache.** Start times resolve asynchronously: batched PowerShell on Windows, `/proc` on Linux, `ps` on macOS, one exec at a time. Entries last `PID_CACHE_TTL_MS` (60s). An expired entry keeps its value under a `refreshing` marker while it re-resolves.
+- **The start-time cache.** Start times resolve asynchronously: batched PowerShell on Windows, `/proc` on Linux, `ps` on macOS, one exec at a time. Entries last `PID_CACHE_TTL_MS` (60s). An entry whose `resolvedAt` lies in the future (a clock stepped back) has no age (`_entryAge`): it counts as expired, past its pending window, and sweepable. An expired entry keeps its value under a `refreshing` marker while it re-resolves.
 - **Cache values** are an epoch, `'pending'`, `'dead'`, `'unknown-alive'` or `'unknown-nodata'`.
   - `'pending'` protects for `PID_PENDING_PROTECT_MS` (30s), then falls back to the cap.
   - `'dead'` means the resolver could not find the pid. It is not owned until the TTL, then refreshed once. (Deleting it instead read as pending forever.)
@@ -230,11 +247,12 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 - **Sanitising.** `readState` also cleans counters (finite or 0), `frequentFiles` (clean keys, no prototype, ≤200), `milestone` (`cleanMilestone`), `diffInfo` (non-negative ints or null), `pid` (int > 0 or 0) and `waitConfirmed` (bool or null).
 - **Guards.** The boot `loadSessions` and the per-frame `orbital.update` are guarded.
 - **Paths.** On win32, `_truncatePath`'s `~` match is case-insensitive.
+- **Labels.** `_assignLabels` counts folder names in a prototype-less map, so a folder named `constructor` or `__proto__` still labels its face.
 
 **The orbital loader.** `loadSessions` (sync, at boot) and `loadSessionsAsync` (every `SESSION_POLL_MS`) build the same per-file records. `_applySessionResults` makes every purge and face decision.
 
 - **Records.** Each file is read once, then stat'ed after the read (`sessionRecord`/`readSessionRecordSync`), giving a `data`, `empty` or `error` record. An unreadable file has no mtime and is never purged that pass.
-- **Parent freshness** is the parent file's mtime (≤ `STALE_MS` old).
+- **Parent freshness** is the parent file's mtime (≤ `STALE_MS` old). A parent unreadable this pass keeps the mtime it was last judged at (`_lastMtimes`); the unreadable record itself is still never purged.
 - **Junk** is a file that is empty, unparseable or not an object. Junk older than `STALE_MS` is purged, unless it is the main's file or a live face vouches for it (`_vouchedFor`). Fresh junk is a write in progress and keeps the existing face.
 - **Ordering.** An async pass that started before a sync load is discarded (`_syncLoads`). A future mtime is dated from first sight (`_judgedMtime`).
 - **`MiniFace.updateFromFile`:**
@@ -249,7 +267,7 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 - **Death.** When an armed PID dies without a Stop, a sticky `editorDead` starts the rescue cascade (responding → happy → idle) and allows another session to be adopted.
 - **Recovery.** A write newer than anything applied clears a false `editorDead`. A newer write reporting a *different* pid (the same id resumed under a new editor) retires the armed PID at once.
 - **Dead sessions.** `markMainDead()` records the death in `deadSessions` (id → write timestamp), because `adoptMain` must clear `editorDead`. `policySessions` (pure, exported) projects those ids as `stopped` until they write something newer, and prunes vanished ones.
-- **Turn ends.** The death check is skipped while `lastStopped` is set, and that includes a plain turn end, because `readState` folds `turnEnded` into `stopped`. An editor that dies between turns is therefore demoted by staleness: a session waiting for a prompt looks exactly like a closed window.
+- **Turn ends.** The death check is skipped while `lastStopped` is set, and that includes a plain turn end, because `readState` folds `turnEnded` into `stopped`. It is skipped too while `lastTurnOver` is set without `lastCompacting` (an idle_prompt's "waiting for you", a `/model` after Stop): `turnOver` is never rescued. An editor that dies between turns is therefore demoted by staleness: a session waiting for a prompt looks exactly like a closed window.
 
 #### Main Session Policy
 
@@ -259,6 +277,7 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
   - On win32, with no `pid`, "live" is purely the 90s `ORPHAN_TIMEOUT` write-silence bound. A session on a permission prompt longer than that hands the center to a working window, even though its `waiting` hold lasts 30 minutes. One clock asks "is it alive?", the other "how long do we show the wait?", and only the first decides the center.
 - **`isStale()`'s 10s completion cut** (`STOPPED_LINGER_MS`) applies only to a **child whose parent is no longer fresh**. Faces are built and judged in one loader pass before any `tick()`, so a wider rule would kill live windows and children at boot over a stale reward write.
 - **The main session's file is never unlinked** by either stale purge. On win32 its `MiniFace` goes stale 30s before the purge.
+- **A top-level file naming no `pid`** (win32) is kept `NO_PID_FILE_KEEP_MS` (30 min, the renderer's `WAIT_HOLD_STALE_MS`) after its last write instead of `STALE_MS`, so a long tool cannot cost a window its `lastPromptAt`/`firstSeenAt` (an adapter finding no file stamped a fresh `lastPromptAt` and took the center). Its face still goes stale at `ORPHAN_TIMEOUT`. A positive-integer pid is judged by liveness as before.
 - **A live pin wins**, even a promoted child. The pin is released (`pinnedId: null`) once its session is stopped, stale or gone.
 - **Otherwise attention wins:** the highest `lastPromptAt` (`attentionAt`), meaning when the user last addressed the session.
 - **Ties keep the current main.** On the first pick, the newest write (`lastUpdate`) breaks a tie.
@@ -272,13 +291,13 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 
 **`adoptMain(id)` is the only place `mainSessionId` changes.**
 
-- **It resets the per-session trackers together:** `lastAppliedState`, `lastAppliedTimestamp`, `lastStopped`, `lastTurnOver`, `lastSessionEnded`, `lastCompacting`, `lastWaitingOn`, `pendingPermission`, `editorDead`, `lastEditorPid`, `candidatePid`, `lastNewWriteAt`, `lastMtime`, `lastForceReadTime`. Nothing held (a work state, an armed PID, an open prompt) leaks onto the new face.
+- **It resets the per-session trackers together:** `lastAppliedState`, `lastAppliedTimestamp`, `lastStopped`, `lastTurnOver`, `lastSessionEnded`, `lastCompacting`, `lastWaitingOn`, `openWait`, `pendingPermission`, `editorDead`, `lastEditorPid`, `candidatePid`, `lastNewWriteAt`, `lastMtime`, `lastForceReadTime`. Nothing held (a work state, an armed PID, an open prompt) leaks onto the new face.
 - **It clears `face.model`, `cwd`, `gitBranch` and `frequentFiles`**, because `setStats` assigns only truthy values. It then adopts the new session's `modelName`/`model`/`editor`/`cwd`/`gitBranch`.
 - **It leaves `candidateSince`/`candidateTs` alone**, because `candidatePid = 0` gates both.
 
 **`_executeSwap`:**
 
-- seeds `lastNewWriteAt` from the adopted write's `timestamp`, so a swapped-in `waiting` starts its silence bound;
+- seeds `lastNewWriteAt` with the adopted write's age on the monotonic clock (`monoNow() - (Date.now() - ts)`; now for a future `ts`), so a swapped-in `waiting` starts its silence bound;
 - carries a tool or wait state's age onto the monotonic clock (`face.lastStateChange = face.now() - (Date.now() - ts)`, for `ts <= now`; not for responding), so "still running … Ns" and the long-tool hold continue;
 - clears `face.stateChangeTimes` after its `forceState`, because caffeine's last 10s belonged to the leaving session;
 - settles or arms an unconfirmed permission prompt.
@@ -294,12 +313,12 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 
 - **update-state.js** stamps it on `UserPromptSubmit`, and on a `SessionStart` whose `source` is not `compact`. A *compact* `SessionStart` with **no** predecessor file also stamps, because an unstamped file has attention `0` forever.
 - **Adapters** keep no memory between events, so the session file is their memory.
-  - They stamp on a session's first event, on the first non-turn-ending event after a file marked `stopped` or `turnEnded`, or when a live previous file has no stamp. Otherwise they carry the old stamp.
+  - They stamp on a session's first event, on the first non-turn-ending event after a file marked `stopped` or `turnEnded`, or when a live previous file has no stamp. Otherwise they carry the old stamp. Turn-ending is judged by the mapped result (a write that stops), not the event name, so a non-stopping `error` (an OpenCode context overflow, OpenClaw's generic error) stamps; so does an oversized payload that is neither a tool end nor a turn end.
   - They follow the same turn-end contract: `turnEnded` on the session file, global `stopped`, and session-file `stopped` only for `session_end`. OpenClaw's `session_end` is its own event.
   - A late `tool_end` is not a new turn. It carries the old stamp and whichever end the file records, and `guardedWriteState` re-stamps the global `stopped` only for such a tool end (`opts.toolEnd`).
   - The previous file also carries `model` and `firstSeenAt`, because `writeSessionState` rebuilds from scratch.
 - **`codex-wrapper.js`** stamps on `thread.started` and `turn.started`. `turn.completed`/`turn.failed` write `turnEnded`; session-file `stopped` comes only when the wrapper closes.
-- **`codex-notify.js`** never stamps, since its only event is a turn end. It carries the hooks' stamp and the other sticky fields forward.
+- **`codex-notify.js`** never stamps, since its only event is a turn end. It carries the hooks' stamp and the other sticky fields forward, and keeps a session file already marked `stopped` stopped: Codex runs it fire and forget, so it can land after codex-wrapper retires the session.
 
 **What the main face reads.** `readState(filePath = STATE_FILE)`: the unified renderer passes the main's session file, and tmux mode passes nothing.
 
@@ -307,6 +326,7 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 - **`startupGate(ts, stopped, now, rendererStartTime, uptimeMs)`** (pure, exported) returns `apply`, `skip` or `record`. Its window is the renderer's monotonic uptime, and `checkState` passes `now - uptime` as the start.
   - During the first `STARTUP_WINDOW_MS` (5s), two kinds of write are **recorded**: a turn that ended before the start (`ts` before it, 0 included), and a live write more than `STARTUP_STALE_MS` (15s) older than the start. Recorded means never shown, but marked applied (`lastAppliedTimestamp`/`lastAppliedState`), so it cannot read as new later.
   - After the window, only writes over `RUNTIME_STALE_MS` (120s) older than the start are skipped.
+  - A live wait (`waiting`, not stopped, not an allowed permission prompt) younger than `WAIT_HOLD_STALE_MS` is neither recorded by the 15s rule nor skipped by the 120s one (`startupGate(…, uptimeMs, waiting)`): a renderer started on an open prompt shows it, as a swap does.
 
 #### Subagent Attribution (`agent_id`)
 
@@ -321,12 +341,12 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 **The eleven `AGENT_EXCLUDED_EVENTS`** (`SessionStart`, `SessionEnd`, `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact`, `Setup`, `ConfigChange`, `InstructionsLoaded`, `StopFailure`, `PostModelSwitch`) keep their own handlers even with `agent_id`.
 
 - **`Stop` is deliberately not one of them.** An agent's `Stop` is its own turn ending: it writes `responding` / `wrapping up` to the agent's orbital without `stopped`, and leaves the parent and global file alone.
-- **`SubagentStop` retires the agent.** If `activeSubagents` lost the agent (a parallel window's lifecycle event reset `stats.session`), it still retires an existing, unstopped `{parent}-agent-{id}.json`. Retirement writes carry the agent's `model`.
+- **`SubagentStop` retires the agent.** If `activeSubagents` lost the agent (a parallel window's lifecycle event reset `stats.session`), it still retires an existing, unstopped `{parent}-agent-{id}.json`. Retirement writes (`_retireSubagent`, shared by SubagentStop and SessionEnd's sweep) carry the agent's sticky fields, `model` included, and its ordering fields, so a late async PreToolUse of the agent's cannot revive it.
 
 **Family heartbeat.** Neither a subagent mid-turn nor a parent waiting on it emits hooks, so mtime alone cannot tell a live family from a dead one (and win32 has no `pid`).
 
 - **Child to parent.** Every agent event stamps the **parent's** file (`_touchSessionFile`) without rewriting it. A child earns the long `CHILD_ORPHAN_TIMEOUT` (15 min) only while its parent's file is fresh, so a crashed parent goes stale normally and takes its orbitals with it.
-- **Parent to child is deliberately not symmetric.** `_touchActiveSubagents` touches only *legacy synthetic* entries, which have no writer of their own; the parent writes their state via `_writeSubagentToolState`. An agent-owned entry must never live on parent activity alone, or a missed `SubagentStop` leaves a ghost.
+- **Parent to child is deliberately not symmetric.** `_touchActiveSubagents` touches only *legacy synthetic* entries, which have no writer of their own; the parent writes their state via `_writeSubagentToolState`. Every such parent-written file carries `synthetic: true` (`buildSubagentSessionState` and the no-`agent_id` `SubagentStart` write), and only a face whose last write carried it may cycle fake work (`MiniFace._cyclesActivity`): an OpenCode task session or an engmux run is a real writer. An agent-owned entry must never live on parent activity alone, or a missed `SubagentStop` leaves a ghost.
 
 **Conducting hold.** Agent events do not write the main's file content (the heartbeat moves only its mtime).
 
@@ -348,7 +368,7 @@ A hook without `agent_id`, from another session id while the stats owner has `ac
 - update-state.js and base-adapter.js stamp it on every write.
 - Birthtime is the fallback only for files that predate the field. An unknown time means subagent, so real grouping never regresses.
 
-**What parallel status changes.** Parallel sessions do not steal `stats.session` while the owner conducts, do not count into its counters, and do not push tool state onto subagent orbitals. A top-level session carrying a stale `parentSession`/`taskDescription` is healed on its next write. Teammates keep theirs.
+**What parallel status changes.** Parallel sessions do not steal `stats.session` while the owner conducts, do not count into its counters, and do not push tool state onto subagent orbitals. A top-level session carrying a stale `parentSession`/`taskDescription` is healed on its next write. Teammates keep theirs. A legacy-classified subagent never writes the global file.
 
 #### Editor Provenance
 
@@ -399,13 +419,34 @@ Editors without a model are unchanged.
 
 **Other editors.** codex-wrapper parses `-m`/`--model`. The OpenCode plugin records `message.updated`'s `info.modelID` without spawning (checked against the 1.18.21 binary). engmux is deliberately not wired up.
 
+### Payload recording
+
+`CODE_CRUMB_RECORD` makes the hooks and adapters append every payload they receive to `~/.code-crumb-record/<local day>.jsonl` (or `CODE_CRUMB_RECORD_FILE`, relative to HOME). The point is replayable fixtures for what editors really send (README: "Recording payloads for a bug report").
+
+- **Hook points.** There are three, each behind `if (process.env.CODE_CRUMB_RECORD)` and never requiring recorder.js at top level, so a disabled recorder costs one env read:
+  - update-state.js's first statement on stdin `end` (the raw text, its tail, the truncated flag and argv; source `<editor>-hook`);
+  - `runStdinAdapter`, for each batch element plus its fallback (source: the adapter's editor);
+  - codex-wrapper, for each ThreadEvent (source `codex-exec`, argv on the first).
+- **A log, not state.** It uses `appendFileSync`, the one exception to the `writeJsonAtomic` rule, and never throws. Limits: a file stops at `MAX_FILE_BYTES` (20 MB), a line over 2M characters becomes a marker, nesting is cut at depth 32, and a payload over 1 MB is recorded as its ids only.
+- **Modes.** `1`/`shape` (or any unknown value) anonymises; `full` keeps payloads raw; unset, `0`, `off`, `false` and `no` disable it.
+- **What shape mode keeps.**
+  - Every key and value type; enum-like keys verbatim (`ENUM_KEYS`); small integers; exit-status lines.
+  - Ids become keyed pseudonyms (cyrb53 keyed by `.code-crumb-record.key` beside the recording, never `crypto`, which costs a hook 15–20 ms). The key is created atomically with `link()`.
+  - Commands and paths keep their shape (`SHAPE_KEYS`): words in `VOCAB`, flags, quoting, operators and line structure survive, every other word becomes `x`, and an IPv4 address becomes `x.x.x.x`. Common words survive inside quotes too, because a wrapped script is all quotes.
+  - All other text becomes `<text len~N lines=L>`.
+- **Replays.** test-replay drives the real hooks, adapters and wrapper through `tests/fixtures/replay/*.jsonl` and compares each step with its golden. Placeholders expand to `~` filler, so a replay re-records to the same fixture.
+  - Regenerate with `CRUMB_UPDATE_GOLDEN=1 node tests/run.js replay`, and review the diff.
+  - A fixture's first line is a header: `synthetic: true` for one built by hand, `"edited": true` for one whose text was edited.
+  - A codex-exec fixture replays as one wrapper run with one snapshot.
+  - Replays run at full speed, so the 8 s and 5 s permission clocks see compressed time.
+
 ### The Renderer Loop
 
 **Clocks.** The face measures its own durations on a monotonic clock, `monoNow()`, which is `performance.now()` and swappable via `_setClock`.
 
 - **Monotonic:**
   - `lastStateChange`, `minDisplayUntil`, `stateChangeTimes`, timeline entries, the reward window, caffeine, escalation and pet timers. Compare them with `face.now()`.
-  - The renderer's forced reads (`lastForceReadTime` starts at `-Infinity`), PID arming, the permission-answer clock and frame deadlines.
+  - The renderer's forced reads (`lastForceReadTime` starts at `-Infinity`), PID arming, the permission-answer clock, the write clock (`lastNewWriteAt`) and frame deadlines.
 - **Wall clock:** `Date.now()` is used only against a file's JSON `timestamp`, `brokenStreakAt`, milestone freshness and the PID heartbeat.
 - **Mtime** is compared with `!==`, so an mtime that moves backwards is still read.
 - **Why:** a wall clock stepped back (NTP, a resumed VM) must freeze nothing.
@@ -424,13 +465,14 @@ Editors without a model are unchanged.
 
 **One self-healing watcher.** One `fs.watch` handle on `SESSIONS_DIR` (`createDirWatcher`) feeds two consumers:
 
-- **Main-file reads.** An event naming the main's file (or no file) reads it with a 50ms leading-edge throttle, plus one trailing read if events folded.
+- **Main-file reads.** An event naming the main's file (or no file) reads it with a 50ms leading-edge throttle, plus one trailing read if events folded, which wakes the loop.
 - **Ring reloads** run 80ms after a burst's first event, never pushed back.
 
 **Self-healing.** The handle closes and re-opens with a backoff (`WATCH_RETRY_MS` 500ms, doubling to `WATCH_RETRY_MAX_MS` 8s) on:
 
 - an `error`;
-- a `rename` that leaves no folder;
+- a `rename` that leaves no folder, or names the folder itself (how Linux reports its deletion, even when a hook has already recreated it);
+- a folder whose device and inode differ from those taken at open (`check()`): the handle watches a dead folder and hears nothing;
 - a filename that is not a plain basename (`isPlainBasename`). On win32, deleting the folder starts an event storm that pegged a core.
 
 `open()` re-creates a missing folder. A re-open reloads the ring, re-reads the main file and wakes the loop.
@@ -470,20 +512,21 @@ Editors without a model are unchanged.
 
 - Inside that window, only an error replaces it: the next work state is buffered, and a newer completion is queued.
 - After it, the queue flushes (`_flushPending`).
-- Work that arrives behind a queued completion is remembered in `pendingWork` and promoted when the completion lands. A completion clears `pendingWork`, since its tool has finished.
+- Work that arrives behind a queued completion is remembered in `pendingWork` and promoted when the completion lands, but never replaces a remembered wait. A completion clears `pendingWork`, since its tool has finished.
 - Completions never bypass active work.
 
 **Same-state writes** refresh `lastStateChange` and the detail.
 
 - A same-state **work** write is a new tool call. It drops any queued state except a wait, and `pendingWork` unless that is a wait, so a stale reward never shows over a running tool. `MiniFace.updateFromFile` does the same.
 - A same-state **completion** write drops queued work and `pendingWork`. A queued wait or a newer completion stays.
+- A same-state write of any other state (waiting, thinking, starting) drops an older queued state, unless it is a wait or a reward.
 - Errors are never queued.
 
 **Caffeine** never fires or decays while a `pendingState` is queued, so a buffered `caffeinated` cannot overwrite a queued `waiting`.
 
 **`face.forceState(state, detail, minMs)`** applies a state at once, skipping the buffer, dropping the queue, and recording the change for caffeine. Rescue paths (a missed Stop, a dead editor) use it, except on `RESCUE_EXCLUDE` states. Those include `error`, which decays by itself so a late `PostToolUseFailure` after Stop still shows.
 
-**Shared sets.** `ACTIVE_WORK_STATES`, `COMPLETION_STATES` and `INTERRUPTIBLE_STATES` are defined once in shared.js, and imported by face.js, grid.js and renderer.js. So is `PERMISSION_TOOL_STATES` (see Permission waits), for grid.js and renderer.js.
+**Shared sets.** `ACTIVE_WORK_STATES`, `COMPLETION_STATES` and `INTERRUPTIBLE_STATES` are defined once in shared.js, and imported by face.js, grid.js and renderer.js. So are `PERMISSION_CONFIRM_MS` and `PERMISSION_TOOL_STATES` (see Permission waits), which grid.js and renderer.js import through wait.js.
 
 #### The Timeout Cascade (`idleCascade`)
 
@@ -505,16 +548,18 @@ Editors without a model are unchanged.
   - the renderer flashes `? WAITING FOR YOU` in the title via the pure `buildTitle(modelName, status, flash)`.
 - **Frame dedupe.** The dedupe key is `title + output`, so a blink with an unchanged body still writes.
 - **The only bound is write silence.** After `WAIT_HOLD_STALE_MS` (30 min) with no new write, the face degrades to idle. This needs no `pid`, which matters on win32.
+- **An open prompt outlives other writes.** update-state.js keeps `waitingOn` on every write until the answer, and each write brings its own state (a background agent's "subagent done"). The renderer remembers the asking write's detail (`openWait`): a newer write still naming the prompt shows, and the wait is queued behind it, where the hold keeps it. An `answered` write, a turn end, a write without `waitingOn`, the allowed-prompt conversion and `adoptMain` clear it.
 
 **Measuring write silence.**
 
-- **`noteNewWrite(ts, lastTs, now, lastAt)`** advances only when a write's own JSON `timestamp` moves forward, so the forced re-read cannot fake freshness.
+- **`noteNewWrite(ts, lastTs, now, lastAt, stamp)`** advances only when a write's own JSON `timestamp` moves forward, so the forced re-read cannot fake freshness. The renderer stamps a new write with its own age on the monotonic clock (`mono - (now - ts)`), so a wall clock stepped either way neither stretches nor cuts the bound; `null` means no write yet.
 - **"Moves forward" is `isNewerWrite(ts, lastTs, now)`** (pure, exported), used at every newness check in `checkState` and in `MiniFace.updateFromFile`. It normally means a greater timestamp, since parallel hooks land out of order. Once the last applied write is more than `FUTURE_SLACK_MS` (60s) in the future, any different stamp counts as new.
 
 **Other rules.**
 
 - **An allowed permission prompt becomes its tool** (see Permission waits), and `lastAppliedState = permState` lets the long-tool hold keep it until its PostToolUse.
 - **Conducting.** `liveChildren > 0` substitutes `subagent` for a downward transition.
+- **A queued state is news.** The cascade does not run while `face.pendingState` is set; the next frame's `update()` flushes it (a wait queued behind "wrapping up" was wiped by responding → happy).
 
 ### Hook Events
 
@@ -555,6 +600,11 @@ Editors without a model are unchanged.
 
 #### Permission waits
 
+**The lifecycle is wait.js's**: one pure module, with its state diagram at the top, holds every rule below.
+
+- **The hook writes through it:** `askFields` (PermissionRequest), `notificationWait`/`agentWaitVerdict` (the notification), `carryWait`/`deniedAnswers` (every later write), `releaseStandIn` (a parent's stand-in) and `toolCallKey`.
+- **The readers ask it the same questions:** the renderer, the orbitals and tmux use `isUnconfirmedPermission`, `carriesUnconfirmedPermission`, `permissionAnswered`, `isUnconfirmedAsk` and `waitPhase` (`none`/`open`/`asked`/`confirmed`/`allowed`). Each used to keep its own copy.
+
 **The 6 s notification.** Claude Code fires `Notification(permission_prompt)` 6 s after a permission dialog opens, and cancels it if the dialog is answered first (2.1.300). `CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS` turns it off.
 
 **`PermissionRequest`** writes `waiting` / `allow <tool>?` with `waitingOn`, a digest of the tool's name and input (`toolCallKey`).
@@ -567,15 +617,16 @@ Editors without a model are unchanged.
 **The parent stands in for its agents.** `_confirmAgentWaits` returns every agent whose prompt is open and confirmed once it returns (just now or by an earlier notification). When that is not the parent's own question, the parent records `waitForAgents` (≤8 agent file names) and `waitPrev` (`{ state, detail }`, from before it started waiting).
 
 - A later notification merges with the list the parent already holds, never replaces it. Agents asking seconds apart each get their own notification, and one that confirms nothing new must not forget the first agent.
+- A session's own wait still unconfirmed `PERMISSION_CONFIRM_MS` after `waitAskedAt` was allowed. A notification that finds an agent asking does not re-confirm it (that put the parent back on "allow?" over its own running tool): it drops that wait's fields and stands in for the agents, with `waitPrev` = its `permState`/`permDetail`. With no agent asking, the notification is still the session's own.
 - When an agent is answered (its tool end on the waited call, or a PermissionDenied), `_releaseParentWait` drops it from the list. When the last one goes, it restores the parent file, and the global file when owned: back to `waitPrev`, or else `subagent` / `conducting`, with `answered: true`, a fresh timestamp, and no wait fields.
 
 **An unconfirmed wait older than `PERMISSION_CONFIRM_MS`** (8s, shared.js) was allowed, and its tool is running. Only an `editor: 'claude'` wait with `waitConfirmed === false` converts.
 
-- **The renderer.** `isUnconfirmedPermission` converts 8s after the write's timestamp or after first sight, whichever comes first. It re-reads the file to confirm it is the same unconfirmed write, then drops the wait and shows `permState`/`permDetail`. A `permState` outside `PERMISSION_TOOL_STATES` (shared.js: thinking + `ACTIVE_WORK_STATES` − responding) stays waiting.
+- **The renderer.** `isUnconfirmedPermission` converts 8s after the write's timestamp or after first sight, whichever comes first. It re-reads the file to confirm the newest applied write still names the same unconfirmed wait (its own, or a later write that carried it on: `carriesUnconfirmedPermission`, which also keeps the clock running), then drops the wait and shows `permState`/`permDetail`. A `permState` outside `PERMISSION_TOOL_STATES` (shared.js: thinking + `ACTIVE_WORK_STATES` − responding) stays waiting.
 - **`MiniFace._permWait`** does the same in `tick`, with the same set, and shows any other `permState` as `executing`.
 - **tmux.** `tmuxDisplayState` maps the wait to `permState`.
 
-**`waitKind`/`waitConfirmed`/`permState`/`permDetail` live and die with `waitingOn`** (`WAIT_FIELDS`). The waited call's tool end, any other answer, or a turn-closing event clears them all.
+**`waitKind`/`waitConfirmed`/`permState`/`permDetail`/`waitAskedAt` live and die with `waitingOn`** (`WAIT_FIELDS`). `waitAskedAt` is the PermissionRequest's own `EVENT_AT`; only the hook reads it (`syncAt` cannot say how long a wait has been open: a background agent's lifecycle event moves it). The waited call's tool end, any other answer, or a turn-closing event clears them all.
 
 **`PermissionDenied`** (2.1.300) fires only when the **auto-mode classifier** refuses a call. A user's "no" fires nothing. The call never runs, so no PostToolUse or PostToolUseFailure follows.
 
@@ -601,10 +652,11 @@ Editors without a model are unchanged.
 
 **Patterns.**
 
-- There are 42 failure patterns (33 stdout, 9 stderr) and 14 false-positive guards. Guards apply **per line**.
+- There are 44 failure patterns (35 stdout, 9 stderr) and 14 false-positive guards. Guards apply **per line**.
+- A stdout panic is a crash's own words: Go's `^panic: `, Rust's `panicked at`, or an upper-case `PANIC`. cargo's passing `test x - should panic ... ok` is not one.
 - Merged-output git failures are stdout patterns: `^fatal: `, `^error: failed to push some refs`, `^ ! [rejected]`.
 - The CONFLICT pattern `\bCONFLICT\s+\([^)\r\n]{1,40}\):` is shared with `isMergeConflict`.
-- Every pattern is linear-time, and so is `stripAnsi` (OSC ending in BEL or ESC `\`).
+- Every pattern is linear-time, and so is `stripAnsi` (OSC ending in BEL or ESC `\`). Two adjacent `\s*` runs, a `.*` restarted from every match of an earlier part, or `\s*` after a separator that is itself whitespace, are quadratic (`SHELL_MOVE_RE` takes `[^\S\r\n]*`): `EXIT_TRAILER_RE` ends `\s*(?:\.\s*)?$`, and the pytest echo is `^(?=\S*::).* PASSED\b`.
 
 **`trustSuccess`.** Claude Code 2.1.300 reports a failing Bash as `PostToolUseFailure`, so its `PostToolUse` is a success the host vouches for. update-state.js passes `{ trustSuccess: EDITOR === 'claude' && hookEvent === 'PostToolUse' }`.
 
@@ -625,10 +677,16 @@ Editors without a model are unchanged.
 
 Text over 80 K characters is scanned as its first `SCAN_HEAD_BYTES` (16 K) plus its last `SCAN_TAIL_BYTES` (64 K), measured in string length (`scanWindow`). The truncated (>1 MB) path scans the same window, with escaped `\n` made real.
 
+**The truncated path** (`classifyTruncatedInput(hookEvent, raw, opts)`) judges a payload cut at 1 MB from its raw text.
+
+- **Errors.** An `isError` flag, then (shell tools) an exit code in the window, then the stdout patterns.
+- **Trust.** update-state.js passes `trustSuccess` for Claude Code's PostToolUse, as on the main path: a shell command that cannot mask a failure, or any other tool, skips the exit code and the patterns. A shell command cut off with its input is not trusted, since nothing says whether it masks.
+- **Success.** A tool end with no error found is its tool's own success face (`classifyToolResult` with an empty result), judged from its input when that survived the cut: `rawToolInput` parses `tool_input` (or the OpenCode plugin's `toolInput`) back with a linear string-aware brace scan. It used to fall through to `thinking` / `large input`.
+
 **Read-only commands.**
 
 - **Content, not errors.** stdout patterns are skipped for read-only commands, whose stdout is content.
-- **Exit codes.** They are inferred from text (`Exit code N`, `exit status N`, `exited with [code] N`, never a bare `returned N`) only for shell tools. For a read-only command, only the editor's own trailer line counts, first or last (`extractTrailerExitCode`).
+- **Exit codes.** They are inferred from text (`Exit code N`, `exit status N`, `exited with [code] N`, never a bare `returned N`) only for shell tools. For a read-only command, only the editor's own trailer line counts, first or last (`extractTrailerExitCode`). Once the host gives a numeric `exitCode` (Codex, OpenCode), none is inferred, unless the command line can mask a failure (`make | tee log` exits with tee's 0).
 - **Merge conflicts** count only for a command containing `git`, an empty command, or a non-shell tool (`errorDetail`'s `opts.conflicts`). They never count for a read-only git command, nor a trusted success, since git exits 1 on a conflict.
 - **`cd` failures** count only in a chain with `cd`/`pushd`/`popd` (`SHELL_MOVE_RE`). There they are errors even though the chain is read-only, because adapters with merged output and no exit code rely on it.
 - **Push rejection.** `errorDetail` also names `push rejected`.
@@ -636,22 +694,34 @@ Text over 80 K characters is scanned as its first `SCAN_HEAD_BYTES` (16 K) plus 
 
 **Shell intent.** `shellIntent(cmd)` returns `{ unquoted, intent, readOnly, masked, segments }`.
 
-- **Unwrapping.** A wrapper is unwrapped first (`unwrapShell`, at most twice, stripping only a whole-script quote pair): `pwsh`/`powershell -Command|-c`, `cmd /c|/k`, or `sh`/`bash`/`zsh`/`dash -c|-lc`, even when named by a path. Codex runs every command through one.
-- **Quotes.** Quoted arguments are emptied and heredoc bodies dropped (`stripQuotedArgs`, linear).
+- **Unwrapping.** A wrapper is unwrapped first (`unwrapShell`, at most twice): `pwsh`/`powershell -Command|-c`, `cmd /c|/k`, or `sh`/`bash`/`zsh`/`dash -c|-lc`, even when named by a path. Codex runs every command through one. Only a script that is one quoted shell word is unquoted (`shellWord`), the way the shell reads it: a run of quoted pieces (shlex quotes `it's` as `'it'"'"'s'`), with `\"`, `\\`, `\$` and `` \` `` unescaped inside double quotes. Two wrapped scripts in a chain are never joined.
+- **Quotes.** Quoted arguments are emptied and heredoc bodies dropped (`stripQuotedArgs`, linear). An unquoted `\;`, `\|` or `\&` is a word, emptied like a quoted one, as bash reads it (find's `-exec … \;`, `grep a\|b`); an escaped backslash `\\` escapes nothing after it.
 - **Segments.** Read-only segments are dropped. Splitting happens on `&&`, `||`, `;`, `|`, `&` and newlines, but never on a redirect's `&` (`2>&1`, `>&2`, `&>file`, `<&3`). `cd`/`pushd`/`popd` are read-only.
-- **Words.** `segmentWords` strips a leading `(`/`{` and a trailing `)`. `cmdName` drops the directory and `.exe`/`.cmd`/`.bat`/`.ps1`.
+- **Words.** `segmentWords` strips a leading `(`/`{` and a trailing `)`, and drops redirects (`2>&1`, `>out.log`, a lone `>`/`2>>`/`<` with its target, a heredoc's `<<`): `make 2>&1` is a bare make, and `git tag 2>/dev/null` is a listing. `cmdName` drops the directory and `.exe`/`.cmd`/`.bat`/`.ps1`.
+- **Wrappers.** `segmentWords` then unwraps (`unwrapCommand`, one pass): every table judges the command a wrapper runs, so `timeout 60 git push` is a push, `sudo -E npm install` an install and `uv run pytest` a test run.
+  - **The wrappers** (`WRAPPERS`, each with the flags that take a value; `--` ends them): env assignments, `sudo`, `doas`, `env`, `time`, `nice`, `ionice`, `timeout` (and its duration), `xvfb-run`, `stdbuf`, `caffeinate`, `dotenv`, `exec`, `nohup`, `command`, `builtin`, `unbuffer`, `chronic`, `cross-env`, `srun`, `mpirun`/`mpiexec`, and `xargs`.
+  - **Environment managers** (`ENV_RUNNERS`): `uv`, `poetry`, `pipenv`, `pdm`, `conda`, `mamba`, `micromamba`, each before `run`.
+  - **Executors** (`executorCommand`): `docker`/`podman` `exec`/`run` (also `container …` and `compose …`), `docker-compose`/`podman-compose`, `kubectl exec … --` and `ssh <host>`. What runs there is judged: `docker exec api cat x` reads. With nothing named to run, the executor is the command, and acts (`docker run img`, `ssh box`).
+  - **A wrapper with nothing to run** is itself the command (`sudo -v`), save `BARE_READS` (`xargs`, `exec`, `command`, `builtin`, `env`), which read: a bare xargs echoes, `exec 3>&1` adjusts the shell. A wrapper xargs runs is always the command, since xargs hands it the input: `xargs sudo` acts.
+  - `command -v`/`-V` is a lookup, as `which` is, and reads.
 - **git.** `gitCalls`/`gitSubcommand` see past git's global options (`-C`, `-c`, `--git-dir`…). `commit`/`push`/`tag` are checked before test/build/install, so a commit message naming a build is still a commit.
 
 **Command tables.**
 
 - **The read-only table** covers:
-  - plain reads, `journalctl`, and git's listing subcommands (log/show/diff/reflog/rev-parse/ls-*/stash list/branch and remote listings…);
+  - plain reads, `journalctl`, and git's listing subcommands (log/show/diff/reflog/rev-parse/ls-*/stash list/branch, remote and tag listings…). `git tag` lists when it has no tag to make: bare, `-l`, `--list` or `-n`;
+  - the text filters a read is piped through (`sort`, `uniq`, `cut`, `tr`, `nl`, `jq`, `column`…). `sed` and `awk` read unless told to edit in place (`sed -i`/`-Ei`/`-i.bak`/`--in-place`, `gawk -i inplace`), and `xargs` is whatever it runs (`xargs grep` reads, `xargs rm` acts; see Wrappers). Without them `grep … | sort | head` was masked, and Codex's `sed -n '1,120p' x.js` had its content scanned;
+  - `find`, unless it acts (`findActs`): `-delete`, `-fprint`/`-fprintf`/`-fls`, or an `-exec`/`-execdir`/`-ok`/`-okdir` whose command (up to its `;` or `+`) acts. `fd` likewise for `-x`/`-X`. A find that find runs is taken to act;
   - `gh` list/view/status/diff/checks, docker/podman/compose `logs|ps|images|inspect`, and `kubectl logs|get|describe|top`;
   - the PowerShell reads and `findstr`.
 - **Builds** are judged by command and subcommand, never an argument (`isBuildCommand`): a build tool by name, or a subcommand-style tool whose subcommand or `run` script is `build`/`compile`. Flags, workspace selectors and `exec`/`dlx`/`compose`/`-p` are skipped.
+- **Task runners** (`turbo`, `nx`, `bazel`/`bazelisk`) are judged by their task (`runnerTasks`). The runner must be the command, or the one a package manager or runner runs (`runnerTarget`); a later word never counts, so `npx jest bazel` is a jest run. The forms: `turbo [run] <task>…`, `nx <target>`, `nx run <project>:<target>`, `nx run-many|affected -t a,b`, `bazel <command>`. A `build`/`compile` task is a build and a `test`/`e2e`/`coverage` task a test run; `turbo run lint` just finishes.
 - **`make`** is a build when bare, or when a target is `all|compile|release|debug|dist|bundle` or contains "build". A test target is a test run, and any other target finishes `make <target> done`.
-- **Installs** use one token-based table for both sides of a call (`isPkgInstall`/`isInstallCommand`). Flags, selectors or a `corepack` prefix may come before `install|i|add|ci`, and a bare `yarn` counts. `cargo build` is a build.
-- **Test runs** (`isToolTestRun`): `node --test` or a test script, gradle/maven test tasks (never one excluded by `-x`), make test targets, and `deno test`. `isTrainingCommand` is linear.
+- **Installs** use one token-based table for both sides of a call (`isPkgInstall`/`isInstallCommand`). Flags, selectors or a `corepack` prefix may come before `install|i|add|ci`, and a bare `yarn` counts, but not `yarn --version`/`-v`/`--help`. The other managers count by their subcommand (`isOtherInstall`): `pip install` (also `python -m pip`, `uv pip`), `cargo add`/`install`, `apt`/`apt-get`/`apk` `install`/`add`, `brew install`, `go get`/`install`, `composer require`/`install`, `dotnet add`/`restore`. `cargo build` is a build.
+- **Test runs** (`isToolTestRun`): `node --test` or a test script (also under `tsx`/`ts-node`), gradle/maven test tasks (never one excluded by `-x`), make test targets, task-runner test tasks, `deno test`, and a test runner (`TEST_RUNNERS`: jest, vitest, mocha, pytest, rspec…) **as the command word** (`isRunnerTest`). It may be reached through `npx`/`bunx`/`pnpx`, a package manager's `exec`/`dlx` or bare bin (`yarn mocha`), `python -m`, or `xargs`; `playwright` counts only as `playwright test` and `cypress` as `cypress run`. An argument never counts: `npm i -D jest`, `pip install pytest` and `git add a.test.js` are not test runs.
+- **Test scripts** (`isTestScript`): the subcommand or `run` script of `npm`/`yarn`/`pnpm`/`bun`/`deno`/`go`/`cargo`/`dotnet`/`rake`/`composer`/`npx` is `test`/`tests` (`test:unit` too), past the manager's flags, a workspace selector and cargo's `+toolchain` (`managerArgs`, shared with `isBuildCommand`); or `php artisan test`. Two argument words never spell one: these were phrases matched anywhere in a segment, so `cp go test` was a test run.
+- **Success details** follow toolToState's order: push/commit, test, build, install, then git (`git done`/`merged clean`), then `make <target> done`. A read-only git step names the result only when nothing else in the command acts (`git status && npm install` finished as `installed`), and only a git step does: a word `git` (`cat git | cut -f1`) is none.
+- **Training** (`isTrainingCommand`, linear) needs a launcher (`python[N]`, `torchrun`, `deepspeed`, `accelerate`, by path too) **as the command**, past wrappers (`srun python train.py`, `uv run python train.py`, `nohup python train.py &`), followed by `train`, or for python a fine-tune or an epochs/learning-rate flag; or a script named train run on its own (`./train.sh`); or `unsloth` as the command word. A launcher inside a word (`ml/python/train.py`, `python-train`) or as an argument (`touch accelerate python-train`) is no launcher.
 
 **Explicit signals.** `normalizeToolResponse` carries `interrupted`, `isError`/`is_error`, numeric `exitCode`/`exit_code`, `backgroundTaskId` and `status`.
 
@@ -662,6 +732,7 @@ Claude Code's `PostToolUseFailure` has **no** `tool_response`. It is `{tool_name
 | Exit 1 from | Detail | Rule |
 |---|---|---|
 | `grep`/`egrep`/`fgrep`/`rg`/`ag`/`ack`/`findstr`/`git grep` | `no matches` | silent |
+| `grep -c`/`--count` (and `egrep`/`fgrep`) | `no matches` | every line a zero count, `0` or `file:0` (`GREP_ZERO_COUNT_RE`) |
 | `diff`, `cmp` | `files differ` | alone |
 | `git diff --quiet` | `files differ` | git's line-ending warning only (`GIT_EOL_WARNING_RE`) |
 | `git diff --exit-code` (no `--quiet`) | `files differ` | alone |
@@ -683,10 +754,12 @@ Claude Code's `PostToolUseFailure` has **no** `tool_response`. It is `{tool_name
 
 **Neutral results** leave the streak alone. update-state.js skips `updateStreak` and `commitCount`, and base-adapter's `handleToolEnd` skips `updateStreak`, as it does for an interrupted tool end.
 
+**Commits** are counted by the result's `committed` flag, never its detail. A successful `git commit` sets it, also under `git commit && git push`, whose face is `pushed!`.
+
 **Diff counts.**
 
 - **With a patch.** Claude Code's `tool_response.structuredPatch` wins when present: `diffFromPatch` sums `+`/`-` lines across hunks, so a same-length replacement is `+1 -1`.
-- **Without one.** `diffFromInput` counts the edit's inputs, including `MultiEdit`'s `edits[]` and `NotebookEdit`'s `new_source`.
+- **Without one.** `diffFromInput` counts the edit's inputs, including `MultiEdit`'s `edits[]` and `NotebookEdit`'s `new_source`. A final newline ends the last line rather than starting another (`lineCount`): `'a\nb\n'` is two lines.
 - **What is stored.** Only the two totals are persisted.
 
 #### Other events
@@ -742,7 +815,7 @@ The renderer calls `face.dropWait()` before applying such a write, so a wait que
 **The fallback path** (`writeFallback`, under the stats lock) handles:
 
 - unparseable stdin, through `classifyTruncatedInput`'s event map, `PermissionDenied` included;
-- payloads over 1 MB. Their `session_id`, `agent_id`, `agent_type`, `hook_event_name` and `source` are regex-extracted, and `tool_use_id` comes from the stream's tail, since it is serialized after `tool_response`;
+- payloads over 1 MB. Their `session_id`, `agent_id`, `agent_type`, `hook_event_name`, `source` and `tool_name` are regex-extracted, and `tool_use_id` comes from the stream's tail, since it is serialized after `tool_response`. A tool end's call key is rebuilt from the raw `tool_input` text (`_rawCallKey`, through state-machine.js's `rawToolInput`), so the waited call's own huge result can answer its prompt;
 - payloads that parsed and then threw, which reuse their parsed ids rather than minting a `claude-<ppid>` phantom.
 
 **What the fallback path writes.**
@@ -750,7 +823,7 @@ The renderer calls `face.dropWait()` before applying such a write, so a wait que
 - **Stamps.** It stamps `lastPromptAt` on `SessionStart`/`UserPromptSubmit` and `turnEnded` on `Stop`.
 - **Empty stdin.** A fallback `SessionStart` counts as attention, and the global owner's id is used.
 - **Routing.** A known `session_id` is used as-is, and `agent_id` routes to the agent orbital.
-- **Ownership.** Only the owner writes the global file. Sticky fields and the turn-end carry come from the session file.
+- **Ownership.** Only the owner writes the global file. Sticky fields, the turn-end carry, a session file's `stopped` and the wait fields come from the session file; the waited call's tool end answers its wait (and releases a parent standing in for an agent). A SubagentStart minted here stamps `synthetic: true`.
 - **Coercion.** Non-string fields go through `toText`.
 
 **Top-level registration.** `UserPromptSubmit` and a `Stop` without `agent_id` register the session in `topLevelSessions` before classification, so a window opened before the hooks were installed is not taken for a subagent. The legacy synthetic-retire loop skips agent-owned entries.
@@ -783,7 +856,7 @@ A per-face label (≤ 8 chars) follows `teammateName` > `taskDescription` > cwd 
 
 **Loading.** `OrbitalSystem` loads **every** session file into `faces`, the main included.
 
-- `setMainSession(id)` marks the main, and `getSortedFaces()`/`_assignLabels()` filter it off the ring. So the list, `liveChildCount()` and the policy all read it as a normal `MiniFace`.
+- `setMainSession(id)` marks the main and relabels the ring at once; `getSortedFaces()`/`_assignLabels()` filter it off the ring. So the list, `liveChildCount()` and the policy all read it as a normal `MiniFace`.
 - `loadSessions(null)` (at boot) excludes nothing.
 - A `MiniFace` carries `lastPromptAt`, `toolCalls` and `filesEdited`.
 
@@ -792,7 +865,8 @@ A per-face label (≤ 8 chars) follows `teammateName` > `taskDescription` > cwd 
 - **`orderSessionList(mainInfo, faces)`** returns `[{ face, depth }]` in **tree order**:
   - the main row (a synthesized `mainInfo`), with its children by `firstSeen`;
   - the other top-level sessions by attention (`lastPromptAt` desc, `firstSeen` tiebreak), each with its children;
-  - then orphans.
+  - each child with its own children one level deeper (an OpenCode task's task, depth 2+);
+  - then orphans (parent not listed), each with its children. A parent loop lists each session once.
 - **`listNavigableIds(entries)`** returns what `j`/`k`/`Enter` may land on: every row that is not `stopped`, plus the main row always (between turns its `stopped` is the folded `turnEnded`). A stopped session still draws for ~10s, but pinning it would be undone on the same tick.
 - **`renderSessionList(cols, rows, entriesOrFaces, paletteThemes, mainInfo, selected)`** takes `selected` as a **session id**. A number is still accepted for legacy callers, as is a face array.
 
@@ -849,6 +923,7 @@ Singletons get no tethers or labels.
   - A face joining a ring already on screen starts at its predecessor's current offset (`_startJoiners`/`joinFrom`) and eases forward at full radius, without a radial spawn. It is drawn beneath, and kept out of `_resolveOverlaps` until the ease ends.
   - A face off the ring forgets its offset, so a demoted main rejoins the same way.
   - A first-drawn ring snaps into place.
+- **The `+N more` text** (`_overflowRow`) takes its planned row (`mainPos.row + mainPos.h + 7`, ≤ `rows - 2`) only when no ring box covers it, else the nearest free row below the keep-out, else above it, else it is skipped that frame.
 - **Space needed.** The ring needs about 80×60 or 114×50 with accessories (78×60 or 104×50 without). Smaller windows get the stable side panel.
 - **Tests.** `tests/test-grid.js › layout invariants` sweeps window sizes and asserts:
   - no overlap with the keep-out, between faces, or with the hint row;
@@ -897,8 +972,8 @@ Tool patterns are shared constants in state-machine.js: `EDIT_TOOLS`, `BASH_TOOL
 | Item type | Mapping |
 |---|---|
 | `command_execution` | `Bash` + the command (so the Bash tables split executing / testing / installing / committing); `declined` → relieved, `failed` → error via `isError`/`exit_code` |
-| `file_change` | `Edit` over `changes[].path`; completed → proud `saved <file>` / `saved N files` |
-| `mcp_tool_call` | `mcp__<server>__<tool>` through the MCP verb classifier |
+| `file_change` | `Edit` over `changes[].path`; completed → proud `saved <file>` / `saved N files`. An item seen only as `item.completed` is counted then |
+| `mcp_tool_call` | `mcp__<server>__<tool>` through the MCP verb classifier; `error` may be a string or `{message}` |
 | `web_search` | `WebSearch` |
 | `collab_tool_call` / `collab_agent_tool_call` | `Task` (Codex's delegation) |
 | `todo_list` / `plan_update` | `TodoWrite` → thinking, then satisfied `plan updated` |
@@ -915,9 +990,9 @@ Tool patterns are shared constants in state-machine.js: `EDIT_TOOLS`, `BASH_TOOL
 - **After `finishSession`**, `handleEvent` returns at once: codex keeps printing while it shuts down.
 - **`close`, not `exit`, ends the run**, so buffered stdout drains. Once codex has *exited*, `EXIT_GRACE_MS` (3s) ends the run anyway, since `close` waits for every holder of the pipe.
 - **A closed reader** (`| head`, `EPIPE`) retires the session as `error` / `output closed` and destroys codex's stdout. The wrapper then exits `signalExitCode('SIGPIPE')`: 141 on POSIX, 1 on win32.
-- **The session-ending write happens once** (`finishSession`), from `close`, a closed reader, or a caught SIGINT/SIGTERM, which is forwarded to codex.
+- **The session-ending write happens once** (`finishSession`), from `close`, a closed reader, or a caught SIGINT/SIGTERM/SIGHUP, which is forwarded to codex.
 - **Exit codes.** `closeOutcome()` turns a signal-killed codex into an error with exit 128+N (`signalExitCode`).
-- **engmux** behaves the same way: a signal writes `error` / `interrupted` with `stopped`, then exits 130/143.
+- **engmux** behaves the same way: a signal writes `error` / `interrupted` with `stopped`, then exits 130/143/129. Its stdout is passed through as it arrives; only the copy it parses is capped at 1 MB, and a capped copy is judged by the exit code.
 
 **Living alongside the hooks.** The session id is codex's **bare** thread id, which is the hooks' `session_id` too (before `thread.started` it is `codex-<pid>`). `setup.js codex` installs the hooks *and* suggests the wrapper.
 
@@ -936,21 +1011,22 @@ Tool patterns are shared constants in state-machine.js: `EDIT_TOOLS`, `BASH_TOOL
 - **Exit codes.** OpenCode reports a command's exit code only in `metadata.exit`. The plugin forwards `exit`, `interrupted` and `timedOut` (`shellOutcome`). Long output keeps its first 1000 and last 2995 chars (`clipOutput`), because a test verdict comes last.
 - **Turn ends are synchronous.** `session.idle`/`session.error` are written with `spawnSync`, because `opencode run` exits with the turn.
 - **Everything else is fire-and-forget**, one child per session at a time.
-  - Payloads arriving meanwhile go out as **one batch** (a JSON array that `processStdinEvent` applies in order) when the child closes, at most `CHAIN_WAIT_MS` (3s) later.
+  - Payloads arriving meanwhile go out as **one batch** (a JSON array that `processStdinEvent` applies in order) when the child closes, at most `CHAIN_WAIT_MS` (3s) after it **had its input**. A timer that fires earlier than that (the plugin's own loop held the input in its pipe, e.g. through a burst of synchronous turn ends) waits out the rest, once, so a hung child still lets go within `2 × CHAIN_WAIT_MS`. The next child used to overtake one still mid-run. `CodeCrumbPlugin.setChainWait(ms)` is the test seam.
   - A sync turn end takes the session's queue with it, turn end last.
   - The spawn promise never rejects.
   - Reasoning deltas are throttled per session (5s).
 - **The node binary** is resolved **per spawn** (`CODE_CRUMB_NODE || 'node'`), because `process.execPath` inside OpenCode is Bun.
 - **Size caps.**
   - The adapter reads ≤1 MB of stdin, and judges anything bigger from its raw text.
-  - Tool arguments are capped at `MAX_FIELD` (64 KB). `capInput` keeps a long string's line count as newlines, for the "+N" thought.
+  - Tool arguments are capped at `MAX_FIELD` (64 KB). An object nested past depth 3 is dropped, since nothing reads that deep. `capInput` keeps a long string's line count as newlines, for the "+N" thought.
   - Batches are capped at `MAX_BATCH_BYTES` (900 KB, `takeBatch`), and sent as sequential `spawnSync`s on the sync path.
 - **Numbering.** Payloads carry `seq` and `pluginId`. A turn end records `endSeq`/`pluginId` on the session file, and a payload numbered before it is a **straggler**: counted, but not drawn. A late tool end keeps its own rule. The cause: a child spawned just before a sync turn end cannot write before it.
 - **Child sessions.** The task tool runs a child session (`sessions.create({ parentID })`). Only `session.created` names the parent, so the plugin remembers it (`parentBySession`) and stamps `parentSession` on the child's payloads. A child is an orbital of its parent:
   - it never stamps attention;
   - it never writes the global file;
   - its tool calls count toward the parent (`statsId`);
-  - its `session.idle` retires it (`stopped`).
+  - its `session.idle` retires it (`stopped`);
+  - its every event touches each ancestor's session file (the family heartbeat, as update-state.js does for Claude Code agents), so a parent waiting on its task tool stays fresh on win32.
 - **`session.error`.**
   - Without a session id it is dropped, because plugin and skill load failures send them. Otherwise it carries `errorName`.
   - A `ContextOverflowError` is followed by compaction. When no `session.compacted` follows, the next idle is marked `overflowFailed` (`trackOverflow`).
@@ -974,10 +1050,10 @@ Tool patterns are shared constants in state-machine.js: `EDIT_TOOLS`, `BASH_TOOL
 | a timed-out tool end | error `timed out` | breaks the streak |
 | `overflowFailed` idle | error `context too long` | a failed turn |
 | `MessageAbortedError`/`AbortError` (Esc) | error `interrupted` | ends the turn without a streak break, in either arrival order |
-| any other session error | error with its detail | ends the turn as failed: `turnError`, kept through the next `session.idle`; breaks the streak once |
+| any other session error | error with its detail | ends the turn as failed: `turnError`, shown by the next `session.idle` and not carried past it; breaks the streak once |
 | `session.idle` | happy | ends the turn (`turnEnded`; `stopped` only for a child) |
 
-The adapter's `TOOL_ALIASES` map `question` → `AskUserQuestion`, `plan_exit` → `ExitPlanMode` and `plan_enter` → `EnterPlanMode`.
+The adapter's `TOOL_ALIASES` map `question` → `AskUserQuestion`, `plan_exit` → `ExitPlanMode` and `plan_enter` → `EnterPlanMode`. `normaliseToolInput` aliases `filePath`/`oldString`/`newString` to `file_path`/`old_string`/`new_string`, inside multiedit's `edits[]` too, so OpenCode edits get diff counts.
 
 **Every adapter (base-adapter.js):**
 
@@ -985,8 +1061,8 @@ The adapter's `TOOL_ALIASES` map `question` → `AskUserQuestion`, `plan_exit` �
 - **Timestamps** strictly increase within a process (`nextTimestamp`).
 - **Hooks for subclasses.** `normaliseEvent` may return `{ skip: true }`, and `mapEvent` may return `breakStreak`.
 - **Tool results.** `exitCode`/`interrupted` are passed to `classifyToolResult`.
-- **Failed turns.** A `turnError` turn end keeps the error face without breaking the streak again (`failedTurnEnd`).
-- **Payloads over 1 MB** reach the session file with their sticky fields, judged by their own event: only a tool end is checked for errors, and a tool start shows its tool.
+- **Failed turns.** The turn end after a `turnError` keeps the error face without breaking the streak again (`failedTurnEnd`), once: a turn end never carries `turnError` on, so a later text-only turn (only its idle reaches the adapter) ends happy.
+- **Payloads over 1 MB** reach the session file with their sticky fields, judged by their own event: only a tool end is checked for errors (and with none ends on its tool's success face), and a tool start shows its tool.
 
 ### The Launcher
 
@@ -1004,35 +1080,38 @@ The adapter's `TOOL_ALIASES` map `question` → `AskUserQuestion`, `plan_exit` �
 
 **Claude Code.** `node setup.js` merges `buildFaceHooks` into `claudeSettingsPath()`: `<CLAUDE_CONFIG_DIR>/settings.json`, else `~/.claude/settings.json`. That is Claude Code's own rule (2.1.300: `CLAUDE_CONFIG_DIR ?? ~/.claude`, resolved); an empty value counts as unset. `uninstall` and the `.bak` follow it.
 
-- It writes a `.bak` first, aborts on unreadable or invalid JSON, and uses `writeJsonAtomic`.
-- It strips only our own commands (`isOurCommand`: our argv shape, ending in a real event).
+- It writes a `.bak` first, aborts on unreadable or invalid JSON, and uses `writeJsonAtomic`. A leading BOM is skipped, as doctor skips it (`parseJsonText`), and not written back.
+- It strips only our own commands (`isOurCommand`: our argv shape, a real event, optionally followed by shell plumbing such as `2>/dev/null || true`, `; true` or `# note`).
+- An event is installed only when it holds exactly the command setup builds for it (`isInstalledCommand`, the user's shell suffix allowed); any other command of ours under that key (another path, another event's argument, a missing `--editor` tag) is a stray, removed or replaced (`installEventHooks`).
 - It syncs `async` flags in place.
 
 **Codex.** `setup.js codex` writes `<CODEX_HOME or ~/.codex>/hooks.json` (`codexHome(env)`). It then removes a Code Crumb `notify` line from the neighbouring `config.toml` (`removeCodexNotify`, `notifyRemoved`), and `uninstall` does the same.
 
 - Only a key whose value names `codex-notify.js` is touched (`ourNotifyKeys`, a one-line key or an array over several lines), never a foreign notify. Comments are not the value, so `notify = [...]  # replaced codex-notify.js` is foreign.
 - `config.toml` edits are textual: a `.bak` first, an abort on any read error but `ENOENT`, a BOM kept first, and the file's own line ending.
-- `setupCodexNotify` follows the same rules.
+- Keys are found by a line scan (`tomlLines`) that tracks multi-line strings and open arrays/inline tables, so a `[` line inside a `"""` string is no table header and a `notify =` inside a string is no key.
+- `setupCodexNotify` follows the same rules, and rewrites in place one of ours whose script is not this checkout's (a moved clone).
 
 **OpenCode.** `setup.js opencode --install|--uninstall` edits the config OpenCode reads; without a flag it just prints instructions.
 
 - **The directory** (`opencodeConfigDir`) is `$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`. That holds on Windows too, since OpenCode uses xdg-basedir off `os.homedir()` (1.18.21 binary).
 - **The file** (`opencodeConfigPath`) is `opencode.json`, or an existing `opencode.jsonc` when there is no `opencode.json`. `OPENCODE_CONFIG` is deliberately unused.
-- **JSONC.** `parseOpenCodeConfig` (pure) reads strict JSON, then JSONC; setup and doctor both use it. A strict-JSON config is rewritten. A JSONC config is edited textually: only the `plugin` member is rewritten, or added after `{`, so comments survive.
+- **JSONC.** `parseOpenCodeConfig` (pure) reads strict JSON, then JSONC; setup and doctor both use it. A strict-JSON config is rewritten. A JSONC config is edited textually: only the `plugin` member is rewritten, or added after `{` (past any comment that opens on the `{` line), so comments survive.
 - **Comments in the list.** A comment **inside** the plugin list makes install and uninstall refuse, leaving the file byte-identical; install prints the entry to add by hand.
 - **The key** is `plugin`, **singular**, and the `.bak` rule applies.
 
-**`setup.js doctor`** (`npm run doctor`; `doctor({ home, env, log, now, nodeVersion })`) is **read-only**.
+**`setup.js doctor`** (`npm run doctor`; `doctor({ home, env, log, now, nodeVersion, platform })`) is **read-only**.
 
 - It makes no backups or prefs, cleans no quit flag, spawns no process, and never throws on a garbage file.
 - Each line is `✓`, `!` plus a fix, or `·`. It exits 1 when it printed a `!`.
 - It checks:
   - node ≥18 and on PATH;
   - the renderer (`isRendererAlive`, with the beat's age), autolaunch, and the quit flag;
-  - the manual hooks in `claudeSettingsPath` (missing events, duplicates, a moved `update-state.js`);
+  - the manual hooks in `claudeSettingsPath` (missing events, duplicates, a moved `update-state.js`, a command filed under one event that reports another);
   - the plugin (enabled, found via `<claudeConfigDir>/plugins/installed_plugins.json`, or older than this copy);
   - the plugin and manual hooks both installed;
-  - the Codex hooks under `CODEX_HOME`, and a leftover notify line (`ourNotifyKeys`: exactly what setup would remove);
+  - the Codex hooks under `CODEX_HOME`, and a leftover notify line (`ourNotifyKeys`: exactly what setup would remove), or a notify-only script that no longer exists;
+  - on Linux, when autolaunch would open the renderer, an in-process PATH lookup for the terminals `buildRendererCommands` knows (`doctorTerminals`);
   - the OpenCode entry, in `opencodeConfigPath` read as JSONC;
   - the newest hook write (warning past `DOCTOR_QUIET_MS`, 1h).
 - With the plugin installed, it prints the plugin's renderer command.
@@ -1121,6 +1200,7 @@ To develop: `npm run demo` in one terminal and `npm start` in another (orbitals:
 | `STALE_MS` | 120000ms | grid.js (session file purge) |
 | `STOPPED_LINGER_MS` | 10000ms | grid.js |
 | `ORPHAN_TIMEOUT` / `CHILD_ORPHAN_TIMEOUT` | 90000ms / 15 min | grid.js |
+| `NO_PID_FILE_KEEP_MS` | 30 min | grid.js (a pid-less top-level file's purge) |
 | `PID_PENDING_PROTECT_MS` / `PID_PROTECT_CAP_MS` | 30000ms / 1h | grid.js |
 | `PID_CACHE_TTL_MS` / `SLACK_MS` | 60000 / 1000ms | grid.js |
 | `MAX_ORBITALS` / `ORBIT_SPACING` | 8 / 1.2 | grid.js |
@@ -1130,10 +1210,11 @@ To develop: `npm run demo` in one terminal and `npm start` in another (orbitals:
 | `rotationSpeed` (instance field) | 0.007 rad/frame | grid.js (~1 revolution per 60s) |
 | `INTER_GROUP_GAP` / `INTRA_GROUP_GAP` | 0.15 / 0.35 rad | grid.js |
 | `TETHER_BRIGHTNESS` / `GROUP_LABEL_BRIGHTNESS` | 0.15 / 0.45 | grid.js |
-| `CYCLE_WORK_STATES` / `CYCLE_INTERVAL` / `CYCLE_STALE_MS` | 5 states / 2500 / 3000ms | grid.js (synthetic subagents only, never a `-agent-` orbital or `CYCLE_PROTECTED_STATES`) |
+| `CYCLE_WORK_STATES` / `CYCLE_INTERVAL` / `CYCLE_STALE_MS` | 5 states / 2500 / 3000ms | grid.js (only a face whose last write carried `synthetic: true`, never a `-agent-` orbital or `CYCLE_PROTECTED_STATES`) |
 | `EXIT_GRACE_MS` | 3000ms | codex-wrapper.js |
 | `MAX_FIELD` / `MAX_BATCH_BYTES` / `CHAIN_WAIT_MS` | 64 KB / 900 KB / 3000ms | opencode-plugin.mjs |
 | `DOCTOR_QUIET_MS` | 1h | setup.js |
+| `MAX_FILE_BYTES` / `MAX_LINE_CHARS` / `MAX_DEPTH` | 20 MB / 2M chars / 32 | recorder.js |
 | `FILE_TIMEOUT_MS` / `IPC_GRACE_MS` | 5 min / 2000ms | tests/run.js |
 
 ## Environment Variables
@@ -1152,6 +1233,8 @@ To develop: `npm run demo` in one terminal and `npm start` in another (orbitals:
 | `NO_COLOR` | Disables colour and the `t` key. |
 | `MINIMAL_BOOT` | Same as `--minimal`. |
 | `ENGMUX_PYTHON` / `PYTHON` | engmux's interpreter. |
+| `CODE_CRUMB_RECORD` | `1`/`shape` records anonymised payloads, `full` raw; unset, `0`, `off`, `false` or `no` disables it. See Payload recording. |
+| `CODE_CRUMB_RECORD_FILE` | The recording file; a relative path is taken from HOME. Default `~/.code-crumb-record/<local day>.jsonl`. |
 
 **Setup**
 
@@ -1168,6 +1251,7 @@ To develop: `npm run demo` in one terminal and `npm start` in another (orbitals:
 | `CRUMB_TEST_HOME` | The throwaway home; `createSuite()` refuses to run without it. |
 | `CRUMB_TEST_FILES` | A `path.delimiter` list replacing the test files, for the runner's own tests. |
 | `CRUMB_TEST_QUIET` | Set by `--quiet`. |
+| `CRUMB_UPDATE_GOLDEN` | `1` makes test-replay rewrite its goldens instead of comparing (set by hand, never by the runner). |
 
 **Renderer CLI flags**
 
@@ -1187,32 +1271,33 @@ Run `npm test`, or `node tests/run.js [--serial] [--jobs=N] [--quiet] [filter...
 **The runner.**
 
 - **Parallel by default.** Each file runs as `run.js --child <file>`, up to `--jobs=N` at once (default `min(4, availableParallelism)`), slowest first.
-- **Isolation.** Each child gets its own throwaway `HOME`/`USERPROFILE`/`CODE_CRUMB_STATE` plus `CRUMB_TEST_HOME`, removed afterwards. `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `OPENCODE_CONFIG_DIR` and `OPENCODE_CONFIG` are unset, so setup can never reach a real editor config. Subprocess tests inherit this environment.
+- **Isolation.** Each child gets its own throwaway `HOME`/`USERPROFILE`/`CODE_CRUMB_STATE` plus `CRUMB_TEST_HOME`, removed afterwards. `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `OPENCODE_CONFIG_DIR` and `OPENCODE_CONFIG` are unset, so setup can never reach a real editor config, and so is every variable the code reads that a developer's shell may hold (`CODE_CRUMB_EDITOR`, `CODE_CRUMB_MODEL`, `CODE_CRUMB_NODE`, `CLAUDE_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `MINIMAL_BOOT`, `NO_COLOR`, `ENGMUX_PYTHON`, `PYTHON`, `CODE_CRUMB_RECORD`, `CODE_CRUMB_RECORD_FILE`). Subprocess tests inherit this environment.
 - **Output.** Each file's output is buffered and printed in list order, and its counts come back over IPC.
 - **Failures.** A crash, a timeout (`FILE_TIMEOUT_MS`) or a non-zero exit after reporting counts as a failure. A load failure is counted, and the run goes on.
 - **Serial mode.** `--serial` runs everything in one process with one home, and a single selected file also runs in-process.
 - **Other flags.** `--quiet` prints only the summary. A filter that matches nothing exits 2.
 - **CI** (`.github/workflows/test.yml`) runs `node --check`, the whitespace gate, and `node tests/run.js --quiet` on ubuntu/windows/macos × node 18/20/22.
 
-**Counts.** **2715 tests across 17 files on win32**:
+**Counts.** **2915 tests across 19 files on win32**:
 
 | File | Tests | File | Tests |
 |---|---|---|---|
-| test-shared | 51 | test-launch | 49 |
-| test-state-machine | 664 | test-adapters | 312 |
+| test-shared | 58 | test-launch | 51 |
+| test-state-machine | 704 | test-adapters | 324 |
 | test-themes | 72 | test-transition | 31 |
-| test-animations | 42 | test-emotions | 261 |
-| test-particles | 49 | test-platform | 153 |
-| test-face | 305 | test-subagents | 74 |
-| test-grid | 396 | test-attention | 139 |
-| test-accessories | 24 | test-release | 50 |
-| test-teams | 43 | | |
+| test-animations | 42 | test-emotions | 284 |
+| test-particles | 49 | test-platform | 165 |
+| test-face | 308 | test-subagents | 77 |
+| test-grid | 413 | test-attention | 146 |
+| test-accessories | 24 | test-release | 58 |
+| test-teams | 43 | test-lifecycle | 29 |
+| test-replay | 37 | | |
 
-**2728 on Linux/macOS**, which match each other. Three files are platform-conditional:
+**2936 on Linux/macOS**, which match each other. Three files are platform-conditional:
 
-- **test-adapters** has 322 there. It adds 11 POSIX-only tests: the wrapper/engmux/demo SIGTERM and SIGHUP tests, the wrapper's late-event retirement and exit grace, and the OpenCode plugin's per-session ordering and turn-end drain, which need a shell-script stand-in for node. It drops 1 win32-only test, the `codex.cmd` shadow.
-- **test-launch** has 50: 2 POSIX-only tests (Ctrl+C reaches the editor, SIGTERM is forwarded), minus the win32 `claude.cmd` shadow.
-- **test-platform** has 155: 3 POSIX-only tests (backup modes, a read-only settings backup, the `code-crumb.sh` symlink), minus the win32 `shell:true` quoting round-trip.
+- **test-adapters** has 339 there. It adds 16 POSIX-only tests: a chain timer that expires while the plugin is busy, the wrapper/engmux/demo SIGTERM and SIGHUP tests, the wrapper's and engmux's own SIGHUP retirement, engmux's whole >1 MB passthrough and a reader that closes early, the wrapper's late-event retirement and exit grace, and the OpenCode plugin's per-session ordering and turn-end drain, which need a shell-script stand-in for node. It drops 1 win32-only test, the `codex.cmd` shadow.
+- **test-launch** has 52: 2 POSIX-only tests (Ctrl+C reaches the editor, SIGTERM is forwarded), minus the win32 `claude.cmd` shadow.
+- **test-platform** has 170: 6 POSIX-only tests (backup modes, a read-only settings backup, the `code-crumb.sh` symlink, a symlinked write, a symlinked settings.json, an exported CDPATH), minus the win32 `shell:true` quoting round-trip.
 
 Check the total. `test-shared.js › getIsWorktree` fails inside a git worktree by construction, because `.git` is a file there.
 
@@ -1221,7 +1306,7 @@ Check the total. `test-shared.js › getIsWorktree` fails inside a git worktree 
 | File | Covers |
 |---|---|
 | test-shared | `safeFilename`, display-width helpers |
-| test-state-machine | `toolToState` for every editor; result classification (patterns, guards, exit codes, `trustSuccess`, echoed lines, scan windows, predicates, background launches); `shellIntent` and git options; diff counting; streaks; `classifyForeignSession`; `prettyModelName`/`agentTranscriptPath`; counter helpers; end-to-end `update-state.js` runs for subagents, SessionStart sources, async ordering, `firstSeenAt` |
+| test-state-machine | `toolToState` for every editor; result classification (patterns, guards, exit codes, `trustSuccess`, echoed lines, scan windows, predicates, background launches); `shellIntent` and git options; diff counting; streaks; `classifyForeignSession`; `prettyModelName`/`agentTranscriptPath`; counter helpers; end-to-end `update-state.js` runs for subagents, SessionStart sources, async ordering, `firstSeenAt`; seeded invariant fuzzing of `shellIntent` and the classifier (arguments, alone and in pairs, the read-only closure, wrappers, masking, trusted success, both sides of a call, linear time); command wrappers and executors, find's actions, escaped operators, explicit exit codes, the truncated path's success face |
 | test-themes | colour math, all 23 states themed, `COMPLETION_LINGER`, thought pools |
 | test-animations | eye and mouth functions |
 | test-particles | all 16 styles, lifecycle, `fadeAll` |
@@ -1230,12 +1315,14 @@ Check the total. `test-shared.js › getIsWorktree` fails inside a git worktree 
 | test-accessories | accessory definitions and rendering |
 | test-teams | team colours/labels/grouping, teammate routing by `agent_id`, the lead heal |
 | test-launch | launcher logic, `--editor`, editor supervision and exit codes, the `.cmd` shadow |
-| test-adapters | every adapter; codex-wrapper vs a fake `codex` (incl. `\| head`, legacy hooks); codex-notify, alone and beside the wrapper; the OpenCode plugin contract; PID liveness; provenance; `firstSeenAt` and neutral results; stats-lock contention; demo signal cleanup |
+| test-adapters | every adapter; codex-wrapper vs a fake `codex` (incl. `\| head`, legacy hooks); codex-notify, alone and beside the wrapper; the OpenCode plugin contract (incl. a chain timer that expires while the plugin is busy); PID liveness; provenance; `firstSeenAt` and neutral results; stats-lock contention; demo signal cleanup |
 | test-transition | `SwapTransition` phases and `dimFactor` |
 | test-emotions | shell commands → states, the timing table, `idleCascade`, waiting and `buildTitle`, `startupGate`, `needsRescue`, tmux, `splitKeys`; the renderer runtime via `runUnifiedMode` (watcher, allowed prompts, clock steps, failed reads, crash/exit restore, deadlines, low power) |
 | test-platform | quoting, `writeJsonAtomic`, the spawn and stats locks, `isRendererAlive`, setup.js on temp configs (Codex notify and `CODEX_HOME`, OpenCode dir and JSONC), launch.js exit codes, `code-crumb.sh` via a symlink |
 | test-subagents | `agent_id` attribution, per-agent model, the family heartbeat, the conducting hold, `ESCALATING_STATES` |
 | test-attention | `pickMainSession` and the fields feeding it, adapter stamp rules, the main's model, the session list, `readState(path)`, permission-wait confirmation, `PermissionDenied`, informational notifications |
+| test-lifecycle | lib/wait.js (asking, reading, carrying, confirming, standing in, one walk through every phase) and lib/carry.js (`writeEnds`, the tombstone across every event, the turn-end inherit, `stopsGlobal`); both write paths keep the same facts and show the same success face, end to end |
+| test-replay | the recorder's anonymiser (pseudonyms, command shapes, free text, the key) and record file (modes, caps, permissions); golden replays of `tests/fixtures/replay` through the real hooks, adapters and wrapper; `import-recording.js` |
 | test-release | packaging (require graph vs `"files"`), plugin manifests and `hooks.json` vs `HOOK_EVENTS`, npm scripts, the runner contract (via `CRUMB_TEST_FILES`), the direct-run refusal, `doctor` and its agreement with setup (`CLAUDE_CONFIG_DIR`, OpenCode's dir and JSONC, notify arrays), `.editorconfig` vs the CI whitespace gate |
 
 **Conventions the suite relies on:**
@@ -1244,13 +1331,13 @@ Check the total. `test-shared.js › getIsWorktree` fails inside a git worktree 
   - `createSuite()` returns `{ describe, test, done, passed, failed }`, and `test.async(name, fn)` (or a returned promise) is awaited.
   - `makeTempEnv(sessionId)`/`cleanup(tmp)`/`readJSON(path)` serve subprocess tests.
   - It owns the subprocess runners, so use them, not a local copy.
-    - `runUpdateState(event, input, env, { args, strict })` runs one hook. Objects are JSON-encoded and strings go in raw, so `''` reaches the catch path. Only a non-zero exit fails, unless `strict`.
+    - `runUpdateState(event, input, env, { args, strict, timeout })` runs one hook. Objects are JSON-encoded and strings go in raw, so `''` reaches the catch path. Only a non-zero exit or a signal (a hook killed by its timeout) fails, unless `strict`.
     - `runFakeCodex(events, seedStats, args)` replays ThreadEvents through codex-wrapper's real spawn path.
 - **Seams.**
   - For a definite PID verdict, seed `_pidStartCache` with a start time before the write, or install `grid._setPidResolver(fn)` (`null` restores the real one).
   - Renderer-runtime tests drive `runUnifiedMode(opts)` with a temp `sessionsDir`, a fake `watch`, manual `schedule`/`cancel`, captured `write`/`exit`, `installHandlers: false` and `start: false`.
 - **Behaviour over source.** The remaining `source:` tests are deliberate lint tests for properties with no runtime observable (render-loop lint, adapter hygiene, autolaunch helpers, CLI paths the suite cannot drive portably). Don't add new ones where a behaviour can be driven.
-- **A regression test must fail first.** Every review-pass test was checked against the pre-fix sources, in labelled blocks (`Third review pass`, `review fixes`, `round 3`, `round 4`, `review round 5`, `Review round 5 (docs-pass bugs)`). `CHANGELOG.md` says what each pass fixed.
+- **A regression test must fail first.** Every review-pass test was checked against the pre-fix sources, in labelled blocks (`Third review pass`, `review fixes`, `round 3`, `round 4`, `review round 5`, `Review round 5 (docs-pass bugs)`, `review round 6`). `CHANGELOG.md` says what each pass fixed.
 - **"Today"** in a test is `localDay()`, never the UTC date.
 - **Timing tests compare growth, not a flat budget.** A linear-time check times n against 8n (best of three, the sizes interleaved) and allows ×20: linear code measures ~×10, quadratic ×64. A loaded CI runner failed a flat 50ms budget. The round-3 fuzz tests keep a deliberately loose 250ms bound against a 1.4s regression.
 
@@ -1273,7 +1360,8 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
   - Nothing may be written to the last cell of the last row.
 - **Widths are terminal columns**:
   - File- or tool-sourced text (detail, task, label, cwd, branch, model, editor, thought) is measured with `strWidth` and cut with `sliceToWidth`/`sliceFromEndToWidth`.
-  - Wide, Fullwidth and emoji code points are 2 columns. Combining marks, ZWJ and variation selectors are 0.
+  - Wide, Fullwidth and emoji code points are 2 columns (the coloured circles and squares, mahjong, cards and enclosed ideographs included). Combining marks, ZWJ, U+200B–200F and U+2060–2064, variation selectors, the BOM, emoji tags and Hangul vowel/final jamo (U+1160–11FF, U+D7B0–D7FF: NFD Korean measures like NFC) are 0.
+  - `safeFilename` keeps `[A-Za-z0-9_-]` and at most 64 characters; a longer id keeps 55 plus `-` and 8 hex of sha1(id), so labelled agent ids (`a${label}-${hex16}`) stay distinct. `${parent}-agent-` prefix matching holds for parent ids up to 48 characters.
   - Every glyph the app draws is pinned at width 1 by a test.
 - **No network**: all IPC is file-based.
 - **Graceful degradation**: the renderer survives resizes, missing or unreadable files and stale sessions. An uncaught throw restores the terminal before exiting.
@@ -1285,11 +1373,13 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **A user's "no" fires no hook.** Only the auto-mode classifier fires `PermissionDenied`. What follows a "no" is unchecked; if nothing arrives within 8 s, the refused tool shows as running until the next write.
 - **Unverified: the interactive TUI dialog uses the same ask path as the 6 s timer.** The timer was read in the binary, and only `claude -p` was observed. If the TUI differs, a dialog left open past 8 s shows its tool running.
 - **A prompt approved after the 6 s notification** shows `waiting` until its tool ends.
-- **The truncated (>1 MB) PostToolUse path has no `trustSuccess`.** This affects the face only, not the streak.
 - **Not handled:** `PostToolBatch`, `PreModelSwitch` and `UserPromptSubmit.source`.
 - **Exec-form hooks** (`"command": "node", "args": [...]`) would skip Git Bash on 2.1.300, a real Windows latency win, but they break older Claude Code.
 - **`TaskCompleted` fire sites changed.** In 2.1.280 `TaskUpdate` fired it for any session; in 2.1.300 only the teammate stop path does, per the binary. Re-check on the next bump.
 - **Installs predating 1.3.0** lack `PermissionDenied` and the async flags (older ones also `PostModelSwitch`). `npm run setup` fixes them; `npm run doctor` reports missing events.
+- **`_writeTeammate` rebuilds its file from scratch**, so a late `TeammateIdle`/team `TaskCompleted` after SessionEnd or after the teammate orbital's retirement can still revive it (the class `echoesTurnEnd` closed for session files). Rare, unverified.
+- **The parsed-then-threw fallback has no call key**, so only the >1 MB path can answer a wait.
+- **Unverified: Codex's command quoting.** `shellWord` handles shlex-style pieces and escaped double quotes, but no real `codex exec --json` output with an apostrophe was checked.
 
 **Launcher and Windows:**
 
@@ -1300,13 +1390,20 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **`quoteArg` (win32 `shell: true`) cannot neutralise `!VAR!`** under registry-enabled delayed expansion (off by default for `cmd /c`). Other metacharacters are quoted: `"` → `""`, `%` → `"^%"`, line breaks → spaces. `wtEscape` turns `;` into `\;`, because wt splits on `;` even inside quotes.
 - **Hook paths are only double-quoted.** A checkout path containing `$` or a backtick is expanded by a POSIX shell, but escaping `$` would break cmd.exe.
 - **An old renderer running across an upgrade never heartbeats.** On win32, autolaunch can open a second face once, so restart the renderer after upgrading.
+- **A future-dated pid file reads as fresh on win32** (a recycled pid, or EPERM) until the clock catches up. `isRendererAlive` keeps `now − mtime` because a live renderer's file is future-dated for up to 10 s after a backward step; a renderer that also beat when `now < lastBeat` would make "far in the future is stale" safe.
+- **`launch.js` never takes the spawn lock** and waits only 500 ms, so with autolaunch on the editor's `SessionStart` may open a second window, which then exits "already running". Unverified.
+- **`HOME` prefers `USERPROFILE` on POSIX.** Under WSL with `WSLENV=USERPROFILE/p`, setup would write the Windows home's `.claude`. Unverified.
+- **Linux autolaunch knows four terminals** (gnome-terminal, konsole, xfce4-terminal, xterm); Ptyxis, kgx, kitty, alacritty and `x-terminal-emulator` get nothing. doctor now says so.
+- **`getIsWorktree` is true for a submodule** (`.git` is a file there too).
 
 **Adapters:**
 
 - **`engmux-adapter.js` spawns python without `shell: true`.** A `.cmd` shim or a Store python alias cannot run.
 - **engmux has no setup or launch entry point.** It is also not wired to `model`; that is one line plus the `'engmux'` sentinel filter that `tests/test-adapters.js` pins.
 - **codex-wrapper's spawn-`error` path** exits without a final session write. This is harmless while only the global file exists.
+- **codex-notify is not wired to the recorder.** Its one payload is a turn end that the hooks already record.
 - **A notify-only Codex session never stamps `lastPromptAt`**, so it reaches the center only uncontested. With hooks, codex-notify carries their stamp.
+- **The OpenCode plugin can still reorder a really slow child's payloads.** A child that runs longer than `CHAIN_WAIT_MS` after it has its input lets the next batch go and write first. A fix would record the last applied `seq`/`pluginId` on the session file and draw nothing numbered below it.
 
 **Models and subagents:**
 
@@ -1324,7 +1421,14 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **`pickMainSession` ranks by raw `lastPromptAt`.** After the clock steps back, an older prompt keeps the center until the clock catches up. Low priority.
 - **`daily.cumulativeMs` sums per-session time**, so concurrent windows add up.
 - **A cross-terminal flicker check of the per-frame full clear** is still pending, by eye.
-- **Unconfirmed: the orbital `+N more` text** (`mainPos.row + mainPos.h + 7`, capped at `rows - 2`) may overdraw the lowest ring face.
 - **Four `StopFailure` branches are unasserted:** `max_output_tokens`, `authentication_failed`, `billing_error` and the `'API error'` default.
 - **A state file without a `timestamp` is never applied.** Every writer stamps one.
 - **`docs/` is gitignored.** The attention-main spec and plan in `docs/superpowers/` won't survive a fresh clone.
+- **A prompt the renderer never saw asked** (recorded at boot past `WAIT_HOLD_STALE_MS`, or a swap landing on a later write that still carries `waitingOn`) has no `openWait` detail, so it is not put back behind other writes. A wait that comes back restarts its 30 s escalation.
+- **A failed read in `_executeSwap`** leaves the old session's state, queue and stats on the new face until the next `checkState` (≤ 467 ms).
+- **The 80 ms ring reload never wakes the loop**: its results arrive through grid.js's own fs callbacks, so at low power a ring change can draw up to 250 ms late.
+- **A wrapper outside the table is the command**, and what it runs its argument: `watchexec -e js npm test`, `nodemon --exec npm test` and `strace npm test` are no test runs. They were while the npm/go/pip phrases matched anywhere in a segment, which also let two argument words spell a command.
+- **An executor's value flag missing from its table** takes its value for the container or image, so the command after it is missed: `docker run --new-flag v img npm test`. So do options with two values (mpirun's `--mca a b`).
+- **Replays run at compressed time**, so a fixture cannot show what the 8 s and 5 s permission clocks do with real gaps.
+- **`vite` alone is classed a build**, though it starts the dev server (`vite build` builds). So are `parcel` and `webpack serve`.
+- **Literal `─`/`→` remain in setup.js code strings** (box rules, `setupOpenClaw`), against the escape convention; test-adapters and test-attention keep their own `status !== 0 && status !== null` copies of the harness check.

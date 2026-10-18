@@ -1977,10 +1977,10 @@ describe('state-machine.js -- classifyTruncatedInput', () => {
     assert.strictEqual(r.state, 'error');
   });
 
-  test('PostToolUse with no error signals falls through to thinking', () => {
+  test("PostToolUse with no error signals ends on its tool's success face", () => {
     const r = classifyTruncatedInput('PostToolUse', '{"tool_name":"Bash","tool_result":"all good output"}');
-    assert.strictEqual(r.state, 'thinking');
-    assert.strictEqual(r.detail, 'large input');
+    assert.strictEqual(r.state, 'relieved');
+    assert.strictEqual(r.detail, 'command succeeded');
   });
 
   test('SessionEnd maps to responding', () => {
@@ -2166,7 +2166,8 @@ describe('state-machine.js -- subagent tool state propagation', () => {
   test('all output fields are present', () => {
     const result = buildSubagentSessionState({}, { id: 's1', description: 'd' }, 'p', '/c');
     const keys = Object.keys(result).sort();
-    assert.deepStrictEqual(keys, ['cwd', 'editor', 'gitBranch', 'modelName', 'parentSession', 'sessionId', 'taskDescription']);
+    assert.deepStrictEqual(keys, ['cwd', 'editor', 'gitBranch', 'modelName', 'parentSession', 'sessionId', 'synthetic', 'taskDescription']);
+    assert.strictEqual(result.synthetic, true, 'a parent-written orbital is synthetic (MiniFace may cycle it)');
   });
 });
 
@@ -4953,6 +4954,928 @@ describe('state-machine.js -- review round 5: line-ending warnings and which a b
     assert.strictEqual(claudeFail('which pnpm', `Exit code 2\n${miss('pnpm')}`).state, 'error');
     assert.strictEqual(claudeFail('which -z x', 'Exit code 2\nIllegal option -z').state, 'error');
     assert.strictEqual(claudeFail('grep x y', 'Exit code 2').state, 'error', 'only which counts its misses');
+  });
+});
+
+// Review round 6: what each command is, read token by token. Every case
+// below was wrong before this pass (checked against the pre-fix sources).
+describe('state-machine.js -- review round 6: commands are their command word, not their arguments', () => {
+  const sm = require('../lib/state-machine');
+  const { shellIntent } = sm;
+  const TRUST = { trustSuccess: true };
+  const pre = (command) => toolToState('Bash', { command }).state;
+  // Claude Code: a trusted PostToolUse with stderr merged into stdout.
+  const claudeOk = (command, stdout) =>
+    classifyToolResult('Bash', { command }, { stdout, stderr: '', interrupted: false }, false, TRUST);
+  const claudeFail = (command, error) =>
+    classifyToolResult('Bash', { command }, sm.normalizeToolResponse({ error, is_interrupt: false }), true);
+  // Codex and the adapters: no trust, a numeric exit code.
+  const codex = (command, stdout, exitCode = 0) =>
+    classifyToolResult('Bash', { command }, { stdout, stderr: '', exitCode }, false);
+  const SRC = "const cfg = load();\nif (err.code === 'ENOENT') return {};\nthrow new Error('FATAL: permission denied');";
+
+  test('text filters only read: sorting or slicing a read does not make its content a verdict', () => {
+    for (const cmd of [
+      'grep -rn "ENOENT" lib | sort | head -20',
+      "grep -rn ENOENT lib | awk -F: '{print $1\":\"$2}' | head",
+      'grep -rn ENOENT lib | cut -d: -f1 | uniq -c | sort -rn',
+      "rg -n ENOENT | sed -n '1,40p' | nl",
+    ]) {
+      assert.strictEqual(shellIntent(cmd).readOnly, true, cmd);
+      assert.strictEqual(claudeOk(cmd, SRC).state, 'relieved', cmd);
+    }
+    // Codex reads files with sed -n and nl.
+    for (const cmd of ["sed -n '1,120p' src/config.js", "nl -ba src/config.js | sed -n '1,120p'",
+      'jq .scripts package.json', 'cat a.log | tr -d "\\r" | tail -50', 'awk \'/ENOENT/\' app.log']) {
+      assert.strictEqual(codex(cmd, SRC).state, 'relieved', cmd);
+    }
+  });
+
+  test('a filter that edits in place still acts', () => {
+    for (const cmd of ["sed -i 's/a/b/' x.js", "sed -Ei.bak 's/a/b/' x.js", "sed --in-place=.orig -e 's/a/b/' x",
+      "gawk -i inplace '{print}' x", 'xargs rm -f', 'find . -name "*.tmp" | xargs rm']) {
+      assert.strictEqual(shellIntent(cmd).readOnly, false, cmd);
+    }
+    assert.strictEqual(shellIntent('find . -name "*.js" | xargs grep -l ENOENT').readOnly, true);
+    assert.strictEqual(shellIntent('git ls-files | xargs -n 50 -I {} wc -l {}').readOnly, true);
+    assert.strictEqual(codex('find . -name "*.js" | xargs grep -l ENOENT', 'src/a.js: ENOENT').state, 'relieved');
+    // An edit that fails is still caught.
+    assert.strictEqual(codex("sed -i 's/a/b/' x.js", "sed: can't read x.js: No such file or directory").state, 'error');
+  });
+
+  test('a test runner named as an argument is not a test run', () => {
+    for (const [cmd, want] of [
+      ['npm install --save-dev jest', 'installing'], ['npm i -D vitest', 'installing'],
+      ['pip install pytest', 'installing'], ['yarn add -D mocha', 'installing'],
+      ['pnpm add -D @playwright/test', 'installing'], ['npx playwright install --with-deps', 'executing'],
+      ['git add src/foo.test.js', 'executing'], ['rm src/old.spec.ts', 'executing'],
+      ['cat jest.config.js && ls cypress', 'executing'],
+    ]) assert.strictEqual(pre(cmd), want, cmd);
+    assert.strictEqual(claudeOk('npm i -D vitest', 'added 1 package').detail, 'installed');
+    assert.strictEqual(claudeOk('git add src/foo.test.js', '').detail, 'git done');
+    assert.strictEqual(pre('find . -name "*.test.js" | xargs jest'), 'testing', 'a runner run by xargs');
+    assert.strictEqual(pre('git ls-files | xargs -n 20 npx vitest run'), 'testing');
+  });
+
+  test('a test runner as the command word still is one', () => {
+    for (const cmd of ['jest', 'npx jest --watchAll=false', 'pnpm exec vitest run', 'yarn mocha', 'bunx vitest',
+      'pytest -q', 'python -m pytest tests/', 'python3 -m unittest discover', 'npx playwright test',
+      'cypress run', './node_modules/.bin/jest src', 'npx tsx src/foo.test.ts', 'rspec spec/a_spec.rb',
+      'npm test', 'npm run test:unit', 'go test ./...', 'cargo test', 'node --test', 'nosetests']) {
+      assert.strictEqual(pre(cmd), 'testing', cmd);
+    }
+  });
+
+  test('task runners are judged by their task: turbo, nx and bazel', () => {
+    for (const [cmd, want] of [
+      ['turbo test', 'testing'], ['turbo run test', 'testing'], ['nx test web', 'testing'],
+      ['bazel test //...', 'testing'], ['pnpm turbo test', 'testing'], ['nx affected -t test', 'testing'],
+      ['turbo run lint', 'executing'], ['turbo build', 'executing'],
+    ]) assert.strictEqual(pre(cmd), want, cmd);
+    for (const [cmd, want] of [
+      ['turbo run lint', 'command succeeded'], ['nx run-many -t lint', 'command succeeded'],
+      ['turbo build', 'build succeeded'], ['turbo run build --filter web', 'build succeeded'],
+      ['nx build web', 'build succeeded'], ['nx run web:build:production', 'build succeeded'],
+      ['nx run-many -t build,test', 'tests passed'], ['nx run-many --targets=build', 'build succeeded'],
+      ['bazel build //...', 'build succeeded'], ['pnpm turbo build', 'build succeeded'],
+      ['npx nx build web', 'build succeeded'], ['bazel run //app', 'command succeeded'],
+    ]) assert.strictEqual(claudeOk(cmd, 'done').detail, want, cmd);
+  });
+
+  test('yarn asked for its version or help is not an install', () => {
+    for (const cmd of ['yarn --version', 'yarn -v', 'yarn --help', 'npm -v']) {
+      assert.strictEqual(pre(cmd), 'executing', cmd);
+      assert.strictEqual(claudeOk(cmd, '1.22.19').detail, 'command succeeded', cmd);
+    }
+    assert.strictEqual(pre('yarn'), 'installing', 'a bare yarn is yarn install');
+    assert.strictEqual(pre('yarn --frozen-lockfile'), 'installing');
+  });
+
+  test('a path through homebrew is not an install', () => {
+    assert.strictEqual(pre('/opt/homebrew/bin/python3 manage.py migrate'), 'executing');
+    assert.strictEqual(pre('export PATH=/opt/homebrew/bin:$PATH && make lint'), 'executing');
+    assert.strictEqual(pre('brew install jq'), 'installing');
+  });
+
+  test('a read-only git step does not name the result of the command it precedes', () => {
+    for (const [cmd, want] of [
+      ['git status && npm install', 'installed'], ['git log --oneline -3 && npm ci', 'installed'],
+      ['git fetch && pip install -r requirements.txt', 'installed'], ['git diff --stat; make lint', 'make lint done'],
+      ['git status && ./deploy.sh', 'command succeeded'],
+      ['git status', 'git done'], ['git fetch', 'git done'], ['git pull --rebase', 'merged clean'],
+    ]) assert.strictEqual(claudeOk(cmd, 'ok').detail, want, cmd);
+  });
+
+  test('git tag lists unless it is given a tag to make', () => {
+    for (const cmd of ['git tag', 'git tag -l', 'git tag --list "v1.*"', 'git tag -n', 'git tag -l --sort=-v:refname']) {
+      assert.strictEqual(shellIntent(cmd).readOnly, true, cmd);
+      assert.notStrictEqual(pre(cmd), 'committing', cmd);
+    }
+    for (const cmd of ['git tag v1.0.0', 'git tag -a v1 -m "release"', 'git tag -d v1']) {
+      assert.strictEqual(pre(cmd), 'committing', cmd);
+    }
+  });
+
+  test('a commit counts when it is pushed in the same command', () => {
+    const both = claudeOk('git commit -am "x" && git push', '[main 1a2b3c4] x\n 1 file changed');
+    assert.deepStrictEqual([both.state, both.detail, both.committed], ['proud', 'pushed!', true]);
+    assert.strictEqual(claudeOk('git commit -m "x"', '[main 1a2b3c4] x').committed, true);
+    assert.strictEqual(claudeOk('git push', 'To github.com:a/b.git').committed, undefined);
+    assert.strictEqual(claudeOk('git log -1', 'x').committed, undefined);
+    // A failed commit is no commit.
+    assert.strictEqual(claudeFail('git commit -m x', 'Exit code 1\nnothing to commit').committed, undefined);
+  });
+
+  test('"panic" is a crash only in a crash\'s own words', () => {
+    const cargo = 'running 3 tests\ntest tests::greater_than_100 - should panic ... ok\ntest tests::adds ... ok\n\n' +
+      'test result: ok. 3 passed; 0 failed; 0 ignored';
+    assert.strictEqual(codex('cargo test', cargo).state, 'relieved');
+    assert.strictEqual(codex('git rm src/panic.rs', "rm 'src/panic.rs'").state, 'relieved');
+    assert.strictEqual(codex('git stash pop', 'On branch main\n\tmodified:   src/panic.rs').state, 'relieved');
+    for (const out of ['panic: runtime error: index out of range [3] with length 3\n\ngoroutine 1 [running]:',
+      "thread 'main' panicked at src/main.rs:2:5:\nexplicit panic", 'Kernel PANIC - not syncing']) {
+      assert.strictEqual(codex('./run', out).state, 'error', out);
+    }
+  });
+
+  test('grep -c finding nothing answers no', () => {
+    for (const [cmd, out] of [['grep -c TODO src/a.js', '0'], ['grep -c TODO a.js b.js', 'a.js:0\nb.js:0'],
+      ['grep -rc FIXME src', 'src/a.js:0\nsrc/b.js:0'], ['grep --count x f', '0']]) {
+      const c = claudeFail(cmd, `Exit code 1\n${out}`);
+      assert.deepStrictEqual([c.state, c.detail, c.neutral], ['satisfied', 'no matches', true], cmd);
+      const x = codex(cmd, out + '\n', 1);
+      assert.deepStrictEqual([x.state, x.detail], ['satisfied', 'no matches'], cmd);
+    }
+    // A count is only a "no" from grep -c, and only when every count is zero.
+    assert.strictEqual(claudeFail('grep TODO a.js', 'Exit code 1\n0').state, 'error');
+    assert.strictEqual(claudeFail('grep -c TODO a.js', 'Exit code 1\ngrep: a.js: Permission denied\n0').state, 'error');
+  });
+
+  test('a trailing newline is not another line', () => {
+    assert.deepStrictEqual(diffFromInput({ content: 'a\nb\n' }), { added: 2, removed: 0 });
+    assert.deepStrictEqual(diffFromInput({ old_string: 'x\n', new_string: 'y\n' }), { added: 1, removed: 1 });
+    assert.deepStrictEqual(diffFromInput({ old_string: 'x', new_string: 'y\nz' }), { added: 2, removed: 1 });
+    assert.deepStrictEqual(diffFromInput({ edits: [{ old_string: 'a\n', new_string: 'b\nc\n' }] }), { added: 2, removed: 1 });
+    assert.deepStrictEqual(diffFromInput({ new_source: 'print(1)\n' }), { added: 1, removed: 0 });
+  });
+
+  test('a wrapped script is unquoted the way the shell would', () => {
+    // An escaped quote inside a double-quoted script is a quote, not text:
+    // the `|` inside it split the script, and its tail read as acting.
+    assert.strictEqual(shellIntent('bash -lc "rg -n \\"TODO|FIXME\\" src"').readOnly, true);
+    assert.strictEqual(codex('bash -lc "rg -n \\"ENOENT|EPERM\\" src"', 'src/a.js:3: ENOENT').state, 'relieved');
+    // shlex quotes an apostrophe as a run of quoted pieces; the commit inside
+    // used to be lost ("executing", never counted).
+    const apostrophe = `bash -lc 'git commit -m "it'"'"'s done"'`;
+    assert.strictEqual(pre(apostrophe), 'committing');
+    assert.strictEqual(claudeOk(apostrophe, '[main 1a2b3c4] it\'s done').committed, true);
+    // Two scripts are still two scripts, never joined into one read.
+    assert.strictEqual(shellIntent('bash -lc "cat a" && bash -lc "npm install"').readOnly, false);
+    assert.strictEqual(shellIntent("bash -lc 'cat a' && bash -lc 'npm install'").readOnly, false);
+  });
+
+  test('the exit trailer and pytest echo patterns stay linear', () => {
+    // Relative, as in round 5: eight times the input, at most twenty times the cost.
+    const cost = (fn) => { const t0 = process.hrtime.bigint(); fn(); return Number(process.hrtime.bigint() - t0) / 1e6; };
+    const cases = [
+      (k) => () => classifyToolResult('Bash', { command: 'cat x' }, { stdout: 'Exit code 1' + ' '.repeat(2000 * k) + 'x', stderr: '' }, false),
+      (k) => () => sm.dropEchoedLines('a::'.repeat(2000 * k)),
+    ];
+    for (const make of cases) {
+      let tSmall = Infinity, tBig = Infinity;
+      for (let run = 0; run < 3; run++) {
+        tSmall = Math.min(tSmall, cost(make(1)));
+        tBig = Math.min(tBig, cost(make(8)));
+      }
+      assert.ok(tBig < tSmall * 20 + 5, `x8 took ${tBig.toFixed(1)}ms, x1 ${tSmall.toFixed(1)}ms`);
+    }
+    assert.strictEqual(sm.dropEchoedLines('tests/test_a.py::TestX::test_y PASSED  [ 50%]'), '');
+    assert.strictEqual(classifyToolResult('Bash', { command: 'cat x' }, { stdout: 'data\nExit code 1 .', stderr: '' }, false).state, 'error');
+  });
+});
+
+describe('state-machine.js -- review round 6: invariants (fuzz)', () => {
+  // Round 6's classifier bugs had one shape: an argument leaked into a
+  // command's intent (`npm i -D jest` ran tests, a `/opt/homebrew/bin/python3`
+  // path installed), or a read-only step changed a verdict (`grep ... | sort`
+  // was masked and its matches read as a failure; Codex's `sed -n '1,120p'`
+  // had file content scanned; `git status && npm install` finished "git
+  // done"). Each was found by hand. The rules they broke are stated once
+  // here, each from CLAUDE.md ("Shell intent", "Command tables", "Success
+  // details", trustSuccess), and checked over generated commands.
+  // Deterministic: a seeded PRNG per case. A failure names the case's seed
+  // and the command, so `gen(seed)` replays it.
+  const sm = require('../lib/state-machine');
+  const { STATE_NAMES } = require('../lib/themes');
+  const { shellIntent } = sm;
+  const SEED = 0x6f75a;
+  const TRUST = { trustSuccess: true };
+  const q = (s) => JSON.stringify(s);
+
+  // -- A seeded generator ---------------------------------------------
+  // mulberry32: 32 bits of state, good enough to spread cases.
+  const prng = (seed) => () => {
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  // Quoting as the shell reads it. shq is Python's shlex.quote (what Codex
+  // logs): safe words bare, anything else in single quotes, an apostrophe as
+  // `'"'"'`. dq double-quotes, escaping the four characters bash escapes there.
+  const shq = (s) => (s === '' ? "''" : /^[\w@%+=:,./-]+$/.test(s) ? s : "'" + s.replace(/'/g, `'"'"'`) + "'");
+  const sq = (s) => "'" + s.replace(/'/g, `'"'"'`) + "'";
+  const dq = (s) => '"' + s.replace(/["\\$`]/g, '\\$&') + '"';
+
+  // Positional arguments that look like intent: runner, tool and verb names,
+  // scary output words, test files and paths through homebrew or a python
+  // folder. None starts with `-` (a flag is not a positional) and none holds
+  // a shell metacharacter, so none can end a segment.
+  const ARGS = ['notes.txt', 'jest', 'vitest', 'pytest', 'mocha', 'playwright', 'cypress', 'test', 'tests', 'build',
+    'compile', 'install', 'i', 'add', 'ci', 'commit', 'push', 'tag', 'merge', 'pull', 'rebase', 'run', 'exec', 'dlx',
+    'npm', 'pnpm', 'yarn', 'bun', 'npx', 'node', 'git', 'make', 'turbo', 'nx', 'bazel', 'cargo', 'go', 'pip', 'brew',
+    'apt-get', 'gradlew', 'mvn', 'tsc', 'webpack', 'xargs', 'sudo', 'bash', 'cd', 'cat', 'python', 'python3',
+    'torchrun', 'accelerate', 'unsloth', 'train', 'train.py', 'finetune.py', 'ENOENT', 'FATAL', 'panic', 'PANIC',
+    'error', 'Error:', 'fatal:', 'CONFLICT', 'Exit', 'src/foo.test.js', 'foo.spec.ts', 'tests/run.js', 'test.js',
+    'build/', 'dist', '/opt/homebrew/bin/python3', 'homebrew', 'node_modules/.bin/jest', '.\\gradlew.bat',
+    'C:\\proj\\build', '~/src', 'ml/python/train.py', 'python-train', 'scripts/torchrun-train.sh', 'unsloth/',
+    'https://github.com/unslothai/unsloth', '\u00e9t\u00e9.md', 'a=b', '1', '0'];
+  // Free text for quoted strings and heredoc bodies: commands, operators,
+  // quotes, substitutions and failure words -- all of it data once quoted.
+  const TEXT = ['npm test', 'npm install', 'pip install torch', 'git push --force', 'git commit -m x', '&&', '||',
+    ';', '|', '&', '2>&1', '$(rm -rf /)', '`id`', "it's", '"quoted"', '\\', '\\"', "\\'", '<<EOF', '#', '(', ')',
+    '{', '}', 'python train.py', 'unsloth', 'jest', 'pytest', 'build', 'ENOENT', 'FATAL: boom', 'panic: x',
+    'CONFLICT (content): y', 'Exit code 1', "bash -lc 'npm install'", 'xargs rm', 'sed -i s/a/b/ x', '\t',
+    '\u00e9', '!', '$HOME', '*', '~', 'EOF2', 'cd /nope'];
+  // Output a command might print: failure words, editor trailers, and plain content.
+  const OUTPUT = ["Error: ENOENT: no such file or directory, open 'x'", 'FATAL: could not connect', 'panic: runtime error',
+    "thread 'main' panicked at src/main.rs:2:5", 'npm ERR! code E404', '3 failed, 2 passed', 'FAIL src/a.test.js',
+    'Traceback (most recent call last):', "ModuleNotFoundError: No module named 'x'",
+    'CONFLICT (content): Merge conflict in a.js', 'fatal: not a git repository', "error: failed to push some refs to 'o'",
+    ' ! [rejected]        main -> main (fetch first)', 'bash: foo: command not found', 'Permission denied',
+    'Segmentation fault (core dumped)', 'syntax error near unexpected token', '# fail 2', 'Build failed',
+    'Compilation failed', 'rustc error[E0308]: mismatched types', 'exited with code 1 at step 3', 'error',
+    'const x = require("./error.js");', '12:  if (err.code === "EPERM") return;', 'ok 1 - parses'];
+  // An editor's exit-status line, and a failed cd's own words.
+  const TRAILERS = ['Exit code 1', 'Exit code 2', 'exit status 127'];
+  const MOVED = ['bash: cd: /x: No such file or directory'];
+  const ODD = [...TRAILERS, ...MOVED];
+
+  // Segments that only read, by the spec's read-only table.
+  const READS = [
+    g => `cat ${g.arg()}`, g => `head -n ${g.int(99)} ${g.arg()}`, g => `tail -${g.int(99)} ${g.arg()}`,
+    g => `grep -rn ${g.quoted()} ${g.arg()}`, g => `rg -n ${g.arg()}`, g => `sed -n '1,${g.int(200)}p' ${g.arg()}`,
+    g => `awk '/x/ {print $1}' ${g.arg()}`, g => `ls -la ${g.arg()}`, g => `find ${g.arg()} -name '*.js'`,
+    g => `wc -l ${g.arg()}`, g => `jq .scripts ${g.arg()}`, g => `git log --oneline -${g.int(9)}`, () => 'git status',
+    g => `git diff --stat ${g.arg()}`, () => 'git show HEAD', () => 'git branch -a', () => 'git tag -l',
+    () => 'git remote -v', () => 'git stash list', () => 'git rev-parse HEAD', g => `git -C ${g.arg()} log -3`,
+    g => `gh pr view ${g.int(99)}`, () => 'gh run list', g => `docker logs ${g.arg()}`, () => 'docker ps',
+    g => `kubectl get pods -n ${g.arg()}`, g => `cd ${g.arg()}`, () => 'pwd', g => `echo ${g.arg()}`,
+    g => `which ${g.arg()}`, g => `stat ${g.arg()}`, g => `diff ${g.arg()} ${g.arg()}`, g => `tree ${g.arg()}`,
+    g => `Get-Content ${g.arg()}`, g => `findstr ${g.arg()} ${g.arg()}`, g => `nl -ba ${g.arg()}`,
+    g => `journalctl -u ${g.arg()}`, g => `git ls-files | xargs grep -l ${g.arg()}`,
+  ];
+  // Filters a read is piped through.
+  const FILTERS = [
+    () => 'sort', () => 'sort -rn', () => 'uniq -c', g => `head -n ${g.int(50)}`, () => 'head', () => 'tail -5',
+    () => 'wc -l', () => 'cut -d: -f1', () => 'nl -ba', () => 'jq .', () => 'sed -n p', () => "sed -n '1,40p'",
+    () => "awk '{print $1}'", () => "tr -d '\\r'", () => 'column -t', g => `grep -v ${g.arg()}`,
+    g => `xargs grep -l ${g.arg()}`, () => 'xargs -n 1 wc -l', () => 'xargs -I {} cat {}', () => 'tac',
+    () => 'sort | uniq -c | sort -rn', g => `Select-String ${g.arg()}`, g => `findstr ${g.arg()}`, () => 'fold -w 80',
+  ];
+  // Segments that act.
+  const ACTS = [
+    g => `npm install ${g.arg()}`, () => 'npm ci', g => `pnpm add -D ${g.arg()}`, g => `yarn add ${g.arg()}`,
+    g => `pip install ${g.arg()}`, g => `brew install ${g.arg()}`, g => `cargo add ${g.arg()}`, () => 'npm test',
+    () => 'npm run test:unit', g => `npx jest ${g.arg()}`, g => `pytest -q ${g.arg()}`, () => 'go test ./...',
+    () => 'cargo test', g => `vitest run ${g.arg()}`, () => 'node --test', () => 'python -m pytest tests/',
+    () => 'npm run build', () => 'pnpm build', () => 'cargo build --release', () => 'go build ./...',
+    g => `tsc -p ${g.arg()}`, g => `docker build -t ${g.arg()} .`, () => 'make', () => 'make lint', () => 'make test',
+    g => `make -C ${g.arg()} clean`, () => 'turbo run lint', () => 'turbo test', () => 'turbo build',
+    g => `nx build ${g.arg()}`, g => `bazel test //${g.int(9)}/...`, g => `git add ${g.arg()}`,
+    g => `git commit -m ${g.quoted()}`, () => 'git push', g => `git push origin ${g.arg()}`,
+    g => `git tag v${g.int(9)}.0.0`, g => `git checkout -b ${g.arg()}`, () => 'git pull --rebase',
+    g => `git merge ${g.arg()}`, () => 'git fetch', g => `git stash push -m ${g.quoted()}`, g => `rm -rf ${g.arg()}`,
+    g => `mv ${g.arg()} notes.bak`, g => `mkdir -p ${g.arg()}`, g => `chmod +x ${g.arg()}`, () => './deploy.sh',
+    g => `node scripts/gen.js ${g.arg()}`, () => 'python train.py --epochs 3', () => 'python manage.py migrate',
+    g => `kubectl apply -f ${g.arg()}`, g => `sed -i 's/a/b/' ${g.arg()}`, () => 'find . -name "*.tmp" | xargs rm -f',
+  ];
+  // Redirects never end a segment (`2>&1`, `&>file`, `<&3`).
+  const REDIRECTS = [' 2>&1', ' 2>/dev/null', ' >&2', ' &>/dev/null', ' >out.txt 2>&1', ' <&3', ' 2>&-'];
+  const OPS = [' && ', ' || ', '; ', ' | ', '\n', ' & '];
+  const POSIX_WRAPPERS = ['bash -lc', 'bash -c', 'sh -c', 'zsh -lc', 'dash -c', '/bin/bash -lc', '/usr/bin/zsh -c',
+    '"C:\\Program Files\\Git\\bin\\bash.exe" -lc', 'bash.exe -c'];
+  const WIN_WRAPPERS = ['pwsh -Command', 'powershell -NoProfile -Command', 'pwsh -NoLogo -NonInteractive -c',
+    'cmd /c', 'cmd.exe /d /s /c', '"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -Command'];
+  const HEREDOCS = [
+    b => `cat > notes.md <<'EOF'\n${b}\nEOF`, b => `cat <<EOF > run.sh\n${b}\nEOF\nchmod +x run.sh`,
+    b => `git commit -F - <<'EOF'\n${b}\nEOF`, b => `python3 - <<'PY'\n${b}\nPY`, b => `kubectl apply -f - <<-EOF\n${b}\n\tEOF`,
+  ];
+
+  function gen(seed) {
+    const rnd = prng(seed);
+    const g = {
+      int: (n) => Math.floor(rnd() * n),
+      chance: (p) => rnd() < p,
+      pick: (a) => a[Math.floor(rnd() * a.length)],
+    };
+    g.arg = () => g.pick(ARGS);
+    g.text = (lines) => {
+      const out = [];
+      for (let n = 1 + g.int(6); n > 0; n--) out.push(g.pick(TEXT));
+      return out.join(lines && g.chance(0.5) ? '\n' : ' ');
+    };
+    // A quoted string, never bare: single, double or shlex-style pieces.
+    g.quoted = () => (g.chance(0.5) ? dq(g.text(true)) : sq(g.text(true)));
+    // A heredoc body: no line of it may be its delimiter.
+    g.body = () => g.text(true).split('\n').filter(l => !/^\s*(?:EOF|PY)\s*$/.test(l)).join('\n');
+    g.read = () => g.pick(READS)(g) + (g.chance(0.2) ? g.pick(REDIRECTS) : '');
+    g.act = () => g.pick(ACTS)(g) + (g.chance(0.2) ? g.pick(REDIRECTS) : '');
+    g.filter = () => g.pick(FILTERS)(g);
+    g.chain = (next, ops, max) => {
+      let s = next();
+      for (let k = g.int(max); k > 0; k--) s += g.pick(ops) + next();
+      return s;
+    };
+    g.segment = () => (g.chance(0.4) ? g.read() : g.act());
+    // A script: segments and operators, now and then a heredoc or a wrapper inside.
+    g.script = () => {
+      let s = g.chain(g.segment, OPS, 3);
+      if (g.chance(0.15)) s = g.pick(HEREDOCS)(g.body()) + g.pick(OPS) + s;
+      if (g.chance(0.1)) s = `${g.pick(POSIX_WRAPPERS)} ${shq(s)}`;
+      return s;
+    };
+    // `bash -lc <script>`, quoted the way the caller would.
+    g.wrap = (s) => {
+      if (g.chance(0.7) || /["\\$`]/.test(s)) return `${g.pick(POSIX_WRAPPERS)} ${g.chance(0.6) ? shq(s) : dq(s)}`;
+      return `${g.pick(WIN_WRAPPERS)} "${s}"`;
+    };
+    g.output = (extra) => {
+      const out = [];
+      for (let n = g.int(6); n > 0; n--) out.push(g.pick(extra && g.chance(0.3) ? extra : OUTPUT));
+      return out.join('\n');
+    };
+    // Token soup and raw characters, for totality.
+    g.soup = () => {
+      const pools = [ARGS, TEXT, OPS, REDIRECTS, POSIX_WRAPPERS, ['"', "'", '\\', '<<', '(', ')', '`', '$(', '\r', '\n']];
+      let s = '';
+      for (let n = g.int(24); n > 0; n--) s += g.pick(g.pick(pools)) + (g.chance(0.7) ? ' ' : '');
+      return s;
+    };
+    g.bytes = () => {
+      let s = '';
+      for (let n = g.int(80); n > 0; n--) {
+        s += g.chance(0.6) ? g.pick(['"', "'", '\\', '<', '&', '|', ';', '\n', '\r', '(', ')', '{', '$', '`', ' ', '-', '=', 'a'])
+          : String.fromCharCode(g.int(0x10000));
+      }
+      return s;
+    };
+    return g;
+  }
+
+  // Runs `body(g, i)` over `n` generated cases. A string it returns is a
+  // counterexample; a throw is one too.
+  function forAll(label, n, body) {
+    for (let i = 0; i < n; i++) {
+      const seed = (SEED ^ Math.imul(i + 1, 0x9E3779B1)) >>> 0;
+      let bad;
+      try {
+        bad = body(gen(seed), i);
+      } catch (e) {
+        bad = `threw ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}`;
+      }
+      if (bad) assert.fail(`${label}: case ${i} (gen seed ${seed}): ${bad}`);
+    }
+  }
+
+  const pre = (command) => toolToState('Bash', { command }).state;
+  // Claude Code's trusted PostToolUse, Codex's (untrusted, numeric exit code)
+  // and an adapter's (untrusted, no exit code).
+  const pick = (r) => ({ state: r.state, detail: r.detail, committed: r.committed, neutral: r.neutral });
+  const claudeOk = (command, stdout, stderr = '') =>
+    pick(classifyToolResult('Bash', { command }, { stdout, stderr, interrupted: false }, false, TRUST));
+  const codex = (command, stdout, exitCode = 0) =>
+    pick(classifyToolResult('Bash', { command }, { stdout, stderr: '', exitCode }, false));
+  const adapter = (command, stdout, stderr = '') =>
+    pick(classifyToolResult('Bash', { command }, { stdout, stderr }, false));
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  // As the round-5 checks: eight times the input may cost at most twenty
+  // times as much (linear code measures about ten, quadratic sixty-four).
+  // Best of three, sizes interleaved, stopping at the first pass. Returns
+  // what it measured when it fails.
+  const both = (cmd) => {
+    toolToState('Bash', { command: cmd });
+    classifyToolResult('Bash', { command: cmd }, { stdout: 'ok', stderr: '' }, false);
+  };
+  const slower = (small, big, run = both) => {
+    const cost = (c) => { const t0 = process.hrtime.bigint(); run(c); return Number(process.hrtime.bigint() - t0) / 1e6; };
+    let tSmall = Infinity, tBig = Infinity;
+    for (let i = 0; i < 3 && !(tBig < tSmall * 20 + 5); i++) {
+      tSmall = Math.min(tSmall, cost(small));
+      tBig = Math.min(tBig, cost(big));
+    }
+    return tBig < tSmall * 20 + 5 ? null : `x8 took ${tBig.toFixed(1)}ms, x1 ${tSmall.toFixed(1)}ms`;
+  };
+
+  test('totality: no command, input or output shape throws, and every answer is a face', () => {
+    const TOOLS = ['Bash', 'shell', 'PowerShell', 'KillShell', 'BashOutput', 'Read', 'Edit', 'MultiEdit', 'Grep', 'LS',
+      'WebFetch', 'Task', 'Skill', 'TodoWrite', 'AskUserQuestion', 'mcp__github__create_issue', 'mcp__x', 'Unknown_Tool', ''];
+    const inputs = [
+      (c, g) => ({ command: c, file_path: g.arg(), pattern: g.arg() }), (c) => ({ cmd: c }), (c) => ({ input: c }),
+      (c) => ({ command: c, run_in_background: true }), () => ({ command: {} }), () => ({ command: ['ls'] }),
+      () => ({ command: 42 }), () => ({ command: null, file_path: {} }), () => null, (c) => c,
+      (c) => ({ edits: [{ old_string: c, new_string: 7 }, null], old_string: [], content: c }),
+    ];
+    const responses = [
+      g => ({ stdout: g.output(ODD), stderr: g.output() }), g => ({ stdout: g.output(), stderr: '', exitCode: g.pick([0, 1, 2, 127, -1, 1.5, NaN]) }),
+      () => ({ stdout: 42, stderr: {} }), () => ({ stdout: '', stderr: '', backgroundTaskId: 'b1' }),
+      () => ({ interrupted: true }), () => ({ structuredPatch: [{ lines: ['+a', 5, null] }, null] }), () => null, () => 'str',
+    ];
+    const payloads = [
+      g => ({ tool_response: g.output() }), g => ({ tool_result: [{ type: 'text', text: 5 }, null, { type: 'text', text: g.output() }] }),
+      () => ({ error: 'Exit code 1', is_interrupt: 'yes' }), () => ({ tool_response: 42 }),
+      () => ({ tool_response: { stdout: {}, exitCode: '1', structuredPatch: 'x', status: 5, backgroundTaskId: 7, is_error: 1 } }), () => ({}),
+    ];
+    const ok = (r) => r && STATE_NAMES.has(r.state) && typeof r.detail === 'string' && !/[\r\n]/.test(r.detail);
+    forAll('totality', 300, (g) => {
+      const cmd = g.chance(0.5) ? g.soup() : g.chance(0.5) ? g.bytes() : g.script();
+      const si = shellIntent(cmd);
+      if (typeof si.intent !== 'string' || typeof si.readOnly !== 'boolean' || typeof si.masked !== 'boolean') {
+        return `shellIntent(${q(cmd)}) -> ${q(si)}`;
+      }
+      for (const tool of ['Bash', g.pick(TOOLS)]) {
+        const input = g.pick(inputs)(cmd, g);
+        const before = toolToState(tool, input);
+        if (!ok(before)) return `toolToState(${q(tool)}, ${q(input)}) -> ${q(before)}`;
+        const resp = g.pick(responses)(g);
+        const after = classifyToolResult(tool, input, resp, g.chance(0.3), g.chance(0.5) ? TRUST : undefined);
+        if (!ok(after)) return `classifyToolResult(${q(tool)}, ${q(input)}, ${q(resp)}) -> ${q(after)}`;
+        const norm = sm.normalizeToolResponse(g.pick(payloads)(g));
+        if (!ok(classifyToolResult(tool, input, norm, false))) return `normalized ${q(norm)} for ${q(cmd)}`;
+      }
+      const raw = JSON.stringify({ tool_name: 'Bash', tool_input: { command: cmd }, tool_response: { stdout: g.output() } });
+      const t = sm.classifyTruncatedInput(g.pick(['PostToolUse', 'PostToolUseFailure', '', 'Stop', 'Nope']), raw.slice(0, g.int(raw.length + 1)));
+      if (!ok(t)) return `classifyTruncatedInput(${q(raw)}) -> ${q(t)}`;
+      return null;
+    });
+  });
+
+  test('arguments are data: a positional, a quoted string or a heredoc body never changes what a command is', () => {
+    // One positional at a time, between fixed neighbours. Two side by side
+    // are the next test's.
+    const SLOTTED = [
+      x => `rm -f ${x}`, x => `rm -rf ${x}`, x => `mkdir -p ${x}`, x => `touch ${x}`, x => `chmod +x ${x}`,
+      x => `cp -r ${x} dist/`, x => `mv ${x} notes.bak`, x => `git add ${x}`, x => `git rm --cached ${x}`,
+      x => `git checkout -- ${x}`, x => `git restore --staged ${x}`, x => `git push origin ${x}`, x => `git commit -m ${x}`,
+      x => `git -C ${x} commit -m wip`, x => `npm install ${x}`, x => `npm i -D ${x}`, x => `pnpm add -D ${x}`,
+      x => `yarn add ${x}`, x => `pip install ${x}`, x => `brew install ${x}`, x => `cargo add ${x}`, x => `npx jest ${x}`,
+      x => `pytest -q ${x}`, x => `vitest run ${x}`, x => `go test ${x}`, x => `docker build -t ${x} .`,
+      x => `make -C ${x} lint`, x => `nx build ${x}`, x => `turbo run lint --filter ${x}`, x => `node scripts/gen.js ${x}`,
+      x => `kubectl apply -f ${x}`, x => `curl -fsSL -o ${x} https://example.com/a`, x => `./deploy.sh ${x}`,
+      x => `git clone ${x}`, x => `cat ${x}`, x => `head -n 20 ${x}`, x => `grep -rn ${x} src`, x => `rg -n ${x}`,
+      x => `ls -la ${x}`, x => `git log --oneline -- ${x}`, x => `git diff ${x}`, x => `sed -n '1,120p' ${x}`,
+      x => `wc -l ${x}`, x => `find ${x} -name '*.ts'`, x => `echo ${x}`, x => `cd ${x} && git status`,
+      x => `docker logs ${x}`, x => `kubectl logs -n ${x} api`, x => `git ls-files | xargs grep -l ${x}`,
+      x => `Get-Content ${x}`, x => `git -C ${x} status`,
+    ];
+    // Strings and heredocs are emptied whole; only their count of pieces shows.
+    const QUOTED = [
+      t => `git commit -m ${t}`, t => `git commit -am ${t} && git push`, t => `git tag -a v1.2.0 -m ${t}`,
+      t => `git stash push -m ${t}`, t => `echo ${t}`, t => `echo ${t} >> notes.md`, t => `grep -rn ${t} src`,
+      t => `rg ${t} | head -20`, t => `python3 -c ${t}`, t => `node -e ${t}`, t => `gh pr create --title ${t} --body ${t}`,
+      t => `jq ${t} package.json`, t => `awk ${t} app.log`, t => `npm run build -- --define ${t}`,
+    ];
+    const PROBE = 'zzqx';
+    const view = (cmd) => {
+      const si = shellIntent(cmd);
+      return { pre: pre(cmd), readOnly: si.readOnly, masked: si.masked, ok: claudeOk(cmd, 'done'), codex: codex(cmd, 'done\n') };
+    };
+    forAll('arguments', 400, (g) => {
+      const tpl = g.pick(SLOTTED), x = g.arg();
+      const cmd = tpl(x), probe = tpl(PROBE);
+      const a = view(cmd), b = view(probe);
+      if (!same(a, b)) return `${q(cmd)} -> ${q(a)}\n  but ${q(probe)} -> ${q(b)}`;
+      const want = shellIntent(probe).intent.split(PROBE).join(x), got = shellIntent(cmd).intent;
+      if (got !== want) return `${q(cmd)} has intent ${q(got)}, not ${q(want)}`;
+      return null;
+    });
+    const emptied = (cmd) => shellIntent(cmd).intent.replace(/(?:"")+/g, '""');
+    forAll('quoted strings', 250, (g) => {
+      const tpl = g.pick(QUOTED), t = g.quoted();
+      const cmd = tpl(t), plain = tpl("'x'");
+      const a = view(cmd), b = view(plain);
+      if (!same(a, b) || emptied(cmd) !== emptied(plain)) return `${q(cmd)} -> ${q(a)} ${q(emptied(cmd))}\n  but ${q(plain)} -> ${q(b)} ${q(emptied(plain))}`;
+      return null;
+    });
+    forAll('heredoc bodies', 120, (g) => {
+      const tpl = g.pick(HEREDOCS), body = g.body();
+      const cmd = tpl(body), plain = tpl('x');
+      const a = view(cmd), b = view(plain);
+      if (!same(a, b) || shellIntent(cmd).intent !== shellIntent(plain).intent) return `${q(cmd)} -> ${q(a)}\n  but ${q(plain)} -> ${q(b)}`;
+      return null;
+    });
+  });
+
+  test('two argument words side by side never spell a command either', () => {
+    // `cp go test` was a test run and `mv go get x` an install: the npm, go
+    // and pip phrase tables matched anywhere in an acting segment. A phrase is
+    // the command's own subcommand now, past the wrappers that run one
+    // (`xvfb-run npm test`, `docker exec api npm test`).
+    const PAIRED = [
+      (x, y) => `cp ${x} ${y}`, (x, y) => `cp -r ${x} ${y} dist/`, (x, y) => `mv ${x} ${y} notes.bak`,
+      (x, y) => `rm -f ${x} ${y}`, (x, y) => `touch ${x} ${y}`, (x, y) => `chmod +x ${x} ${y}`,
+      (x, y) => `mkdir -p ${x} ${y}`, (x, y) => `git add ${x} ${y}`, (x, y) => `./deploy.sh ${x} ${y}`,
+      (x, y) => `node scripts/gen.js ${x} ${y}`, (x, y) => `cat ${x} ${y}`, (x, y) => `ls -la ${x} ${y}`,
+    ];
+    const view = (cmd) => {
+      const si = shellIntent(cmd);
+      return { pre: pre(cmd), readOnly: si.readOnly, masked: si.masked, ok: claudeOk(cmd, 'done'), codex: codex(cmd, 'done\n') };
+    };
+    forAll('argument pairs', 600, (g) => {
+      const tpl = g.pick(PAIRED), x = g.arg(), y = g.arg();
+      const cmd = tpl(x, y), probe = tpl('zzqx', 'qqzx');
+      const a = view(cmd), b = view(probe);
+      return same(a, b) ? null : `${q(cmd)} -> ${q(a)}\n  but ${q(probe)} -> ${q(b)}`;
+    });
+  });
+
+  test('a read stays a read: chains of reads, a filter after one, and a redirect are never a verdict', () => {
+    forAll('read-only closure', 400, (g) => {
+      const r = g.chain(g.read, OPS, 2);
+      const rf = `${r} | ${g.filter()}`;
+      for (const c of [r, rf]) {
+        const si = shellIntent(c);
+        if (!si.readOnly || si.masked || si.intent.trim()) return `${q(c)} -> ${q({ readOnly: si.readOnly, masked: si.masked, intent: si.intent })}`;
+      }
+      // A filter never turns content into a verdict, nor a verdict into
+      // content. An editor's exit-status line is the exception: it is the
+      // pipeline's LAST command's status, and the filter becomes that command
+      // (`diff a b` exiting 1 answers "files differ"; `diff a b | sort`
+      // exiting 1 is sort's failure -- see Predicate commands).
+      // An error's detail may differ: it reads git's `fatal:` for "a command
+      // containing git", and a filter can put the word there (`cd git |
+      // head` -- see errorDetail).
+      for (const [check, out] of [[codex, g.output(ODD)], [adapter, g.output(MOVED)]]) {
+        const a = check(r, out), b = check(rf, out);
+        if (a.state === 'error') a.detail = b.detail;
+        if (!same(a, b)) return `${q(r)} -> ${q(a)}, but ${q(rf)} -> ${q(b)} on ${q(out)}`;
+      }
+      // Content without an editor's trailer or a failed cd is no failure at all.
+      const content = g.output();
+      for (const c of [r, rf]) {
+        for (const check of [codex, adapter]) {
+          const v = check(c, content);
+          if (v.state !== 'relieved') return `${q(c)} -> ${q(v)} on ${q(content)}`;
+        }
+      }
+      return null;
+    });
+  });
+
+  test('a read in front of an act, or after it, does not change what the act is', () => {
+    const view = (cmd, out) => ({ pre: pre(cmd), ok: claudeOk(cmd, out, out), codex: codex(cmd, 'done\n') });
+    forAll('reads beside an act', 300, (g) => {
+      const act = g.chain(g.act, [' && '], 1);
+      if (shellIntent(act).readOnly) return `${q(act)} is read-only`;
+      const out = g.output(ODD);
+      const want = view(act, out);
+      for (const cmd of [g.chain(g.read, OPS, 2) + g.pick([' && ', '; ', '\n', ' || ']) + act,
+        act + ' && ' + g.chain(g.read, [' && ', ' | '], 2)]) {
+        const got = view(cmd, out);
+        if (!same(got, want)) return `${q(cmd)} -> ${q(got)}\n  but ${q(act)} alone -> ${q(want)}`;
+      }
+      return null;
+    });
+  });
+
+  test('a shell wrapper is transparent, and two wrapped scripts are never joined', () => {
+    const view = (cmd, out) => {
+      const si = shellIntent(cmd);
+      return { intent: si.intent, readOnly: si.readOnly, masked: si.masked, pre: pre(cmd),
+        ok: claudeOk(cmd, out), codex: codex(cmd, out), adapter: adapter(cmd, out, out) };
+    };
+    forAll('wrapping', 300, (g) => {
+      const s = g.script(), w = g.wrap(s), out = g.output(ODD);
+      const a = view(w, out), b = view(s, out);
+      if (!same(a, b)) return `${q(w)} -> ${q(a)}\n  but ${q(s)} -> ${q(b)}`;
+      const s2 = g.script(), both = `${g.wrap(s)} && ${g.wrap(s2)}`;
+      if (shellIntent(both).readOnly && !(shellIntent(s).readOnly && shellIntent(s2).readOnly)) return `${q(both)} is read-only`;
+      return null;
+    });
+  });
+
+  test('masking: only a lost exit status masks, and `&&` alone never does', () => {
+    forAll('masking', 300, (g) => {
+      const anded = g.chain(g.segment, [' && '], 3);
+      if (shellIntent(anded).masked) return `${q(anded)} is masked`;
+      const reads = g.chain(g.read, OPS, 3);
+      if (shellIntent(reads).masked) return `${q(reads)} is masked`;
+      const a = g.act(), r = g.read();
+      for (const cmd of [`${a} | ${g.filter()}`, `${a} &`, `${a} || true`, `${a}; ${r}`, `${a}\n${r}`, `${a} & ${r}`]) {
+        if (!shellIntent(cmd).masked) return `${q(cmd)} is not masked`;
+      }
+      if (shellIntent(`${r} | ${a}`).masked) return `${q(`${r} | ${a}`)} is masked`;
+      return null;
+    });
+  });
+
+  test('a trusted success that nothing could have masked is never an error, whatever it printed', () => {
+    const NON_SHELL = ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'WebFetch', 'mcp__github__create_issue', 'Task', 'Skill', 'NotebookEdit'];
+    forAll('trusted success', 400, (g) => {
+      const cmd = g.chance(0.7) ? g.script() : g.soup();
+      const out = g.output(ODD), err = g.output(ODD);
+      if (!shellIntent(cmd).masked) {
+        for (const tool of ['Bash', 'shell', 'PowerShell']) {
+          const r = classifyToolResult(tool, { command: cmd }, { stdout: out, stderr: err, interrupted: false }, false, TRUST);
+          if (r.state === 'error') return `${tool} ${q(cmd)} -> ${q(r)} on ${q(out)} / ${q(err)}`;
+        }
+      }
+      const tool = g.pick(NON_SHELL);
+      const r = classifyToolResult(tool, { file_path: g.arg(), pattern: g.arg() }, { stdout: out, stderr: err }, false, TRUST);
+      return r.state === 'error' ? `${tool} -> ${q(r)} on ${q(out)} / ${q(err)}` : null;
+    });
+  });
+
+  test('the two sides of a call agree: a success names what the tool call showed', () => {
+    // Success details follow toolToState's order (push/commit, test, build,
+    // install, then git, then make). A tag shows committing but has no
+    // success word of its own, so a command with one is left out.
+    const allowed = {
+      testing: d => /tests passed$/.test(d),
+      installing: d => d === 'installed' || d === 'build succeeded',
+      committing: d => d === 'committed' || d === 'pushed!',
+      executing: d => !/tests passed$|^installed$|^committed$|^pushed!$/.test(d),
+      training: d => !/tests passed$|^installed$|^committed$|^pushed!$/.test(d),
+    };
+    forAll('two sides', 500, (g) => {
+      const cmd = g.script();
+      if (shellIntent(cmd).masked || /\btag\b/.test(cmd)) return null;
+      const before = pre(cmd), after = claudeOk(cmd, 'done').detail;
+      if (allowed[before] && !allowed[before](after)) return `${q(cmd)} showed ${before}, then finished ${q(after)}`;
+      return null;
+    });
+  });
+
+  test('linear time: a repeated fragment costs what its length does', () => {
+    const UNITS = ['xargs ', 'xargs -n 1 ', 'sudo ', 'A=1 ', '( ', '\\"', '"\\', `'a'"'"'`, 'bash -lc ', '<<A\n', '<<"A ',
+      '2>&1 ', '> ', '| sort ', '&& cat x ', 'git -C x ', 'npx -p x ', 'pnpm --filter x ', 'nx -t a,b ', 'make -j 8 ',
+      'python ', 'nohup ', 'npm ', 'go ', '; ', '\n', '\r\n', 'cd a; ', "sed -n 'p' ", '--epochs ', 'turbo run ', '$(',
+      '`', '{ ', 'a/', ' ', 'timeout 5 ', 'env -u X ', 'ssh h ', 'kubectl exec p -- ', 'docker compose run w ', 'uv run ',
+      'find . -exec ', String.raw`\; `, String.raw`\\`];
+    // Every fragment behind a read and behind an act: a read-only chain is
+    // searched for a failed cd, an acting one by the intent tables.
+    const PREFIXES = ['git log && cat x ', 'npm install ', 'bash -lc "', "sh -c '", 'pwsh -Command ', 'find . | xargs ', ''];
+    forAll('linear time', UNITS.length + 8, (g, i) => {
+      const unit = i < UNITS.length ? UNITS[i] : g.segment() + g.pick(OPS);
+      const n = Math.max(1, Math.floor(600 / unit.length));
+      for (const prefix of i < UNITS.length ? PREFIXES.slice(0, 2) : [g.pick(PREFIXES)]) {
+        const bad = slower(prefix + unit.repeat(n), prefix + unit.repeat(8 * n));
+        if (bad) return `${q(prefix)} + ${q(unit)} x${n}: ${bad}`;
+      }
+      return null;
+    });
+  });
+
+  // -- What the invariants found ----------------------------------------
+  // Each was a counterexample in round 6's own code (the redirect, runner,
+  // git-word and xargs ones) or older (the training words and both
+  // quadratic scans).
+
+  test('a redirect is not an argument: no make target, tag or branch name', () => {
+    for (const [cmd, want] of [
+      ['make 2>&1 | tail -20', 'build succeeded'], ['make -j8 >out.log 2>&1', 'build succeeded'],
+      ['make > out.log', 'build succeeded'], ['yarn 2>&1 | tail -5', 'installed'], ['make lint 2>&1', 'make lint done'],
+      ['make > out.log test', 'tests passed'], ['make <<EOF test\nx\nEOF', 'tests passed'],
+    ]) assert.strictEqual(claudeOk(cmd, 'ok').detail, want, cmd);
+    for (const cmd of ['git tag 2>/dev/null', 'git branch -a 2>&1', 'git branch >&2', 'git remote 2>/dev/null',
+      'git branch -a &>/dev/null', 'git branch -a <&3', 'git branch -a > branches.txt']) {
+      assert.strictEqual(shellIntent(cmd).readOnly, true, cmd);
+    }
+    assert.strictEqual(pre('git tag 2>/dev/null'), 'executing');
+    assert.strictEqual(shellIntent('git branch -a 2>/dev/null | head').masked, false);
+    // A branch or a tag to make still acts.
+    for (const cmd of ['git branch fix 2>&1', 'git tag v1 >/dev/null', 'git tag 2>&1 v1']) {
+      assert.strictEqual(shellIntent(cmd).readOnly, false, cmd);
+    }
+    assert.strictEqual(pre('git tag v1 2>&1'), 'committing');
+  });
+
+  test('a task runner is the command a runner runs, not any word after it', () => {
+    for (const cmd of ['npx jest bazel', 'npx vitest run turbo', 'pnpm exec jest nx']) assert.strictEqual(pre(cmd), 'testing', cmd);
+    for (const [cmd, want] of [
+      ['npx jest bazel', 'tests passed'], ['pnpm turbo build', 'build succeeded'], ['npx nx build web', 'build succeeded'],
+      ['yarn workspace web turbo test', 'tests passed'], ['pnpm --filter nx build', 'build succeeded'],
+      ['pnpm --filter nx lint', 'command succeeded'], ['npm install turbo', 'installed'],
+    ]) assert.strictEqual(claudeOk(cmd, 'ok').detail, want, cmd);
+  });
+
+  test('a word named git is no git step', () => {
+    for (const cmd of ['cat git | cut -d: -f1', 'kubectl logs -n git api', 'rg -n git | wc -l', 'ls -la git']) {
+      assert.strictEqual(claudeOk(cmd, 'ok').detail, 'command succeeded', cmd);
+    }
+    for (const cmd of ['git log --oneline | head', 'cd repo && git status', 'git -C app diff --stat']) {
+      assert.strictEqual(claudeOk(cmd, 'ok').detail, 'git done', cmd);
+    }
+  });
+
+  test('a training launcher is a word of its own, and unsloth the command', () => {
+    for (const cmd of ['git add ml/python/train.py', 'docker build -t python-train .', 'chmod +x scripts/torchrun-train.sh',
+      'git clone https://github.com/unslothai/unsloth', 'rm -rf unsloth', 'node scripts/gen.js python/train.py']) {
+      assert.notStrictEqual(pre(cmd), 'training', cmd);
+    }
+    for (const cmd of ['python train.py', '/opt/homebrew/bin/python3 train.py', '.venv/bin/python train.py',
+      'python3.11 train.py', 'C:\\Python312\\python.exe train.py', 'srun python train.py', 'uv run python train.py',
+      'CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=8 train.py', '(python train.py)', 'nohup ./train.sh &',
+      'unsloth finetune model', 'python -m unsloth', 'python3 finetune.py --lr 0.001']) {
+      assert.strictEqual(pre(cmd), 'training', cmd);
+    }
+  });
+
+  test('a run of xargs is skipped in one pass', () => {
+    // isReadOnlySegment and runnerTarget re-split the rest of the segment for
+    // each xargs: 1,000 of them cost 200ms, and 8,000 overflowed the stack.
+    const bad = slower(`find . | ${'xargs '.repeat(200)}jest`, `find . | ${'xargs '.repeat(1600)}jest`);
+    assert.strictEqual(bad, null);
+    const many = 'xargs '.repeat(20000);
+    assert.strictEqual(shellIntent(`find . | ${many}grep -l x`).readOnly, true);
+    assert.strictEqual(pre(`find . | ${many}jest`), 'testing');
+    // What xargs runs is judged as before.
+    for (const [cmd, want] of [['find . | xargs -0 sudo cat', true], ['find . | xargs -n 1 sudo rm', false],
+      ['find . | xargs sudo', false], ['find . | xargs', true], ['git ls-files | xargs -I {} xargs wc -l {}', true]]) {
+      assert.strictEqual(shellIntent(cmd).readOnly, want, cmd);
+    }
+  });
+
+  test('an unclosed escaped quote, or a run of blank lines, is read once', () => {
+    // stripQuotedArgs looked for a closing quote again from every `\"` after
+    // one that had none, and SHELL_MOVE_RE's `\s*` ran over every line
+    // break after each one: both quadratic.
+    assert.strictEqual(slower('echo ' + '\\"'.repeat(1000), 'echo ' + '\\"'.repeat(8000)), null);
+    assert.strictEqual(slower('cat x' + '\n'.repeat(2000), 'cat x' + '\n'.repeat(16000)), null);
+    // A later string is still emptied, and a cd after blank lines still a cd.
+    assert.strictEqual(pre(`echo \\"x; git commit -m 'npm test'`), 'committing');
+    assert.strictEqual(adapter('cat x\n\n\n  cd /nope', 'bash: cd: /nope: No such file or directory').state, 'error');
+    assert.strictEqual(adapter('cat x\r\n\r\ncd /nope', 'bash: cd: /nope: No such file or directory').state, 'error');
+  });
+});
+
+describe('state-machine.js -- review round 6: what the fuzzer found', () => {
+  const sm = require('../lib/state-machine');
+  const { shellIntent } = sm;
+  const pre = (command) => toolToState('Bash', { command }).state;
+  const done = (command) => classifyToolResult('Bash', { command }, { stdout: '', stderr: '' }, false).detail;
+  const check = (rows) => {
+    for (const [cmd, state, detail] of rows) {
+      assert.strictEqual(pre(cmd), state, `${cmd} shows ${pre(cmd)}`);
+      if (detail) assert.strictEqual(done(cmd), detail, `${cmd} finishes ${done(cmd)}`);
+    }
+  };
+
+  // The npm/go/pip phrase tables matched anywhere in an acting segment, so
+  // two argument words could spell a command.
+  test('argument words never spell a test run or an install', () => {
+    for (const cmd of ['cp go test', 'mv cargo test x', 'cp npm test dist/', 'touch dotnet test', 'git add rake test',
+      'cp php artisan test .', 'cp pip install x', 'mv go get x', 'rm -f brew install', 'mkdir -p apt-get install']) {
+      assert.strictEqual(pre(cmd), 'executing', `${cmd} shows ${pre(cmd)}`);
+      assert.ok(!/tests passed|installed/.test(done(cmd)), `${cmd} finishes ${done(cmd)}`);
+    }
+  });
+
+  // What the phrase tables' reach was for: a wrapper runs the command after
+  // it. The word tables never looked past one (`timeout 60 git push`).
+  test('a wrapper runs the command after it: sudo, env, timeout, nice, xvfb-run, xargs...', () => {
+    check([
+      ['xvfb-run -a npm test', 'testing', 'tests passed'],
+      ['timeout 600 cargo test', 'testing', 'tests passed'],
+      ['timeout -s KILL 10m go test ./...', 'testing', 'tests passed'],
+      ['nice -n 10 go test ./...', 'testing', 'tests passed'],
+      ['env CI=1 npm test', 'testing', 'tests passed'],
+      ['env -u HOME CI=1 pytest -q', 'testing', 'tests passed'],
+      ['stdbuf -oL make test', 'testing', 'tests passed'],
+      ['sudo -E npm install -g typescript', 'installing', 'installed'],
+      ['sudo apt-get -y install jq', 'installing', 'installed'],
+      ['sudo -u deploy git push', 'committing', 'pushed!'],
+      ['timeout 60 git push', 'committing', 'pushed!'],
+      ['time -p make', 'executing', 'build succeeded'],
+      ['nohup npm run build', 'executing', 'build succeeded'],
+      ['git ls-files -z | xargs -0 git rm --cached', 'executing', 'git done'],
+    ]);
+    assert.strictEqual(shellIntent('ls | xargs -n1 timeout 5 cat').readOnly, true);
+    assert.strictEqual(shellIntent('timeout 5 tail -f app.log').readOnly, true);
+    assert.strictEqual(shellIntent('ls | xargs -n1 timeout 5 rm').readOnly, false);
+    // `command -v` looks a name up, whatever the name.
+    assert.strictEqual(shellIntent('command -v deploy').readOnly, true);
+    assert.strictEqual(shellIntent('command deploy --prod').readOnly, false);
+  });
+
+  test('a container, pod or host runs the command after it', () => {
+    check([
+      ['docker exec api npm test', 'testing', 'tests passed'],
+      ['docker exec -it -u node api npm test', 'testing', 'tests passed'],
+      ['docker compose exec web pytest', 'testing', 'tests passed'],
+      ['docker compose -f ci.yml run --rm web npm test', 'testing', 'tests passed'],
+      ['docker-compose exec -T web npm install', 'installing', 'installed'],
+      ['docker run --rm -v "$PWD":/app -w /app node:20 npm test', 'testing', 'tests passed'],
+      ['podman run --rm -e CI=1 --cpus 2 node:20 npm test', 'testing', 'tests passed'],
+      ['kubectl exec -it api -c app -- npm test', 'testing', 'tests passed'],
+      ['ssh -p 2222 ci-box npm test', 'testing', 'tests passed'],
+    ]);
+    // What runs there is what is judged: a read stays a read...
+    assert.strictEqual(shellIntent('docker exec api cat /etc/hosts').readOnly, true);
+    assert.strictEqual(shellIntent('ssh box tail -n 50 app.log').readOnly, true);
+    // ...and with nothing named to run, the container or the login acts.
+    for (const cmd of ['docker run img', 'docker run --rm -it node:20', 'ssh box', 'kubectl exec -it api', 'docker compose up']) {
+      assert.strictEqual(shellIntent(cmd).readOnly, false, cmd);
+    }
+  });
+
+  test("a manager's subcommand is found past its flags and workspace selector", () => {
+    check([
+      ['npm --prefix web test', 'testing', 'tests passed'],
+      ['pnpm --filter web test', 'testing', 'tests passed'],
+      ['yarn workspace web test', 'testing', 'tests passed'],
+      ['npm -s run test:unit', 'testing', 'tests passed'],
+      ['cargo +nightly test', 'testing', 'tests passed'],
+      ['python -m pip install -r requirements.txt', 'installing', 'installed'],
+      ['uv pip install torch', 'installing', 'installed'],
+      ['pip3.11 install requests', 'installing', 'installed'],
+      ['go install ./cmd/tool', 'installing', 'installed'],
+      ['php artisan test', 'testing', 'tests passed'],
+      ['rake test:units', 'testing', 'tests passed'],
+    ]);
+    assert.strictEqual(done('cargo +nightly build'), 'build succeeded');
+  });
+
+  // find's actions were invisible: every find was a read, so a failed
+  // -delete was never looked for.
+  test('find acts when it deletes, writes a file, or runs a command that acts', () => {
+    for (const [cmd, readOnly] of [
+      ["find . -name '*.tmp' -delete", false], ['find . -name x -exec rm {} \\;', false],
+      ['find . -exec rm -f {} +', false], ['find . -type f -execdir chmod +x {} \\;', false],
+      ['find . -ok rm {} \\;', false], ['find . -fprint files.txt', false], ['find . -exec rm {} \\; -print', false],
+      ['find . -exec sudo rm {} +', false], ['fd -e tmp -x rm', false],
+      ['find . -exec grep -l foo {} +', true], ['find . -name "*.ts" -exec wc -l {} \\; | sort -n', true],
+      ['find . -type f', true], ['find . -exec sed -n 1p {} \\;', true], ['fd -e ts -X wc -l', true],
+    ]) {
+      assert.strictEqual(shellIntent(cmd).readOnly, readOnly, cmd);
+    }
+    // So an adapter, with no exit code, reports find's own failure.
+    const r = classifyToolResult('Bash', { command: "find . -name '*.log' -delete" },
+      { stdout: "find: cannot delete './x.log': Permission denied", stderr: '' }, false);
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('an escaped ; | or & is a word, as the shell reads it, not an operator', () => {
+    assert.strictEqual(shellIntent('find . -exec rm {} \\; -print').segments.length, 1);
+    assert.strictEqual(shellIntent('grep a\\|b notes.txt').readOnly, true);
+    assert.strictEqual(shellIntent('grep a\\|b notes.txt').segments.length, 1);
+    // An escaped backslash escapes nothing after it.
+    assert.strictEqual(shellIntent('echo a\\\\; rm -rf build').segments.length, 2);
+  });
+
+  // An explicit exit code is the host's own word on the command's status.
+  test('an explicit exit code 0 beats one read from the output, unless the command can mask it', () => {
+    const out = 'step 3 of 5: Exit code 1\nretrying\nall done';
+    const r = (command, extra) => classifyToolResult('Bash', { command }, { stdout: out, stderr: '', ...extra }, false);
+    assert.strictEqual(r('make', { exitCode: 0 }).state, 'relieved');
+    assert.strictEqual(r('make', { exitCode: 0 }).detail, 'build succeeded');
+    // A pipeline's 0 is its last command's: make's own status is lost.
+    assert.strictEqual(r('make | tee build.log', { exitCode: 0 }).state, 'error');
+    // No exit code at all: the output is all there is, as before.
+    assert.strictEqual(r('make', {}).state, 'error');
+  });
+
+  // A huge result is cut at 1 MB and judged from its raw text. With no error
+  // in it, it fell through to "large input" instead of its tool's success.
+  test("a huge tool result with no error in it ends on its tool's own success face", () => {
+    const cut = (name, input) => JSON.stringify({ session_id: 's', hook_event_name: 'PostToolUse', tool_name: name,
+      tool_input: input, tool_response: { stdout: 'line\n'.repeat(400) } }).slice(0, 3000);
+    const t = (name, input, opts) => classifyTruncatedInput('PostToolUse', cut(name, input), opts);
+    assert.deepStrictEqual([t('Bash', { command: 'npm test' }).state, t('Bash', { command: 'npm test' }).detail], ['relieved', 'tests passed']);
+    assert.strictEqual(t('Read', { file_path: '/x/big.log' }).detail, 'read big.log');
+    assert.strictEqual(t('mcp__playwright__browser_take_screenshot', {}).detail, 'playwright done');
+    // The OpenCode plugin's flat payload names its input toolInput.
+    const flat = JSON.stringify({ type: 'tool.execute.after', tool: 'bash', toolInput: { command: 'cargo test' },
+      output: 'ok\n'.repeat(900) }).slice(0, 2000);
+    assert.strictEqual(classifyTruncatedInput('PostToolUse', flat).detail, 'tests passed');
+    // An input cut off with the output is the tool's face without it.
+    const huge = JSON.stringify({ tool_name: 'Write', tool_input: { file_path: 'a.txt', content: 'x'.repeat(5000) } }).slice(0, 1000);
+    assert.strictEqual(classifyTruncatedInput('PostToolUse', huge).state, 'proud');
+    // An error in the window still wins.
+    assert.strictEqual(classifyTruncatedInput('PostToolUse', cut('Bash', { command: 'npm test' }) + '\\nnpm ERR! code 1').state, 'error');
+  });
+
+  // Claude Code reports a failed Bash as PostToolUseFailure, so its huge
+  // PostToolUse is a success too -- as on the main path, only a command line
+  // that can mask a failure is searched.
+  test('a huge trusted success is not searched for failures, unless the command can mask one', () => {
+    const TRUST = { trustSuccess: true };
+    const raw = (command) => JSON.stringify({ tool_name: 'Bash', tool_input: { command },
+      tool_response: { stdout: 'line\nFAIL src/a.test.js\n' + 'line\n'.repeat(400) } }).slice(0, 3000);
+    assert.strictEqual(classifyTruncatedInput('PostToolUse', raw('npm test'), TRUST).detail, 'tests passed');
+    assert.strictEqual(classifyTruncatedInput('PostToolUse', raw('npm test | tail -50'), TRUST).state, 'error');
+    // Untrusted (Codex, an adapter) as before.
+    assert.strictEqual(classifyTruncatedInput('PostToolUse', raw('npm test')).state, 'error');
   });
 });
 

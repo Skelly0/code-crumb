@@ -555,20 +555,23 @@ describe('grid -- the main session is loaded but kept off the ring', () => {
     // On win32 there is no pid, so the main's face goes stale at
     // ORPHAN_TIMEOUT (90s) and stops protecting its file 30s before the
     // STALE_MS purge fires -- deleting the very file the renderer reads.
+    // Both files are older than every window that keeps a pid-less top-level
+    // file (NO_PID_FILE_KEEP_MS), so only the main-file rule can keep M.
     const t = makeTempEnv();
     try {
       const dir = t.sessionsDir;
       fs.mkdirSync(dir, { recursive: true });
       const now = Date.now();
-      const old = new Date(now - 130000);
+      const ageMs = require('../lib/grid').NO_PID_FILE_KEEP_MS + 10000;
+      const old = new Date(now - ageMs);
       const seed = (name, obj) => {
         const fp = path.join(dir, name);
         writeJsonAtomic(fp, obj);
         fs.utimesSync(fp, old, old);
         return fp;
       };
-      const mainFp = seed('M.json', { session_id: 'M', state: 'coding', timestamp: now - 130000, lastPromptAt: now - 130000 });
-      const otherFp = seed('B.json', { session_id: 'B', state: 'coding', timestamp: now - 130000 });
+      const mainFp = seed('M.json', { session_id: 'M', state: 'coding', timestamp: now - ageMs, lastPromptAt: now - ageMs });
+      const otherFp = seed('B.json', { session_id: 'B', state: 'coding', timestamp: now - ageMs });
       const orb = new OrbitalSystem();
       orb._sessionsDir = dir;
       orb.loadSessions('M');   // no faces yet: nothing else protects either file
@@ -1126,8 +1129,11 @@ describe('review fixes -- renderer and face', () => {
     const adopt = src.slice(src.indexOf('function adoptMain('), src.indexOf('function adoptMain(') + 1500);
     assert.ok(/face\.cwd = null;/.test(adopt) && /face\.gitBranch = null;/.test(adopt),
       'adoptMain must clear the outgoing branch/cwd');
-    const swap = src.slice(src.indexOf('function _executeSwap('), src.indexOf('function _executeSwap(') + 1500);
-    assert.ok(/lastNewWriteAt = ts;/.test(swap), 'the waiting bound needs a real write clock after a swap');
+    const swap = src.slice(src.indexOf('function _executeSwap('), src.indexOf('function _executeSwap(') + 2500);
+    // Seeded from the write's own age, on the monotonic clock (review round 6;
+    // test-emotions drives it: "a face swapped in on a wait...").
+    assert.ok(/lastNewWriteAt = ts <= wallNow \? monoNow\(\) - \(wallNow - ts\)/.test(swap),
+      'the waiting bound needs a real write clock after a swap');
   });
 
   test('the status line never runs past the right edge', () => {
@@ -2062,6 +2068,214 @@ describe('review round 5 (docs-pass bugs) -- the notify-disable switch reads lik
 
   test('1/true/yes/on in any case, padded, turn it off: no unconfirmed wait', () => {
     for (const v of [' On ', 'TRUE']) assert.strictEqual(waitKindWith(v), undefined, JSON.stringify(v));
+  });
+});
+
+// -- Review round 6 (hooks) ----------------------------------------------
+// Each reproduced against the pre-fix sources with real update-state.js runs.
+
+describe('review round 6 (hooks) -- turn ends and session ends', () => {
+  const huge = 'x'.repeat(1100000);
+  const bg = (id) => ({ session_id: id, agent_id: 'bg1', agent_type: 'general-purpose' });
+  const finishedTurn = (t, id) => {
+    runUpdateState('SessionStart', { session_id: id, source: 'startup' }, t.env);
+    runUpdateState('UserPromptSubmit', { session_id: id, prompt: 'go' }, t.env);
+    runUpdateState('SubagentStart', bg(id), t.env);   // a background agent outlives the turn
+    runUpdateState('Stop', { session_id: id }, t.env);
+  };
+
+  // StopFailure is in AGENT_EXCLUDED_EVENTS, so an agent's lands on the
+  // parent's file; it rightly ends nothing there, but as a turn-closing event
+  // it carried nothing either: the parent lost `turnEnded` and the global file
+  // `stopped`, and a finished turn sat on the 45s thinking timeout.
+  test('an agent\'s StopFailure after the parent\'s Stop keeps the turn over', () => {
+    const t = makeTempEnv('r6-sf');
+    try {
+      finishedTurn(t, 'r6-sf');
+      runUpdateState('StopFailure', { ...bg('r6-sf'), error: 'rate_limit' }, t.env);
+      const s = readJSON(sessionFile(t.sessionsDir, 'r6-sf'));
+      assert.deepStrictEqual([s.state, s.detail], ['error', 'rate limited!'], 'the failure still shows on the parent');
+      assert.strictEqual(s.turnEnded, true, 'but the finished turn stays finished');
+      assert.ok(!s.stopped);
+      assert.strictEqual(readJSON(t.stateFile).stopped, true, 'and the global file stays released');
+    } finally { cleanup(t.tmp); }
+    // Mid-turn it still ends nothing: the agent's turn is not the parent's.
+    const m = makeTempEnv('r6-sf2');
+    try {
+      runUpdateState('UserPromptSubmit', { session_id: 'r6-sf2', prompt: 'go' }, m.env);
+      runUpdateState('SubagentStart', bg('r6-sf2'), m.env);
+      runUpdateState('StopFailure', { ...bg('r6-sf2'), error: 'rate_limit' }, m.env);
+      const s = readJSON(sessionFile(m.sessionsDir, 'r6-sf2'));
+      assert.ok(!s.turnEnded && !s.turnOver, 'mid-turn');
+      assert.ok(!readJSON(m.stateFile).stopped, 'mid-turn, global');
+    } finally { cleanup(m.tmp); }
+  });
+
+  // "stopped on a session file is reserved for SessionEnd" -- and only a late
+  // tool end carried it, so a background agent's SubagentStop (or a
+  // TaskCompleted, a compaction) after SessionEnd rewrote the ended session
+  // live, with its old lastPromptAt: a top-level candidate again.
+  test('an echo after SessionEnd leaves the session ended, on either path', () => {
+    for (const [event, payload] of [
+      ['SubagentStop', (id) => bg(id)],
+      ['TaskCompleted', (id) => ({ session_id: id, task_subject: 'late task' })],
+      ['PostCompact', (id) => ({ session_id: id, trigger: 'auto' })],
+      ['PreCompact', (id) => ({ session_id: id, trigger: 'auto' })],
+      // Over 1 MB: the degraded path dropped `stopped` from every write.
+      ['PostToolUse', (id) => JSON.stringify({ session_id: id, hook_event_name: 'PostToolUse',
+        tool_name: 'Bash', tool_input: { command: 'cat big.log' }, tool_response: { stdout: huge },
+        tool_use_id: 'toolu_big' })],
+    ]) {
+      const t = makeTempEnv('r6-end');
+      try {
+        finishedTurn(t, 'r6-end');
+        runUpdateState('SessionEnd', { session_id: 'r6-end', reason: 'clear' }, t.env);
+        runUpdateState(event, payload('r6-end'), t.env);
+        const s = readJSON(sessionFile(t.sessionsDir, 'r6-end'));
+        assert.strictEqual(s.stopped, true, `${event}: an ended session is no candidate again`);
+      } finally { cleanup(t.tmp); }
+    }
+  });
+
+  // The global re-stamp read the global file's own `stopped`, which any wait
+  // clears -- and an idle_prompt arrives ~60 s after every Stop. The next echo
+  // then wrote the global file live, and no other window could take it for
+  // two minutes.
+  test('the global file stays released through a between-turns wait', () => {
+    const t = makeTempEnv('r6-gw');
+    try {
+      finishedTurn(t, 'r6-gw');
+      runUpdateState('Notification', { session_id: 'r6-gw', notification_type: 'idle_prompt' }, t.env);
+      assert.ok(!readJSON(t.stateFile).stopped, 'fixture: a wait clears it (tmux would rescue it to "wrapping up")');
+      runUpdateState('SubagentStop', bg('r6-gw'), t.env);
+      assert.strictEqual(readJSON(t.stateFile).stopped, true, 're-stamped from the session file\'s own turn end');
+      runUpdateState('UserPromptSubmit', { session_id: 'r6-gw-B', prompt: 'next' }, t.env);
+      assert.strictEqual(readJSON(t.stateFile).sessionId, 'r6-gw-B', 'so another window can take it');
+    } finally { cleanup(t.tmp); }
+  });
+});
+
+describe('review round 6 (hooks) -- permission waits', () => {
+  const WAIT_KEYS = ['waitingOn', 'waitKind', 'waitConfirmed', 'permState', 'permDetail'];
+  const huge = 'x'.repeat(1100000);
+
+  // The >1 MB path carried only STICKY_FIELDS: a parallel tool's huge result
+  // wiped the open prompt, and the allowed call's own huge result never
+  // answered it.
+  test('a parallel tool\'s >1 MB result keeps the open wait; the waited call\'s own answers it', () => {
+    const t = makeTempEnv('r6-big');
+    try {
+      const id = 'r6-big';
+      const bash = { tool_name: 'Bash', tool_input: { command: 'rm -rf build' } };
+      runUpdateState('UserPromptSubmit', { session_id: id, prompt: 'go' }, t.env);
+      runUpdateState('PreToolUse', { session_id: id, ...bash, tool_use_id: 'toolu_bash' }, t.env);
+      runUpdateState('PermissionRequest', { session_id: id, ...bash }, t.env);
+      const asked = readJSON(sessionFile(t.sessionsDir, id));
+      // A parallel Read of a huge image finishes while the dialog is open.
+      runUpdateState('PostToolUse', JSON.stringify({ session_id: id, hook_event_name: 'PostToolUse',
+        tool_name: 'Read', tool_input: { file_path: 'shot.png' },
+        tool_response: { type: 'image', file: { base64: huge } }, tool_use_id: 'toolu_read' }), t.env);
+      let f = readJSON(sessionFile(t.sessionsDir, id));
+      for (const k of WAIT_KEYS) assert.strictEqual(f[k], asked[k], `${k} kept past a parallel tool`);
+      // The allowed call returns a huge output of its own.
+      runUpdateState('PostToolUse', JSON.stringify({ session_id: id, hook_event_name: 'PostToolUse',
+        ...bash, tool_response: { stdout: huge, stderr: '' }, tool_use_id: 'toolu_bash' }), t.env);
+      f = readJSON(sessionFile(t.sessionsDir, id));
+      assert.strictEqual(f.answered, true, 'the allowed call answers its prompt');
+      for (const k of [...WAIT_KEYS, 'waitAskedAt']) assert.strictEqual(f[k], undefined, k);
+    } finally { cleanup(t.tmp); }
+  });
+
+  // An MCP screenshot is the commonest >1 MB result. The agent's prompt was
+  // never answered on the degraded path, so the parent stood in for it
+  // ("allow?", flashing title) until the agent's SubagentStop.
+  test('an agent\'s allowed tool returning >1 MB answers its wait and releases the parent', () => {
+    const t = makeTempEnv('r6-bigA');
+    try {
+      const id = 'r6-bigA';
+      const A = { session_id: id, agent_id: 'ag1', agent_type: 'general-purpose' };
+      const shot = { tool_name: 'mcp__playwright__browser_take_screenshot', tool_input: { fullPage: true } };
+      runUpdateState('UserPromptSubmit', { session_id: id, prompt: 'go' }, t.env);
+      runUpdateState('PreToolUse', { session_id: id, tool_name: 'Agent', tool_use_id: 'toolu_task',
+        tool_input: { description: 'shoot', subagent_type: 'general-purpose', prompt: 'go' } }, t.env);
+      runUpdateState('SubagentStart', A, t.env);
+      runUpdateState('PreToolUse', { ...A, ...shot, tool_use_id: 'toolu_shot' }, t.env);
+      runUpdateState('PermissionRequest', { ...A, ...shot }, t.env);
+      const fp = sessionFile(t.sessionsDir, `${id}-agent-ag1`);
+      const a = readJSON(fp);
+      fs.writeFileSync(fp, JSON.stringify({ ...a, syncAt: a.syncAt - 10000 }), 'utf8');
+      const before = readJSON(sessionFile(t.sessionsDir, id));
+      runUpdateState('Notification', { session_id: id, notification_type: 'permission_prompt' }, t.env);
+      assert.deepStrictEqual(readJSON(sessionFile(t.sessionsDir, id)).waitForAgents, [`${id}-agent-ag1`], 'fixture');
+      runUpdateState('PostToolUse', JSON.stringify({ ...A, hook_event_name: 'PostToolUse', ...shot,
+        tool_response: [{ type: 'image', data: huge }], tool_use_id: 'toolu_shot' }), t.env);
+      const agent = readJSON(fp);
+      assert.strictEqual(agent.answered, true);
+      for (const k of WAIT_KEYS) assert.strictEqual(agent[k], undefined, `agent ${k}`);
+      const parent = readJSON(sessionFile(t.sessionsDir, id));
+      assert.deepStrictEqual([parent.state, parent.detail], [before.state, before.detail], 'the parent goes back');
+      assert.strictEqual(parent.answered, true);
+      assert.strictEqual(parent.waitForAgents, undefined);
+      assert.notStrictEqual(readJSON(t.stateFile).state, 'waiting', 'and so does the global file');
+    } finally { cleanup(t.tmp); }
+  });
+
+  // Ages a session file's own clocks, as if it had been written `ms` earlier.
+  const age = (t, id, ms) => {
+    const fp = sessionFile(t.sessionsDir, id);
+    const o = readJSON(fp);
+    for (const k of ['syncAt', 'eventAt', 'timestamp', 'waitAskedAt']) if (typeof o[k] === 'number') o[k] -= ms;
+    fs.writeFileSync(fp, JSON.stringify(o), 'utf8');
+  };
+  const bash = { tool_name: 'Bash', tool_input: { command: 'npm test' } };
+
+  // The parent's own prompt, allowed within 6 s (no notification), its tool
+  // running for minutes; then a background agent asks. Its notification
+  // re-confirmed the parent's long-answered wait: "allow Bash?" over its own
+  // running call -- and since the parent was "asking", it never stood in for
+  // the agent, so answering the agent released nothing.
+  test('an agent\'s notification does not re-confirm the parent\'s own allowed prompt', () => {
+    const t = makeTempEnv('r6-own');
+    try {
+      const id = 'r6-own';
+      const A = { session_id: id, agent_id: 'ag1', agent_type: 'general-purpose' };
+      runUpdateState('UserPromptSubmit', { session_id: id, prompt: 'go' }, t.env);
+      runUpdateState('SubagentStart', A, t.env);
+      runUpdateState('PreToolUse', { session_id: id, ...bash, tool_use_id: 'toolu_own' }, t.env);
+      runUpdateState('PermissionRequest', { session_id: id, ...bash }, t.env);
+      const asked = readJSON(sessionFile(t.sessionsDir, id));
+      age(t, id, 60000);
+      const lint = { ...A, tool_name: 'Bash', tool_input: { command: 'npm run lint -- --fix' } };
+      runUpdateState('PreToolUse', { ...lint, tool_use_id: 'toolu_lint' }, t.env);
+      runUpdateState('PermissionRequest', lint, t.env);
+      age(t, `${id}-agent-ag1`, 7000);
+      runUpdateState('Notification', { session_id: id, notification_type: 'permission_prompt' }, t.env);
+      let parent = readJSON(sessionFile(t.sessionsDir, id));
+      assert.strictEqual(parent.state, 'waiting', 'the user is needed');
+      assert.strictEqual(parent.waitingOn, undefined, 'but not on the parent\'s own running call');
+      assert.deepStrictEqual(parent.waitForAgents, [`${id}-agent-ag1`], 'it stands in for the agent');
+      runUpdateState('PostToolUse', { ...lint, tool_use_id: 'toolu_lint',
+        tool_response: { stdout: 'fixed', stderr: '' } }, t.env);
+      parent = readJSON(sessionFile(t.sessionsDir, id));
+      assert.deepStrictEqual([parent.state, parent.detail], [asked.permState, asked.permDetail],
+        'back to its own tool, running');
+      assert.strictEqual(parent.waitForAgents, undefined);
+    } finally { cleanup(t.tmp); }
+  });
+
+  // Guard for the rule above: with no agent asking, a notification can only
+  // be the parent's own, however late its hook started.
+  test('a late notification nobody else claims still confirms the parent\'s own prompt', () => {
+    const t = makeTempEnv('r6-own2');
+    try {
+      runUpdateState('PermissionRequest', { session_id: 'r6-own2', ...bash }, t.env);
+      age(t, 'r6-own2', 9000);
+      runUpdateState('Notification', { session_id: 'r6-own2', notification_type: 'permission_prompt' }, t.env);
+      const f = readJSON(sessionFile(t.sessionsDir, 'r6-own2'));
+      assert.strictEqual(f.waitConfirmed, true);
+      assert.ok(f.waitingOn);
+      assert.strictEqual(f.detail, 'allow Bash?');
+    } finally { cleanup(t.tmp); }
   });
 });
 

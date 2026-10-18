@@ -28,17 +28,21 @@ const WINDOW_TITLE = 'Code Crumb';
 
 /**
  * Parse --editor flag from raw argv, return { editorName, editorArgs }.
- * Consumes --editor <name> and passes everything else through.
+ * Consumes --editor <name> (or --editor=<name>, the form update-state.js and
+ * setup's hook matching also take -- the launcher used to hand it to claude
+ * as an argument) and passes everything else through.
  */
 function parseArgs(rawArgs) {
   let editorName = 'claude';
-  const editorIdx = rawArgs.indexOf('--editor');
-  if (editorIdx !== -1 && rawArgs[editorIdx + 1]) {
-    editorName = rawArgs[editorIdx + 1].toLowerCase();
+  const editorIdx = rawArgs.findIndex(a => a === '--editor' || a.startsWith('--editor='));
+  const joined = editorIdx !== -1 && rawArgs[editorIdx] !== '--editor';
+  const value = joined ? rawArgs[editorIdx].slice('--editor='.length) : rawArgs[editorIdx + 1];
+  if (editorIdx !== -1 && value) {
+    editorName = value.toLowerCase();
   }
 
   const editorArgs = rawArgs.filter((a, i) =>
-    a !== '--editor' && (editorIdx === -1 || i !== editorIdx + 1)
+    a !== '--editor' && i !== editorIdx && (editorIdx === -1 || joined || i !== editorIdx + 1)
   );
 
   return { editorName, editorArgs };

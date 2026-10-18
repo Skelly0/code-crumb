@@ -19,7 +19,7 @@ const { spawnSync } = require('child_process');
 const suite = require('./_harness').createSuite();
 const { describe, test } = suite;
 
-const { cleanup } = require('./_harness');
+const { cleanup, makeTempEnv, runUpdateState } = require('./_harness');
 const setup = require('../setup');
 const { TEST_MODULES } = require('./run');
 
@@ -580,10 +580,12 @@ describe('release -- setup.js doctor', () => {
     const up = healthyHome();
     put(up, '.code-crumb-quit', String(Date.now()));
     assert.strictEqual(doctor(up).problems, 0);
-    // No flag: autolaunch will open it, so a stopped renderer is fine.
+    // No flag: autolaunch will open it, so a stopped renderer is fine -- given
+    // a terminal to open it in (Linux looks for one on PATH; round 6).
     const auto = healthyHome();
     fs.unlinkSync(path.join(auto, '.code-crumb.pid'));
-    const a = doctor(auto);
+    put(auto, 'bin/xterm', '');
+    const a = doctor(auto, { env: { PATH: path.dirname(NODE) + path.delimiter + path.join(auto, 'bin') } });
     assert.strictEqual(a.problems, 0, a.text);
     assert.ok(a.text.includes('autolaunch opens it on the next hook'), a.text);
   });
@@ -839,6 +841,165 @@ describe('release -- Review round 5 (docs-pass bugs): setup and doctor agree', (
   });
 
   test('cleanup', () => { for (const h of homes) cleanup(h); });
+});
+
+// -- Review round 6 ----------------------------------------------------------
+// Run against the pre-fix sources first; each failed.
+
+describe('release -- Review round 6 (doctor): what doctor reports is what setup installs', () => {
+  const homes = [];
+  function put(home, rel, data) {
+    const p = path.join(home, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, typeof data === 'string' ? data : JSON.stringify(data, null, 2));
+    return p;
+  }
+  // The renderer "alive" and a fresh hook write: only the checks under test can complain.
+  function mkHome() {
+    const h = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-r6-doctor-'));
+    homes.push(h);
+    put(h, '.code-crumb.pid', String(process.pid));
+    put(h, '.code-crumb-prefs.json', { autolaunch: false });
+    put(h, '.code-crumb-sessions/s1.json', { state: 'idle' });
+    return h;
+  }
+  function doctor(home, { env = {}, platform } = {}) {
+    const lines = [];
+    const r = setup.doctor({ home, platform, env: { PATH: path.dirname(NODE), PATHEXT: process.env.PATHEXT || '', ...env },
+      log: l => lines.push(l) });
+    return { problems: r.problems, text: lines.join('\n'), bad: lines.filter(l => l.startsWith('  ! ')) };
+  }
+  const quiet = { log: () => {}, quiet: true };
+  const manualHooks = (edit) => {
+    const hooks = setup.buildFaceHooks(setup.DEFAULT_HOOK_PATH);
+    if (edit) edit(hooks);
+    return { hooks };
+  };
+
+  // Claude Code fires the KEY's event; update-state.js reports its argv's.
+  // A block copied by hand with its argument left unchanged was "all 23".
+  test('a hook filed under one event that runs another is reported, and setup repairs it', () => {
+    const home = mkHome();
+    const settingsPath = put(home, '.claude/settings.json', manualHooks(h => {
+      h.Stop[0].hooks[0].command = h.Stop[0].hooks[0].command.replace(/ Stop$/, ' Notification');
+    }));
+    const codex = setup.buildCodexHooks(REPO);
+    codex.hooks.Stop[0].hooks[0].command = codex.hooks.Stop[0].hooks[0].command.replace(/ Stop$/, ' Interrupt');
+    const hooksPath = put(home, '.codex/hooks.json', codex);
+    const r = doctor(home);
+    assert.strictEqual(r.problems, 2, r.text);
+    assert.ok(r.bad.some(l => l.includes('Stop runs Notification')), r.text);
+    assert.ok(r.bad.some(l => l.includes('Stop runs Interrupt')), r.text);
+    assert.strictEqual(setup.setupClaude({ settingsPath, ...quiet }).replaced, 1);
+    assert.strictEqual(setup.setupCodex({ hooksPath, configPath: path.join(home, '.codex', 'config.toml'), ...quiet }).replaced, 1);
+    const after = doctor(home);
+    assert.strictEqual(after.problems, 0, after.text);
+  });
+
+  test('our commands with a shell suffix count as installed, as setup and uninstall count them', () => {
+    const home = mkHome();
+    put(home, '.claude/settings.json', manualHooks(h => {
+      for (const g of Object.values(h)) g[0].hooks[0].command += ' 2>/dev/null || true';
+    }));
+    const r = doctor(home);
+    assert.strictEqual(r.problems, 0, r.text);
+    assert.ok(r.text.includes(`manual hooks for all ${setup.HOOK_EVENTS.length} events`), r.text);
+  });
+
+  test('a settings.json with a BOM: doctor names the missing event and setup installs it', () => {
+    const home = mkHome();
+    const { hooks } = manualHooks(h => { delete h.PermissionDenied; });
+    const settingsPath = put(home, '.claude/settings.json', '\uFEFF' + JSON.stringify({ hooks }, null, 2));
+    const r = doctor(home);
+    assert.strictEqual(r.problems, 1, r.text);
+    assert.ok(r.bad[0].includes('PermissionDenied'), r.text);
+    const s = setup.setupClaude({ settingsPath, ...quiet });
+    assert.deepStrictEqual([s.ok, s.added], [true, 1], 'setup refused the file doctor had read');
+    assert.strictEqual(doctor(home).problems, 0);
+  });
+
+  test('a notify line whose codex-notify.js is gone is a problem, with its path', () => {
+    const home = mkHome();
+    put(home, '.claude/settings.json', manualHooks());
+    const gone = toPosix(path.join(home, 'old-clone', 'adapters', 'codex-notify.js'));
+    put(home, '.codex/config.toml', `# Code Crumb integration\nnotify = ["node", "${gone}"]\n`);
+    const r = doctor(home);
+    assert.strictEqual(r.problems, 1, r.text);
+    assert.ok(r.bad[0].includes(gone) && r.bad[0].includes('does not exist'), r.text);
+    assert.ok(r.text.includes('codex-notify'), 'the fix names the setup to re-run');
+  });
+
+  // spawnRendererWindow tries gnome-terminal, konsole, xfce4-terminal and
+  // xterm on Linux, and opens nothing when none is on PATH.
+  test('with no terminal autolaunch knows on PATH, a stopped renderer is not "opened on the next hook"', () => {
+    const home = mkHome();
+    fs.unlinkSync(path.join(home, '.code-crumb.pid'));
+    put(home, '.code-crumb-prefs.json', { autolaunch: true });
+    put(home, '.claude/settings.json', manualHooks());
+    const none = doctor(home, { platform: 'linux' });
+    assert.strictEqual(none.problems, 1, none.text);
+    assert.ok(none.bad[0].includes('renderer is not running') && none.bad[0].includes('xterm'), none.text);
+    assert.ok(none.text.includes('renderer.js'), 'the fix names the renderer');
+    const bin = path.join(home, 'bin');
+    put(bin, 'xterm', '');
+    const some = doctor(home, { platform: 'linux', env: { PATH: path.dirname(NODE) + path.delimiter + bin } });
+    assert.strictEqual(some.problems, 0, some.text);
+    assert.ok(some.text.includes('autolaunch opens it on the next hook'), some.text);
+  });
+
+  test('cleanup', () => { for (const h of homes) cleanup(h); });
+});
+
+describe('release -- Review round 6: the runner and the harness', () => {
+  // Every variable the code reads that a developer's shell may hold -- and
+  // `npm test` inside Claude Code hands it CLAUDE_CODE_SESSION_ID at least.
+  const LEAKY = {
+    CODE_CRUMB_EDITOR: 'codex', CODE_CRUMB_MODEL: 'my-model', CODE_CRUMB_NODE: '/nowhere/node',
+    CLAUDE_SESSION_ID: 'outer', CLAUDE_CODE_SESSION_ID: 'outer-cc',
+    CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS: '1', CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+    MINIMAL_BOOT: '1', NO_COLOR: '1', ENGMUX_PYTHON: '/nowhere/python', PYTHON: '/nowhere/python',
+    // A recording developer's file would collect every test hook's payload.
+    CODE_CRUMB_RECORD: '1', CODE_CRUMB_RECORD_FILE: '/nowhere/record.jsonl',
+  };
+
+  test('no variable the code reads leaks from the developer\'s shell into a test file', () => {
+    const fx = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-r6-env-'));
+    try {
+      const seen = path.join(fx, 'seen.jsonl');
+      const files = ['env-a.js', 'env-b.js'].map(name => {
+        const file = path.join(fx, name);
+        fs.writeFileSync(file, [
+          "'use strict';",
+          "const fs = require('fs');",
+          `const suite = require(${JSON.stringify(path.join(__dirname, '_harness.js'))}).createSuite();`,
+          `const names = ${JSON.stringify(Object.keys(LEAKY))};`,
+          `suite.test('records', () => fs.appendFileSync(${JSON.stringify(seen)}, JSON.stringify(names.filter(k => k in process.env)) + '\\n'));`,
+          'module.exports = suite;',
+          '',
+        ].join('\n'));
+        return file;
+      });
+      const env = { ...process.env, ...LEAKY, CRUMB_TEST_FILES: files.join(path.delimiter) };
+      delete env.CRUMB_TEST_QUIET;
+      for (const args of [['--jobs=2'], ['--serial']]) {
+        try { fs.unlinkSync(seen); } catch {}
+        const r = spawnSync(NODE, [RUN_JS, ...args], { env, encoding: 'utf8', timeout: 60000 });
+        assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+        const lines = fs.readFileSync(seen, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+        assert.strictEqual(lines.length, 2, `${args}: both files ran`);
+        for (const leaked of lines) assert.deepStrictEqual(leaked, [], `${args}: leaked ${leaked.join(', ')}`);
+      }
+    } finally { cleanup(fx); }
+  });
+
+  // A hook killed by its timeout has status null; that counted as a pass.
+  test('runUpdateState fails a hook its timeout killed', () => {
+    const { tmp, env } = makeTempEnv('r6-timeout');
+    try {
+      assert.throws(() => runUpdateState('Stop', { session_id: 'r6-timeout' }, env, { timeout: 1 }));
+      assert.doesNotThrow(() => runUpdateState('Stop', { session_id: 'r6-timeout' }, env), 'a hook that finishes still passes');
+    } finally { cleanup(tmp); }
+  });
 });
 
 module.exports = suite;

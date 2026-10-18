@@ -100,7 +100,11 @@ try {
         }
       }
     }
-    writeSessionState(sessionId, state, detail, false, sessionExtra);
+    // A session that is over stays over, as after a late tool end. Codex runs
+    // this program fire and forget at the turn end, so under codex-wrapper it
+    // lands after the wrapper has retired the session, and it made a finished
+    // run a live window again -- holding the newest attention stamp.
+    writeSessionState(sessionId, state, detail, !!(prev && prev.stopped === true), sessionExtra);
     writeStats(stats);
   });
 } catch {

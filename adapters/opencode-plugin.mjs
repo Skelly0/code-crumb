@@ -89,9 +89,13 @@ function capText(v) {
   return v.slice(0, MAX_FIELD) + '\n'.repeat(lines);
 }
 
+// Past depth 3 nothing is read (the adapter's deepest field is an edit's
+// old_string inside edits[]), so a deeper object is dropped: passed through
+// whole, a long string nested in an MCP tool's arguments went out uncapped.
 function capInput(v, depth = 0) {
   if (typeof v === 'string') return capText(v);
-  if (!v || typeof v !== 'object' || depth > 3) return v;
+  if (!v || typeof v !== 'object') return v;
+  if (depth > 3) return null;
   if (Array.isArray(v)) return v.map(x => capInput(x, depth + 1));
   const out = {};
   for (const [k, x] of Object.entries(v)) out[k] = capInput(x, depth + 1);
@@ -334,6 +338,7 @@ function trackOverflow(payload) {
 // and undo it -- a late tool.execute.before re-opened the turn, re-stamped
 // attention and cleared `stopped`.
 const CHAIN_WAIT_MS = 3000;
+let chainWaitMs = CHAIN_WAIT_MS;   // CHAIN_WAIT_MS, but for the tests' seam below
 const queues = new Map(); // sessionId -> { running, pending: [{ json, node, bytes }] }
 
 // This plugin instance, and the order it reported events in.
@@ -343,6 +348,13 @@ let sequence = 0;
 // Resolves when the child is done (or CHAIN_WAIT_MS passes); never rejects,
 // whatever spawn does -- under EMFILE a child comes back with no stdin, and a
 // throw here used to leave a rejected promise that muted the session for good.
+// The wait is the CHILD's, counted from when it has its input: that sits in
+// our pipe until the event loop comes round, so a loop held near the deadline
+// (a burst of synchronous turn ends) handed a child its input 2.8 s in, the
+// timer let it go 0.2 s later, mid-run, and the next child overtook it -- a
+// tool's end landing before its start. So a timer that fires before the child
+// has had CHAIN_WAIT_MS since its input waits out the rest, once: a child
+// that hangs still lets go, within twice CHAIN_WAIT_MS of its spawn.
 function spawnAdapter(node, input) {
   return new Promise((resolve) => {
     try {
@@ -350,14 +362,26 @@ function spawnAdapter(node, input) {
         stdio: ['pipe', 'ignore', 'ignore'],
         windowsHide: true,
       });
-      const timer = setTimeout(resolve, CHAIN_WAIT_MS);
+      let inputAt = 0;   // when the child had all of its input (monotonic)
+      let extended = false;
+      const expire = () => {
+        const had = inputAt ? performance.now() - inputAt : 0;
+        if (!extended && had < chainWaitMs) {
+          extended = true;
+          timer = setTimeout(expire, chainWaitMs - had);
+          if (timer.unref) timer.unref();
+          return;
+        }
+        resolve();
+      };
+      let timer = setTimeout(expire, chainWaitMs);
       if (timer.unref) timer.unref();
       const done = () => { clearTimeout(timer); resolve(); };
       child.on('error', done);
       child.on('close', done);
       if (!child.stdin) { done(); return; }
       child.stdin.on('error', () => {});
-      child.stdin.end(input);
+      child.stdin.end(input, () => { inputAt = performance.now(); });
     } catch {
       resolve();
     }
@@ -484,3 +508,4 @@ export const CodeCrumbPlugin = async () => ({
 // Test seams: a static property is invisible to the plugin loader.
 CodeCrumbPlugin.translate = translate;
 CodeCrumbPlugin.takeBatch = takeBatch;
+CodeCrumbPlugin.setChainWait = (ms) => { chainWaitMs = ms; };

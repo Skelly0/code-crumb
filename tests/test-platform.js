@@ -2005,4 +2005,278 @@ describe('platform -- Review round 5: OpenCode setup', () => {
   });
 });
 
+// -- Review round 6 ----------------------------------------------------------
+// Each block below was run against the pre-fix sources first and failed.
+
+describe('platform -- Review round 6 (setup)', () => {
+  const quiet = { log: () => {}, quiet: true };
+  const HOOK = '/repo/update-state.js';
+  const PLUGIN = '/repo/adapters/opencode-plugin.mjs';
+  const NOTIFY = '/repo/adapters/codex-notify.js';
+  const commandsOf = (groups) => groups.flatMap(g => g.hooks.map(h => h.command));
+  function settingsIn(dir, obj, prefix = '') {
+    const p = path.join(dir, '.claude', 'settings.json');
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, prefix + JSON.stringify(obj, null, 2));
+    return p;
+  }
+
+  // A line starting with `[` inside a multi-line string or a nested array
+  // read as a [table] header, so a foreign top-level notify after it went
+  // unseen and setup added a second one -- a TOML error codex will not load.
+  test('codex-notify never adds a second top-level notify after a multi-line string or a nested array', () => {
+    const dir = tmpDir('crumb-r6-toml-');
+    try {
+      const foreign = 'notify = ["python3", "/home/me/notify.py"]\n';
+      for (const [label, before] of [
+        ['basic multi-line string', 'model = "gpt-5"\ndeveloper_instructions = """\n[IMPORTANT] always run the tests\n"""\n'],
+        ['literal multi-line string', "developer_instructions = '''\n[[not a table]]\n'''\n"],
+        ['nested array', 'matrix = [\n  ["a", "b"],\n]\n'],
+      ]) {
+        const configPath = path.join(dir, 'config.toml');
+        const text = before + foreign + '\n[tui]\nnotifications = true\n';
+        fs.writeFileSync(configPath, text);
+        const r = setup.setupCodexNotify({ configPath, notifyPath: NOTIFY, ...quiet });
+        assert.deepStrictEqual([r.ok, r.modified], [true, false], label);
+        assert.strictEqual(fs.readFileSync(configPath, 'utf8'), text, `${label}: untouched`);
+      }
+    } finally { cleanup(dir); }
+  });
+
+  test('a notify line inside a multi-line string is text, not a key: never removed, never counted', () => {
+    const dir = tmpDir('crumb-r6-toml-');
+    try {
+      const configPath = path.join(dir, 'config.toml');
+      const text = `developer_instructions = """\nnotify = ["node", "${NOTIFY}"]\n"""\n`;
+      fs.writeFileSync(configPath, text);
+      assert.strictEqual(setup.removeCodexNotify({ configPath, ...quiet }).removed, 0);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), text);
+      const r = setup.setupCodexNotify({ configPath, notifyPath: NOTIFY, ...quiet });
+      assert.deepStrictEqual([r.ok, r.modified], [true, true], 'the real key is still missing');
+      assert.ok(fs.readFileSync(configPath, 'utf8').startsWith(`# Code Crumb integration\nnotify = ["node", "${NOTIFY}"]\n\n`));
+    } finally { cleanup(dir); }
+  });
+
+  test('a Code Crumb notify line naming a moved clone is repaired, not "already configured"', () => {
+    const dir = tmpDir('crumb-r6-notify-');
+    try {
+      const configPath = path.join(dir, 'config.toml');
+      const original = '# Code Crumb integration\nnotify = ["node", "/old/place/code-crumb/adapters/codex-notify.js"]\n\nmodel = "o3"\n';
+      fs.writeFileSync(configPath, original);
+      const r = setup.setupCodexNotify({ configPath, notifyPath: NOTIFY, ...quiet });
+      assert.deepStrictEqual([r.ok, r.modified], [true, true]);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'),
+        `# Code Crumb integration\nnotify = ["node", "${NOTIFY}"]\n\nmodel = "o3"\n`);
+      assert.strictEqual(fs.readFileSync(configPath + '.bak', 'utf8'), original, 'backed up first');
+      assert.strictEqual(setup.setupCodexNotify({ configPath, notifyPath: NOTIFY, ...quiet }).modified, false);
+      // The same script spelled with TOML-escaped backslashes is this checkout.
+      const win = 'notify = ["node", "C:\\\\repo\\\\adapters\\\\codex-notify.js"]\n';
+      fs.writeFileSync(configPath, win);
+      assert.strictEqual(setup.setupCodexNotify({ configPath, notifyPath: 'C:/repo/adapters/codex-notify.js', ...quiet }).modified, false);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'), win);
+    } finally { cleanup(dir); }
+  });
+
+  // Claude Code reads the event from the KEY; update-state.js from its argv.
+  test('an event holding our command for ANOTHER event is not installed: setup rewrites it', () => {
+    const dir = tmpDir('crumb-r6-event-');
+    try {
+      const hooks = setup.buildFaceHooks(HOOK);
+      hooks.Stop[0].hooks[0].command = `node "${HOOK}" Notification`;
+      const settingsPath = settingsIn(dir, { hooks });
+      const r = setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
+      assert.deepStrictEqual([r.ok, r.added, r.replaced], [true, 0, 1]);
+      assert.deepStrictEqual(commandsOf(readJSON(settingsPath).hooks.Stop), [`node "${HOOK}" Stop`]);
+      assert.strictEqual(setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet }).modified, false);
+    } finally { cleanup(dir); }
+  });
+
+  test('a stray command of ours beside the right one is dropped; the right one and the user\'s stay', () => {
+    const dir = tmpDir('crumb-r6-stray-');
+    try {
+      const hooks = setup.buildFaceHooks(HOOK);
+      hooks.Stop[0].hooks.push({ type: 'command', command: '~/bin/on-stop.sh' },
+        { type: 'command', command: `node "${HOOK}" Notification` });
+      const settingsPath = settingsIn(dir, { hooks });
+      const r = setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
+      assert.deepStrictEqual([r.ok, r.replaced], [true, 1]);
+      assert.deepStrictEqual(commandsOf(readJSON(settingsPath).hooks.Stop), [`node "${HOOK}" Stop`, '~/bin/on-stop.sh']);
+    } finally { cleanup(dir); }
+  });
+
+  // A user who silenced hook errors: setup called these installed, while
+  // uninstall (and doctor) did not see them at all.
+  test('our command with a shell suffix is ours everywhere: installed as is, and uninstalled', () => {
+    const dir = tmpDir('crumb-r6-wrapped-');
+    try {
+      const hooks = setup.buildFaceHooks(HOOK);
+      for (const g of Object.values(hooks)) g[0].hooks[0].command += ' 2>/dev/null || true';
+      const settingsPath = settingsIn(dir, { hooks, env: { KEEP: '1' } });
+      const r = setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
+      assert.deepStrictEqual([r.ok, r.modified], [true, false], 'no second copy beside each');
+      const u = setup.uninstallClaude({ settingsPath, ...quiet });
+      assert.strictEqual(u.removed, setup.HOOK_EVENTS.length);
+      assert.deepStrictEqual(readJSON(settingsPath), { env: { KEEP: '1' } });
+    } finally { cleanup(dir); }
+  });
+
+  // Notepad and PowerShell 5's `Set-Content -Encoding UTF8` write one.
+  test('a settings.json or Codex hooks.json saved with a BOM is read, and written back without one', () => {
+    const dir = tmpDir('crumb-r6-bom-');
+    try {
+      const settingsPath = settingsIn(dir, { env: { KEEP: '1' } }, '\uFEFF');
+      const original = fs.readFileSync(settingsPath, 'utf8');
+      const r = setup.setupClaude({ settingsPath, hookPath: HOOK, ...quiet });
+      assert.deepStrictEqual([r.ok, r.added], [true, setup.HOOK_EVENTS.length]);
+      const out = fs.readFileSync(settingsPath, 'utf8');
+      assert.ok(!out.startsWith('\uFEFF'), 'no BOM written back');
+      assert.strictEqual(JSON.parse(out).env.KEEP, '1');
+      assert.strictEqual(fs.readFileSync(settingsPath + '.bak', 'utf8'), original, 'the .bak is the file as it was');
+      const hooksPath = path.join(dir, '.codex', 'hooks.json');
+      fs.mkdirSync(path.dirname(hooksPath));
+      fs.writeFileSync(hooksPath, '\uFEFF{"hooks": {}}');
+      const c = setup.setupCodex({ hooksPath, configPath: path.join(dir, '.codex', 'config.toml'), repoRoot: '/repo', ...quiet });
+      assert.deepStrictEqual([c.ok, c.added], [true, setup.CODEX_HOOK_EVENTS.length]);
+    } finally { cleanup(dir); }
+  });
+
+  test('a block comment opened on the { line: the plugin member goes after it, not inside it', () => {
+    const dir = tmpDir('crumb-r6-jsonc-');
+    try {
+      const configPath = path.join(dir, 'opencode.jsonc');
+      fs.writeFileSync(configPath, '{ /* my opencode config\n   maintained by hand */\n  "model": "x"\n}\n');
+      const r = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.deepStrictEqual([r.ok, r.added], [true, 1]);
+      assert.strictEqual(fs.readFileSync(configPath, 'utf8'),
+        `{ /* my opencode config\n   maintained by hand */\n  "plugin": ["${PLUGIN}"],\n  "model": "x"\n}\n`);
+      const again = setup.setupOpenCode({ configPath, pluginPath: PLUGIN, install: true, ...quiet });
+      assert.deepStrictEqual([again.ok, again.modified], [true, false], 'found again: it is real config, not comment');
+    } finally { cleanup(dir); }
+  });
+
+  test('an extra positional argument is a usage error, never ignored', () => {
+    for (const [args, wouldWrite] of [[['codex', 'uninstall'], '.codex/hooks.json'], [['claude', 'remove'], '.claude/settings.json']]) {
+      const dir = setupHome('crumb-r6-args-');
+      try {
+        const r = runSetup(dir, args);
+        assert.strictEqual(r.status, 1, `${args.join(' ')}: ${r.out}`);
+        assert.ok(r.out.includes('Unexpected argument'), r.out);
+        assert.strictEqual(fs.existsSync(path.join(dir, wouldWrite)), false, `${args.join(' ')} installed anyway`);
+      } finally { cleanup(dir); }
+    }
+  });
+
+  // GNU stow, chezmoi's symlink mode and home-manager link settings.json into
+  // a dotfiles repo; a rename over the link replaced it with a regular file.
+  if (process.platform !== 'win32') {
+    test('writeJsonAtomic writes through a symlink and keeps the link, a dangling one included', () => {
+      const dir = tmpDir('crumb-r6-link-');
+      try {
+        fs.mkdirSync(path.join(dir, 'dotfiles'));
+        const real = path.join(dir, 'dotfiles', 'settings.json');
+        fs.writeFileSync(real, '{"a":1}');
+        const link = path.join(dir, 'settings.json');
+        fs.symlinkSync(path.join('dotfiles', 'settings.json'), link);   // relative, as stow writes it
+        assert.strictEqual(shared.writeJsonAtomic(link, { a: 2 }), true);
+        assert.ok(fs.lstatSync(link).isSymbolicLink(), 'still a link');
+        assert.deepStrictEqual(readJSON(real), { a: 2 }, 'the dotfiles copy was written');
+        assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['dotfiles', 'settings.json']);
+        assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'dotfiles')), ['settings.json'], 'no temp file left');
+        fs.unlinkSync(real);
+        assert.strictEqual(shared.writeJsonAtomic(link, { a: 3 }), true);
+        assert.ok(fs.lstatSync(link).isSymbolicLink(), 'a dangling link is kept too');
+        assert.deepStrictEqual(readJSON(real), { a: 3 }, 'and its target created');
+      } finally { cleanup(dir); }
+    });
+
+    test('setup keeps a symlinked settings.json a symlink, its target installed into', () => {
+      const dir = tmpDir('crumb-r6-link-');
+      try {
+        fs.mkdirSync(path.join(dir, 'dotfiles'));
+        const real = path.join(dir, 'dotfiles', 'settings.json');
+        fs.writeFileSync(real, JSON.stringify({ permissions: { allow: ['Bash(ls)'] } }));
+        fs.mkdirSync(path.join(dir, '.claude'));
+        const link = path.join(dir, '.claude', 'settings.json');
+        fs.symlinkSync(real, link);
+        const r = setup.setupClaude({ settingsPath: link, hookPath: HOOK, ...quiet });
+        assert.deepStrictEqual([r.ok, r.added], [true, setup.HOOK_EVENTS.length]);
+        assert.ok(fs.lstatSync(link).isSymbolicLink(), 'still a link');
+        const s = readJSON(real);
+        assert.deepStrictEqual(s.permissions, { allow: ['Bash(ls)'] });
+        assert.deepStrictEqual(Object.keys(s.hooks).sort(), [...setup.HOOK_EVENTS].sort());
+      } finally { cleanup(dir); }
+    });
+
+    // An exported CDPATH made `cd` look elsewhere for a relative directory
+    // and print where it went, so $(cd ... && pwd) held two lines.
+    test('code-crumb.sh ignores an exported CDPATH, run by a relative path or a relative link', () => {
+      const dir = tmpDir('crumb-r6-cdpath-');
+      try {
+        for (const [where, says] of [['work', 'right'], ['elsewhere', 'wrong']]) {
+          for (const sub of ['cc', 'bin']) fs.mkdirSync(path.join(dir, where, sub), { recursive: true });
+          fs.writeFileSync(path.join(dir, where, 'cc', 'launch.js'), `console.log('${says}', process.argv.slice(2).join(' '));\n`);
+        }
+        fs.copyFileSync(path.join(ROOT, 'code-crumb.sh'), path.join(dir, 'work', 'cc', 'code-crumb.sh'));
+        fs.symlinkSync('../cc/code-crumb.sh', path.join(dir, 'work', 'bin', 'cc'));
+        const env = { ...process.env, CDPATH: path.join(dir, 'elsewhere') };
+        for (const script of ['cc/code-crumb.sh', 'bin/cc']) {
+          const out = execFileSync('bash', [script, '--version'], { cwd: path.join(dir, 'work'), env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 });
+          assert.strictEqual(out.toString().trim(), 'right --version', script);
+        }
+      } finally { cleanup(dir); }
+    });
+  }
+});
+
+// A lock's age measured as `now - mtime` is negative once the clock steps
+// back past it (NTP, an RTC kept in local time by a dual boot, a resumed VM),
+// and a negative age was never stale: autolaunch stayed blocked, and every
+// hook waited LOCK_WAIT_MS and then ran unlocked, until the clock caught up.
+describe('platform -- Review round 6: a lock dated in the future', () => {
+  const ahead = (ms) => new Date(Date.now() + ms);
+  test('a spawn lock far in the future is stale; a second ahead (clock skew) is still fresh', () => {
+    const dir = tmpDir('crumb-r6-lock-');
+    try {
+      const lock = path.join(dir, 'spawn.lock');
+      fs.writeFileSync(lock, '4242');
+      fs.utimesSync(lock, ahead(2 * 3600e3), ahead(2 * 3600e3));
+      assert.strictEqual(shared.acquireSpawnLock(lock, 5000), true, 'a dead launch\'s lock, 2h "ahead"');
+      fs.utimesSync(lock, ahead(1000), ahead(1000));
+      assert.strictEqual(shared.acquireSpawnLock(lock, 5000), false, 'one second ahead is a live lock on a skewed clock');
+    } finally { cleanup(dir); }
+  });
+
+  test('a future-dated claim left by a dead takeover is cleared', () => {
+    const dir = tmpDir('crumb-r6-lock-');
+    try {
+      const lock = path.join(dir, 'spawn.lock');
+      fs.writeFileSync(lock, '1');
+      const old = new Date(Date.now() - 60000);
+      fs.utimesSync(lock, old, old);
+      fs.writeFileSync(lock + '.claim', '2');
+      fs.utimesSync(lock + '.claim', ahead(2 * 3600e3), ahead(2 * 3600e3));
+      assert.strictEqual(shared.acquireSpawnLock(lock, 5000), false);
+      assert.strictEqual(fs.existsSync(lock + '.claim'), false);
+      assert.strictEqual(shared.acquireSpawnLock(lock, 5000), true);
+    } finally { cleanup(dir); }
+  });
+
+  test('a crashed hook\'s stats lock far in the future is taken over; one a second ahead is held', () => {
+    const dir = tmpDir('crumb-r6-lock-');
+    try {
+      const lock = path.join(dir, 'stats.lock');
+      fs.writeFileSync(lock, 'crashed-hook-token');
+      fs.utimesSync(lock, ahead(2 * 3600e3), ahead(2 * 3600e3));
+      const release = shared.acquireFileLock(lock, { waitMs: 150 });
+      assert.strictEqual(typeof release, 'function', 'taken over, not waited out');
+      assert.notStrictEqual(fs.readFileSync(lock, 'utf8'), 'crashed-hook-token');
+      release();
+      fs.writeFileSync(lock, 'live-hook-token');
+      fs.utimesSync(lock, ahead(1000), ahead(1000));
+      assert.strictEqual(shared.acquireFileLock(lock, { waitMs: 30 }), null, 'a live lock on a skewed clock');
+      assert.strictEqual(fs.readFileSync(lock, 'utf8'), 'live-hook-token');
+    } finally { cleanup(dir); }
+  });
+});
+
 module.exports = suite;

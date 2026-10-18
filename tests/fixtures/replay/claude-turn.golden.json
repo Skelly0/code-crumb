@@ -1,0 +1,142 @@
+{
+  "fixture": "claude-turn.jsonl",
+  "regenerate": "CRUMB_UPDATE_GOLDEN=1 node tests/run.js replay",
+  "steps": [
+    {
+      "step": 1,
+      "event": "SessionStart",
+      "sessions": {
+        "s1": {
+          "state": "idle",
+          "detail": "session starting",
+          "prompt": 1,
+          "editor": "claude",
+          "model": "Sonnet"
+        }
+      },
+      "global": {
+        "state": "idle",
+        "detail": "session starting",
+        "sessionId": "s1"
+      },
+      "streak": 0
+    },
+    {
+      "step": 2,
+      "event": "UserPromptSubmit",
+      "sessions": {
+        "s1": {
+          "state": "thinking",
+          "detail": "reading your message",
+          "answered": true,
+          "prompt": 2,
+          "editor": "claude",
+          "model": "Sonnet"
+        }
+      },
+      "global": {
+        "state": "thinking",
+        "detail": "reading your message",
+        "sessionId": "s1"
+      },
+      "streak": 0
+    },
+    {
+      "step": 3,
+      "event": "PreToolUse",
+      "sessions": {
+        "s1": {
+          "state": "testing",
+          "detail": "npm test",
+          "prompt": 2,
+          "editor": "claude",
+          "model": "Sonnet"
+        }
+      },
+      "global": {
+        "state": "testing",
+        "detail": "npm test",
+        "sessionId": "s1"
+      },
+      "streak": 0
+    },
+    {
+      "step": 4,
+      "event": "PostToolUse",
+      "sessions": {
+        "s1": {
+          "state": "relieved",
+          "detail": "tests passed",
+          "prompt": 2,
+          "editor": "claude",
+          "model": "Sonnet"
+        }
+      },
+      "global": {
+        "state": "relieved",
+        "detail": "tests passed",
+        "sessionId": "s1"
+      },
+      "streak": 1
+    },
+    {
+      "step": 5,
+      "event": "PreToolUse",
+      "sessions": {
+        "s1": {
+          "state": "reading",
+          "detail": "reading login.test.js",
+          "prompt": 2,
+          "editor": "claude",
+          "model": "Sonnet"
+        }
+      },
+      "global": {
+        "state": "reading",
+        "detail": "reading login.test.js",
+        "sessionId": "s1"
+      },
+      "streak": 1
+    },
+    {
+      "step": 6,
+      "event": "PostToolUse",
+      "sessions": {
+        "s1": {
+          "state": "satisfied",
+          "detail": "got it",
+          "prompt": 2,
+          "editor": "claude",
+          "model": "Sonnet"
+        }
+      },
+      "global": {
+        "state": "satisfied",
+        "detail": "got it",
+        "sessionId": "s1"
+      },
+      "streak": 1
+    },
+    {
+      "step": 7,
+      "event": "Stop",
+      "sessions": {
+        "s1": {
+          "state": "idle",
+          "detail": "between turns",
+          "turnEnded": true,
+          "prompt": 2,
+          "editor": "claude",
+          "model": "Sonnet"
+        }
+      },
+      "global": {
+        "state": "responding",
+        "detail": "wrapping up",
+        "sessionId": "s1",
+        "stopped": true
+      },
+      "streak": 1
+    }
+  ]
+}

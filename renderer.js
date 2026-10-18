@@ -26,7 +26,7 @@ const { ParticleSystem } = require('./lib/particles');
 // measures its own durations on it too -- the boot window, the forced-read
 // interval, PID arming, the frame deadlines -- and keeps Date.now() for what is
 // compared against a file's JSON timestamp or an mtime.
-const { ClaudeFace, monoNow, cleanMilestone } = require('./lib/face');
+const { ClaudeFace, monoNow, cleanMilestone, faceFits } = require('./lib/face');
 const { MiniFace, OrbitalSystem, renderSessionList, orderSessionList, listNavigableIds, isProcessAlive, isOwnedByLiveProcess, requestPidStartTime, _pidStartStatus, sessionListFits } = require('./lib/grid');
 const { SwapTransition } = require('./lib/transition');
 
@@ -106,29 +106,14 @@ function needsRescue(face, lastStopped, editorDead, liveChildren = 0) {
 // allowed -- and its tool (`permState` / `permDetail`) is running.
 // Only for that contract: a confirmed wait, a wait without the fields (an
 // older hook), and every other editor (Codex has no Notification hook at all)
-// keep waiting exactly as before.
-// PERMISSION_CONFIRM_MS: 8s, the 6s timer plus slack. PERMISSION_TOOL_STATES:
-// what an answered prompt may turn into, the asking tool's own face -- one
-// set with the orbitals (grid.js), in shared.js.
-const { PERMISSION_CONFIRM_MS, PERMISSION_TOOL_STATES } = require('./lib/shared');
-
-// Pure: a Claude Code permission wait its 6s Notification has not confirmed.
-// `waitConfirmed` must be an explicit false -- anything else is a wait this
-// contract does not describe, and it keeps today's behaviour.
-function isUnconfirmedPermission(write) {
-  return !!write && write.state === 'waiting' && write.waitKind === 'permission'
-    && write.waitConfirmed === false && write.editor === 'claude'
-    && PERMISSION_TOOL_STATES.has(write.permState);
-}
-
-// Pure: has that wait gone unconfirmed long enough to have been answered?
-// Measured from the write's own timestamp, so a renderer that only sees the
-// wait late (a boot, a swap) does not make the user wait again.
-function permissionAnswered(write, now) {
-  if (!isUnconfirmedPermission(write)) return false;
-  const ts = write.timestamp || 0;
-  return ts > 0 && now - ts >= PERMISSION_CONFIRM_MS;
-}
+// keep waiting exactly as before. The lifecycle and its predicates -- the
+// asking write (isUnconfirmedPermission), a later write that carries it on
+// (carriesUnconfirmedPermission), one allowed by now (permissionAnswered) --
+// are lib/wait.js's, shared with the hook, the orbitals and tmux mode.
+const {
+  PERMISSION_CONFIRM_MS,
+  isUnconfirmedPermission, carriesUnconfirmedPermission, permissionAnswered, waitPhase,
+} = require('./lib/wait');
 
 // -- Timeout cascade -------------------------------------------------
 // Pure: decide the timeout-driven transition for the main face.
@@ -208,12 +193,17 @@ function idleCascade({ state, sinceChangeMs, sessionActive, lingerMs, fileState,
 //
 //   ts      timestamp of the write just read
 //   lastTs  the newest timestamp applied so far
-//   now     current time
+//   now     current wall time, to judge the write's timestamp by
 //   lastAt  the stamp to keep if this is not a new write
-// Returns the stamp to keep. 0 means "no write seen yet" -- callers treat that
-// as fresh rather than infinitely stale.
-function noteNewWrite(ts, lastTs, now, lastAt) {
-  return isNewerWrite(ts, lastTs, now) ? now : lastAt;
+//   stamp   the stamp for a new write (default `now`). The renderer keeps the
+//           clock on its monotonic one: an age measured as Date.now() minus a
+//           wall stamp stretched the 30-minute bound by however far the wall
+//           clock stepped back, and cut it short by a step forward.
+// Returns the stamp to keep. Before the first new write that is the caller's
+// own "none yet" value (the renderer's is null), which callers treat as fresh
+// rather than infinitely stale.
+function noteNewWrite(ts, lastTs, now, lastAt, stamp = now) {
+  return isNewerWrite(ts, lastTs, now) ? stamp : lastAt;
 }
 
 // Whether a write is newer than the last one applied. Normally its timestamp
@@ -380,7 +370,7 @@ function tmuxDisplayState(data, now) {
   let state = (data && data.state) || 'idle';
   const ts = (data && data.timestamp) || 0;
   const age = ts ? now - ts : 0;
-  if (state === 'waiting' && permissionAnswered(data, now)) state = data.permState;
+  if (state === 'waiting' && waitPhase(data, now) === 'allowed') state = data.permState;
   else if (state === 'waiting') return age > WAIT_HOLD_STALE_MS ? 'idle' : 'waiting';
   if (data && data.stopped) return age > IDLE_TIMEOUT ? 'idle' : state;
   const limit = (ACTIVE_WORK_STATES.has(state) && state !== 'responding') ? LONG_TOOL_HOLD_MS : THINKING_TIMEOUT;
@@ -433,17 +423,25 @@ function tmuxStatusLine(data, now, branchOf = getGitBranch) {
 // re-expressed on the current wall clock (`now - uptimeMs`), so a step cannot
 // make every fresh write look older than the renderer either. Omitted, it is
 // derived from the wall clock as before.
+// `waiting`: the write asks the user something (and is not a permission
+// prompt already allowed -- that is its tool, running). A wait has gone quiet
+// by design: the editor writes nothing until it is answered, and the running
+// face holds it for WAIT_HOLD_STALE_MS of silence. So a live wait inside that
+// bound is never too old to show: a renderer started on a prompt opened 20s
+// earlier recorded it and never showed it, while the same file reached by a
+// swap showed it at once.
 const STARTUP_WINDOW_MS = 5000;
 const STARTUP_STALE_MS = 15000;
 const RUNTIME_STALE_MS = 120000;
 
-function startupGate(ts, stopped, now, rendererStartTime, uptimeMs = now - rendererStartTime) {
+function startupGate(ts, stopped, now, rendererStartTime, uptimeMs = now - rendererStartTime, waiting = false) {
+  const liveWait = waiting && !stopped && ts > 0 && now - ts <= WAIT_HOLD_STALE_MS;
   if (uptimeMs < STARTUP_WINDOW_MS) {
     if (stopped && !(ts >= rendererStartTime)) return 'record';
-    if (ts > 0 && ts < rendererStartTime - STARTUP_STALE_MS) return 'record';
+    if (ts > 0 && ts < rendererStartTime - STARTUP_STALE_MS && !liveWait) return 'record';
     return 'apply';
   }
-  if (ts > 0 && ts < rendererStartTime - RUNTIME_STALE_MS) return 'skip';
+  if (ts > 0 && ts < rendererStartTime - RUNTIME_STALE_MS && !liveWait) return 'skip';
   return 'apply';
 }
 
@@ -619,9 +617,16 @@ function writeQuitFlag() {
 // with a backoff once the folder exists again (creating it if need be -- the
 // hooks create it anyway). `check()` is the periodic health check, for a
 // platform that reports a vanished folder by saying nothing at all.
+// A folder deleted and recreated before the event is handled (a hook mkdirs
+// it within milliseconds) exists again, but the handle still watches the dead
+// one and hears nothing more -- the renderer went deaf for good on Linux. So a
+// `rename` naming the folder itself (how Linux reports its deletion) is a
+// break too, and `check()` also compares the folder's device and inode with
+// the ones it had when the handle was opened.
 //   onEvent(eventType, filename)  a change in the folder (filename may be null)
 //   onReopen()                    a handle came back: events were missed
-// fs.watch, fs.existsSync, mkdir and the timers are injectable for tests.
+// fs.watch, fs.existsSync, fs.statSync, mkdir and the timers are injectable
+// for tests.
 const WATCH_RETRY_MS = 500;
 const WATCH_RETRY_MAX_MS = 8000;
 
@@ -632,16 +637,27 @@ function isPlainBasename(name) {
 
 function createDirWatcher({
   dir, onEvent, onReopen,
-  watch = fs.watch, exists = fs.existsSync,
+  watch = fs.watch, exists = fs.existsSync, stat = fs.statSync,
   mkdir = (d) => fs.mkdirSync(d, { recursive: true }),
   schedule = setTimeout, cancel = clearTimeout,
   retryMs = WATCH_RETRY_MS, maxRetryMs = WATCH_RETRY_MAX_MS,
 }) {
+  const folderName = path.basename(dir);
   let handle = null;
+  let watchedId = null;   // the folder's identity when the handle was opened
   let retryTimer = null;
   let delay = retryMs;
   let opened = 0;
   let closed = false;
+
+  // Device and inode, or null where the platform reports none (then only
+  // existence can be checked).
+  function folderId() {
+    try {
+      const s = stat(dir);
+      return s && s.ino ? `${s.dev}:${s.ino}` : null;
+    } catch { return null; }
+  }
 
   function open() {
     retryTimer = null;
@@ -649,6 +665,9 @@ function createDirWatcher({
     let h = null;
     try {
       if (!exists(dir)) mkdir(dir);
+      // Taken before the watch: a folder replaced in between then reads as
+      // replaced (one spare re-open), never as the one being watched.
+      watchedId = folderId();
       h = watch(dir, (eventType, filename) => onRaw(h, eventType, filename));
       if (h && typeof h.on === 'function') h.on('error', () => broken(h));
     } catch {
@@ -677,15 +696,20 @@ function createDirWatcher({
     if (closed || !h || h !== handle) return;
     const name = filename == null ? null : String(filename);
     if (name !== null && !isPlainBasename(name)) { broken(h); return; }
-    if (eventType === 'rename' && !exists(dir)) { broken(h); return; }
+    if (eventType === 'rename' && (name === folderName || !exists(dir))) { broken(h); return; }
     delay = retryMs;   // healthy again: the next break starts the backoff afresh
     try { onEvent(eventType, name); } catch {}
   }
 
   function check() {
     if (closed) return;
-    if (handle && !exists(dir)) broken(handle);
+    if (handle && (!exists(dir) || replaced())) broken(handle);
     else if (!handle) retry();
+  }
+
+  function replaced() {
+    const id = folderId();
+    return !!(watchedId && id && id !== watchedId);
   }
 
   function close() {
@@ -833,10 +857,20 @@ function runUnifiedMode(opts = {}) {
   let editorDead = false;     // Armed PID found dead — session presumed crashed
   let lastAppliedTimestamp = 0; // Dedup: skip re-applying state with same timestamp
   let lastAppliedState = null;  // State named by that write -- "is this tool still running?"
-  let lastNewWriteAt = 0;       // When a NEW write last arrived (not a re-read) -- see noteNewWrite
+  // When a NEW write last arrived (not a re-read; see noteNewWrite), on the
+  // monotonic clock. null until one has: that clock may well read 0 or less.
+  let lastNewWriteAt = null;
   // The applied write is an unconfirmed Claude Code permission wait (see
   // Permission prompts): its JSON timestamp and when it was first seen.
   let pendingPermission = null;
+  // The prompt the face owes the user: { detail } from the `waiting` write
+  // that asked it, while later writes still name it unanswered (waitingOn).
+  // update-state.js keeps `waitingOn` on every write until the answer, but
+  // each write brings its own state -- a background agent's SubagentStop
+  // wrote "subagent done" over an open permission dialog, and the face went
+  // happy -> thinking -> idle -> asleep with the question still on screen in
+  // the editor. Such a write may show; the prompt is then queued behind it.
+  let openWait = null;
   // Sessions whose armed editor PID died: id -> the write timestamp at death.
   // Outlives adoptMain (which must clear editorDead) -- see policySessions.
   const deadSessions = new Map();
@@ -871,11 +905,12 @@ function runUnifiedMode(opts = {}) {
     lastSessionEnded = false;
     lastCompacting = false;
     lastWaitingOn = false;
+    openWait = null;
     pendingPermission = null;
     editorDead = false;
     lastEditorPid = 0;
     candidatePid = 0;
-    lastNewWriteAt = 0;
+    lastNewWriteAt = null;
     lastMtime = 0;
     lastForceReadTime = -Infinity;
     // Cleared, not just overwritten: the incoming session may have no model at
@@ -968,8 +1003,13 @@ function runUnifiedMode(opts = {}) {
         // It is demoted by staleness instead (the policy drops a stale session
         // and picks another), which is the honest reading: a session waiting
         // for its next prompt looks exactly like one whose window was closed.
+        // The same goes for a turn over on a face that carries `turnOver` (an
+        // idle_prompt's "waiting for you", a /model, a PermissionDenied after
+        // Stop): never rescued, by contract -- closing the editor there used
+        // to replay "wrapping up" -> done! for a turn long finished. A
+        // compaction running between turns is live work, and still checked.
         if (lastEditorPid && !editorDead && !lastStopped && !RESCUE_EXCLUDE.has(face.state)) {
-          if (!isProcessAlive(lastEditorPid)) markMainDead();
+          if (!(lastTurnOver && !lastCompacting) && !isProcessAlive(lastEditorPid)) markMainDead();
         }
       }
       // Any change of mtime, not only a later one: after the wall clock
@@ -992,7 +1032,8 @@ function runUnifiedMode(opts = {}) {
         // is handed over re-expressed on today's wall clock (see startupGate).
         const ts = stateData.timestamp || 0;
         const uptime = mono - rendererStartMono;
-        const gate = startupGate(ts, !!stateData.stopped, now, now - uptime, uptime);
+        const asksUser = stateData.state === 'waiting' && waitPhase(stateData, now) !== 'allowed';
+        const gate = startupGate(ts, !!stateData.stopped, now, now - uptime, uptime, asksUser);
         if (gate === 'skip') return;
         if (gate === 'record') {
           // Don't resurrect dead sessions on fresh renderer start -- and
@@ -1060,7 +1101,11 @@ function runUnifiedMode(opts = {}) {
         // (A write landing mid-transition is not seen at all: checkState now
         // returns at the top while a swap animates. Nothing is lost -- the
         // swap frame's adoptMain resets this clock for the new session.)
-        lastNewWriteAt = noteNewWrite(ts, lastAppliedTimestamp, now, lastNewWriteAt);
+        // The stamp is the write's own age carried onto the monotonic clock,
+        // as _executeSwap seeds it: a prompt applied at boot that was already
+        // 25 minutes old has 5 minutes of its silence bound left, not 30.
+        lastNewWriteAt = noteNewWrite(ts, lastAppliedTimestamp, now, lastNewWriteAt,
+          ts <= now ? mono - (now - ts) : mono);
 
         if (isNewerWrite(ts, lastAppliedTimestamp, now)) {
           const prevAppliedTs = lastAppliedTimestamp;
@@ -1101,18 +1146,32 @@ function runUnifiedMode(opts = {}) {
           if (stateData.answered || stateData.stopped) face.dropWait();
           lastWaitingOn = !!stateData.waitingOn;
           face.setState(stateData.state, stateData.detail);
+          // The prompt this write still names (see openWait): asked by this
+          // write, carried on from the one that asked it, or gone -- answered,
+          // the turn over, or no longer on the file.
+          if (!lastWaitingOn || stateData.answered || stateData.stopped) openWait = null;
+          else if (stateData.state === 'waiting') openWait = { detail: stateData.detail };
           face.setStats(stateData);
+          // Still open under a write of something else: the prompt queues
+          // behind that state (a reward keeps its guaranteed window, a tool
+          // its minimum) and comes back, where the cascade holds it.
+          if (openWait && stateData.state !== 'waiting') face.setState('waiting', openWait.detail);
           // An unconfirmed Claude Code permission wait starts the answer clock
-          // below; any other newer write stops it.
-          pendingPermission = isUnconfirmedPermission(stateData) ? { ts, seenAt: mono } : null;
+          // below. A later write carrying that same wait on (a parallel tool's)
+          // leaves the clock running -- stopping it there kept an allowed
+          // prompt from ever turning into its tool. Any other newer write
+          // stops it.
+          if (isUnconfirmedPermission(stateData)) pendingPermission = { ts, seenAt: mono };
+          else if (!carriesUnconfirmedPermission(stateData)) pendingPermission = null;
         }
       }
 
       // A permission prompt whose 6s Notification never came was answered
       // (see Permission prompts): the face shows its tool, running. Judged
       // against the file as it is NOW, so a confirmation (or anything else)
-      // that landed since the last read is never overruled -- only the same
-      // unconfirmed write, still the newest, turns into its tool. Due once
+      // that landed since the last read is never overruled -- only the newest
+      // applied write, still naming the same unconfirmed wait (the wait's own,
+      // or a later one that carried it on), turns into its tool. Due once
       // the window has passed since the write was made or since it was first
       // seen, whichever comes first: the second keeps it working after the
       // wall clock steps back.
@@ -1120,9 +1179,11 @@ function runUnifiedMode(opts = {}) {
           || mono - pendingPermission.seenAt >= PERMISSION_CONFIRM_MS)) {
         const cur = readState(fp);
         if (!cur.failed) {
-          if (cur.timestamp === pendingPermission.ts && isUnconfirmedPermission(cur)) {
+          if (cur.timestamp === lastAppliedTimestamp
+              && (isUnconfirmedPermission(cur) || carriesUnconfirmedPermission(cur))) {
             face.dropWait();
             lastWaitingOn = false;
+            openWait = null;
             // The long-tool hold compares the face with the file's state. The
             // file still says "waiting"; what that write means now is this
             // tool, running -- so the hold keeps it, up to LONG_TOOL_HOLD_MS,
@@ -1152,8 +1213,12 @@ function runUnifiedMode(opts = {}) {
       face.forceState('responding', 'wrapping up', 3000); // respect responding's 3s min display time
     }
 
-    // Don't apply timeouts if minimum display time hasn't passed
-    if (face.now() < face.minDisplayUntil) return;
+    // Don't apply timeouts if minimum display time hasn't passed -- nor while
+    // a state is queued: that is news, and the next frame's update() flushes
+    // it (its time has come by now). A transition set here replaced it: a
+    // wait queued behind "wrapping up" was wiped by the cascade's
+    // responding -> happy on a read that landed between two frames.
+    if (face.now() < face.minDisplayUntil || face.pendingState) return;
 
     // Session is active until Stop hook fires (writes stopped: true)
     // or the armed editor PID is found dead
@@ -1180,7 +1245,7 @@ function runUnifiedMode(opts = {}) {
       sessionActive,
       lingerMs: COMPLETION_LINGER[face.state] || 0,
       fileState: lastAppliedState,
-      fileAgeMs: lastNewWriteAt ? now - lastNewWriteAt : 0,
+      fileAgeMs: lastNewWriteAt === null ? 0 : mono - lastNewWriteAt,
       liveChildren,
       fileWaiting: lastWaitingOn,
     });
@@ -1207,7 +1272,10 @@ function runUnifiedMode(opts = {}) {
     try { checkState(); } catch {}
     stateWatchTimer = schedule(() => {
       stateWatchTimer = null;
-      if (stateWatchMissed) { stateWatchMissed = false; onMainFileEvent(); }
+      // The trailing read brings in what the folded events wrote, after their
+      // own wake() had already drawn the old face: draw this one now too, not
+      // at the next low-power frame.
+      if (stateWatchMissed) { stateWatchMissed = false; onMainFileEvent(); wake(); }
     }, 50);
   }
   function reloadRingSoon() {
@@ -1293,9 +1361,11 @@ function runUnifiedMode(opts = {}) {
       const ids = face.sessionListIds;
       let idx = ids.indexOf(face.sessionListSelectedId);
       if (idx < 0) idx = 0;
-      if (key === '\x1b[A' || key === 'k') {
+      // CSI or SS3: a terminal in application cursor mode sends ESC O A/B,
+      // and the list used to read those as "any other key" and close.
+      if (key === '\x1b[A' || key === '\x1bOA' || key === 'k') {
         face.sessionListSelectedId = ids[Math.max(0, idx - 1)] || null;
-      } else if (key === '\x1b[B' || key === 'j') {
+      } else if (key === '\x1b[B' || key === '\x1bOB' || key === 'j') {
         face.sessionListSelectedId = ids[Math.min(ids.length - 1, idx + 1)] || null;
       } else if (key === '\r' || key === '\n') {
         const sel = face.sessionListSelectedId;
@@ -1321,7 +1391,10 @@ function runUnifiedMode(opts = {}) {
       // Too small to draw it: an invisible list would eat the next key.
       if (sessionListFits(process.stdout.columns || 80, process.stdout.rows || 24)) face.toggleSessionList();
     }
-    else if (key === 'h' || key === '?') face.toggleHelp();
+    else if (key === 'h' || key === '?') {
+      // Same for help: below the face's minimum nothing draws it.
+      if (faceFits(process.stdout.columns || 80, process.stdout.rows || 24)) face.toggleHelp();
+    }
   }
 
   // One chunk can carry several keys (a held arrow, a fast double tap):
@@ -1358,6 +1431,11 @@ function runUnifiedMode(opts = {}) {
       face.showSessionList = false;
       face.sessionListSelectedId = null;
     }
+    // And help below the face's minimum, where it draws nothing either (and,
+    // left open, kept the loop off low power).
+    if (face.showHelp && !faceFits(process.stdout.columns || 80, process.stdout.rows || 24)) {
+      face.showHelp = false;
+    }
     prevFrame = null;  // the screen is about to be cleared -- force the next frame out even if identical
     try { write(ansi.syncEnd + ansi.clear); } catch {}
     wake();
@@ -1387,17 +1465,21 @@ function runUnifiedMode(opts = {}) {
           pendingPermission = { ts, seenAt: monoNow() };
         }
         lastAppliedTimestamp = ts;
-        // Seed the write clock from the write itself. adoptMain zeroed it, and
-        // later reads of this same write are not "new", so without this the
+        // Seed the write clock from the write itself: its age, carried onto
+        // the monotonic clock (a write from the future -- a wall clock stepped
+        // back -- is as new as it gets). adoptMain cleared it, and later reads
+        // of this same write are not "new", so without this the
         // WAIT_HOLD_STALE_MS bound could never fire on a face swapped in while
         // already waiting.
-        lastNewWriteAt = ts;
+        const wallNow = Date.now();
+        lastNewWriteAt = ts <= wallNow ? monoNow() - (wallNow - ts) : monoNow();
         lastAppliedState = newData.state;
         lastStopped = !!newData.stopped;
         lastTurnOver = !!newData.turnOver;
         lastSessionEnded = !!newData.sessionEnded;
         lastCompacting = !!newData.compacting;
         lastWaitingOn = !!newData.waitingOn;
+        openWait = newData.state === 'waiting' && lastWaitingOn ? { detail: newData.detail } : null;
         // forceState, not setState: a materialized face must show its own
         // session at once. Any leftover minDisplayUntil belongs to the session
         // that just left, and setState would buffer this behind it. No third
@@ -1568,7 +1650,9 @@ function runUnifiedMode(opts = {}) {
         isPinned: pinnedSessionId === mainSessionId,
         toolCalls: face.toolCallCount,
         filesEdited: face.filesEditedCount,
-        lastUpdate: lastNewWriteAt,
+        // The row's age is read against the wall clock; the write clock is
+        // monotonic, so it goes back as an age.
+        lastUpdate: lastNewWriteAt === null ? 0 : now - (t - lastNewWriteAt),
         taskDescription: mainFace ? mainFace.taskDescription : '',
         agentType: mainFace ? mainFace.agentType : '',
         parentSession: mainFace ? mainFace.parentSession : null,

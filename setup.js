@@ -123,18 +123,18 @@ function buildFaceHooks(hookPath) {
   return faceHooks;
 }
 
-// Bring our installed commands for `event` (at exactly hookPath) to the async
-// flag buildFaceHooks gives that event. An install from before the async
-// change matches by path and used to be reported "already installed" for
-// good; this upgrades it in place instead of adding a second entry. Returns
-// how many commands changed.
-function syncAsyncFlags(entries, event, hookPath) {
+// Bring our installed `command` for `event` to the async flag buildFaceHooks
+// gives that event. An install from before the async change is otherwise
+// identical and used to be reported "already installed" for good; this
+// upgrades it in place instead of adding a second entry. Returns how many
+// commands changed.
+function syncAsyncFlags(entries, event, command) {
   const want = ASYNC_HOOK_EVENTS.includes(event);
   let changed = 0;
   for (const e of entries) {
     if (!Array.isArray(e?.hooks)) continue;
     for (const hh of e.hooks) {
-      if (!isOurCommand(hh) || !hh.command.includes(hookPath)) continue;
+      if (!isInstalledCommand(hh, command)) continue;
       if (want && hh.async !== true) { hh.async = true; changed++; }
       else if (!want && 'async' in hh) { delete hh.async; changed++; }
     }
@@ -147,12 +147,26 @@ function syncAsyncFlags(entries, event, hookPath) {
 // with a real hook event -- so an unrelated script that happens to be called
 // update-state.js (a tmux status helper, `update-state.js busy`) is never
 // mistaken for a moved Code Crumb repo. Every event ever installed is still in
-// HOOK_EVENTS or CODEX_HOOK_EVENTS, so old installs still match.
+// HOOK_EVENTS or CODEX_HOOK_EVENTS, so old installs still match. Shell
+// plumbing may follow the event (`2>/dev/null || true`, `; true`, `# note`):
+// a user who silenced hook errors that way still runs our hook, and setup
+// called it installed while uninstall and doctor did not see it at all.
 const ALL_HOOK_EVENTS = [...new Set([...HOOK_EVENTS, ...CODEX_HOOK_EVENTS])];
+const SHELL_TAIL = '(?:\\s*[<>|;&]|\\s+\\d+>|\\s+#)';
 const OUR_COMMAND_RE = new RegExp(
-  `update-state\\.js["']?\\s+(?:--editor[=\\s]\\S+\\s+)?(?:${ALL_HOOK_EVENTS.join('|')})\\s*$`);
+  `update-state\\.js["']?\\s+(?:--editor[=\\s]\\S+\\s+)?(${ALL_HOOK_EVENTS.join('|')})(?:\\s*$|${SHELL_TAIL})`);
+const SHELL_TAIL_RE = new RegExp(`^${SHELL_TAIL}`);
 function isOurCommand(hh) {
   return typeof hh?.command === 'string' && OUR_COMMAND_RE.test(hh.command);
+}
+
+// The event one of our commands reports to update-state.js ('' if not ours).
+// Claude Code and codex fire a command for the event it is registered under,
+// so one filed under Stop that says Notification shows every turn end as a
+// notification -- and setup and doctor both counted Stop as installed.
+function ourCommandEvent(hh) {
+  const m = typeof hh?.command === 'string' ? OUR_COMMAND_RE.exec(hh.command) : null;
+  return m ? m[1] : '';
 }
 
 // A matcher group that holds at least one of our commands.
@@ -164,30 +178,79 @@ function isOurHook(entry) {
 // command, not per group: a user who put their own hook in the same group as
 // ours keeps it, and a group is dropped only once nothing of theirs is left.
 // (Filtering whole groups deleted every co-located user hook on uninstall and
-// on a moved-repo repair.) Returns { kept, removed } -- removed counts commands.
-function stripOurHooks(entries) {
+// on a moved-repo repair.) `keep` spares some of ours (the installed one,
+// when only strays go). Returns { kept, removed } -- removed counts commands.
+function stripOurHooks(entries, keep = () => false) {
   const kept = [];
   let removed = 0;
   for (const e of entries) {
     if (!isOurHook(e)) { kept.push(e); continue; }
-    const others = e.hooks.filter(hh => !isOurCommand(hh));
+    const others = e.hooks.filter(hh => !isOurCommand(hh) || keep(hh));
     removed += e.hooks.length - others.length;
     if (others.length) kept.push({ ...e, hooks: others });
   }
   return { kept, removed };
 }
 
-// Our hook entry pointing at exactly this hookPath.
-function hasExactPath(entry, hookPath) {
-  return !!entry?.hooks?.some(hh => typeof hh?.command === 'string' && hh.command.includes(hookPath));
+// Exactly the command setup builds for an event -- its path, its event, its
+// --editor tag -- optionally followed by the user's own shell plumbing. A
+// path match was not enough: a command at the right path for ANOTHER event
+// (a block copied by hand, its argument left unchanged) read as installed.
+// The Codex installer needed this from the start: a legacy entry can point at
+// the right update-state.js and still miss the `--editor codex` tag that
+// keeps sessions from being labelled "claude".
+function isInstalledCommand(hh, command) {
+  if (typeof hh?.command !== 'string' || !hh.command.startsWith(command)) return false;
+  const tail = hh.command.slice(command.length);
+  return /^\s*$/.test(tail) || SHELL_TAIL_RE.test(tail);
 }
 
-// Byte-exact command match. The Codex installer needs this rather than a path
-// match: a legacy entry can point at the right update-state.js and still be
-// missing the `--editor codex` tag that keeps sessions from being labelled
-// "claude", and that entry must be rewritten, not reported as installed.
-function hasExactCommand(entry, command) {
-  return !!entry?.hooks?.some(hh => typeof hh?.command === 'string' && hh.command === command);
+// How an event's entries stand against the `command` setup would install:
+// `installed` when one of ours is that command, `strays` for every other
+// command of ours there (another path, another event, a missing tag).
+function ourInstallState(entries, command) {
+  let installed = false;
+  let strays = 0;
+  for (const e of entries) {
+    if (!Array.isArray(e?.hooks)) continue;
+    for (const hh of e.hooks) {
+      if (!isOurCommand(hh)) continue;
+      if (isInstalledCommand(hh, command)) installed = true;
+      else strays++;
+    }
+  }
+  return { installed, strays };
+}
+
+// Install `hookConfigs` (one command) under `event`: keep it if it is there,
+// drop strays of ours, replace a wrong one of ours. Returns 'ok', 'cleaned',
+// 'replaced' or 'added'; the async flag is the caller's.
+function installEventHooks(hooks, event, hookConfigs) {
+  if (!Array.isArray(hooks[event])) hooks[event] = [];
+  const command = hookConfigs[0].hooks[0].command;
+  const { installed, strays } = ourInstallState(hooks[event], command);
+  if (installed && !strays) return 'ok';
+  if (installed) {
+    hooks[event] = stripOurHooks(hooks[event], hh => isInstalledCommand(hh, command)).kept;
+    return 'cleaned';
+  }
+  if (strays) {
+    // A Code Crumb entry with a different path (the repo moved), another
+    // event's argument or a missing --editor tag: replace it instead of
+    // reporting "already installed" and leaving a hook that misleads.
+    hooks[event] = stripOurHooks(hooks[event]).kept.concat(hookConfigs);
+    return 'replaced';
+  }
+  hooks[event].push(...hookConfigs);
+  return 'added';
+}
+
+// JSON text as setup and doctor both read it: a leading UTF-8 BOM (Notepad,
+// PowerShell 5's `Set-Content -Encoding UTF8`) is not part of it. doctor
+// skipped one while setup called the same file "not valid JSON" and refused
+// to touch it; written back, the file has none.
+function parseJsonText(raw) {
+  return JSON.parse(String(raw).replace(/^\uFEFF/, ''));
 }
 
 // Read a JSON config file. A missing file means "start fresh"; anything else
@@ -211,7 +274,7 @@ function readJsonConfig(filePath, log, label) {
   }
   let settings;
   try {
-    settings = JSON.parse(raw);
+    settings = parseJsonText(raw);
   } catch (err) {
     log(`  [!!] ${filePath} is not valid JSON (${err.message}).`);
     log('       Leaving it untouched so nothing is lost. Fix the file, then re-run setup.');
@@ -333,29 +396,27 @@ function setupClaude(opts = {}) {
   let replaced = 0;
   let upgraded = 0;
   for (const [event, hookConfigs] of Object.entries(faceHooks)) {
-    if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
-    const entries = settings.hooks[event];
-
-    if (entries.some(e => hasExactPath(e, hookPath))) {
-      if (syncAsyncFlags(entries, event, hookPath)) {
-        upgraded++;
-        log(`  ~ Updated ${event} hook (${ASYNC_HOOK_EVENTS.includes(event) ? 'async' : 'sync'})`);
-      } else {
-        log(`  [ok] ${event} hook already installed`);
-      }
+    const how = installEventHooks(settings.hooks, event, hookConfigs);
+    if (how === 'added') {
+      added++;
+      log(`  + Added ${event} hook`);
       continue;
     }
-    // A Code Crumb entry with a different path: the repo moved. Replace it
-    // instead of reporting "already installed" and leaving a dead hook.
-    if (entries.some(isOurHook)) {
-      settings.hooks[event] = stripOurHooks(entries).kept.concat(hookConfigs);
+    if (how === 'replaced') {
       replaced++;
-      log(`  ~ Updated ${event} hook path`);
+      log(`  ~ Updated ${event} hook`);
       continue;
     }
-    entries.push(...hookConfigs);
-    added++;
-    log(`  + Added ${event} hook`);
+    if (how === 'cleaned') {
+      replaced++;
+      log(`  ~ Removed a stray Code Crumb command from the ${event} hooks`);
+    }
+    if (syncAsyncFlags(settings.hooks[event], event, hookConfigs[0].hooks[0].command)) {
+      upgraded++;
+      log(`  ~ Updated ${event} hook (${ASYNC_HOOK_EVENTS.includes(event) ? 'async' : 'sync'})`);
+    } else if (how === 'ok') {
+      log(`  [ok] ${event} hook already installed`);
+    }
   }
 
   const modified = added + replaced + upgraded > 0;
@@ -501,25 +562,16 @@ function setupCodex(opts = {}) {
   let replaced = 0;
   let pruned = 0;
   for (const [event, hookConfigs] of Object.entries(faceHooks)) {
-    if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
-    const entries = settings.hooks[event];
-    const command = hookConfigs[0].hooks[0].command;
-
-    if (entries.some(e => hasExactCommand(e, command))) {
+    const how = installEventHooks(settings.hooks, event, hookConfigs);
+    if (how === 'ok') {
       log(`  [ok] ${event} hook already installed`);
-      continue;
-    }
-    // A Code Crumb entry with a different path or a missing --editor tag:
-    // rewrite it rather than leave a hook that mislabels every session.
-    if (entries.some(isOurHook)) {
-      settings.hooks[event] = stripOurHooks(entries).kept.concat(hookConfigs);
+    } else if (how === 'added') {
+      added++;
+      log(`  + Added ${event} hook`);
+    } else {
       replaced++;
-      log(`  ~ Updated ${event} hook`);
-      continue;
+      log(how === 'cleaned' ? `  ~ Removed a stray Code Crumb command from the ${event} hooks` : `  ~ Updated ${event} hook`);
     }
-    entries.push(...hookConfigs);
-    added++;
-    log(`  + Added ${event} hook`);
   }
 
   // Drop our entries from events codex cannot fire (an older install wrote
@@ -617,21 +669,69 @@ function lineEnd(text, i) {
   return nl === -1 ? text.length : nl + 1;
 }
 
-// Net [ ] depth of a piece of one TOML line, outside strings and comments.
-function bracketDepth(s) {
-  let depth = 0;
-  let quote = '';
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (quote) {
-      if (c === '\\' && quote === '"') i++;
-      else if (c === quote) quote = '';
-    } else if (c === '"' || c === "'") quote = c;
-    else if (c === '#') break;
-    else if (c === '[') depth++;
-    else if (c === ']') depth--;
+// config.toml as lines, { start, end, code }, where `code` is false for a
+// line that begins inside a value still open from an earlier line: a
+// multi-line string (""" or ''') or an array or inline table. Only a code
+// line can hold a key or a [table] header. A line starting with `[` inside a
+// multi-line string (`"""` then `[IMPORTANT] ...`) or a nested array read as
+// a header, so a foreign top-level notify after it went unseen and
+// setupCodexNotify added a second one -- a duplicate key codex will not load.
+function tomlLines(text) {
+  const lines = [];
+  let ml = '';     // the open multi-line string's delimiter
+  let depth = 0;   // [ and { still open in a value
+  for (let start = 0; start < text.length;) {
+    const end = lineEnd(text, start);
+    lines.push({ start, end, code: !ml && depth === 0 });
+    for (let i = start; i < end; i++) {
+      const c = text[i];
+      if (ml) {
+        if (c === '\\' && ml === '"""') i++;
+        else if (text.startsWith(ml, i)) {
+          // Up to two more quotes still close it: """a"""" is `a"`.
+          let j = i + 3;
+          while (j < i + 5 && text[j] === ml[0]) j++;
+          ml = '';
+          i = j - 1;
+        }
+      } else if (c === '#') {
+        break;
+      } else if (c === '"' || c === "'") {
+        if (text.startsWith(c.repeat(3), i)) { ml = c.repeat(3); i += 2; continue; }
+        // A one-line string ends at its quote, or at the end of the line.
+        for (i++; i < end && text[i] !== c && text[i] !== '\n'; i++) if (c === '"' && text[i] === '\\') i++;
+      } else if (c === '[' || c === '{') {
+        depth++;
+      } else if ((c === ']' || c === '}') && depth > 0) {
+        depth--;
+      }
+    }
+    start = end;
   }
-  return depth;
+  return lines;
+}
+
+// The codex-notify.js a notify value names, unquoted ('' when no string
+// ends in it). `code` is the value without its comments.
+function notifyScriptPath(code) {
+  const re = /"((?:[^"\\\n]|\\.)*)"|'([^'\n]*)'/g;
+  let m;
+  while ((m = re.exec(code))) {
+    let s = m[2];
+    if (s === undefined) { try { s = JSON.parse(`"${m[1]}"`); } catch { s = m[1]; } }
+    if (/codex-notify\.js$/.test(s)) return s;
+  }
+  return '';
+}
+
+// Two spellings of one script: TOML-escaped backslashes or forward slashes,
+// and on Windows any case.
+function sameScript(a, b) {
+  const norm = p => {
+    const s = String(p).replace(/\\/g, '/');
+    return process.platform === 'win32' ? s.toLowerCase() : s;
+  };
+  return norm(a) === norm(b);
 }
 
 // One TOML line without its comment (a `#` outside a string, to the end).
@@ -649,31 +749,31 @@ function tomlLineCode(line) {
 }
 
 // Every `notify = ...` key in the file, one line or an array spread over
-// several, as { start, end, ours, topLevel }: whole-line character ranges
-// (end past the last terminator), `ours` when its value names
-// codex-notify.js, and `topLevel` when no [table] header comes before it --
-// the only place the key means anything to codex. Comments are not the
-// value: a foreign notify whose comment mentions codex-notify.js ("# replaced
-// codex-notify.js") was ours, and removeCodexNotify deleted it.
+// several, as { start, end, ours, topLevel, script }: whole-line character
+// ranges (end past the last terminator), `ours` when its value names
+// codex-notify.js, `topLevel` when no [table] header comes before it -- the
+// only place the key means anything to codex -- and, for ours, the script it
+// runs. Comments are not the value: a foreign notify whose comment mentions
+// codex-notify.js ("# replaced codex-notify.js") was ours, and
+// removeCodexNotify deleted it. Text inside a multi-line string is not a key.
 function findNotifyKeys(text) {
   const keys = [];
-  const re = /^[ \t]*notify[ \t]*=/gm;
-  let m;
-  while ((m = re.exec(text))) {
-    const start = m.index;
-    let end = lineEnd(text, start);
-    let depth = bracketDepth(text.slice(start + m[0].length, end));
-    while (depth > 0 && end < text.length) {
-      const next = lineEnd(text, end);
-      depth += bracketDepth(text.slice(end, next));
-      end = next;
-    }
-    keys.push({
-      start, end,
-      ours: /codex-notify\.js/.test(text.slice(start, end).split('\n').map(tomlLineCode).join('\n')),
-      topLevel: !/^[ \t]*\[/m.test(text.slice(0, start)),
-    });
-    re.lastIndex = end;
+  const lines = tomlLines(text);
+  let topLevel = true;
+  for (let n = 0; n < lines.length; n++) {
+    if (!lines[n].code) continue;
+    const start = lines[n].start;
+    const head = text.slice(start, lines[n].end);
+    if (/^[ \t]*\[/.test(head)) { topLevel = false; continue; }
+    if (!/^[ \t]*notify[ \t]*=/.test(head)) continue;
+    // The value runs on through every line that begins inside it.
+    let last = n;
+    while (last + 1 < lines.length && !lines[last + 1].code) last++;
+    const end = lines[last].end;
+    const code = text.slice(start, end).split('\n').map(tomlLineCode).join('\n');
+    const ours = /codex-notify\.js/.test(code);
+    keys.push({ start, end, ours, topLevel, script: ours ? notifyScriptPath(code) : '' });
+    n = last;
   }
   return keys;
 }
@@ -699,7 +799,7 @@ function readCodexConfig(configPath, log) {
     log(`  [!!] Could not read ${configPath} (${err.code || err.message}) -- leaving it untouched.`);
     return { error: err };
   }
-  const bom = text.startsWith('﻿') ? '﻿' : '';
+  const bom = text.startsWith('\uFEFF') ? '\uFEFF' : '';
   return { text, bom, body: text.slice(bom.length), existed: true };
 }
 
@@ -772,9 +872,25 @@ function setupCodexNotify(opts = {}) {
   log(read.existed ? '  [ok] Found existing Codex config' : '  [..] No existing config found');
 
   const keys = findNotifyKeys(read.body).filter(k => k.topLevel);
+  const ours = keys.filter(k => k.ours);
   let modified = false;
-  if (keys.some(k => k.ours)) {
+  // A script we cannot read off the value (wrapped in `sh -c`, say) is
+  // taken as configured: the user built that line, not setup.
+  if (ours.some(k => !k.script || sameScript(k.script, notifyPath))) {
     log('  [ok] Code Crumb notify handler already configured');
+  } else if (ours.length) {
+    // Ours, from a clone that has moved or gone since: "already configured"
+    // left codex running a program that no longer exists. Rewritten in
+    // place, keeping the line's own terminator.
+    const k = ours[0];
+    const term = /\r?\n$/.exec(read.body.slice(k.start, k.end));
+    const body = read.body.slice(0, k.start) + line + (term ? term[0] : '') + read.body.slice(k.end);
+    if (!writeCodexConfig(configPath, read.bom + body, read.text, log)) {
+      log(`  [!!] Could not write ${configPath}`);
+      return { ok: false, modified: false, error: new Error('write failed') };
+    }
+    modified = true;
+    log(`  ~ Updated the notify handler in ${configPath} (it ran ${k.script})`);
   } else if (keys.length) {
     log('\n  [!!] Codex already has a notify handler configured.');
     log(`  To add Code Crumb, edit ${configPath}:`);
@@ -903,7 +1019,7 @@ function blankJsonc(text) {
   const out = text.split('');
   const comments = [];
   let i = 0;
-  if (out[0] === '﻿') { out[0] = ' '; i = 1; }
+  if (out[0] === '\uFEFF') { out[0] = ' '; i = 1; }
   while (i < text.length) {
     if (text[i] === '"') { i = skipJsonString(text, i); continue; }
     if (text[i] === '/' && text[i + 1] === '/') {
@@ -1001,7 +1117,11 @@ function editJsoncPlugin(raw, blanked, list) {
   if (!list) return raw;
   const member = `"plugin": ${oneLineList(list)}`;
   const at = top.open + 1;
-  const nl = raw.indexOf('\n', at);
+  // The first line end after `{` that is not inside a comment: a block
+  // comment opened on the `{` line and closed further down put the member
+  // inside it, where OpenCode never read it and the next run added another.
+  let nl = raw.indexOf('\n', at);
+  for (let c; nl !== -1 && (c = blanked.comments.find(([s, e]) => s < nl && e > nl));) nl = raw.indexOf('\n', c[1]);
   if (nl !== -1 && blanked.noComments.slice(at, nl).trim() === '') {
     // `{` ends its line: the member goes on the next one, indented like the
     // members already there.
@@ -1381,13 +1501,13 @@ const AUTOLAUNCH_COMMANDS = new Set(['claude', 'claude-code', 'codex', 'openai']
 // takes seconds to start and need not be on PATH). Returns { problems };
 // the CLI exits 1 when any `!` was printed.
 //
-// opts: { home, env, log, now, nodeVersion } -- every path is derived from
-// `home` and `env` the way shared.js derives its own, and each editor's
-// config through the resolver setup itself writes with (claudeConfigDir,
-// codexHome, opencodeConfigPath), so a test can point it at a temp home and
-// doctor never checks a file setup did not write.
+// opts: { home, env, log, now, nodeVersion, platform } -- every path is
+// derived from `home` and `env` the way shared.js derives its own, and each
+// editor's config through the resolver setup itself writes with
+// (claudeConfigDir, codexHome, opencodeConfigPath), so a test can point it at
+// a temp home and doctor never checks a file setup did not write.
 
-const { PID_FILE, PREFS_FILE, SESSIONS_DIR, isRendererAlive } = require('./lib/shared');
+const { PID_FILE, PREFS_FILE, SESSIONS_DIR, isRendererAlive, buildRendererCommands } = require('./lib/shared');
 
 const DOCTOR_OK = '\u2713';
 const DOCTOR_BAD = '!';
@@ -1409,7 +1529,7 @@ function doctorReadJson(file) {
     return { exists: true, error: (e && (e.code || e.message)) || 'unreadable' };
   }
   try {
-    return { exists: true, data: JSON.parse(raw.replace(/^\uFEFF/, '')) };
+    return { exists: true, data: parseJsonText(raw) };
   } catch {
     return { exists: true, error: 'not valid JSON' };
   }
@@ -1449,6 +1569,17 @@ function doctorEnv(env, name) {
   return key ? String(env[key] || '') : '';
 }
 
+// The terminals autolaunch could open the renderer in, or null where one is
+// always there (Windows' cmd.exe, macOS's Terminal through osascript). On
+// Linux spawnRendererWindow tries each candidate with `command -v` and opens
+// nothing when none is found; this is the same PATH lookup, in-process --
+// doctor spawns nothing.
+function doctorTerminals(platform, env) {
+  if (platform === 'win32' || platform === 'darwin') return null;
+  const names = Object.values(buildRendererCommands(platform, [], '')).map(c => c.cmd);
+  return { names, found: names.filter(n => doctorFindOnPath(n, env)) };
+}
+
 function doctorFindOnPath(name, env) {
   const exts = process.platform === 'win32'
     ? (doctorEnv(env, 'PATHEXT') || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean).concat([''])
@@ -1463,7 +1594,9 @@ function doctorFindOnPath(name, env) {
   return '';
 }
 
-// Every Code Crumb command in a { hooks: { Event: [group...] } } config.
+// Every Code Crumb command in a { hooks: { Event: [group...] } } config:
+// `event` is the key it is filed under (what fires it), `runs` the event its
+// argument tells update-state.js.
 function doctorOurCommands(config) {
   const out = [];
   const hooks = doctorIsObject(config) && doctorIsObject(config.hooks) ? config.hooks : {};
@@ -1472,11 +1605,17 @@ function doctorOurCommands(config) {
     for (const group of groups) {
       if (!group || !Array.isArray(group.hooks)) continue;
       for (const hh of group.hooks) {
-        if (isOurCommand(hh)) out.push({ event, command: hh.command });
+        if (isOurCommand(hh)) out.push({ event, command: hh.command, runs: ourCommandEvent(hh) });
       }
     }
   }
   return out;
+}
+
+// Commands filed under one event that report another, as "Stop runs
+// Notification" -- a hand-copied block whose argument was never changed.
+function doctorMisfiled(commands) {
+  return commands.filter(c => c.runs !== c.event).map(c => `${c.event} runs ${c.runs}`);
 }
 
 // The update-state.js a hook command runs, as a checkable path -- or '' when
@@ -1523,6 +1662,7 @@ function doctor(opts = {}) {
   const log = opts.log || console.log;
   const now = opts.now || Date.now();
   const nodeVersion = String(opts.nodeVersion || process.versions.node);
+  const platform = opts.platform || process.platform;
 
   let problems = 0;
   const ok = (msg) => log(`  ${DOCTOR_OK} ${msg}`);
@@ -1596,7 +1736,11 @@ function doctor(opts = {}) {
   const codexRead = doctorReadJson(codexHooksPath);
   const codex = doctorOurCommands(codexRead.data);
   // What removeCodexNotify would take out, by the same scan.
-  const notifyLine = ourNotifyKeys(doctorReadText(codexConfigPath).replace(/^﻿/, '')).length > 0;
+  const notifyKeys = ourNotifyKeys(doctorReadText(codexConfigPath).replace(/^\uFEFF/, ''));
+  const notifyLine = notifyKeys.length > 0;
+  // codex runs the program itself, no shell: an absolute path is checkable.
+  const notifyGone = [...new Set(notifyKeys.map(k => k.script))]
+    .filter(p => p && path.isAbsolute(p) && !doctorStat(p));
 
   // Read as setup reads it: JSONC (comments, trailing commas) included.
   const opencodeText = doctorReadText(opencodePath);
@@ -1619,8 +1763,15 @@ function doctor(opts = {}) {
   check('the renderer', () => {
     const pidText = pidStat ? doctorReadText(pidFile).trim() : '';
     const age = pidStat ? doctorAge(now - pidStat.mtimeMs) : '';
+    const terminals = !rendererAlive && autolaunch && !quitStat ? doctorTerminals(platform, env) : null;
     if (rendererAlive) {
       ok(`renderer running (pid ${pidText}, last heartbeat ${age} ago)`);
+    } else if (terminals && !terminals.found.length) {
+      bad(`renderer is not running, and autolaunch cannot open it: none of the terminals it knows (${terminals.names.join(', ')}) is on PATH`, [
+        'start it in a terminal of its own:',
+        `  ${rendererCmd}`,
+        'or install one of those terminals for autolaunch to use',
+      ]);
     } else if (autolaunch && !quitStat) {
       ok('renderer not running -- autolaunch opens it on the next hook');
     } else {
@@ -1641,14 +1792,20 @@ function doctor(opts = {}) {
         'fix the file by hand; node setup.js will not touch it until it parses');
     }
     if (manual.length) {
+      // Counted by the event each command reports, under the key that fires it.
       const byEvent = new Map();
-      for (const c of manual) byEvent.set(c.event, (byEvent.get(c.event) || 0) + 1);
-      const missing = HOOK_EVENTS.filter(e => !byEvent.has(e));
+      for (const c of manual) if (c.runs === c.event) byEvent.set(c.event, (byEvent.get(c.event) || 0) + 1);
+      const misfiled = doctorMisfiled(manual);
+      const missing = HOOK_EVENTS.filter(e => !byEvent.has(e) && !manual.some(c => c.event === e && c.runs !== e));
       const dupes = [...byEvent].filter(([, n]) => n > 1).map(([e]) => e);
       const { scripts, missing: gone } = doctorScripts(manual, home);
       for (const p of gone) {
         bad(`manual hooks run ${p}, which does not exist -- every one of them fails (a moved or deleted clone)`,
           ['re-run setup from wherever the clone lives now; it rewrites the paths. For this copy:', `  node "${ownSetup}"`]);
+      }
+      if (misfiled.length) {
+        bad(`manual hooks report the wrong event (${misfiled.join(', ')}) -- Claude Code fires each under its key, and the face hears the other`,
+          'npm run setup (or node setup.js) rewrites them');
       }
       if (missing.length) {
         bad(`manual hooks miss ${missing.length} of ${HOOK_EVENTS.length} events: ${missing.join(', ')}`,
@@ -1658,7 +1815,7 @@ function doctor(opts = {}) {
         bad(`manual hooks register ${dupes.join(', ')} more than once -- each of those events fires twice`,
           'node setup.js uninstall, then node setup.js');
       }
-      if (!gone.length && !missing.length && !dupes.length) {
+      if (!gone.length && !misfiled.length && !missing.length && !dupes.length) {
         ok(`Claude Code: manual hooks for all ${HOOK_EVENTS.length} events in ${settingsPath}`);
       }
       for (const p of scripts) {
@@ -1704,14 +1861,19 @@ function doctor(opts = {}) {
         'fix it by hand, or move it aside and run npm run setup:codex');
     }
     if (codex.length) {
-      const events = new Set(codex.map(c => c.event));
+      const events = new Set(codex.filter(c => c.runs === c.event).map(c => c.event));
+      const misfiled = doctorMisfiled(codex);
       const untagged = codex.filter(c => !/--editor[=\s]+codex(\s|$)/.test(c.command));
-      const missing = CODEX_HOOK_EVENTS.filter(e => !events.has(e));
-      const extra = [...events].filter(e => !CODEX_HOOK_EVENTS.includes(e));
+      const missing = CODEX_HOOK_EVENTS.filter(e => !events.has(e) && !codex.some(c => c.event === e && c.runs !== e));
+      const extra = [...new Set(codex.map(c => c.event))].filter(e => !CODEX_HOOK_EVENTS.includes(e));
       const { missing: gone } = doctorScripts(codex, home);
       for (const p of gone) {
         bad(`Codex hooks run ${p}, which does not exist -- every one of them fails`,
           'run npm run setup:codex from wherever the clone lives now');
+      }
+      if (misfiled.length) {
+        bad(`Codex hooks report the wrong event (${misfiled.join(', ')}) -- codex fires each under its key, and the face hears the other`,
+          'npm run setup:codex (rewrites them)');
       }
       if (untagged.length) {
         bad(`${untagged.length} of ${codex.length} Codex hooks have no --editor codex tag -- sessions show as "claude" and every codex exec wrapper run is counted twice`,
@@ -1720,7 +1882,7 @@ function doctor(opts = {}) {
       if (missing.length) {
         bad(`Codex hooks miss ${missing.join(', ')}`, 'npm run setup:codex registers the rest');
       }
-      if (!gone.length && !untagged.length && !missing.length) {
+      if (!gone.length && !misfiled.length && !untagged.length && !missing.length) {
         ok(`Codex: ${CODEX_HOOK_EVENTS.length} hooks in ${codexHooksPath}, tagged --editor codex`);
       }
       if (extra.length) note(`also registered for ${extra.join(', ')}, which codex never fires (npm run setup:codex prunes them)`);
@@ -1730,7 +1892,14 @@ function doctor(opts = {}) {
           `delete the notify = [... codex-notify.js] line from ${codexConfigPath}`);
       }
     } else if (notifyLine) {
-      info(`Codex: legacy notify channel only (turn ends, no tool events) -- npm run setup:codex, then drop the notify line from ${codexConfigPath}`);
+      for (const p of notifyGone) {
+        bad(`${codexConfigPath} has codex run ${p} at every turn end, which does not exist (a moved or deleted clone)`,
+          ['from wherever the clone lives now: npm run setup:codex (its hooks replace the notify line),',
+            'or node setup.js codex-notify to point the line there']);
+      }
+      if (!notifyGone.length) {
+        info(`Codex: legacy notify channel only (turn ends, no tool events) -- npm run setup:codex, then drop the notify line from ${codexConfigPath}`);
+      }
     } else {
       info('Codex: not set up (npm run setup:codex if you use it)');
     }
@@ -1823,6 +1992,14 @@ function main() {
   const unknown = flags.filter(f => !KNOWN_FLAGS.has(f));
   if (unknown.length) {
     console.log(`\n  Unknown option: ${unknown.join(' ')}`);
+    printUsage();
+    process.exit(1);
+  }
+  // Every command takes one word. A second one was dropped the same way, so
+  // `codex uninstall` INSTALLED the Codex hooks and `claude remove` the
+  // Claude Code ones.
+  if (args.length > 1) {
+    console.log(`\n  Unexpected argument: ${args.slice(1).join(' ')}`);
     printUsage();
     process.exit(1);
   }
