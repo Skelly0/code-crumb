@@ -1156,4 +1156,80 @@ describe('update-state -- echoes of a finished turn do not reopen it', () => {
   });
 });
 
+// -- Review round 6 (hooks) ----------------------------------------------
+// Each reproduced against the pre-fix sources with real update-state.js runs.
+
+describe('review round 6 (hooks) -- agent retirement and legacy subagents', () => {
+  // SubagentStop's retirement records the ordering fields, so an async
+  // PreToolUse of the agent's that lands after it is dropped as stale. The
+  // SessionEnd sweep rebuilt every agent file from scratch -- no syncAt, and
+  // no agentType, taskDescription or model -- so that late Pre revived the
+  // agent as a live `testing` orbital after its session was gone.
+  test('SessionEnd retires an agent like SubagentStop: its late PreToolUse cannot revive it', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('se-ag');
+    try {
+      runUpdateState('SessionStart', { session_id: 'se-ag', source: 'startup' }, env);
+      runUpdateState('SubagentStart', { session_id: 'se-ag', agent_id: 'a1', agent_type: 'Explore',
+        invocation_prompt: 'map the callers' }, env);
+      // The model, as the agent's first tool event resolves it from its transcript.
+      const fp = sessionFile(sessionsDir, 'se-ag-agent-a1');
+      writeJsonAtomic(fp, { ...readJSON(fp), model: 'Haiku' });
+      runUpdateState('SessionEnd', { session_id: 'se-ag', reason: 'exit' }, env);
+      const retired = readJSON(fp);
+      assert.strictEqual(retired.stopped, true);
+      assert.strictEqual(retired.syncEvent, 'SessionEnd', 'the retirement is the agent\'s newest synchronous word');
+      assert.strictEqual(typeof retired.syncAt, 'number');
+      assert.strictEqual(retired.agentType, 'Explore');
+      assert.strictEqual(retired.taskDescription, 'map the callers');
+      assert.strictEqual(retired.model, 'Haiku');
+      // syncAt in the future stands for "SessionEnd fired after this Pre did".
+      writeJsonAtomic(fp, { ...retired, syncAt: Date.now() + 20000 });
+      runUpdateState('PreToolUse', { session_id: 'se-ag', agent_id: 'a1', agent_type: 'Explore',
+        tool_name: 'Bash', tool_input: { command: 'npm test' }, tool_use_id: 'toolu_late' }, env);
+      const after = readJSON(fp);
+      assert.strictEqual(after.stopped, true, 'still retired');
+      assert.strictEqual(after.state, 'happy');
+    } finally { cleanup(tmp); }
+  });
+
+  // A legacy subagent reports under its own session id, so on its first event
+  // its file does not exist yet: the parentSession guard, which reads that
+  // file, let it take the global file from its stopped parent.
+  test('a legacy-classified subagent\'s first write never takes the global file', () => {
+    const { tmp, stateFile, sessionsDir, env } = makeTempEnv('own-L');
+    try {
+      runUpdateState('SessionStart', { session_id: 'own-L', source: 'startup' }, env);
+      runUpdateState('UserPromptSubmit', { session_id: 'own-L', prompt: 'go' }, env);
+      runUpdateState('SubagentStart', { session_id: 'own-L', description: 'bg job' }, env);
+      runUpdateState('Stop', { session_id: 'own-L' }, env);   // the background agent keeps running
+      runUpdateState('PreToolUse', { session_id: 'sub-L', tool_name: 'Read', tool_input: { file_path: 'a.js' } }, env);
+      assert.strictEqual(readJSON(sessionFile(sessionsDir, 'sub-L')).parentSession, 'own-L',
+        'fixture: classified as the owner\'s subagent');
+      const g = readJSON(stateFile);
+      assert.strictEqual(g.sessionId, 'own-L', 'the parent keeps the global file');
+      assert.strictEqual(g.stopped, true, 'with its finished turn');
+    } finally { cleanup(tmp); }
+  });
+
+  // The parent writes a legacy synthetic's state (it has no writer of its
+  // own), so only such a face may have activity cycled onto it by the
+  // renderer; a real agent orbital reports its own tools.
+  test('a SubagentStart without agent_id marks its orbital synthetic; one with agent_id does not', () => {
+    const { tmp, sessionsDir, env } = makeTempEnv('syn');
+    try {
+      runUpdateState('SubagentStart', { session_id: 'syn', description: 'legacy task' }, env);
+      runUpdateState('SubagentStart', { session_id: 'syn', agent_id: 'a1', agent_type: 'Explore' }, env);
+      const legacy = fs.readdirSync(sessionsDir).filter(f => /^syn-sub-\d+\.json$/.test(f));
+      assert.strictEqual(legacy.length, 1, 'fixture: one legacy synthetic');
+      assert.strictEqual(readJSON(path.join(sessionsDir, legacy[0])).synthetic, true);
+      assert.strictEqual(readJSON(sessionFile(sessionsDir, 'syn-agent-a1')).synthetic, undefined);
+      // The empty-stdin path mints a synthetic of its own.
+      runUpdateState('SubagentStart', '', env);
+      const all = fs.readdirSync(sessionsDir).filter(f => /^syn-sub-\d+\.json$/.test(f));
+      assert.strictEqual(all.length, 2, 'fixture: the fallback minted one too');
+      for (const f of all) assert.strictEqual(readJSON(path.join(sessionsDir, f)).synthetic, true, f);
+    } finally { cleanup(tmp); }
+  });
+});
+
 module.exports = suite;

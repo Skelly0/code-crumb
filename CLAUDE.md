@@ -131,7 +131,7 @@ Per-session state for **every** session: subagents, parallel windows, and the ma
 - **Sticky fields** are set once and kept: `taskDescription`, `parentSession`, `agentType`, `editor`, `model`, `lastPromptAt`, `firstSeenAt`, and the team fields.
 - **Per-write extras:**
   - the ordering fields `eventAt`/`syncAt`/`syncEvent`/`doneToolIds`, on the session file only;
-  - the wait fields `waitingOn`/`waitKind`/`waitConfirmed`/`permState`/`permDetail`, plus `waitForAgents`/`waitPrev`;
+  - the wait fields `waitingOn`/`waitKind`/`waitConfirmed`/`permState`/`permDetail`/`waitAskedAt`, plus `waitForAgents`/`waitPrev`;
   - an adapter's `turnError`;
   - OpenCode's `endSeq`/`pluginId`.
 - **`SessionStart`** writes a file too (`isSessionStart: true`), so a fresh window can take the center before its first tool call. It unlinks a stale predecessor first, **except** for `source === 'compact'`. That is the same live session, which keeps its sticky fields and `stats.session` (counters, clock, `activeSubagents`); every other source resets them.
@@ -146,10 +146,10 @@ A non-agent `Stop` writes `idle` / `between turns` with `turnEnded: true` and **
   - Any other face carries `turnOver`. The renderer folds `turnEnded` into `stopped` and rescues faces outside `RESCUE_EXCLUDE` to "wrapping up", so a non-reward echo would replay the turn-end celebration.
   - `turnOver` means "not active" (the short idle timeout) but is never rescued. The next echo with a reward or an error turns it back into `turnEnded`.
 - **`AMBIENT_EVENTS`** (`PreCompact`, `PostModelSwitch`, `SessionStart`, `Setup`) also happen *between* turns: a `/compact`, a `/model`, or a subagent's auto-compaction sent with the parent's `session_id` and no `agent_id`. After a finished turn they carry `turnOver` instead of clearing it, and all but `SessionStart` re-stamp the global `stopped`. A mid-turn compaction is live work.
-- **Failed and interrupted turns.** `StopFailure` fires instead of `Stop` and follows the same contract with an `error` face. So does Codex's `Interrupt` (Esc, which runs no `Stop`), as `error` / `interrupted`, without breaking the streak.
-- **`stopped` on a session file is reserved for `SessionEnd`.** A turn-end `stopped` there would retire a live window in the orbital loader.
+- **Failed and interrupted turns.** `StopFailure` fires instead of `Stop` and follows the same contract with an `error` face. So does Codex's `Interrupt` (Esc, which runs no `Stop`), as `error` / `interrupted`, without breaking the streak. An agent's `StopFailure` writes the parent's file but ends nothing there: it is an echo (`closesTurn`) and carries the turn end.
+- **`stopped` on a session file is reserved for `SessionEnd`.** A turn-end `stopped` there would retire a live window in the orbital loader. Once set, every event that carries the turn end keeps it, on both paths (`echoesTurnEnd`: `carriesTurnEnd`, plus the ambient events except `SessionStart`), so a late SubagentStop or TaskCompleted cannot bring an ended window back as a candidate.
   - The owner's late `PostToolUse` carries `turnEnded`, like a parallel window's.
-  - The global file's `stopped` re-stamp uses a separate `globalStopped` flag.
+  - The global file's `stopped` re-stamp uses a separate `globalStopped` flag, set from the global file's own `stopped` for this session or from the session file's `stopped`/`turnEnded`/`turnOver` (a between-turns wait clears the global one).
   - The renderer folds `stopped || turnEnded` for the face.
 
 #### `~/.code-crumb-stats.json`
@@ -323,7 +323,7 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 **The eleven `AGENT_EXCLUDED_EVENTS`** (`SessionStart`, `SessionEnd`, `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact`, `Setup`, `ConfigChange`, `InstructionsLoaded`, `StopFailure`, `PostModelSwitch`) keep their own handlers even with `agent_id`.
 
 - **`Stop` is deliberately not one of them.** An agent's `Stop` is its own turn ending: it writes `responding` / `wrapping up` to the agent's orbital without `stopped`, and leaves the parent and global file alone.
-- **`SubagentStop` retires the agent.** If `activeSubagents` lost the agent (a parallel window's lifecycle event reset `stats.session`), it still retires an existing, unstopped `{parent}-agent-{id}.json`. Retirement writes carry the agent's `model`.
+- **`SubagentStop` retires the agent.** If `activeSubagents` lost the agent (a parallel window's lifecycle event reset `stats.session`), it still retires an existing, unstopped `{parent}-agent-{id}.json`. Retirement writes (`_retireSubagent`, shared by SubagentStop and SessionEnd's sweep) carry the agent's sticky fields, `model` included, and its ordering fields, so a late async PreToolUse of the agent's cannot revive it.
 
 **Family heartbeat.** Neither a subagent mid-turn nor a parent waiting on it emits hooks, so mtime alone cannot tell a live family from a dead one (and win32 has no `pid`).
 
@@ -350,7 +350,7 @@ A hook without `agent_id`, from another session id while the stats owner has `ac
 - update-state.js and base-adapter.js stamp it on every write.
 - Birthtime is the fallback only for files that predate the field. An unknown time means subagent, so real grouping never regresses.
 
-**What parallel status changes.** Parallel sessions do not steal `stats.session` while the owner conducts, do not count into its counters, and do not push tool state onto subagent orbitals. A top-level session carrying a stale `parentSession`/`taskDescription` is healed on its next write. Teammates keep theirs.
+**What parallel status changes.** Parallel sessions do not steal `stats.session` while the owner conducts, do not count into its counters, and do not push tool state onto subagent orbitals. A top-level session carrying a stale `parentSession`/`taskDescription` is healed on its next write. Teammates keep theirs. A legacy-classified subagent never writes the global file.
 
 #### Editor Provenance
 
@@ -569,6 +569,7 @@ Editors without a model are unchanged.
 **The parent stands in for its agents.** `_confirmAgentWaits` returns every agent whose prompt is open and confirmed once it returns (just now or by an earlier notification). When that is not the parent's own question, the parent records `waitForAgents` (≤8 agent file names) and `waitPrev` (`{ state, detail }`, from before it started waiting).
 
 - A later notification merges with the list the parent already holds, never replaces it. Agents asking seconds apart each get their own notification, and one that confirms nothing new must not forget the first agent.
+- A session's own wait still unconfirmed `PERMISSION_CONFIRM_MS` after `waitAskedAt` was allowed. A notification that finds an agent asking does not re-confirm it (that put the parent back on "allow?" over its own running tool): it drops that wait's fields and stands in for the agents, with `waitPrev` = its `permState`/`permDetail`. With no agent asking, the notification is still the session's own.
 - When an agent is answered (its tool end on the waited call, or a PermissionDenied), `_releaseParentWait` drops it from the list. When the last one goes, it restores the parent file, and the global file when owned: back to `waitPrev`, or else `subagent` / `conducting`, with `answered: true`, a fresh timestamp, and no wait fields.
 
 **An unconfirmed wait older than `PERMISSION_CONFIRM_MS`** (8s, shared.js) was allowed, and its tool is running. Only an `editor: 'claude'` wait with `waitConfirmed === false` converts.
@@ -577,7 +578,7 @@ Editors without a model are unchanged.
 - **`MiniFace._permWait`** does the same in `tick`, with the same set, and shows any other `permState` as `executing`.
 - **tmux.** `tmuxDisplayState` maps the wait to `permState`.
 
-**`waitKind`/`waitConfirmed`/`permState`/`permDetail` live and die with `waitingOn`** (`WAIT_FIELDS`). The waited call's tool end, any other answer, or a turn-closing event clears them all.
+**`waitKind`/`waitConfirmed`/`permState`/`permDetail`/`waitAskedAt` live and die with `waitingOn`** (`WAIT_FIELDS`). `waitAskedAt` is the PermissionRequest's own `EVENT_AT`; only the hook reads it (`syncAt` cannot say how long a wait has been open: a background agent's lifecycle event moves it). The waited call's tool end, any other answer, or a turn-closing event clears them all.
 
 **`PermissionDenied`** (2.1.300) fires only when the **auto-mode classifier** refuses a call. A user's "no" fires nothing. The call never runs, so no PostToolUse or PostToolUseFailure follows.
 
@@ -751,7 +752,7 @@ The renderer calls `face.dropWait()` before applying such a write, so a wait que
 **The fallback path** (`writeFallback`, under the stats lock) handles:
 
 - unparseable stdin, through `classifyTruncatedInput`'s event map, `PermissionDenied` included;
-- payloads over 1 MB. Their `session_id`, `agent_id`, `agent_type`, `hook_event_name` and `source` are regex-extracted, and `tool_use_id` comes from the stream's tail, since it is serialized after `tool_response`;
+- payloads over 1 MB. Their `session_id`, `agent_id`, `agent_type`, `hook_event_name`, `source` and `tool_name` are regex-extracted, and `tool_use_id` comes from the stream's tail, since it is serialized after `tool_response`. A tool end's call key is rebuilt from the raw `tool_input` text (`_rawCallKey`, a linear string-aware brace scan), so the waited call's own huge result can answer its prompt;
 - payloads that parsed and then threw, which reuse their parsed ids rather than minting a `claude-<ppid>` phantom.
 
 **What the fallback path writes.**
@@ -759,7 +760,7 @@ The renderer calls `face.dropWait()` before applying such a write, so a wait que
 - **Stamps.** It stamps `lastPromptAt` on `SessionStart`/`UserPromptSubmit` and `turnEnded` on `Stop`.
 - **Empty stdin.** A fallback `SessionStart` counts as attention, and the global owner's id is used.
 - **Routing.** A known `session_id` is used as-is, and `agent_id` routes to the agent orbital.
-- **Ownership.** Only the owner writes the global file. Sticky fields and the turn-end carry come from the session file.
+- **Ownership.** Only the owner writes the global file. Sticky fields, the turn-end carry, a session file's `stopped` and the wait fields come from the session file; the waited call's tool end answers its wait (and releases a parent standing in for an agent). A SubagentStart minted here stamps `synthetic: true`.
 - **Coercion.** Non-string fields go through `toText`.
 
 **Top-level registration.** `UserPromptSubmit` and a `Stop` without `agent_id` register the session in `topLevelSessions` before classification, so a window opened before the hooks were installed is not taken for a subagent. The legacy synthetic-retire loop skips agent-owned entries.
