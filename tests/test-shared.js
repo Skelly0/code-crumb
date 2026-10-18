@@ -376,4 +376,79 @@ describe('shared.js -- round 3: wide characters', () => {
   });
 });
 
+// -- Review round 6 ------------------------------------------------------
+// Run against the pre-fix sources first; every block below failed.
+
+// Claude Code mints labelled agent ids, `a${label}-${16 hex}` (a forked
+// subagent's label comes from its name or prompt), so a session's
+// `${uuid}-agent-${agentId}` runs past 64 characters, and cutting it there
+// dropped the random suffix: two agents of one session shared one file.
+describe('shared.js -- Review round 6: safeFilename keeps long ids apart', () => {
+  const uuid = '0b6c7a2e-4f1d-4c3b-9a8e-2d5f6e7a8b9c';
+  const agent = (hex) => `${uuid}-agent-acomment-thread-analyst-${hex}`;
+  const SAFE = /^[A-Za-z0-9_-]{1,64}$/;
+
+  test('two labelled agents of one session get distinct names of at most 64 characters', () => {
+    const a = safeFilename(agent('0123456789abcdef'));
+    const b = safeFilename(agent('fedcba9876543210'));
+    assert.notStrictEqual(a, b);
+    for (const n of [a, b]) {
+      assert.ok(SAFE.test(n), n);
+      assert.ok(n.startsWith(`${uuid}-agent-`), `the parent's -agent- prefix still matches: ${n}`);
+    }
+  });
+
+  test('a name that fits is unchanged (an ordinary agent id: 60 characters)', () => {
+    const id = `${uuid}-agent-a0123456789abcdef`;
+    assert.strictEqual(id.length, 60);
+    assert.strictEqual(safeFilename(id), id);
+    assert.strictEqual(safeFilename('x'.repeat(64)), 'x'.repeat(64));
+  });
+
+  test('the same id always maps to the same name, and a name maps to itself', () => {
+    const n = safeFilename(agent('0123456789abcdef'));
+    assert.strictEqual(safeFilename(agent('0123456789abcdef')), n);
+    assert.strictEqual(safeFilename(n), n, 'a file name read back as an id finds the same file');
+    // Ids that sanitize alike past the cut still differ: the hash is of the id itself.
+    assert.notStrictEqual(safeFilename('p'.repeat(70) + '/x'), safeFilename('p'.repeat(70) + ':x'));
+  });
+});
+
+describe('shared.js -- Review round 6: display width of real text', () => {
+  // Default-emoji-presentation code points outside the old emoji blocks: a
+  // status line such as "🟢 tests pass" measured one column short.
+  test('every emoji-presentation code point the table missed is two columns', () => {
+    const missed = [0x1f004, 0x1f0cf, 0x1f18e, 0x1f191, 0x1f19a, 0x1f201, 0x1f21a, 0x1f22f,
+      0x1f232, 0x1f236, 0x1f238, 0x1f23a, 0x1f250, 0x1f251, 0x1f7e0, 0x1f7eb, 0x1f7f0];
+    for (const cp of missed) assert.strictEqual(charWidth(cp), 2, `U+${cp.toString(16).toUpperCase()}`);
+    assert.strictEqual(strWidth('\ud83d\udfe2 tests pass'), 13);  // 🟢
+    // East Asian Wide in the same ideographic supplement, emoji or not.
+    assert.strictEqual(charWidth(0x1f237), 2);
+  });
+
+  test('U+2329 and U+232A (angle brackets) are East Asian Wide', () => {
+    assert.strictEqual(strWidth('\u2329\u232a'), 4);
+  });
+
+  test('zero-width space, joiners and marks of direction draw nothing', () => {
+    for (const cp of [0x200b, 0x200c, 0x200e, 0x200f, 0x2060, 0xfeff]) {
+      assert.strictEqual(charWidth(cp), 0, `U+${cp.toString(16).toUpperCase()}`);
+    }
+    assert.strictEqual(strWidth('a\u200bb'), 2);
+  });
+
+  // macOS hands back folder names in NFD: Hangul as leading + vowel (+ final)
+  // jamo, where only the leading one takes the two columns.
+  test('decomposed (NFD) Hangul measures like the composed syllables', () => {
+    const nfc = '\ud55c\uae00';  // 한글
+    const nfd = nfc.normalize('NFD');
+    assert.notStrictEqual(nfd, nfc, 'fixture really is decomposed');
+    assert.strictEqual(strWidth(nfd), strWidth(nfc));
+    assert.strictEqual(strWidth(nfd), 4);
+    assert.strictEqual(sliceToWidth(nfd, 2), nfd.slice(0, 3), 'a syllable is cut whole');
+    assert.strictEqual(charWidth(0xd7b0), 0);  // Jamo Extended-B vowel
+    assert.strictEqual(charWidth(0x1100), 2, 'the leading consonant still carries the width');
+  });
+});
+
 module.exports = suite;

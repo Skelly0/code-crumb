@@ -85,15 +85,26 @@ const RESET = '\x1b[0m';
 // XDG_CONFIG_HOME / OPENCODE_CONFIG_DIR / OPENCODE_CONFIG, which setup.js
 // and doctor follow) would point a test straight back at the user's real
 // editor config, so they go too (the defaults then resolve inside the
-// fake home).
+// fake home). So does every other variable the code reads that a
+// developer's shell may hold: `npm test` run inside Claude Code inherits
+// CLAUDE_CODE_SESSION_ID, and a CODE_CRUMB_EDITOR=codex or a
+// CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS=1 there failed tests
+// that assume the defaults. A test that wants one sets it itself.
 // Every process of a parallel run calls this, so each file gets a
 // home of its own.
+const EDITOR_CONFIG_VARS = ['CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG'];
+const DEVELOPER_VARS = [
+  'CODE_CRUMB_EDITOR', 'CODE_CRUMB_MODEL', 'CODE_CRUMB_NODE',
+  'CLAUDE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS', 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
+  'MINIMAL_BOOT', 'NO_COLOR', 'ENGMUX_PYTHON', 'PYTHON',
+];
 function isolate() {
   const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-test-home-'));
   process.env.HOME = fakeHome;
   process.env.USERPROFILE = fakeHome;
   process.env.CODE_CRUMB_STATE = path.join(fakeHome, '.code-crumb-state');
-  for (const k of ['CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME', 'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG']) {
+  for (const k of [...EDITOR_CONFIG_VARS, ...DEVELOPER_VARS]) {
     delete process.env[k];
   }
   process.env[ISOLATION_MARKER] = fakeHome;

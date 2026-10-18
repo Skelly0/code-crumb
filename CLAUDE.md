@@ -48,14 +48,15 @@ Everything else lives in a folder. This document names modules bare (`grid.js`, 
 ```
 renderer.js      Entry point: runtime loop, PID guard, state polling, re-exports for tests; runUnifiedMode(opts) is the test seam
 update-state.js  Hook handler: editor events via stdin → state files; takes `[--editor <name>] <Event>`
-launch.js        Opens the renderer, then starts and supervises the editor (--editor flag); package.json `bin`
+launch.js        Opens the renderer, then starts and supervises the editor (--editor <name> / --editor=<name>); package.json `bin`
 setup.js         setup.js [claude|codex|codex-notify|opencode|openclaw|uninstall|doctor] [--autolaunch]; opencode also --install/--uninstall.
                  `uninstall` removes the Claude Code hooks, the Codex hooks file and a Code Crumb notify line in Codex's config.toml.
+                 A second command word is a usage error (exit 1, no changes): `codex uninstall` used to install.
                  Exports each editor's setup/uninstall, buildFaceHooks, buildCodexHooks, setupCodexNotify/removeCodexNotify, codexHome,
                  claudeConfigDir/claudeSettingsPath, opencodeConfigDir/opencodeConfigPath, enableAutolaunch, doctor, HOOK_EVENTS,
                  CODEX_HOOK_EVENTS, printClaudeUsage
                  (its demo hint prints only when demo/single.js exists; the npm tarball omits it)
-code-crumb.sh    Unix shell wrapper for launch.js (resolves its own symlink)
+code-crumb.sh    Unix shell wrapper for launch.js (resolves its own symlink; ignores an exported CDPATH)
 code-crumb.cmd   Windows batch wrapper for launch.js (runs `node.exe`, never a bare `node` cmd.exe would find in the project folder first)
 lib/
   themes.js        ANSI codes, color math, theme definitions, thought bubble data
@@ -188,6 +189,7 @@ Persistent stats.
 - **`~/.code-crumb-spawn.lock`** lets exactly one of the parallel hooks that notice a dead renderer open a terminal (`acquireSpawnLock`, O_EXCL, 5s staleness).
   - Nothing deletes it, so later launches are stale takeovers. Those are exclusive too: only the hook that creates `<lock>.claim` (O_EXCL) may overwrite the lock, and only while it is still the stale lock it saw.
   - A dead hook's claim is cleared once stale.
+  - A lock or claim further in the future than its stale bound is stale (`lockIsStale`: |now − mtime| > staleMs), so a clock stepped back cannot block autolaunch (or the stats lock) until it catches up; a little ahead is clock skew and still held. `isRendererAlive` keeps `now − mtime`: a live renderer's pid file is future-dated for up to 10 s after a backward step, and judging that dead would open a second renderer.
 - **`~/.code-crumb-quit`** is written on every normal renderer exit, never by the crash handler. While it exists, autolaunch launches nothing.
   - A `SessionStart` from `EDITOR_START_SOURCES` (`startup`, `resume`, `fork`) clears it, and so does `setup.js --autolaunch`.
   - `/clear` and compaction do not.
@@ -201,6 +203,7 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 
 - **Rename retries.** A rename refused with `EPERM`/`EACCES`/`EBUSY` (a Windows scanner or another hook holding the target) is retried 3 times, 2ms apart, before the direct write.
 - **Birthtime.** The rename resets a file's birthtime on every write, which is why classification reads `firstSeenAt` instead.
+- **Symlinks.** A symlinked target is followed (`writeTarget`, dangling included) and the temp file goes beside the real file, so a dotfile manager's link (stow, chezmoi, home-manager) survives instead of being replaced by a regular file.
 
 #### Editor PID Liveness
 
@@ -1016,35 +1019,38 @@ The adapter's `TOOL_ALIASES` map `question` → `AskUserQuestion`, `plan_exit` �
 
 **Claude Code.** `node setup.js` merges `buildFaceHooks` into `claudeSettingsPath()`: `<CLAUDE_CONFIG_DIR>/settings.json`, else `~/.claude/settings.json`. That is Claude Code's own rule (2.1.300: `CLAUDE_CONFIG_DIR ?? ~/.claude`, resolved); an empty value counts as unset. `uninstall` and the `.bak` follow it.
 
-- It writes a `.bak` first, aborts on unreadable or invalid JSON, and uses `writeJsonAtomic`.
-- It strips only our own commands (`isOurCommand`: our argv shape, ending in a real event).
+- It writes a `.bak` first, aborts on unreadable or invalid JSON, and uses `writeJsonAtomic`. A leading BOM is skipped, as doctor skips it (`parseJsonText`), and not written back.
+- It strips only our own commands (`isOurCommand`: our argv shape, a real event, optionally followed by shell plumbing such as `2>/dev/null || true`, `; true` or `# note`).
+- An event is installed only when it holds exactly the command setup builds for it (`isInstalledCommand`, the user's shell suffix allowed); any other command of ours under that key (another path, another event's argument, a missing `--editor` tag) is a stray, removed or replaced (`installEventHooks`).
 - It syncs `async` flags in place.
 
 **Codex.** `setup.js codex` writes `<CODEX_HOME or ~/.codex>/hooks.json` (`codexHome(env)`). It then removes a Code Crumb `notify` line from the neighbouring `config.toml` (`removeCodexNotify`, `notifyRemoved`), and `uninstall` does the same.
 
 - Only a key whose value names `codex-notify.js` is touched (`ourNotifyKeys`, a one-line key or an array over several lines), never a foreign notify. Comments are not the value, so `notify = [...]  # replaced codex-notify.js` is foreign.
 - `config.toml` edits are textual: a `.bak` first, an abort on any read error but `ENOENT`, a BOM kept first, and the file's own line ending.
-- `setupCodexNotify` follows the same rules.
+- Keys are found by a line scan (`tomlLines`) that tracks multi-line strings and open arrays/inline tables, so a `[` line inside a `"""` string is no table header and a `notify =` inside a string is no key.
+- `setupCodexNotify` follows the same rules, and rewrites in place one of ours whose script is not this checkout's (a moved clone).
 
 **OpenCode.** `setup.js opencode --install|--uninstall` edits the config OpenCode reads; without a flag it just prints instructions.
 
 - **The directory** (`opencodeConfigDir`) is `$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`. That holds on Windows too, since OpenCode uses xdg-basedir off `os.homedir()` (1.18.21 binary).
 - **The file** (`opencodeConfigPath`) is `opencode.json`, or an existing `opencode.jsonc` when there is no `opencode.json`. `OPENCODE_CONFIG` is deliberately unused.
-- **JSONC.** `parseOpenCodeConfig` (pure) reads strict JSON, then JSONC; setup and doctor both use it. A strict-JSON config is rewritten. A JSONC config is edited textually: only the `plugin` member is rewritten, or added after `{`, so comments survive.
+- **JSONC.** `parseOpenCodeConfig` (pure) reads strict JSON, then JSONC; setup and doctor both use it. A strict-JSON config is rewritten. A JSONC config is edited textually: only the `plugin` member is rewritten, or added after `{` (past any comment that opens on the `{` line), so comments survive.
 - **Comments in the list.** A comment **inside** the plugin list makes install and uninstall refuse, leaving the file byte-identical; install prints the entry to add by hand.
 - **The key** is `plugin`, **singular**, and the `.bak` rule applies.
 
-**`setup.js doctor`** (`npm run doctor`; `doctor({ home, env, log, now, nodeVersion })`) is **read-only**.
+**`setup.js doctor`** (`npm run doctor`; `doctor({ home, env, log, now, nodeVersion, platform })`) is **read-only**.
 
 - It makes no backups or prefs, cleans no quit flag, spawns no process, and never throws on a garbage file.
 - Each line is `✓`, `!` plus a fix, or `·`. It exits 1 when it printed a `!`.
 - It checks:
   - node ≥18 and on PATH;
   - the renderer (`isRendererAlive`, with the beat's age), autolaunch, and the quit flag;
-  - the manual hooks in `claudeSettingsPath` (missing events, duplicates, a moved `update-state.js`);
+  - the manual hooks in `claudeSettingsPath` (missing events, duplicates, a moved `update-state.js`, a command filed under one event that reports another);
   - the plugin (enabled, found via `<claudeConfigDir>/plugins/installed_plugins.json`, or older than this copy);
   - the plugin and manual hooks both installed;
-  - the Codex hooks under `CODEX_HOME`, and a leftover notify line (`ourNotifyKeys`: exactly what setup would remove);
+  - the Codex hooks under `CODEX_HOME`, and a leftover notify line (`ourNotifyKeys`: exactly what setup would remove), or a notify-only script that no longer exists;
+  - on Linux, when autolaunch would open the renderer, an in-process PATH lookup for the terminals `buildRendererCommands` knows (`doctorTerminals`);
   - the OpenCode entry, in `opencodeConfigPath` read as JSONC;
   - the newest hook write (warning past `DOCTOR_QUIET_MS`, 1h).
 - With the plugin installed, it prints the plugin's renderer command.
@@ -1200,7 +1206,7 @@ Run `npm test`, or `node tests/run.js [--serial] [--jobs=N] [--quiet] [filter...
 **The runner.**
 
 - **Parallel by default.** Each file runs as `run.js --child <file>`, up to `--jobs=N` at once (default `min(4, availableParallelism)`), slowest first.
-- **Isolation.** Each child gets its own throwaway `HOME`/`USERPROFILE`/`CODE_CRUMB_STATE` plus `CRUMB_TEST_HOME`, removed afterwards. `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `OPENCODE_CONFIG_DIR` and `OPENCODE_CONFIG` are unset, so setup can never reach a real editor config. Subprocess tests inherit this environment.
+- **Isolation.** Each child gets its own throwaway `HOME`/`USERPROFILE`/`CODE_CRUMB_STATE` plus `CRUMB_TEST_HOME`, removed afterwards. `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `OPENCODE_CONFIG_DIR` and `OPENCODE_CONFIG` are unset, so setup can never reach a real editor config, and so is every variable the code reads that a developer's shell may hold (`CODE_CRUMB_EDITOR`, `CODE_CRUMB_MODEL`, `CODE_CRUMB_NODE`, `CLAUDE_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `MINIMAL_BOOT`, `NO_COLOR`, `ENGMUX_PYTHON`, `PYTHON`). Subprocess tests inherit this environment.
 - **Output.** Each file's output is buffered and printed in list order, and its counts come back over IPC.
 - **Failures.** A crash, a timeout (`FILE_TIMEOUT_MS`) or a non-zero exit after reporting counts as a failure. A load failure is counted, and the run goes on.
 - **Serial mode.** `--serial` runs everything in one process with one home, and a single selected file also runs in-process.
@@ -1257,7 +1263,7 @@ Check the total. `test-shared.js › getIsWorktree` fails inside a git worktree 
   - `createSuite()` returns `{ describe, test, done, passed, failed }`, and `test.async(name, fn)` (or a returned promise) is awaited.
   - `makeTempEnv(sessionId)`/`cleanup(tmp)`/`readJSON(path)` serve subprocess tests.
   - It owns the subprocess runners, so use them, not a local copy.
-    - `runUpdateState(event, input, env, { args, strict })` runs one hook. Objects are JSON-encoded and strings go in raw, so `''` reaches the catch path. Only a non-zero exit fails, unless `strict`.
+    - `runUpdateState(event, input, env, { args, strict, timeout })` runs one hook. Objects are JSON-encoded and strings go in raw, so `''` reaches the catch path. Only a non-zero exit or a signal (a hook killed by its timeout) fails, unless `strict`.
     - `runFakeCodex(events, seedStats, args)` replays ThreadEvents through codex-wrapper's real spawn path.
 - **Seams.**
   - For a definite PID verdict, seed `_pidStartCache` with a start time before the write, or install `grid._setPidResolver(fn)` (`null` restores the real one).
@@ -1286,7 +1292,8 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
   - Nothing may be written to the last cell of the last row.
 - **Widths are terminal columns**:
   - File- or tool-sourced text (detail, task, label, cwd, branch, model, editor, thought) is measured with `strWidth` and cut with `sliceToWidth`/`sliceFromEndToWidth`.
-  - Wide, Fullwidth and emoji code points are 2 columns. Combining marks, ZWJ and variation selectors are 0.
+  - Wide, Fullwidth and emoji code points are 2 columns (the coloured circles and squares, mahjong, cards and enclosed ideographs included). Combining marks, ZWJ, U+200B–200F and U+2060–2064, variation selectors, the BOM, emoji tags and Hangul vowel/final jamo (U+1160–11FF, U+D7B0–D7FF: NFD Korean measures like NFC) are 0.
+  - `safeFilename` keeps `[A-Za-z0-9_-]` and at most 64 characters; a longer id keeps 55 plus `-` and 8 hex of sha1(id), so labelled agent ids (`a${label}-${hex16}`) stay distinct. `${parent}-agent-` prefix matching holds for parent ids up to 48 characters.
   - Every glyph the app draws is pinned at width 1 by a test.
 - **No network**: all IPC is file-based.
 - **Graceful degradation**: the renderer survives resizes, missing or unreadable files and stale sessions. An uncaught throw restores the terminal before exiting.

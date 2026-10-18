@@ -538,4 +538,21 @@ describe('launch.js -- Review round 5: the launcher supervises the editor', () =
   }
 });
 
+// -- Review round 6 ---------------------------------------------------------
+// Run against the pre-fix sources first; each failed.
+
+// update-state.js and setup's OUR_COMMAND_RE both take `--editor=<name>`; the
+// launcher took only the spaced form, so `--editor=codex x` started claude
+// with `--editor=codex x` as its arguments.
+describe('launch.js -- Review round 6: --editor=<name>', () => {
+  test('--editor=<name> picks the editor and is not passed on', () => {
+    assert.deepStrictEqual(parseArgs(['--editor=codex', 'x']), { editorName: 'codex', editorArgs: ['x'] });
+    assert.deepStrictEqual(parseArgs(['-p', 'fix', '--editor=OpenCode']), { editorName: 'opencode', editorArgs: ['-p', 'fix'] });
+  });
+
+  test('an empty --editor= falls back to claude and is still consumed', () => {
+    assert.deepStrictEqual(parseArgs(['--editor=', 'x']), { editorName: 'claude', editorArgs: ['x'] });
+  });
+});
+
 module.exports = suite;
