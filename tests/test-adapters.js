@@ -5540,4 +5540,49 @@ describe('adapters -- Review round 6 (adapters): engmux', () => {
   }
 });
 
+// The per-session chain's CHAIN_WAIT_MS lets a hung child go -- but it was
+// timed from the spawn, while the child's input still sat in the plugin's
+// pipe until the event loop came round. A loop held past the deadline (a
+// burst of synchronous turn ends; in this file, a sibling test's
+// execFileSync) fired the timer first, the next child overtook a first one
+// still waiting for its stdin, and the face saw a tool's end before its start.
+describe('adapters -- review round 6: a busy plugin keeps a session in order', () => {
+  const PLUGIN_FILE = path.join(ADAPTERS_DIR, 'opencode-plugin.mjs');
+  if (POSIX) {
+    test.async('a chain timer that expires while the plugin is busy does not let the next child overtake', async () => {
+      const os = require('os');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-busy-'));
+      const log = path.join(dir, 'log');
+      const fake = path.join(dir, 'fake-node');
+      fs.writeFileSync(fake, `#!/bin/sh\ncat >> "${log}"\necho >> "${log}"\nsleep 0.1\necho end >> "${log}"\n`);
+      fs.chmodSync(fake, 0o755);
+      const realNode = process.env.CODE_CRUMB_NODE;
+      try {
+        const { CodeCrumbPlugin } = await import(`${require('url').pathToFileURL(PLUGIN_FILE).href}?t=r6-busy`);
+        CodeCrumbPlugin.setChainWait(150);
+        const hooks = await CodeCrumbPlugin();
+        process.env.CODE_CRUMB_NODE = fake;
+        const input = { sessionID: 'ses_busy', tool: 'read', callID: 'c1' };
+        const calls = [
+          hooks['tool.execute.before'](input, { args: { filePath: 'a.js' } }),
+          hooks['tool.execute.after']({ ...input, args: { filePath: 'a.js' } }, { title: '', output: 'x', metadata: {} }),
+        ];
+        if (realNode === undefined) delete process.env.CODE_CRUMB_NODE; else process.env.CODE_CRUMB_NODE = realNode;
+        // Hold the event loop past the chain deadline before the first child
+        // has its input, as a synchronous turn end would.
+        const until = Date.now() + 450;
+        while (Date.now() < until) { /* busy */ }
+        await Promise.all(calls);
+        await waitFor(() => (fs.readFileSync(log, 'utf8').match(/^end$/gm) || []).length === 2, 10000, 'both children');
+        const lines = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean);
+        assert.strictEqual(lines.length, 4, lines.join(' | '));
+        assert.strictEqual(lines[1], 'end', 'the second child must not start before the first ends: ' + lines.join(' | ').slice(0, 300));
+      } finally {
+        if (realNode === undefined) delete process.env.CODE_CRUMB_NODE; else process.env.CODE_CRUMB_NODE = realNode;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 module.exports = suite;
