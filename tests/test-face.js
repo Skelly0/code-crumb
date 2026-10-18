@@ -3192,4 +3192,66 @@ describe('face.js -- round 3: wide characters', () => {
   }
 });
 
+// -- Review round 6 (renderer) ------------------------------------------------
+// Each test below was run against the pre-fix sources first and failed there.
+
+describe('face.js -- review round 6: work never overwrites a remembered prompt', () => {
+  test('a parallel tool behind a queued reward leaves the prompt remembered, and it shows', () => {
+    const face = new ClaudeFace();
+    face.forceState('coding', 'edit a.js');
+    face.setState('satisfied', 'saved');          // queued behind the running tool
+    face.setState('waiting', 'allow Bash?');      // remembered behind that reward
+    face.setState('reading', 'b.js');             // a parallel tool, the prompt still open
+    assert.deepStrictEqual(face.pendingWork, { state: 'waiting', detail: 'allow Bash?' });
+    face.minDisplayUntil = face.now() - 1;
+    face.update(66);                               // the reward lands, the prompt is promoted
+    assert.strictEqual(face.state, 'satisfied');
+    assert.strictEqual(face.pendingState, 'waiting');
+    face.lastStateChange = face.now() - 5000;      // past the guaranteed window
+    face.minDisplayUntil = face.now() - 1;
+    face.update(66);
+    assert.strictEqual(face.state, 'waiting');
+    assert.strictEqual(face.stateDetail, 'allow Bash?');
+    // With no prompt remembered, work is remembered exactly as before.
+    const g = new ClaudeFace();
+    g.forceState('coding', 'edit a.js');
+    g.setState('satisfied', 'saved');
+    g.setState('reading', 'b.js');
+    g.setState('searching', 'grep x');
+    assert.deepStrictEqual(g.pendingWork, { state: 'searching', detail: 'grep x' });
+  });
+});
+
+describe('face.js -- review round 6: a same-state write drops an older queued state', () => {
+  test('waiting, thinking queued, waiting again: it stays on the wait', () => {
+    const face = new ClaudeFace();
+    face.forceState('waiting', 'allow Bash?');
+    face.setState('thinking', 'now Opus');        // inside the wait's minimum: queued
+    assert.strictEqual(face.pendingState, 'thinking', 'fixture: queued');
+    face.setState('waiting', 'allow Bash?');      // the newest write
+    assert.strictEqual(face.pendingState, null, 'the older thinking would flush over the wait');
+    face.minDisplayUntil = face.now() - 1;
+    face.update(66);
+    assert.strictEqual(face.state, 'waiting');
+  });
+
+  test('starting, thinking queued, starting again: still starting; a queued prompt is kept', () => {
+    const face = new ClaudeFace();
+    face.forceState('starting', '');
+    face.setState('thinking', 'reading your message');
+    assert.strictEqual(face.pendingState, 'thinking', 'fixture: queued');
+    face.setState('starting', 'resumed');
+    assert.strictEqual(face.pendingState, null);
+    face.minDisplayUntil = face.now() - 1;
+    face.update(66);
+    assert.strictEqual(face.state, 'starting');
+    // A queued prompt still wants an answer, whatever is written again.
+    const g = new ClaudeFace();
+    g.forceState('thinking', 'x');
+    g.setState('waiting', 'allow?');              // queued behind thinking's minimum
+    g.setState('thinking', 'y');
+    assert.strictEqual(g.pendingState, 'waiting');
+  });
+});
+
 module.exports = suite;

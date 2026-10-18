@@ -1129,8 +1129,11 @@ describe('review fixes -- renderer and face', () => {
     const adopt = src.slice(src.indexOf('function adoptMain('), src.indexOf('function adoptMain(') + 1500);
     assert.ok(/face\.cwd = null;/.test(adopt) && /face\.gitBranch = null;/.test(adopt),
       'adoptMain must clear the outgoing branch/cwd');
-    const swap = src.slice(src.indexOf('function _executeSwap('), src.indexOf('function _executeSwap(') + 1500);
-    assert.ok(/lastNewWriteAt = ts;/.test(swap), 'the waiting bound needs a real write clock after a swap');
+    const swap = src.slice(src.indexOf('function _executeSwap('), src.indexOf('function _executeSwap(') + 2500);
+    // Seeded from the write's own age, on the monotonic clock (review round 6;
+    // test-emotions drives it: "a face swapped in on a wait...").
+    assert.ok(/lastNewWriteAt = ts <= wallNow \? monoNow\(\) - \(wallNow - ts\)/.test(swap),
+      'the waiting bound needs a real write clock after a swap');
   });
 
   test('the status line never runs past the right edge', () => {

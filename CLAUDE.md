@@ -22,6 +22,8 @@ This file states the rules. The stories behind them, meaning how each bug showed
 | `q` / Ctrl+C | Quit |
 
 - **Any key closes** the help overlay or the session list, so `h`/`?` is not a strict toggle once open.
+- **Help needs the face.** `h`/`?` open help only where the face fits (`faceFits`, 38×20), and a resize below that closes it, as the session list's own guard does: an invisible overlay swallowed the next key.
+- **Arrows** are accepted as CSI (`ESC [ A/B`) or SS3 (`ESC O A/B`, application cursor mode).
 - **The session list selects by session id**, not row index. Only live rows are selectable (see Main Session Policy).
 - **Minimal mode** (`--minimal` / `MINIMAL_BOOT=1`) disables every key except `space` and `q`.
 - **Key splitting.** Each stdin chunk is split into keys by `splitKeys` (renderer.js, pure: a CSI/SS3 sequence stays whole, anything else is one code point). Each key is handled on its own, so a held arrow or a fast `qq` works.
@@ -62,7 +64,7 @@ lib/
   themes.js        ANSI codes, color math, theme definitions, thought bubble data
   animations.js    Eye and mouth animation functions (full-size and grid)
   particles.js     ParticleSystem: 16 visual effect styles (incl. stream, fire, bigquestion)
-  face.js          ClaudeFace: main face state machine and rendering; monoNow/_setClock (the face clock), cleanMilestone
+  face.js          ClaudeFace: main face state machine and rendering; monoNow/_setClock (the face clock), cleanMilestone, faceFits
   grid.js          MiniFace + OrbitalSystem: orbitals, session loading, PID liveness, the session list
   transition.js    SwapTransition: dissolve/swap/materialize animation state machine
   accessories.js   Accessory definitions (hats, glasses, ears, etc.) and rendering helpers
@@ -253,7 +255,7 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 - **Death.** When an armed PID dies without a Stop, a sticky `editorDead` starts the rescue cascade (responding → happy → idle) and allows another session to be adopted.
 - **Recovery.** A write newer than anything applied clears a false `editorDead`. A newer write reporting a *different* pid (the same id resumed under a new editor) retires the armed PID at once.
 - **Dead sessions.** `markMainDead()` records the death in `deadSessions` (id → write timestamp), because `adoptMain` must clear `editorDead`. `policySessions` (pure, exported) projects those ids as `stopped` until they write something newer, and prunes vanished ones.
-- **Turn ends.** The death check is skipped while `lastStopped` is set, and that includes a plain turn end, because `readState` folds `turnEnded` into `stopped`. An editor that dies between turns is therefore demoted by staleness: a session waiting for a prompt looks exactly like a closed window.
+- **Turn ends.** The death check is skipped while `lastStopped` is set, and that includes a plain turn end, because `readState` folds `turnEnded` into `stopped`. It is skipped too while `lastTurnOver` is set without `lastCompacting` (an idle_prompt's "waiting for you", a `/model` after Stop): `turnOver` is never rescued. An editor that dies between turns is therefore demoted by staleness: a session waiting for a prompt looks exactly like a closed window.
 
 #### Main Session Policy
 
@@ -277,13 +279,13 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 
 **`adoptMain(id)` is the only place `mainSessionId` changes.**
 
-- **It resets the per-session trackers together:** `lastAppliedState`, `lastAppliedTimestamp`, `lastStopped`, `lastTurnOver`, `lastSessionEnded`, `lastCompacting`, `lastWaitingOn`, `pendingPermission`, `editorDead`, `lastEditorPid`, `candidatePid`, `lastNewWriteAt`, `lastMtime`, `lastForceReadTime`. Nothing held (a work state, an armed PID, an open prompt) leaks onto the new face.
+- **It resets the per-session trackers together:** `lastAppliedState`, `lastAppliedTimestamp`, `lastStopped`, `lastTurnOver`, `lastSessionEnded`, `lastCompacting`, `lastWaitingOn`, `openWait`, `pendingPermission`, `editorDead`, `lastEditorPid`, `candidatePid`, `lastNewWriteAt`, `lastMtime`, `lastForceReadTime`. Nothing held (a work state, an armed PID, an open prompt) leaks onto the new face.
 - **It clears `face.model`, `cwd`, `gitBranch` and `frequentFiles`**, because `setStats` assigns only truthy values. It then adopts the new session's `modelName`/`model`/`editor`/`cwd`/`gitBranch`.
 - **It leaves `candidateSince`/`candidateTs` alone**, because `candidatePid = 0` gates both.
 
 **`_executeSwap`:**
 
-- seeds `lastNewWriteAt` from the adopted write's `timestamp`, so a swapped-in `waiting` starts its silence bound;
+- seeds `lastNewWriteAt` with the adopted write's age on the monotonic clock (`monoNow() - (Date.now() - ts)`; now for a future `ts`), so a swapped-in `waiting` starts its silence bound;
 - carries a tool or wait state's age onto the monotonic clock (`face.lastStateChange = face.now() - (Date.now() - ts)`, for `ts <= now`; not for responding), so "still running … Ns" and the long-tool hold continue;
 - clears `face.stateChangeTimes` after its `forceState`, because caffeine's last 10s belonged to the leaving session;
 - settles or arms an unconfirmed permission prompt.
@@ -312,6 +314,7 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 - **`startupGate(ts, stopped, now, rendererStartTime, uptimeMs)`** (pure, exported) returns `apply`, `skip` or `record`. Its window is the renderer's monotonic uptime, and `checkState` passes `now - uptime` as the start.
   - During the first `STARTUP_WINDOW_MS` (5s), two kinds of write are **recorded**: a turn that ended before the start (`ts` before it, 0 included), and a live write more than `STARTUP_STALE_MS` (15s) older than the start. Recorded means never shown, but marked applied (`lastAppliedTimestamp`/`lastAppliedState`), so it cannot read as new later.
   - After the window, only writes over `RUNTIME_STALE_MS` (120s) older than the start are skipped.
+  - A live wait (`waiting`, not stopped, not an allowed permission prompt) younger than `WAIT_HOLD_STALE_MS` is neither recorded by the 15s rule nor skipped by the 120s one (`startupGate(…, uptimeMs, waiting)`): a renderer started on an open prompt shows it, as a swap does.
 
 #### Subagent Attribution (`agent_id`)
 
@@ -410,7 +413,7 @@ Editors without a model are unchanged.
 
 - **Monotonic:**
   - `lastStateChange`, `minDisplayUntil`, `stateChangeTimes`, timeline entries, the reward window, caffeine, escalation and pet timers. Compare them with `face.now()`.
-  - The renderer's forced reads (`lastForceReadTime` starts at `-Infinity`), PID arming, the permission-answer clock and frame deadlines.
+  - The renderer's forced reads (`lastForceReadTime` starts at `-Infinity`), PID arming, the permission-answer clock, the write clock (`lastNewWriteAt`) and frame deadlines.
 - **Wall clock:** `Date.now()` is used only against a file's JSON `timestamp`, `brokenStreakAt`, milestone freshness and the PID heartbeat.
 - **Mtime** is compared with `!==`, so an mtime that moves backwards is still read.
 - **Why:** a wall clock stepped back (NTP, a resumed VM) must freeze nothing.
@@ -429,13 +432,14 @@ Editors without a model are unchanged.
 
 **One self-healing watcher.** One `fs.watch` handle on `SESSIONS_DIR` (`createDirWatcher`) feeds two consumers:
 
-- **Main-file reads.** An event naming the main's file (or no file) reads it with a 50ms leading-edge throttle, plus one trailing read if events folded.
+- **Main-file reads.** An event naming the main's file (or no file) reads it with a 50ms leading-edge throttle, plus one trailing read if events folded, which wakes the loop.
 - **Ring reloads** run 80ms after a burst's first event, never pushed back.
 
 **Self-healing.** The handle closes and re-opens with a backoff (`WATCH_RETRY_MS` 500ms, doubling to `WATCH_RETRY_MAX_MS` 8s) on:
 
 - an `error`;
-- a `rename` that leaves no folder;
+- a `rename` that leaves no folder, or names the folder itself (how Linux reports its deletion, even when a hook has already recreated it);
+- a folder whose device and inode differ from those taken at open (`check()`): the handle watches a dead folder and hears nothing;
 - a filename that is not a plain basename (`isPlainBasename`). On win32, deleting the folder starts an event storm that pegged a core.
 
 `open()` re-creates a missing folder. A re-open reloads the ring, re-reads the main file and wakes the loop.
@@ -475,13 +479,14 @@ Editors without a model are unchanged.
 
 - Inside that window, only an error replaces it: the next work state is buffered, and a newer completion is queued.
 - After it, the queue flushes (`_flushPending`).
-- Work that arrives behind a queued completion is remembered in `pendingWork` and promoted when the completion lands. A completion clears `pendingWork`, since its tool has finished.
+- Work that arrives behind a queued completion is remembered in `pendingWork` and promoted when the completion lands, but never replaces a remembered wait. A completion clears `pendingWork`, since its tool has finished.
 - Completions never bypass active work.
 
 **Same-state writes** refresh `lastStateChange` and the detail.
 
 - A same-state **work** write is a new tool call. It drops any queued state except a wait, and `pendingWork` unless that is a wait, so a stale reward never shows over a running tool. `MiniFace.updateFromFile` does the same.
 - A same-state **completion** write drops queued work and `pendingWork`. A queued wait or a newer completion stays.
+- A same-state write of any other state (waiting, thinking, starting) drops an older queued state, unless it is a wait or a reward.
 - Errors are never queued.
 
 **Caffeine** never fires or decays while a `pendingState` is queued, so a buffered `caffeinated` cannot overwrite a queued `waiting`.
@@ -510,16 +515,18 @@ Editors without a model are unchanged.
   - the renderer flashes `? WAITING FOR YOU` in the title via the pure `buildTitle(modelName, status, flash)`.
 - **Frame dedupe.** The dedupe key is `title + output`, so a blink with an unchanged body still writes.
 - **The only bound is write silence.** After `WAIT_HOLD_STALE_MS` (30 min) with no new write, the face degrades to idle. This needs no `pid`, which matters on win32.
+- **An open prompt outlives other writes.** update-state.js keeps `waitingOn` on every write until the answer, and each write brings its own state (a background agent's "subagent done"). The renderer remembers the asking write's detail (`openWait`): a newer write still naming the prompt shows, and the wait is queued behind it, where the hold keeps it. An `answered` write, a turn end, a write without `waitingOn`, the allowed-prompt conversion and `adoptMain` clear it.
 
 **Measuring write silence.**
 
-- **`noteNewWrite(ts, lastTs, now, lastAt)`** advances only when a write's own JSON `timestamp` moves forward, so the forced re-read cannot fake freshness.
+- **`noteNewWrite(ts, lastTs, now, lastAt, stamp)`** advances only when a write's own JSON `timestamp` moves forward, so the forced re-read cannot fake freshness. The renderer stamps a new write with its own age on the monotonic clock (`mono - (now - ts)`), so a wall clock stepped either way neither stretches nor cuts the bound; `null` means no write yet.
 - **"Moves forward" is `isNewerWrite(ts, lastTs, now)`** (pure, exported), used at every newness check in `checkState` and in `MiniFace.updateFromFile`. It normally means a greater timestamp, since parallel hooks land out of order. Once the last applied write is more than `FUTURE_SLACK_MS` (60s) in the future, any different stamp counts as new.
 
 **Other rules.**
 
 - **An allowed permission prompt becomes its tool** (see Permission waits), and `lastAppliedState = permState` lets the long-tool hold keep it until its PostToolUse.
 - **Conducting.** `liveChildren > 0` substitutes `subagent` for a downward transition.
+- **A queued state is news.** The cascade does not run while `face.pendingState` is set; the next frame's `update()` flushes it (a wait queued behind "wrapping up" was wiped by responding → happy).
 
 ### Hook Events
 
@@ -577,7 +584,7 @@ Editors without a model are unchanged.
 
 **An unconfirmed wait older than `PERMISSION_CONFIRM_MS`** (8s, shared.js) was allowed, and its tool is running. Only an `editor: 'claude'` wait with `waitConfirmed === false` converts.
 
-- **The renderer.** `isUnconfirmedPermission` converts 8s after the write's timestamp or after first sight, whichever comes first. It re-reads the file to confirm it is the same unconfirmed write, then drops the wait and shows `permState`/`permDetail`. A `permState` outside `PERMISSION_TOOL_STATES` (shared.js: thinking + `ACTIVE_WORK_STATES` − responding) stays waiting.
+- **The renderer.** `isUnconfirmedPermission` converts 8s after the write's timestamp or after first sight, whichever comes first. It re-reads the file to confirm the newest applied write still names the same unconfirmed wait (its own, or a later write that carried it on: `carriesUnconfirmedPermission`, which also keeps the clock running), then drops the wait and shows `permState`/`permDetail`. A `permState` outside `PERMISSION_TOOL_STATES` (shared.js: thinking + `ACTIVE_WORK_STATES` − responding) stays waiting.
 - **`MiniFace._permWait`** does the same in `tick`, with the same set, and shows any other `permState` as `executing`.
 - **tmux.** `tmuxDisplayState` maps the wait to `permState`.
 
@@ -1214,25 +1221,25 @@ Run `npm test`, or `node tests/run.js [--serial] [--jobs=N] [--quiet] [filter...
 - **Other flags.** `--quiet` prints only the summary. A filter that matches nothing exits 2.
 - **CI** (`.github/workflows/test.yml`) runs `node --check`, the whitespace gate, and `node tests/run.js --quiet` on ubuntu/windows/macos × node 18/20/22.
 
-**Counts.** **2715 tests across 17 files on win32**:
+**Counts.** **2824 tests across 17 files on win32**:
 
 | File | Tests | File | Tests |
 |---|---|---|---|
-| test-shared | 51 | test-launch | 49 |
-| test-state-machine | 664 | test-adapters | 312 |
+| test-shared | 58 | test-launch | 51 |
+| test-state-machine | 679 | test-adapters | 324 |
 | test-themes | 72 | test-transition | 31 |
-| test-animations | 42 | test-emotions | 261 |
-| test-particles | 49 | test-platform | 153 |
-| test-face | 305 | test-subagents | 74 |
-| test-grid | 396 | test-attention | 139 |
-| test-accessories | 24 | test-release | 50 |
+| test-animations | 42 | test-emotions | 284 |
+| test-particles | 49 | test-platform | 165 |
+| test-face | 308 | test-subagents | 77 |
+| test-grid | 413 | test-attention | 146 |
+| test-accessories | 24 | test-release | 58 |
 | test-teams | 43 | | |
 
-**2728 on Linux/macOS**, which match each other. Three files are platform-conditional:
+**2844 on Linux/macOS**, which match each other. Three files are platform-conditional:
 
-- **test-adapters** has 322 there. It adds 11 POSIX-only tests: the wrapper/engmux/demo SIGTERM and SIGHUP tests, the wrapper's late-event retirement and exit grace, and the OpenCode plugin's per-session ordering and turn-end drain, which need a shell-script stand-in for node. It drops 1 win32-only test, the `codex.cmd` shadow.
-- **test-launch** has 50: 2 POSIX-only tests (Ctrl+C reaches the editor, SIGTERM is forwarded), minus the win32 `claude.cmd` shadow.
-- **test-platform** has 155: 3 POSIX-only tests (backup modes, a read-only settings backup, the `code-crumb.sh` symlink), minus the win32 `shell:true` quoting round-trip.
+- **test-adapters** has 338 there. It adds 15 POSIX-only tests: the wrapper/engmux/demo SIGTERM and SIGHUP tests, the wrapper's and engmux's own SIGHUP retirement, engmux's whole >1 MB passthrough and a reader that closes early, the wrapper's late-event retirement and exit grace, and the OpenCode plugin's per-session ordering and turn-end drain, which need a shell-script stand-in for node. It drops 1 win32-only test, the `codex.cmd` shadow.
+- **test-launch** has 52: 2 POSIX-only tests (Ctrl+C reaches the editor, SIGTERM is forwarded), minus the win32 `claude.cmd` shadow.
+- **test-platform** has 170: 6 POSIX-only tests (backup modes, a read-only settings backup, the `code-crumb.sh` symlink, a symlinked write, a symlinked settings.json, an exported CDPATH), minus the win32 `shell:true` quoting round-trip.
 
 Check the total. `test-shared.js › getIsWorktree` fails inside a git worktree by construction, because `.git` is a file there.
 
@@ -1311,6 +1318,9 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **Exec-form hooks** (`"command": "node", "args": [...]`) would skip Git Bash on 2.1.300, a real Windows latency win, but they break older Claude Code.
 - **`TaskCompleted` fire sites changed.** In 2.1.280 `TaskUpdate` fired it for any session; in 2.1.300 only the teammate stop path does, per the binary. Re-check on the next bump.
 - **Installs predating 1.3.0** lack `PermissionDenied` and the async flags (older ones also `PostModelSwitch`). `npm run setup` fixes them; `npm run doctor` reports missing events.
+- **`_writeTeammate` rebuilds its file from scratch**, so a late `TeammateIdle`/team `TaskCompleted` after SessionEnd or after the teammate orbital's retirement can still revive it (the class `echoesTurnEnd` closed for session files). Rare, unverified.
+- **The parsed-then-threw fallback has no call key**, so only the >1 MB path can answer a wait.
+- **Unverified: Codex's command quoting.** `shellWord` handles shlex-style pieces and escaped double quotes, but no real `codex exec --json` output with an apostrophe was checked.
 
 **Launcher and Windows:**
 
@@ -1321,6 +1331,11 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **`quoteArg` (win32 `shell: true`) cannot neutralise `!VAR!`** under registry-enabled delayed expansion (off by default for `cmd /c`). Other metacharacters are quoted: `"` → `""`, `%` → `"^%"`, line breaks → spaces. `wtEscape` turns `;` into `\;`, because wt splits on `;` even inside quotes.
 - **Hook paths are only double-quoted.** A checkout path containing `$` or a backtick is expanded by a POSIX shell, but escaping `$` would break cmd.exe.
 - **An old renderer running across an upgrade never heartbeats.** On win32, autolaunch can open a second face once, so restart the renderer after upgrading.
+- **A future-dated pid file reads as fresh on win32** (a recycled pid, or EPERM) until the clock catches up. `isRendererAlive` keeps `now − mtime` because a live renderer's file is future-dated for up to 10 s after a backward step; a renderer that also beat when `now < lastBeat` would make "far in the future is stale" safe.
+- **`launch.js` never takes the spawn lock** and waits only 500 ms, so with autolaunch on the editor's `SessionStart` may open a second window, which then exits "already running". Unverified.
+- **`HOME` prefers `USERPROFILE` on POSIX.** Under WSL with `WSLENV=USERPROFILE/p`, setup would write the Windows home's `.claude`. Unverified.
+- **Linux autolaunch knows four terminals** (gnome-terminal, konsole, xfce4-terminal, xterm); Ptyxis, kgx, kitty, alacritty and `x-terminal-emulator` get nothing. doctor now says so.
+- **`getIsWorktree` is true for a submodule** (`.git` is a file there too).
 
 **Adapters:**
 
@@ -1328,6 +1343,7 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **engmux has no setup or launch entry point.** It is also not wired to `model`; that is one line plus the `'engmux'` sentinel filter that `tests/test-adapters.js` pins.
 - **codex-wrapper's spawn-`error` path** exits without a final session write. This is harmless while only the global file exists.
 - **A notify-only Codex session never stamps `lastPromptAt`**, so it reaches the center only uncontested. With hooks, codex-notify carries their stamp.
+- **The OpenCode plugin can reorder a slow child's payloads.** `CHAIN_WAIT_MS` releases the queue while a child slower than 3 s still runs, so the next batch can write first. A fix would record the last applied `seq`/`pluginId` on the session file and draw nothing numbered below it.
 
 **Models and subagents:**
 
@@ -1348,3 +1364,8 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **Four `StopFailure` branches are unasserted:** `max_output_tokens`, `authentication_failed`, `billing_error` and the `'API error'` default.
 - **A state file without a `timestamp` is never applied.** Every writer stamps one.
 - **`docs/` is gitignored.** The attention-main spec and plan in `docs/superpowers/` won't survive a fresh clone.
+- **A prompt the renderer never saw asked** (recorded at boot past `WAIT_HOLD_STALE_MS`, or a swap landing on a later write that still carries `waitingOn`) has no `openWait` detail, so it is not put back behind other writes. A wait that comes back restarts its 30 s escalation.
+- **A failed read in `_executeSwap`** leaves the old session's state, queue and stats on the new face until the next `checkState` (≤ 467 ms).
+- **The 80 ms ring reload never wakes the loop**: its results arrive through grid.js's own fs callbacks, so at low power a ring change can draw up to 250 ms late.
+- **`vite` alone is classed a build**, though it starts the dev server (`vite build` builds). So are `parcel` and `webpack serve`.
+- **Literal `─`/`→` remain in setup.js code strings** (box rules, `setupOpenClaw`), against the escape convention; test-adapters and test-attention keep their own `status !== 0 && status !== null` copies of the harness check.
