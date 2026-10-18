@@ -35,7 +35,7 @@ const {
   TURN_CLOSING_EVENTS, STICKY_FIELDS, nextSessionFile, stopsGlobal,
 } = require('./lib/carry');
 const {
-  toolToState, normalizeToolResponse, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
+  toolToState, normalizeToolResponse, classifyToolResult, classifyTruncatedInput, rawToolInput, updateStreak, defaultStats, normalizeStats,
   EDIT_TOOLS, SUBAGENT_TOOLS, ASK_TOOLS, toText,
   pruneFrequentFiles, topFrequentFiles, buildSubagentSessionState,
   subagentSessionId, subagentLabel,
@@ -348,30 +348,13 @@ function _rawField(raw, key) {
 
 // The toolCallKey of a payload too large to parse, or '' -- what a permission
 // prompt's wait is matched against when its allowed call returns >1 MB (an
-// MCP screenshot, a huge build log). Claude Code serializes tool_input whole
-// before tool_response, as JSON.stringify writes it, so the object's own text
-// parses back to the value the PermissionRequest hashed. The tool's name
-// alone is not enough: a parallel call of the same tool would answer a dialog
-// that is still open. A string-aware brace scan, linear; '' when the object
-// is cut off or is not one.
+// MCP screenshot, a huge build log). tool_input is serialized whole before
+// tool_response, so it parses back to the value the PermissionRequest hashed
+// (rawToolInput). The tool's name alone is not enough: a parallel call of the
+// same tool would answer a dialog that is still open.
 function _rawCallKey(raw, toolName) {
-  if (!toolName) return '';
-  const m = /"tool_input"\s*:\s*\{/.exec(raw);
-  if (!m) return '';
-  const start = m.index + m[0].length - 1;
-  let depth = 0, inString = false;
-  for (let i = start; i < raw.length; i++) {
-    const c = raw.charCodeAt(i);
-    if (inString) {
-      if (c === 92) i++;                 // a backslash escapes the next char
-      else if (c === 34) inString = false;
-    } else if (c === 34) inString = true;
-    else if (c === 123) depth++;
-    else if (c === 125 && --depth === 0) {
-      try { return toolCallKey(toolName, JSON.parse(raw.slice(start, i + 1))); } catch { return ''; }
-    }
-  }
-  return '';
+  const input = toolName ? rawToolInput(raw) : null;
+  return input ? toolCallKey(toolName, input) : '';
 }
 
 // Argv: `[--editor <name>] <Event>` (cross-platform -- no env var tricks).
@@ -867,7 +850,8 @@ process.stdin.on('end', () => {
     // session clobbered the global owner's state.
     try {
       if (!hookEvent) hookEvent = _rawField(input, 'hook_event_name');
-      const truncResult = classifyTruncatedInput(hookEvent, input);
+      const truncResult = classifyTruncatedInput(hookEvent, input,
+        { trustSuccess: EDITOR === 'claude' && hookEvent === 'PostToolUse' });
       // Only a tool end can answer a wait, so only it pays for the scan.
       const callKey = (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure')
         ? _rawCallKey(input, _rawField(input, 'tool_name')) : '';

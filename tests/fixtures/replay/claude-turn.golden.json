@@ -103,16 +103,16 @@
       "event": "PostToolUse",
       "sessions": {
         "s1": {
-          "state": "thinking",
-          "detail": "large input",
+          "state": "satisfied",
+          "detail": "got it",
           "prompt": 2,
           "editor": "claude",
           "model": "Sonnet"
         }
       },
       "global": {
-        "state": "thinking",
-        "detail": "large input",
+        "state": "satisfied",
+        "detail": "got it",
         "sessionId": "s1"
       },
       "streak": 1

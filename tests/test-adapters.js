@@ -883,6 +883,8 @@ describe('adapters -- opencode-adapter (plugin payloads)', () => {
       const f = readJSON(path.join(sessionsDir, 'ses_big.json'));
       assert.notStrictEqual(f.state, 'coding', 'no longer stuck on the tool start');
       assert.notStrictEqual(f.state, 'error', 'a write\'s content is not a verdict');
+      // It ended on "large input" before its own success face.
+      assert.strictEqual(f.state, 'proud', 'a finished write is a write');
       assert.ok(f.lastPromptAt > 0, 'the attention stamp is carried');
       assert.strictEqual(readJSON(stateFile).state, f.state, 'the global file agrees');
       runStdinAdapter(ADAPTER, { type: 'tool.execute.before', sessionId: 'ses_big', tool: 'write',

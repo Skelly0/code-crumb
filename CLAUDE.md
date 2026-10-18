@@ -677,10 +677,16 @@ Editors without a model are unchanged.
 
 Text over 80 K characters is scanned as its first `SCAN_HEAD_BYTES` (16 K) plus its last `SCAN_TAIL_BYTES` (64 K), measured in string length (`scanWindow`). The truncated (>1 MB) path scans the same window, with escaped `\n` made real.
 
+**The truncated path** (`classifyTruncatedInput(hookEvent, raw, opts)`) judges a payload cut at 1 MB from its raw text.
+
+- **Errors.** An `isError` flag, then (shell tools) an exit code in the window, then the stdout patterns.
+- **Trust.** update-state.js passes `trustSuccess` for Claude Code's PostToolUse, as on the main path: a shell command that cannot mask a failure, or any other tool, skips the exit code and the patterns. A shell command cut off with its input is not trusted, since nothing says whether it masks.
+- **Success.** A tool end with no error found is its tool's own success face (`classifyToolResult` with an empty result), judged from its input when that survived the cut: `rawToolInput` parses `tool_input` (or the OpenCode plugin's `toolInput`) back with a linear string-aware brace scan. It used to fall through to `thinking` / `large input`.
+
 **Read-only commands.**
 
 - **Content, not errors.** stdout patterns are skipped for read-only commands, whose stdout is content.
-- **Exit codes.** They are inferred from text (`Exit code N`, `exit status N`, `exited with [code] N`, never a bare `returned N`) only for shell tools. For a read-only command, only the editor's own trailer line counts, first or last (`extractTrailerExitCode`).
+- **Exit codes.** They are inferred from text (`Exit code N`, `exit status N`, `exited with [code] N`, never a bare `returned N`) only for shell tools. For a read-only command, only the editor's own trailer line counts, first or last (`extractTrailerExitCode`). Once the host gives a numeric `exitCode` (Codex, OpenCode), none is inferred, unless the command line can mask a failure (`make | tee log` exits with tee's 0).
 - **Merge conflicts** count only for a command containing `git`, an empty command, or a non-shell tool (`errorDetail`'s `opts.conflicts`). They never count for a read-only git command, nor a trusted success, since git exits 1 on a conflict.
 - **`cd` failures** count only in a chain with `cd`/`pushd`/`popd` (`SHELL_MOVE_RE`). There they are errors even though the chain is read-only, because adapters with merged output and no exit code rely on it.
 - **Push rejection.** `errorDetail` also names `push rejected`.
@@ -689,25 +695,33 @@ Text over 80 K characters is scanned as its first `SCAN_HEAD_BYTES` (16 K) plus 
 **Shell intent.** `shellIntent(cmd)` returns `{ unquoted, intent, readOnly, masked, segments }`.
 
 - **Unwrapping.** A wrapper is unwrapped first (`unwrapShell`, at most twice): `pwsh`/`powershell -Command|-c`, `cmd /c|/k`, or `sh`/`bash`/`zsh`/`dash -c|-lc`, even when named by a path. Codex runs every command through one. Only a script that is one quoted shell word is unquoted (`shellWord`), the way the shell reads it: a run of quoted pieces (shlex quotes `it's` as `'it'"'"'s'`), with `\"`, `\\`, `\$` and `` \` `` unescaped inside double quotes. Two wrapped scripts in a chain are never joined.
-- **Quotes.** Quoted arguments are emptied and heredoc bodies dropped (`stripQuotedArgs`, linear).
+- **Quotes.** Quoted arguments are emptied and heredoc bodies dropped (`stripQuotedArgs`, linear). An unquoted `\;`, `\|` or `\&` is a word, emptied like a quoted one, as bash reads it (find's `-exec … \;`, `grep a\|b`); an escaped backslash `\\` escapes nothing after it.
 - **Segments.** Read-only segments are dropped. Splitting happens on `&&`, `||`, `;`, `|`, `&` and newlines, but never on a redirect's `&` (`2>&1`, `>&2`, `&>file`, `<&3`). `cd`/`pushd`/`popd` are read-only.
 - **Words.** `segmentWords` strips a leading `(`/`{` and a trailing `)`, and drops redirects (`2>&1`, `>out.log`, a lone `>`/`2>>`/`<` with its target, a heredoc's `<<`): `make 2>&1` is a bare make, and `git tag 2>/dev/null` is a listing. `cmdName` drops the directory and `.exe`/`.cmd`/`.bat`/`.ps1`.
+- **Wrappers.** `segmentWords` then unwraps (`unwrapCommand`, one pass): every table judges the command a wrapper runs, so `timeout 60 git push` is a push, `sudo -E npm install` an install and `uv run pytest` a test run.
+  - **The wrappers** (`WRAPPERS`, each with the flags that take a value; `--` ends them): env assignments, `sudo`, `doas`, `env`, `time`, `nice`, `ionice`, `timeout` (and its duration), `xvfb-run`, `stdbuf`, `caffeinate`, `dotenv`, `exec`, `nohup`, `command`, `builtin`, `unbuffer`, `chronic`, `cross-env`, `srun`, `mpirun`/`mpiexec`, and `xargs`.
+  - **Environment managers** (`ENV_RUNNERS`): `uv`, `poetry`, `pipenv`, `pdm`, `conda`, `mamba`, `micromamba`, each before `run`.
+  - **Executors** (`executorCommand`): `docker`/`podman` `exec`/`run` (also `container …` and `compose …`), `docker-compose`/`podman-compose`, `kubectl exec … --` and `ssh <host>`. What runs there is judged: `docker exec api cat x` reads. With nothing named to run, the executor is the command, and acts (`docker run img`, `ssh box`).
+  - **A wrapper with nothing to run** is itself the command (`sudo -v`), save `BARE_READS` (`xargs`, `exec`, `command`, `builtin`, `env`), which read: a bare xargs echoes, `exec 3>&1` adjusts the shell. A wrapper xargs runs is always the command, since xargs hands it the input: `xargs sudo` acts.
+  - `command -v`/`-V` is a lookup, as `which` is, and reads.
 - **git.** `gitCalls`/`gitSubcommand` see past git's global options (`-C`, `-c`, `--git-dir`…). `commit`/`push`/`tag` are checked before test/build/install, so a commit message naming a build is still a commit.
 
 **Command tables.**
 
 - **The read-only table** covers:
   - plain reads, `journalctl`, and git's listing subcommands (log/show/diff/reflog/rev-parse/ls-*/stash list/branch, remote and tag listings…). `git tag` lists when it has no tag to make: bare, `-l`, `--list` or `-n`;
-  - the text filters a read is piped through (`sort`, `uniq`, `cut`, `tr`, `nl`, `jq`, `column`…). `sed` and `awk` read unless told to edit in place (`sed -i`/`-Ei`/`-i.bak`/`--in-place`, `gawk -i inplace`), and `xargs` is whatever it runs (`xargs grep` reads, `xargs rm` acts). Without them `grep … | sort | head` was masked, and Codex's `sed -n '1,120p' x.js` had its content scanned;
+  - the text filters a read is piped through (`sort`, `uniq`, `cut`, `tr`, `nl`, `jq`, `column`…). `sed` and `awk` read unless told to edit in place (`sed -i`/`-Ei`/`-i.bak`/`--in-place`, `gawk -i inplace`), and `xargs` is whatever it runs (`xargs grep` reads, `xargs rm` acts; see Wrappers). Without them `grep … | sort | head` was masked, and Codex's `sed -n '1,120p' x.js` had its content scanned;
+  - `find`, unless it acts (`findActs`): `-delete`, `-fprint`/`-fprintf`/`-fls`, or an `-exec`/`-execdir`/`-ok`/`-okdir` whose command (up to its `;` or `+`) acts. `fd` likewise for `-x`/`-X`. A find that find runs is taken to act;
   - `gh` list/view/status/diff/checks, docker/podman/compose `logs|ps|images|inspect`, and `kubectl logs|get|describe|top`;
   - the PowerShell reads and `findstr`.
 - **Builds** are judged by command and subcommand, never an argument (`isBuildCommand`): a build tool by name, or a subcommand-style tool whose subcommand or `run` script is `build`/`compile`. Flags, workspace selectors and `exec`/`dlx`/`compose`/`-p` are skipped.
 - **Task runners** (`turbo`, `nx`, `bazel`/`bazelisk`) are judged by their task (`runnerTasks`). The runner must be the command, or the one a package manager or runner runs (`runnerTarget`); a later word never counts, so `npx jest bazel` is a jest run. The forms: `turbo [run] <task>…`, `nx <target>`, `nx run <project>:<target>`, `nx run-many|affected -t a,b`, `bazel <command>`. A `build`/`compile` task is a build and a `test`/`e2e`/`coverage` task a test run; `turbo run lint` just finishes.
 - **`make`** is a build when bare, or when a target is `all|compile|release|debug|dist|bundle` or contains "build". A test target is a test run, and any other target finishes `make <target> done`.
-- **Installs** use one token-based table for both sides of a call (`isPkgInstall`/`isInstallCommand`). Flags, selectors or a `corepack` prefix may come before `install|i|add|ci`, and a bare `yarn` counts, but not `yarn --version`/`-v`/`--help`. `cargo build` is a build.
-- **Test runs** (`isToolTestRun`): `node --test` or a test script (also under `tsx`/`ts-node`), gradle/maven test tasks (never one excluded by `-x`), make test targets, task-runner test tasks, `deno test`, and a test runner (`TEST_RUNNERS`: jest, vitest, mocha, pytest, rspec…) **as the command word** (`isRunnerTest`). It may be reached through `npx`/`bunx`/`pnpx`, a package manager's `exec`/`dlx` or bare bin (`yarn mocha`), `python -m`, or `xargs`; `playwright` counts only as `playwright test` and `cypress` as `cypress run`. An argument never counts: `npm i -D jest`, `pip install pytest` and `git add a.test.js` are not test runs. `isTrainingCommand` is linear.
+- **Installs** use one token-based table for both sides of a call (`isPkgInstall`/`isInstallCommand`). Flags, selectors or a `corepack` prefix may come before `install|i|add|ci`, and a bare `yarn` counts, but not `yarn --version`/`-v`/`--help`. The other managers count by their subcommand (`isOtherInstall`): `pip install` (also `python -m pip`, `uv pip`), `cargo add`/`install`, `apt`/`apt-get`/`apk` `install`/`add`, `brew install`, `go get`/`install`, `composer require`/`install`, `dotnet add`/`restore`. `cargo build` is a build.
+- **Test runs** (`isToolTestRun`): `node --test` or a test script (also under `tsx`/`ts-node`), gradle/maven test tasks (never one excluded by `-x`), make test targets, task-runner test tasks, `deno test`, and a test runner (`TEST_RUNNERS`: jest, vitest, mocha, pytest, rspec…) **as the command word** (`isRunnerTest`). It may be reached through `npx`/`bunx`/`pnpx`, a package manager's `exec`/`dlx` or bare bin (`yarn mocha`), `python -m`, or `xargs`; `playwright` counts only as `playwright test` and `cypress` as `cypress run`. An argument never counts: `npm i -D jest`, `pip install pytest` and `git add a.test.js` are not test runs.
+- **Test scripts** (`isTestScript`): the subcommand or `run` script of `npm`/`yarn`/`pnpm`/`bun`/`deno`/`go`/`cargo`/`dotnet`/`rake`/`composer`/`npx` is `test`/`tests` (`test:unit` too), past the manager's flags, a workspace selector and cargo's `+toolchain` (`managerArgs`, shared with `isBuildCommand`); or `php artisan test`. Two argument words never spell one: these were phrases matched anywhere in a segment, so `cp go test` was a test run.
 - **Success details** follow toolToState's order: push/commit, test, build, install, then git (`git done`/`merged clean`), then `make <target> done`. A read-only git step names the result only when nothing else in the command acts (`git status && npm install` finished as `installed`), and only a git step does: a word `git` (`cat git | cut -f1`) is none.
-- **Training** (`isTrainingCommand`, linear) needs a launcher word (`python[N]`, `torchrun`, `deepspeed`, `accelerate`, by path too, anywhere in an acting segment, so `srun python train.py` counts) followed by `train`, a fine-tune, or an epochs/learning-rate flag; or `nohup … train`; or `unsloth` as the command word. A launcher inside a word (`ml/python/train.py`, `python-train`) is an argument.
+- **Training** (`isTrainingCommand`, linear) needs a launcher (`python[N]`, `torchrun`, `deepspeed`, `accelerate`, by path too) **as the command**, past wrappers (`srun python train.py`, `uv run python train.py`, `nohup python train.py &`), followed by `train`, or for python a fine-tune or an epochs/learning-rate flag; or a script named train run on its own (`./train.sh`); or `unsloth` as the command word. A launcher inside a word (`ml/python/train.py`, `python-train`) or as an argument (`touch accelerate python-train`) is no launcher.
 
 **Explicit signals.** `normalizeToolResponse` carries `interrupted`, `isError`/`is_error`, numeric `exitCode`/`exit_code`, `backgroundTaskId` and `status`.
 
@@ -801,7 +815,7 @@ The renderer calls `face.dropWait()` before applying such a write, so a wait que
 **The fallback path** (`writeFallback`, under the stats lock) handles:
 
 - unparseable stdin, through `classifyTruncatedInput`'s event map, `PermissionDenied` included;
-- payloads over 1 MB. Their `session_id`, `agent_id`, `agent_type`, `hook_event_name`, `source` and `tool_name` are regex-extracted, and `tool_use_id` comes from the stream's tail, since it is serialized after `tool_response`. A tool end's call key is rebuilt from the raw `tool_input` text (`_rawCallKey`, a linear string-aware brace scan), so the waited call's own huge result can answer its prompt;
+- payloads over 1 MB. Their `session_id`, `agent_id`, `agent_type`, `hook_event_name`, `source` and `tool_name` are regex-extracted, and `tool_use_id` comes from the stream's tail, since it is serialized after `tool_response`. A tool end's call key is rebuilt from the raw `tool_input` text (`_rawCallKey`, through state-machine.js's `rawToolInput`), so the waited call's own huge result can answer its prompt;
 - payloads that parsed and then threw, which reuse their parsed ids rather than minting a `claude-<ppid>` phantom.
 
 **What the fallback path writes.**
@@ -1048,7 +1062,7 @@ The adapter's `TOOL_ALIASES` map `question` → `AskUserQuestion`, `plan_exit` �
 - **Hooks for subclasses.** `normaliseEvent` may return `{ skip: true }`, and `mapEvent` may return `breakStreak`.
 - **Tool results.** `exitCode`/`interrupted` are passed to `classifyToolResult`.
 - **Failed turns.** The turn end after a `turnError` keeps the error face without breaking the streak again (`failedTurnEnd`), once: a turn end never carries `turnError` on, so a later text-only turn (only its idle reaches the adapter) ends happy.
-- **Payloads over 1 MB** reach the session file with their sticky fields, judged by their own event: only a tool end is checked for errors, and a tool start shows its tool.
+- **Payloads over 1 MB** reach the session file with their sticky fields, judged by their own event: only a tool end is checked for errors (and with none ends on its tool's success face), and a tool start shows its tool.
 
 ### The Launcher
 
@@ -1264,22 +1278,22 @@ Run `npm test`, or `node tests/run.js [--serial] [--jobs=N] [--quiet] [filter...
 - **Other flags.** `--quiet` prints only the summary. A filter that matches nothing exits 2.
 - **CI** (`.github/workflows/test.yml`) runs `node --check`, the whitespace gate, and `node tests/run.js --quiet` on ubuntu/windows/macos × node 18/20/22.
 
-**Counts.** **2904 tests across 19 files on win32**:
+**Counts.** **2915 tests across 19 files on win32**:
 
 | File | Tests | File | Tests |
 |---|---|---|---|
 | test-shared | 58 | test-launch | 51 |
-| test-state-machine | 694 | test-adapters | 324 |
+| test-state-machine | 704 | test-adapters | 324 |
 | test-themes | 72 | test-transition | 31 |
 | test-animations | 42 | test-emotions | 284 |
 | test-particles | 49 | test-platform | 165 |
 | test-face | 308 | test-subagents | 77 |
 | test-grid | 413 | test-attention | 146 |
 | test-accessories | 24 | test-release | 58 |
-| test-teams | 43 | test-lifecycle | 28 |
+| test-teams | 43 | test-lifecycle | 29 |
 | test-replay | 37 | | |
 
-**2925 on Linux/macOS**, which match each other. Three files are platform-conditional:
+**2936 on Linux/macOS**, which match each other. Three files are platform-conditional:
 
 - **test-adapters** has 339 there. It adds 16 POSIX-only tests: a chain timer that expires while the plugin is busy, the wrapper/engmux/demo SIGTERM and SIGHUP tests, the wrapper's and engmux's own SIGHUP retirement, engmux's whole >1 MB passthrough and a reader that closes early, the wrapper's late-event retirement and exit grace, and the OpenCode plugin's per-session ordering and turn-end drain, which need a shell-script stand-in for node. It drops 1 win32-only test, the `codex.cmd` shadow.
 - **test-launch** has 52: 2 POSIX-only tests (Ctrl+C reaches the editor, SIGTERM is forwarded), minus the win32 `claude.cmd` shadow.
@@ -1292,7 +1306,7 @@ Check the total. `test-shared.js › getIsWorktree` fails inside a git worktree 
 | File | Covers |
 |---|---|
 | test-shared | `safeFilename`, display-width helpers |
-| test-state-machine | `toolToState` for every editor; result classification (patterns, guards, exit codes, `trustSuccess`, echoed lines, scan windows, predicates, background launches); `shellIntent` and git options; diff counting; streaks; `classifyForeignSession`; `prettyModelName`/`agentTranscriptPath`; counter helpers; end-to-end `update-state.js` runs for subagents, SessionStart sources, async ordering, `firstSeenAt`; seeded invariant fuzzing of `shellIntent` and the classifier (arguments, the read-only closure, wrappers, masking, trusted success, both sides of a call, linear time) |
+| test-state-machine | `toolToState` for every editor; result classification (patterns, guards, exit codes, `trustSuccess`, echoed lines, scan windows, predicates, background launches); `shellIntent` and git options; diff counting; streaks; `classifyForeignSession`; `prettyModelName`/`agentTranscriptPath`; counter helpers; end-to-end `update-state.js` runs for subagents, SessionStart sources, async ordering, `firstSeenAt`; seeded invariant fuzzing of `shellIntent` and the classifier (arguments, alone and in pairs, the read-only closure, wrappers, masking, trusted success, both sides of a call, linear time); command wrappers and executors, find's actions, escaped operators, explicit exit codes, the truncated path's success face |
 | test-themes | colour math, all 23 states themed, `COMPLETION_LINGER`, thought pools |
 | test-animations | eye and mouth functions |
 | test-particles | all 16 styles, lifecycle, `fadeAll` |
@@ -1307,7 +1321,7 @@ Check the total. `test-shared.js › getIsWorktree` fails inside a git worktree 
 | test-platform | quoting, `writeJsonAtomic`, the spawn and stats locks, `isRendererAlive`, setup.js on temp configs (Codex notify and `CODEX_HOME`, OpenCode dir and JSONC), launch.js exit codes, `code-crumb.sh` via a symlink |
 | test-subagents | `agent_id` attribution, per-agent model, the family heartbeat, the conducting hold, `ESCALATING_STATES` |
 | test-attention | `pickMainSession` and the fields feeding it, adapter stamp rules, the main's model, the session list, `readState(path)`, permission-wait confirmation, `PermissionDenied`, informational notifications |
-| test-lifecycle | lib/wait.js (asking, reading, carrying, confirming, standing in, one walk through every phase) and lib/carry.js (`writeEnds`, the tombstone across every event, the turn-end inherit, `stopsGlobal`); both write paths keep the same facts, end to end |
+| test-lifecycle | lib/wait.js (asking, reading, carrying, confirming, standing in, one walk through every phase) and lib/carry.js (`writeEnds`, the tombstone across every event, the turn-end inherit, `stopsGlobal`); both write paths keep the same facts and show the same success face, end to end |
 | test-replay | the recorder's anonymiser (pseudonyms, command shapes, free text, the key) and record file (modes, caps, permissions); golden replays of `tests/fixtures/replay` through the real hooks, adapters and wrapper; `import-recording.js` |
 | test-release | packaging (require graph vs `"files"`), plugin manifests and `hooks.json` vs `HOOK_EVENTS`, npm scripts, the runner contract (via `CRUMB_TEST_FILES`), the direct-run refusal, `doctor` and its agreement with setup (`CLAUDE_CONFIG_DIR`, OpenCode's dir and JSONC, notify arrays), `.editorconfig` vs the CI whitespace gate |
 
@@ -1323,7 +1337,7 @@ Check the total. `test-shared.js › getIsWorktree` fails inside a git worktree 
   - For a definite PID verdict, seed `_pidStartCache` with a start time before the write, or install `grid._setPidResolver(fn)` (`null` restores the real one).
   - Renderer-runtime tests drive `runUnifiedMode(opts)` with a temp `sessionsDir`, a fake `watch`, manual `schedule`/`cancel`, captured `write`/`exit`, `installHandlers: false` and `start: false`.
 - **Behaviour over source.** The remaining `source:` tests are deliberate lint tests for properties with no runtime observable (render-loop lint, adapter hygiene, autolaunch helpers, CLI paths the suite cannot drive portably). Don't add new ones where a behaviour can be driven.
-- **A regression test must fail first.** Every review-pass test was checked against the pre-fix sources, in labelled blocks (`Third review pass`, `review fixes`, `round 3`, `round 4`, `review round 5`, `Review round 5 (docs-pass bugs)`). `CHANGELOG.md` says what each pass fixed.
+- **A regression test must fail first.** Every review-pass test was checked against the pre-fix sources, in labelled blocks (`Third review pass`, `review fixes`, `round 3`, `round 4`, `review round 5`, `Review round 5 (docs-pass bugs)`, `review round 6`). `CHANGELOG.md` says what each pass fixed.
 - **"Today"** in a test is `localDay()`, never the UTC date.
 - **Timing tests compare growth, not a flat budget.** A linear-time check times n against 8n (best of three, the sizes interleaved) and allows ×20: linear code measures ~×10, quadratic ×64. A loaded CI runner failed a flat 50ms budget. The round-3 fuzz tests keep a deliberately loose 250ms bound against a 1.4s regression.
 
@@ -1359,14 +1373,12 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **A user's "no" fires no hook.** Only the auto-mode classifier fires `PermissionDenied`. What follows a "no" is unchecked; if nothing arrives within 8 s, the refused tool shows as running until the next write.
 - **Unverified: the interactive TUI dialog uses the same ask path as the 6 s timer.** The timer was read in the binary, and only `claude -p` was observed. If the TUI differs, a dialog left open past 8 s shows its tool running.
 - **A prompt approved after the 6 s notification** shows `waiting` until its tool ends.
-- **The truncated (>1 MB) PostToolUse path has no `trustSuccess`.** This affects the face only, not the streak.
 - **Not handled:** `PostToolBatch`, `PreModelSwitch` and `UserPromptSubmit.source`.
 - **Exec-form hooks** (`"command": "node", "args": [...]`) would skip Git Bash on 2.1.300, a real Windows latency win, but they break older Claude Code.
 - **`TaskCompleted` fire sites changed.** In 2.1.280 `TaskUpdate` fired it for any session; in 2.1.300 only the teammate stop path does, per the binary. Re-check on the next bump.
 - **Installs predating 1.3.0** lack `PermissionDenied` and the async flags (older ones also `PostModelSwitch`). `npm run setup` fixes them; `npm run doctor` reports missing events.
 - **`_writeTeammate` rebuilds its file from scratch**, so a late `TeammateIdle`/team `TaskCompleted` after SessionEnd or after the teammate orbital's retirement can still revive it (the class `echoesTurnEnd` closed for session files). Rare, unverified.
 - **The parsed-then-threw fallback has no call key**, so only the >1 MB path can answer a wait.
-- **A successful >1 MB tool end shows `thinking` / `large input`**, not its tool's success face. `classifyTruncatedInput` finds no error in the scan window and falls through its event map, which has no `PostToolUse`. Found by recording one.
 - **Unverified: Codex's command quoting.** `shellWord` handles shlex-style pieces and escaped double quotes, but no real `codex exec --json` output with an apostrophe was checked.
 
 **Launcher and Windows:**
@@ -1415,10 +1427,8 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **A prompt the renderer never saw asked** (recorded at boot past `WAIT_HOLD_STALE_MS`, or a swap landing on a later write that still carries `waitingOn`) has no `openWait` detail, so it is not put back behind other writes. A wait that comes back restarts its 30 s escalation.
 - **A failed read in `_executeSwap`** leaves the old session's state, queue and stats on the new face until the next `checkState` (≤ 467 ms).
 - **The 80 ms ring reload never wakes the loop**: its results arrive through grid.js's own fs callbacks, so at low power a ring change can draw up to 250 ms late.
-- **The classifier, by fuzzing (found, not fixed):**
-  - Two argument words can spell a command: `cp go test` is a test run, because `isTestCommand`'s `(npm|yarn|pnpm|bun|deno|go|cargo|dotnet) [run] test` regex runs over the acting text, not from its command word (`mv cargo test x` too). That is what makes `xvfb-run npm test` and `docker exec api npm test` test runs, so a fix needs a wrapper table first.
-  - A numeric `exitCode: 0` does not stop an exit code being inferred from the text: a build that prints `Exit code 1` is an error.
-  - `find -exec rm` and `find -delete` count as read-only, so their output is never scanned.
+- **A wrapper outside the table is the command**, and what it runs its argument: `watchexec -e js npm test`, `nodemon --exec npm test` and `strace npm test` are no test runs. They were while the npm/go/pip phrases matched anywhere in a segment, which also let two argument words spell a command.
+- **An executor's value flag missing from its table** takes its value for the container or image, so the command after it is missed: `docker run --new-flag v img npm test`. So do options with two values (mpirun's `--mca a b`).
 - **Replays run at compressed time**, so a fixture cannot show what the 8 s and 5 s permission clocks do with real gaps.
 - **`vite` alone is classed a build**, though it starts the dev server (`vite build` builds). So are `parcel` and `webpack serve`.
 - **Literal `─`/`→` remain in setup.js code strings** (box rules, `setupOpenClaw`), against the escape convention; test-adapters and test-attention keep their own `status !== 0 && status !== null` copies of the harness check.

@@ -394,6 +394,26 @@ describe('both write paths keep the same facts (end to end)', () => {
       assert.deepStrictEqual(results[1], results[0], 'the >1 MB path carries what the main path carries');
     });
   }
+
+  // The face too: a huge successful result showed "large input".
+  test('a successful tool end shows its own success face, whichever path writes it', () => {
+    for (const [tool, command] of [['Bash', 'npm test'], ['mcp__playwright__browser_take_screenshot', '']]) {
+      const id = 'both-face-' + tool.length;
+      const faces = [];
+      for (const pad of [false, true]) {
+        const t = makeTempEnv(id);
+        try {
+          runUpdateState('UserPromptSubmit', { session_id: id, prompt: 'go' }, t.env);
+          runUpdateState('PreToolUse', { session_id: id, tool_name: tool, tool_input: { command } }, t.env);
+          runUpdateState('PostToolUse', post(id, command, tool)(pad), t.env);
+          const s = readJSON(fileOf(t, id));
+          faces.push([s.state, s.detail]);
+        } finally { cleanup(t.tmp); }
+      }
+      assert.notStrictEqual(faces[1][1], 'large input', tool);
+      assert.deepStrictEqual(faces[1], faces[0], tool);
+    }
+  });
 });
 
 module.exports = suite;

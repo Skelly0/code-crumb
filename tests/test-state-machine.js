@@ -1977,10 +1977,10 @@ describe('state-machine.js -- classifyTruncatedInput', () => {
     assert.strictEqual(r.state, 'error');
   });
 
-  test('PostToolUse with no error signals falls through to thinking', () => {
+  test("PostToolUse with no error signals ends on its tool's success face", () => {
     const r = classifyTruncatedInput('PostToolUse', '{"tool_name":"Bash","tool_result":"all good output"}');
-    assert.strictEqual(r.state, 'thinking');
-    assert.strictEqual(r.detail, 'large input');
+    assert.strictEqual(r.state, 'relieved');
+    assert.strictEqual(r.detail, 'command succeeded');
   });
 
   test('SessionEnd maps to responding', () => {
@@ -5421,10 +5421,8 @@ describe('state-machine.js -- review round 6: invariants (fuzz)', () => {
   });
 
   test('arguments are data: a positional, a quoted string or a heredoc body never changes what a command is', () => {
-    // One positional at a time, between fixed neighbours. Two argument words
-    // side by side can still spell a command (`cp go test`): the npm/go/pip
-    // phrase tables match anywhere in an acting segment, which is what makes
-    // `xvfb-run npm test` and `docker exec api npm test` test runs.
+    // One positional at a time, between fixed neighbours. Two side by side
+    // are the next test's.
     const SLOTTED = [
       x => `rm -f ${x}`, x => `rm -rf ${x}`, x => `mkdir -p ${x}`, x => `touch ${x}`, x => `chmod +x ${x}`,
       x => `cp -r ${x} dist/`, x => `mv ${x} notes.bak`, x => `git add ${x}`, x => `git rm --cached ${x}`,
@@ -5475,6 +5473,29 @@ describe('state-machine.js -- review round 6: invariants (fuzz)', () => {
       const a = view(cmd), b = view(plain);
       if (!same(a, b) || shellIntent(cmd).intent !== shellIntent(plain).intent) return `${q(cmd)} -> ${q(a)}\n  but ${q(plain)} -> ${q(b)}`;
       return null;
+    });
+  });
+
+  test('two argument words side by side never spell a command either', () => {
+    // `cp go test` was a test run and `mv go get x` an install: the npm, go
+    // and pip phrase tables matched anywhere in an acting segment. A phrase is
+    // the command's own subcommand now, past the wrappers that run one
+    // (`xvfb-run npm test`, `docker exec api npm test`).
+    const PAIRED = [
+      (x, y) => `cp ${x} ${y}`, (x, y) => `cp -r ${x} ${y} dist/`, (x, y) => `mv ${x} ${y} notes.bak`,
+      (x, y) => `rm -f ${x} ${y}`, (x, y) => `touch ${x} ${y}`, (x, y) => `chmod +x ${x} ${y}`,
+      (x, y) => `mkdir -p ${x} ${y}`, (x, y) => `git add ${x} ${y}`, (x, y) => `./deploy.sh ${x} ${y}`,
+      (x, y) => `node scripts/gen.js ${x} ${y}`, (x, y) => `cat ${x} ${y}`, (x, y) => `ls -la ${x} ${y}`,
+    ];
+    const view = (cmd) => {
+      const si = shellIntent(cmd);
+      return { pre: pre(cmd), readOnly: si.readOnly, masked: si.masked, ok: claudeOk(cmd, 'done'), codex: codex(cmd, 'done\n') };
+    };
+    forAll('argument pairs', 600, (g) => {
+      const tpl = g.pick(PAIRED), x = g.arg(), y = g.arg();
+      const cmd = tpl(x, y), probe = tpl('zzqx', 'qqzx');
+      const a = view(cmd), b = view(probe);
+      return same(a, b) ? null : `${q(cmd)} -> ${q(a)}\n  but ${q(probe)} -> ${q(b)}`;
     });
   });
 
@@ -5599,7 +5620,8 @@ describe('state-machine.js -- review round 6: invariants (fuzz)', () => {
     const UNITS = ['xargs ', 'xargs -n 1 ', 'sudo ', 'A=1 ', '( ', '\\"', '"\\', `'a'"'"'`, 'bash -lc ', '<<A\n', '<<"A ',
       '2>&1 ', '> ', '| sort ', '&& cat x ', 'git -C x ', 'npx -p x ', 'pnpm --filter x ', 'nx -t a,b ', 'make -j 8 ',
       'python ', 'nohup ', 'npm ', 'go ', '; ', '\n', '\r\n', 'cd a; ', "sed -n 'p' ", '--epochs ', 'turbo run ', '$(',
-      '`', '{ ', 'a/', ' '];
+      '`', '{ ', 'a/', ' ', 'timeout 5 ', 'env -u X ', 'ssh h ', 'kubectl exec p -- ', 'docker compose run w ', 'uv run ',
+      'find . -exec ', String.raw`\; `, String.raw`\\`];
     // Every fragment behind a read and behind an act: a read-only chain is
     // searched for a failed cd, an acting one by the intent tables.
     const PREFIXES = ['git log && cat x ', 'npm install ', 'bash -lc "', "sh -c '", 'pwsh -Command ', 'find . | xargs ', ''];
@@ -5694,6 +5716,166 @@ describe('state-machine.js -- review round 6: invariants (fuzz)', () => {
     assert.strictEqual(pre(`echo \\"x; git commit -m 'npm test'`), 'committing');
     assert.strictEqual(adapter('cat x\n\n\n  cd /nope', 'bash: cd: /nope: No such file or directory').state, 'error');
     assert.strictEqual(adapter('cat x\r\n\r\ncd /nope', 'bash: cd: /nope: No such file or directory').state, 'error');
+  });
+});
+
+describe('state-machine.js -- review round 6: what the fuzzer found', () => {
+  const sm = require('../lib/state-machine');
+  const { shellIntent } = sm;
+  const pre = (command) => toolToState('Bash', { command }).state;
+  const done = (command) => classifyToolResult('Bash', { command }, { stdout: '', stderr: '' }, false).detail;
+  const check = (rows) => {
+    for (const [cmd, state, detail] of rows) {
+      assert.strictEqual(pre(cmd), state, `${cmd} shows ${pre(cmd)}`);
+      if (detail) assert.strictEqual(done(cmd), detail, `${cmd} finishes ${done(cmd)}`);
+    }
+  };
+
+  // The npm/go/pip phrase tables matched anywhere in an acting segment, so
+  // two argument words could spell a command.
+  test('argument words never spell a test run or an install', () => {
+    for (const cmd of ['cp go test', 'mv cargo test x', 'cp npm test dist/', 'touch dotnet test', 'git add rake test',
+      'cp php artisan test .', 'cp pip install x', 'mv go get x', 'rm -f brew install', 'mkdir -p apt-get install']) {
+      assert.strictEqual(pre(cmd), 'executing', `${cmd} shows ${pre(cmd)}`);
+      assert.ok(!/tests passed|installed/.test(done(cmd)), `${cmd} finishes ${done(cmd)}`);
+    }
+  });
+
+  // What the phrase tables' reach was for: a wrapper runs the command after
+  // it. The word tables never looked past one (`timeout 60 git push`).
+  test('a wrapper runs the command after it: sudo, env, timeout, nice, xvfb-run, xargs...', () => {
+    check([
+      ['xvfb-run -a npm test', 'testing', 'tests passed'],
+      ['timeout 600 cargo test', 'testing', 'tests passed'],
+      ['timeout -s KILL 10m go test ./...', 'testing', 'tests passed'],
+      ['nice -n 10 go test ./...', 'testing', 'tests passed'],
+      ['env CI=1 npm test', 'testing', 'tests passed'],
+      ['env -u HOME CI=1 pytest -q', 'testing', 'tests passed'],
+      ['stdbuf -oL make test', 'testing', 'tests passed'],
+      ['sudo -E npm install -g typescript', 'installing', 'installed'],
+      ['sudo apt-get -y install jq', 'installing', 'installed'],
+      ['sudo -u deploy git push', 'committing', 'pushed!'],
+      ['timeout 60 git push', 'committing', 'pushed!'],
+      ['time -p make', 'executing', 'build succeeded'],
+      ['nohup npm run build', 'executing', 'build succeeded'],
+      ['git ls-files -z | xargs -0 git rm --cached', 'executing', 'git done'],
+    ]);
+    assert.strictEqual(shellIntent('ls | xargs -n1 timeout 5 cat').readOnly, true);
+    assert.strictEqual(shellIntent('timeout 5 tail -f app.log').readOnly, true);
+    assert.strictEqual(shellIntent('ls | xargs -n1 timeout 5 rm').readOnly, false);
+    // `command -v` looks a name up, whatever the name.
+    assert.strictEqual(shellIntent('command -v deploy').readOnly, true);
+    assert.strictEqual(shellIntent('command deploy --prod').readOnly, false);
+  });
+
+  test('a container, pod or host runs the command after it', () => {
+    check([
+      ['docker exec api npm test', 'testing', 'tests passed'],
+      ['docker exec -it -u node api npm test', 'testing', 'tests passed'],
+      ['docker compose exec web pytest', 'testing', 'tests passed'],
+      ['docker compose -f ci.yml run --rm web npm test', 'testing', 'tests passed'],
+      ['docker-compose exec -T web npm install', 'installing', 'installed'],
+      ['docker run --rm -v "$PWD":/app -w /app node:20 npm test', 'testing', 'tests passed'],
+      ['podman run --rm -e CI=1 --cpus 2 node:20 npm test', 'testing', 'tests passed'],
+      ['kubectl exec -it api -c app -- npm test', 'testing', 'tests passed'],
+      ['ssh -p 2222 ci-box npm test', 'testing', 'tests passed'],
+    ]);
+    // What runs there is what is judged: a read stays a read...
+    assert.strictEqual(shellIntent('docker exec api cat /etc/hosts').readOnly, true);
+    assert.strictEqual(shellIntent('ssh box tail -n 50 app.log').readOnly, true);
+    // ...and with nothing named to run, the container or the login acts.
+    for (const cmd of ['docker run img', 'docker run --rm -it node:20', 'ssh box', 'kubectl exec -it api', 'docker compose up']) {
+      assert.strictEqual(shellIntent(cmd).readOnly, false, cmd);
+    }
+  });
+
+  test("a manager's subcommand is found past its flags and workspace selector", () => {
+    check([
+      ['npm --prefix web test', 'testing', 'tests passed'],
+      ['pnpm --filter web test', 'testing', 'tests passed'],
+      ['yarn workspace web test', 'testing', 'tests passed'],
+      ['npm -s run test:unit', 'testing', 'tests passed'],
+      ['cargo +nightly test', 'testing', 'tests passed'],
+      ['python -m pip install -r requirements.txt', 'installing', 'installed'],
+      ['uv pip install torch', 'installing', 'installed'],
+      ['pip3.11 install requests', 'installing', 'installed'],
+      ['go install ./cmd/tool', 'installing', 'installed'],
+      ['php artisan test', 'testing', 'tests passed'],
+      ['rake test:units', 'testing', 'tests passed'],
+    ]);
+    assert.strictEqual(done('cargo +nightly build'), 'build succeeded');
+  });
+
+  // find's actions were invisible: every find was a read, so a failed
+  // -delete was never looked for.
+  test('find acts when it deletes, writes a file, or runs a command that acts', () => {
+    for (const [cmd, readOnly] of [
+      ["find . -name '*.tmp' -delete", false], ['find . -name x -exec rm {} \\;', false],
+      ['find . -exec rm -f {} +', false], ['find . -type f -execdir chmod +x {} \\;', false],
+      ['find . -ok rm {} \\;', false], ['find . -fprint files.txt', false], ['find . -exec rm {} \\; -print', false],
+      ['find . -exec sudo rm {} +', false], ['fd -e tmp -x rm', false],
+      ['find . -exec grep -l foo {} +', true], ['find . -name "*.ts" -exec wc -l {} \\; | sort -n', true],
+      ['find . -type f', true], ['find . -exec sed -n 1p {} \\;', true], ['fd -e ts -X wc -l', true],
+    ]) {
+      assert.strictEqual(shellIntent(cmd).readOnly, readOnly, cmd);
+    }
+    // So an adapter, with no exit code, reports find's own failure.
+    const r = classifyToolResult('Bash', { command: "find . -name '*.log' -delete" },
+      { stdout: "find: cannot delete './x.log': Permission denied", stderr: '' }, false);
+    assert.strictEqual(r.state, 'error');
+  });
+
+  test('an escaped ; | or & is a word, as the shell reads it, not an operator', () => {
+    assert.strictEqual(shellIntent('find . -exec rm {} \\; -print').segments.length, 1);
+    assert.strictEqual(shellIntent('grep a\\|b notes.txt').readOnly, true);
+    assert.strictEqual(shellIntent('grep a\\|b notes.txt').segments.length, 1);
+    // An escaped backslash escapes nothing after it.
+    assert.strictEqual(shellIntent('echo a\\\\; rm -rf build').segments.length, 2);
+  });
+
+  // An explicit exit code is the host's own word on the command's status.
+  test('an explicit exit code 0 beats one read from the output, unless the command can mask it', () => {
+    const out = 'step 3 of 5: Exit code 1\nretrying\nall done';
+    const r = (command, extra) => classifyToolResult('Bash', { command }, { stdout: out, stderr: '', ...extra }, false);
+    assert.strictEqual(r('make', { exitCode: 0 }).state, 'relieved');
+    assert.strictEqual(r('make', { exitCode: 0 }).detail, 'build succeeded');
+    // A pipeline's 0 is its last command's: make's own status is lost.
+    assert.strictEqual(r('make | tee build.log', { exitCode: 0 }).state, 'error');
+    // No exit code at all: the output is all there is, as before.
+    assert.strictEqual(r('make', {}).state, 'error');
+  });
+
+  // A huge result is cut at 1 MB and judged from its raw text. With no error
+  // in it, it fell through to "large input" instead of its tool's success.
+  test("a huge tool result with no error in it ends on its tool's own success face", () => {
+    const cut = (name, input) => JSON.stringify({ session_id: 's', hook_event_name: 'PostToolUse', tool_name: name,
+      tool_input: input, tool_response: { stdout: 'line\n'.repeat(400) } }).slice(0, 3000);
+    const t = (name, input, opts) => classifyTruncatedInput('PostToolUse', cut(name, input), opts);
+    assert.deepStrictEqual([t('Bash', { command: 'npm test' }).state, t('Bash', { command: 'npm test' }).detail], ['relieved', 'tests passed']);
+    assert.strictEqual(t('Read', { file_path: '/x/big.log' }).detail, 'read big.log');
+    assert.strictEqual(t('mcp__playwright__browser_take_screenshot', {}).detail, 'playwright done');
+    // The OpenCode plugin's flat payload names its input toolInput.
+    const flat = JSON.stringify({ type: 'tool.execute.after', tool: 'bash', toolInput: { command: 'cargo test' },
+      output: 'ok\n'.repeat(900) }).slice(0, 2000);
+    assert.strictEqual(classifyTruncatedInput('PostToolUse', flat).detail, 'tests passed');
+    // An input cut off with the output is the tool's face without it.
+    const huge = JSON.stringify({ tool_name: 'Write', tool_input: { file_path: 'a.txt', content: 'x'.repeat(5000) } }).slice(0, 1000);
+    assert.strictEqual(classifyTruncatedInput('PostToolUse', huge).state, 'proud');
+    // An error in the window still wins.
+    assert.strictEqual(classifyTruncatedInput('PostToolUse', cut('Bash', { command: 'npm test' }) + '\\nnpm ERR! code 1').state, 'error');
+  });
+
+  // Claude Code reports a failed Bash as PostToolUseFailure, so its huge
+  // PostToolUse is a success too -- as on the main path, only a command line
+  // that can mask a failure is searched.
+  test('a huge trusted success is not searched for failures, unless the command can mask one', () => {
+    const TRUST = { trustSuccess: true };
+    const raw = (command) => JSON.stringify({ tool_name: 'Bash', tool_input: { command },
+      tool_response: { stdout: 'line\nFAIL src/a.test.js\n' + 'line\n'.repeat(400) } }).slice(0, 3000);
+    assert.strictEqual(classifyTruncatedInput('PostToolUse', raw('npm test'), TRUST).detail, 'tests passed');
+    assert.strictEqual(classifyTruncatedInput('PostToolUse', raw('npm test | tail -50'), TRUST).state, 'error');
+    // Untrusted (Codex, an adapter) as before.
+    assert.strictEqual(classifyTruncatedInput('PostToolUse', raw('npm test')).state, 'error');
   });
 });
 
