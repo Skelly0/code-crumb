@@ -299,12 +299,12 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 
 - **update-state.js** stamps it on `UserPromptSubmit`, and on a `SessionStart` whose `source` is not `compact`. A *compact* `SessionStart` with **no** predecessor file also stamps, because an unstamped file has attention `0` forever.
 - **Adapters** keep no memory between events, so the session file is their memory.
-  - They stamp on a session's first event, on the first non-turn-ending event after a file marked `stopped` or `turnEnded`, or when a live previous file has no stamp. Otherwise they carry the old stamp.
+  - They stamp on a session's first event, on the first non-turn-ending event after a file marked `stopped` or `turnEnded`, or when a live previous file has no stamp. Otherwise they carry the old stamp. Turn-ending is judged by the mapped result (a write that stops), not the event name, so a non-stopping `error` (an OpenCode context overflow, OpenClaw's generic error) stamps; so does an oversized payload that is neither a tool end nor a turn end.
   - They follow the same turn-end contract: `turnEnded` on the session file, global `stopped`, and session-file `stopped` only for `session_end`. OpenClaw's `session_end` is its own event.
   - A late `tool_end` is not a new turn. It carries the old stamp and whichever end the file records, and `guardedWriteState` re-stamps the global `stopped` only for such a tool end (`opts.toolEnd`).
   - The previous file also carries `model` and `firstSeenAt`, because `writeSessionState` rebuilds from scratch.
 - **`codex-wrapper.js`** stamps on `thread.started` and `turn.started`. `turn.completed`/`turn.failed` write `turnEnded`; session-file `stopped` comes only when the wrapper closes.
-- **`codex-notify.js`** never stamps, since its only event is a turn end. It carries the hooks' stamp and the other sticky fields forward.
+- **`codex-notify.js`** never stamps, since its only event is a turn end. It carries the hooks' stamp and the other sticky fields forward, and keeps a session file already marked `stopped` stopped: Codex runs it fire and forget, so it can land after codex-wrapper retires the session.
 
 **What the main face reads.** `readState(filePath = STATE_FILE)`: the unified renderer passes the main's session file, and tmux mode passes nothing.
 
@@ -912,8 +912,8 @@ Tool patterns are shared constants in state-machine.js: `EDIT_TOOLS`, `BASH_TOOL
 | Item type | Mapping |
 |---|---|
 | `command_execution` | `Bash` + the command (so the Bash tables split executing / testing / installing / committing); `declined` → relieved, `failed` → error via `isError`/`exit_code` |
-| `file_change` | `Edit` over `changes[].path`; completed → proud `saved <file>` / `saved N files` |
-| `mcp_tool_call` | `mcp__<server>__<tool>` through the MCP verb classifier |
+| `file_change` | `Edit` over `changes[].path`; completed → proud `saved <file>` / `saved N files`. An item seen only as `item.completed` is counted then |
+| `mcp_tool_call` | `mcp__<server>__<tool>` through the MCP verb classifier; `error` may be a string or `{message}` |
 | `web_search` | `WebSearch` |
 | `collab_tool_call` / `collab_agent_tool_call` | `Task` (Codex's delegation) |
 | `todo_list` / `plan_update` | `TodoWrite` → thinking, then satisfied `plan updated` |
@@ -930,9 +930,9 @@ Tool patterns are shared constants in state-machine.js: `EDIT_TOOLS`, `BASH_TOOL
 - **After `finishSession`**, `handleEvent` returns at once: codex keeps printing while it shuts down.
 - **`close`, not `exit`, ends the run**, so buffered stdout drains. Once codex has *exited*, `EXIT_GRACE_MS` (3s) ends the run anyway, since `close` waits for every holder of the pipe.
 - **A closed reader** (`| head`, `EPIPE`) retires the session as `error` / `output closed` and destroys codex's stdout. The wrapper then exits `signalExitCode('SIGPIPE')`: 141 on POSIX, 1 on win32.
-- **The session-ending write happens once** (`finishSession`), from `close`, a closed reader, or a caught SIGINT/SIGTERM, which is forwarded to codex.
+- **The session-ending write happens once** (`finishSession`), from `close`, a closed reader, or a caught SIGINT/SIGTERM/SIGHUP, which is forwarded to codex.
 - **Exit codes.** `closeOutcome()` turns a signal-killed codex into an error with exit 128+N (`signalExitCode`).
-- **engmux** behaves the same way: a signal writes `error` / `interrupted` with `stopped`, then exits 130/143.
+- **engmux** behaves the same way: a signal writes `error` / `interrupted` with `stopped`, then exits 130/143/129. Its stdout is passed through as it arrives; only the copy it parses is capped at 1 MB, and a capped copy is judged by the exit code.
 
 **Living alongside the hooks.** The session id is codex's **bare** thread id, which is the hooks' `session_id` too (before `thread.started` it is `codex-<pid>`). `setup.js codex` installs the hooks *and* suggests the wrapper.
 
@@ -958,14 +958,15 @@ Tool patterns are shared constants in state-machine.js: `EDIT_TOOLS`, `BASH_TOOL
 - **The node binary** is resolved **per spawn** (`CODE_CRUMB_NODE || 'node'`), because `process.execPath` inside OpenCode is Bun.
 - **Size caps.**
   - The adapter reads ≤1 MB of stdin, and judges anything bigger from its raw text.
-  - Tool arguments are capped at `MAX_FIELD` (64 KB). `capInput` keeps a long string's line count as newlines, for the "+N" thought.
+  - Tool arguments are capped at `MAX_FIELD` (64 KB). An object nested past depth 3 is dropped, since nothing reads that deep. `capInput` keeps a long string's line count as newlines, for the "+N" thought.
   - Batches are capped at `MAX_BATCH_BYTES` (900 KB, `takeBatch`), and sent as sequential `spawnSync`s on the sync path.
 - **Numbering.** Payloads carry `seq` and `pluginId`. A turn end records `endSeq`/`pluginId` on the session file, and a payload numbered before it is a **straggler**: counted, but not drawn. A late tool end keeps its own rule. The cause: a child spawned just before a sync turn end cannot write before it.
 - **Child sessions.** The task tool runs a child session (`sessions.create({ parentID })`). Only `session.created` names the parent, so the plugin remembers it (`parentBySession`) and stamps `parentSession` on the child's payloads. A child is an orbital of its parent:
   - it never stamps attention;
   - it never writes the global file;
   - its tool calls count toward the parent (`statsId`);
-  - its `session.idle` retires it (`stopped`).
+  - its `session.idle` retires it (`stopped`);
+  - its every event touches each ancestor's session file (the family heartbeat, as update-state.js does for Claude Code agents), so a parent waiting on its task tool stays fresh on win32.
 - **`session.error`.**
   - Without a session id it is dropped, because plugin and skill load failures send them. Otherwise it carries `errorName`.
   - A `ContextOverflowError` is followed by compaction. When no `session.compacted` follows, the next idle is marked `overflowFailed` (`trackOverflow`).
@@ -989,10 +990,10 @@ Tool patterns are shared constants in state-machine.js: `EDIT_TOOLS`, `BASH_TOOL
 | a timed-out tool end | error `timed out` | breaks the streak |
 | `overflowFailed` idle | error `context too long` | a failed turn |
 | `MessageAbortedError`/`AbortError` (Esc) | error `interrupted` | ends the turn without a streak break, in either arrival order |
-| any other session error | error with its detail | ends the turn as failed: `turnError`, kept through the next `session.idle`; breaks the streak once |
+| any other session error | error with its detail | ends the turn as failed: `turnError`, shown by the next `session.idle` and not carried past it; breaks the streak once |
 | `session.idle` | happy | ends the turn (`turnEnded`; `stopped` only for a child) |
 
-The adapter's `TOOL_ALIASES` map `question` → `AskUserQuestion`, `plan_exit` → `ExitPlanMode` and `plan_enter` → `EnterPlanMode`.
+The adapter's `TOOL_ALIASES` map `question` → `AskUserQuestion`, `plan_exit` → `ExitPlanMode` and `plan_enter` → `EnterPlanMode`. `normaliseToolInput` aliases `filePath`/`oldString`/`newString` to `file_path`/`old_string`/`new_string`, inside multiedit's `edits[]` too, so OpenCode edits get diff counts.
 
 **Every adapter (base-adapter.js):**
 
@@ -1000,7 +1001,7 @@ The adapter's `TOOL_ALIASES` map `question` → `AskUserQuestion`, `plan_exit` �
 - **Timestamps** strictly increase within a process (`nextTimestamp`).
 - **Hooks for subclasses.** `normaliseEvent` may return `{ skip: true }`, and `mapEvent` may return `breakStreak`.
 - **Tool results.** `exitCode`/`interrupted` are passed to `classifyToolResult`.
-- **Failed turns.** A `turnError` turn end keeps the error face without breaking the streak again (`failedTurnEnd`).
+- **Failed turns.** The turn end after a `turnError` keeps the error face without breaking the streak again (`failedTurnEnd`), once: a turn end never carries `turnError` on, so a later text-only turn (only its idle reaches the adapter) ends happy.
 - **Payloads over 1 MB** reach the session file with their sticky fields, judged by their own event: only a tool end is checked for errors, and a tool start shows its tool.
 
 ### The Launcher

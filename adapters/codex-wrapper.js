@@ -173,11 +173,15 @@ function classifyItem(item, phase) {
       const toolInput = (item.arguments && typeof item.arguments === 'object') ? item.arguments : {};
       if (!done) return { toolName, toolInput };
       const failed = status === 'failed' || item.error != null;
+      // codex's McpToolCallItem error is { message }; it read "[object Object]".
+      const err = item.error;
+      const errText = typeof err === 'string' ? err
+        : (err && typeof err.message === 'string' ? err.message : '');
       return {
         toolName, toolInput,
         toolResponse: {
           stdout: typeof item.result === 'string' ? item.result : '',
-          stderr: failed ? shortText(item.error || 'tool failed') : '',
+          stderr: failed ? shortText(errText || 'tool failed') : '',
           isError: failed,
         },
       };
@@ -289,29 +293,49 @@ function commit(decide) {
   });
 }
 
-// countTool is false for item.updated: the same tool must not be counted twice.
+// Ids of the items whose start was counted. codex exec reports some items
+// only once they are done -- a patch (file_change), a web search -- and with
+// the count taken on item.started alone, a run's edits never reached its
+// tool calls, filesEdited or frequentFiles.
+const startedItems = new Set();
+
+// The start of an item, counted: the tool call and every path it touched
+// (handleToolStart tracks only the first; a patch can touch many).
+function countStart(stats, s) {
+  const result = handleToolStart(stats, s.toolName, s.toolInput);
+  for (const fp of (s.filePaths || []).slice(1)) {
+    trackEditedFile(stats, s.toolName, { file_path: fp });
+  }
+  return result;
+}
+
+// countTool is false for item.updated: the same tool must not be counted
+// twice. A completion counts the start no item.started counted.
 function applyItem(item, phase, countTool) {
   const c = classifyItem(item, phase);
   if (!c) return;
+  const id = item.id != null ? String(item.id) : '';
+  const unstarted = phase === 'completed' && !!c.toolName && !!id && !startedItems.has(id);
+  if (phase !== 'completed' && countTool && c.toolName && id) startedItems.add(id);
   commit((stats) => {
     let state = c.state;
     let detail = c.detail;
     let diffInfo = null;
     if (c.toolName) {
       if (phase === 'completed') {
+        if (unstarted) {
+          const s = classifyItem(item, 'started');
+          if (s && s.toolName) countStart(stats, s);
+        }
         const response = c.toolResponse || {};
         const result = handleToolEnd(stats, c.toolName, c.toolInput, response, !!response.isError);
         state = state || result.state;
         if (detail === undefined) detail = result.detail;
         diffInfo = result.diffInfo;
       } else if (countTool) {
-        const result = handleToolStart(stats, c.toolName, c.toolInput);
+        const result = countStart(stats, c);
         state = state || result.state;
         if (detail === undefined) detail = result.detail;
-        // handleToolStart only tracks the first path; a patch can touch many.
-        for (const fp of (c.filePaths || []).slice(1)) {
-          trackEditedFile(stats, c.toolName, { file_path: fp });
-        }
       } else {
         const result = toolToState(c.toolName, c.toolInput);
         state = state || result.state;
@@ -568,7 +592,9 @@ function main() {
     try { codex.kill(sig); } catch {}
     setTimeout(() => process.exit(signalExitCode(sig)), 2000).unref();
   };
-  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => onSignal(sig));
+  // SIGHUP too: launch.js forwards it to the editor it supervises, and a
+  // closing terminal sends it; it killed the wrapper with no final write.
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => onSignal(sig));
 
   // 'close', not 'exit': exit fires while stdout may still hold buffered
   // JSONL, so the last events of a turn (turn.completed included) could be

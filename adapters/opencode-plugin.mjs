@@ -89,9 +89,13 @@ function capText(v) {
   return v.slice(0, MAX_FIELD) + '\n'.repeat(lines);
 }
 
+// Past depth 3 nothing is read (the adapter's deepest field is an edit's
+// old_string inside edits[]), so a deeper object is dropped: passed through
+// whole, a long string nested in an MCP tool's arguments went out uncapped.
 function capInput(v, depth = 0) {
   if (typeof v === 'string') return capText(v);
-  if (!v || typeof v !== 'object' || depth > 3) return v;
+  if (!v || typeof v !== 'object') return v;
+  if (depth > 3) return null;
   if (Array.isArray(v)) return v.map(x => capInput(x, depth + 1));
   const out = {};
   for (const [k, x] of Object.entries(v)) out[k] = capInput(x, depth + 1);

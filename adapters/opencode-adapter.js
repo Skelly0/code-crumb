@@ -82,15 +82,33 @@ function textField(v) {
   return typeof v === 'string' ? v : '';
 }
 
-// OpenCode's built-in tools name their file argument `filePath`; the shared
-// tool->state map and the edited-file tracker read `file_path`. Alias it so
-// `edit` shows "editing a.js" and the file lands in frequentFiles.
+// OpenCode's built-in tools spell their arguments in camelCase; the shared
+// tool->state map, the edited-file tracker and the diff counter read the
+// snake_case names. Aliased, `edit` shows "editing a.js", the file lands in
+// frequentFiles, and an edit or multiedit gets its "+N -M" (it had none:
+// the diff counter found no old_string/new_string).
+const ARG_ALIASES = [['filePath', 'file_path'], ['oldString', 'old_string'], ['newString', 'new_string']];
+
+function aliasArgs(input) {
+  let out = input;
+  for (const [from, to] of ARG_ALIASES) {
+    if (!input[to] && typeof input[from] === 'string') {
+      if (out === input) out = { ...input };
+      out[to] = input[from];
+    }
+  }
+  return out;
+}
+
 function normaliseToolInput(raw) {
   const input = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
-  if (!input.file_path && typeof input.filePath === 'string') {
-    return { ...input, file_path: input.filePath };
-  }
-  return input;
+  const out = aliasArgs(input);
+  // multiedit: { filePath, edits: [{ filePath, oldString, newString }] }
+  if (!Array.isArray(input.edits)) return out;
+  return {
+    ...out,
+    edits: input.edits.map(e => (e && typeof e === 'object' && !Array.isArray(e) ? aliasArgs(e) : e)),
+  };
 }
 
 function normaliseEvent(data) {
@@ -204,11 +222,9 @@ function mapEvent(event, toolName, toolInput, toolOutput, isError, data) {
       || 'something went wrong';
     return { state: 'error', detail, stopped: true, breakStreak: true, extra: { turnError: detail } };
   }
+  // The idle itself is the failed turn's end: nothing follows to keep it for.
   if (event === 'turn_end' && data.overflowFailed === true) {
-    return {
-      state: 'error', detail: 'context too long', stopped: true, breakStreak: true,
-      extra: { turnError: 'context too long' },
-    };
+    return { state: 'error', detail: 'context too long', stopped: true, breakStreak: true };
   }
   if (event === 'message_update') {
     if (data.is_thinking) {
