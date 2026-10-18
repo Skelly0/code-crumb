@@ -1305,13 +1305,15 @@ describe('grid.js -- loadSessions mtime purge protects active faces (Bug #0)', (
 
   // Same file in all three tests, only the in-memory face differs: that is
   // what makes "the file survived" attributable to the face and not to luck.
+  // A top-level file naming no pid is kept NO_PID_FILE_KEEP_MS whatever its
+  // face (round 6), so the file is older than that.
   function seedStaleFile(sessionId) {
     try { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); } catch {}
     const fp = pathMod.join(SESSIONS_DIR, sessionId + '.json');
     fs.writeFileSync(fp, JSON.stringify({
       session_id: sessionId, state: 'thinking', detail: '', timestamp: Date.now(),
     }));
-    const old = new Date(Date.now() - STALE_MS - 5000);
+    const old = new Date(Date.now() - require('../lib/grid').NO_PID_FILE_KEEP_MS - 5000);
     fs.utimesSync(fp, old, old);
     return fp;
   }
@@ -3637,6 +3639,7 @@ describe('MiniFace activity cycling', () => {
 
   test('non-subagent faces do not cycle (no parentSession)', () => {
     const face = new MiniFace('no-parent');
+    face.synthetic = true;
     face.state = 'thinking';
     face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
     // Place firstSeen so cycle index would land on 'coding' (idx 3) if cycling fired
@@ -3651,6 +3654,7 @@ describe('MiniFace activity cycling', () => {
   test('stopped faces do not cycle', () => {
     const face = new MiniFace('stopped-sub');
     face.parentSession = 'parent-1';
+    face.synthetic = true; // a parent-written subagent file (synthetic: true)
     face.stopped = true;
     face.state = 'thinking';
     face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
@@ -3664,6 +3668,7 @@ describe('MiniFace activity cycling', () => {
   test('spawning faces do not cycle', () => {
     const face = new MiniFace('spawning-sub');
     face.parentSession = 'parent-1';
+    face.synthetic = true; // a parent-written subagent file (synthetic: true)
     face.spawning = true;
     face.state = 'spawning';
     face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
@@ -3677,6 +3682,7 @@ describe('MiniFace activity cycling', () => {
   test('fresh data prevents cycling (sinceUpdate < CYCLE_STALE_MS)', () => {
     const face = new MiniFace('fresh-data');
     face.parentSession = 'parent-1';
+    face.synthetic = true; // a parent-written subagent file (synthetic: true)
     face.state = 'reading';
     face.lastUpdate = Date.now(); // just updated
     face.firstSeen = Date.now() - 30000;
@@ -3689,6 +3695,7 @@ describe('MiniFace activity cycling', () => {
   test('deterministic cycling based on firstSeen', () => {
     const face = new MiniFace('cycle-test');
     face.parentSession = 'parent-1';
+    face.synthetic = true; // a parent-written subagent file (synthetic: true)
     face.state = 'thinking';
     const baseTime = Date.now();
     face.firstSeen = baseTime - 10000;
@@ -3704,6 +3711,7 @@ describe('MiniFace activity cycling', () => {
   test('non-thinking cycling states survive timeout logic', () => {
     const face = new MiniFace('survive-test');
     face.parentSession = 'parent-1';
+    face.synthetic = true; // a parent-written subagent file (synthetic: true)
     face.state = 'idle';
     // Place firstSeen so cycle index lands on 'coding' (idx 3)
     face.firstSeen = Date.now() - (3 * CYCLE_INTERVAL + 500);
@@ -3718,6 +3726,7 @@ describe('MiniFace activity cycling', () => {
   test('cycling sets minDisplayUntil to 800ms', () => {
     const face = new MiniFace('display-time');
     face.parentSession = 'parent-1';
+    face.synthetic = true; // a parent-written subagent file (synthetic: true)
     face.state = 'idle'; // will differ from cycle state
     face.firstSeen = Date.now() - 15000;
     face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
@@ -3732,6 +3741,7 @@ describe('MiniFace activity cycling', () => {
   test('_cycleDetail returns taskDescription when available', () => {
     const face = new MiniFace('detail-task');
     face.parentSession = 'parent-1';
+    face.synthetic = true; // a parent-written subagent file (synthetic: true)
     face.taskDescription = 'fix login bugs';
     face.state = 'coding';
     assert.strictEqual(face._cycleDetail(), 'fix logi');
@@ -3740,6 +3750,7 @@ describe('MiniFace activity cycling', () => {
   test('_cycleDetail returns state-specific text without taskDescription', () => {
     const face = new MiniFace('detail-state');
     face.parentSession = 'parent-1';
+    face.synthetic = true; // a parent-written subagent file (synthetic: true)
     face.state = 'reading';
     assert.strictEqual(face._cycleDetail(), 'reading');
     face.state = 'searching';
@@ -3755,6 +3766,7 @@ describe('MiniFace activity cycling', () => {
   test('real data override stops cycling', () => {
     const face = new MiniFace('override-test');
     face.parentSession = 'parent-1';
+    face.synthetic = true; // a parent-written subagent file (synthetic: true)
     face.state = 'idle';
     face.firstSeen = Date.now() - 15000;
     face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
@@ -3766,7 +3778,7 @@ describe('MiniFace activity cycling', () => {
     // Now simulate real data arriving — expire minDisplayUntil first since
     // cycling sets it to now+800 and active work states can't interrupt each other
     face.minDisplayUntil = 0;
-    face.updateFromFile({ state: 'coding', detail: 'real.js', timestamp: Date.now() });
+    face.updateFromFile({ state: 'coding', detail: 'real.js', parentSession: 'parent-1', synthetic: true, timestamp: Date.now() });
     assert.strictEqual(face.state, 'coding');
     assert.strictEqual(face.detail, 'real.js');
     // Next tick should NOT cycle because lastUpdate is fresh
@@ -4195,6 +4207,9 @@ describe('grid.js -- activity cycling never paints over real state', () => {
   function staleChild(id, state) {
     const face = new MiniFace(id);
     face.parentSession = 'parent-1';
+    // Marked synthetic even for the agent_id ids below: the id rule must hold
+    // on its own, whatever such a file claims.
+    face.synthetic = true;
     face.state = state;
     face.firstSeen = Date.now() - (3 * CYCLE_INTERVAL + 500); // cycle idx would be 'coding'
     face.lastUpdate = Date.now() - CYCLE_STALE_MS - 1000;
@@ -4996,7 +5011,8 @@ describe('grid.js -- Review round 5', () => {
       put(dir, 'P.json', '');                                     // a live parent, torn this pass
       put(dir, 'P-agent-1.json', { session_id: 'P-agent-1', parentSession: 'P', state: 'thinking', timestamp: now - 100e3 }, now - 100e3);
       put(dir, 'P-agent-2.json', { session_id: 'P-agent-2', parentSession: 'P', state: 'thinking', timestamp: now - 130e3 }, now - 130e3);
-      put(dir, 'old.json', { session_id: 'old', state: 'coding', timestamp: now - 200e3 }, now - 200e3);
+      put(dir, 'old.json', { session_id: 'old', state: 'coding', timestamp: now - 7200e3 }, now - 7200e3);
+      put(dir, 'mid.json', { session_id: 'mid', state: 'coding', timestamp: now - 200e3 }, now - 200e3); // no pid: kept
       put(dir, 'junk.json', 'null', now - 200e3);
       put(dir, 'done.json', { session_id: 'done', state: 'happy', stopped: true, timestamp: now }, now);
       put(dir, 'win.json', { session_id: 'win', state: 'reading', timestamp: now }, now);
@@ -5014,7 +5030,7 @@ describe('grid.js -- Review round 5', () => {
       assert.deepStrictEqual(verdict(a, d2), verdict(s, d1));
       assert.deepStrictEqual(verdict(s, d1), {
         faces: ['P-agent-1', 'P-agent-2', 'win'],
-        files: ['P-agent-1.json', 'P-agent-2.json', 'P.json', 'done.json', 'win.json'],
+        files: ['P-agent-1.json', 'P-agent-2.json', 'P.json', 'done.json', 'mid.json', 'win.json'],
       });
     } finally { rm(d1); rm(d2); }
   });
@@ -5034,7 +5050,9 @@ describe('grid.js -- Review round 5', () => {
       assert.ok(f.lastUpdate <= realNow(), 'lastUpdate sits an hour in the future');
       Date.now = () => realNow() + ORPHAN_TIMEOUT + 5000;
       assert.strictEqual(f.isStale(), true, 'a crashed session read as fresh for the whole step');
-      Date.now = () => realNow() + STALE_MS + 5000;
+      // Past the keep a top-level file naming no pid gets (round 6), and
+      // still well short of the hour its raw mtime claims.
+      Date.now = () => realNow() + grid.NO_PID_FILE_KEEP_MS + 5000;
       orb.loadSessions(null); // the face goes...
       orb.loadSessions(null); // ...and with nothing vouching for it, the file
       assert.strictEqual(fs.existsSync(fp), false, 'its file was never purged');
@@ -5333,6 +5351,329 @@ describe('grid.js -- Review round 5 (docs-pass bugs): permission settles', () =>
       const orbitalShowsIt = settle(write).state === s;
       assert.strictEqual(orbitalShowsIt, mainTakesIt, s);
     }
+  });
+});
+
+// -- Review round 6 (grid) ----------------------------------------------------
+// Each test below was run against the pre-fix sources first and failed there.
+
+describe('grid.js -- Review round 6 (grid)', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const grid = require('../lib/grid');
+  const { orderSessionList, MINI_W, MINI_H } = grid;
+  const alive = () => true;
+  const mkdir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'crumb-r6-'));
+  const rm = (dir) => fs.rmSync(dir, { recursive: true, force: true });
+  const put = (dir, name, body, mtimeMs) => {
+    const fp = path.join(dir, name);
+    fs.writeFileSync(fp, typeof body === 'string' ? body : JSON.stringify(body));
+    if (mtimeMs !== undefined) fs.utimesSync(fp, new Date(mtimeMs), new Date(mtimeMs));
+    return fp;
+  };
+  const orbitalAt = (dir) => { const o = new OrbitalSystem(); o._sessionsDir = dir; return o; };
+  const loadAsync = async (o, id = null) => {
+    o.loadSessionsAsync(id);
+    const until = Date.now() + 3000;
+    while (o._loadingInProgress && Date.now() < until) await new Promise(r => setTimeout(r, 5));
+    await new Promise(r => setTimeout(r, 50)); // its unlinks are fire-and-forget
+  };
+
+  // -- 1. A no-pid window's file outlives a long tool ------------------------
+  // win32 sessions carry no pid. A window 130s into `npm test` lost its file
+  // to the STALE_MS purge, and the adapter's next event, finding no file,
+  // stamped a fresh lastPromptAt: the center went to a window nobody addressed.
+
+  test.async('a no-pid top-level file survives a long tool, sync and async; its face still goes stale', async () => {
+    for (const mode of ['sync', 'async']) {
+      const dir = mkdir();
+      try {
+        const now = Date.now();
+        const fp = put(dir, 'ses_oc.json', {
+          session_id: 'ses_oc', state: 'testing', detail: 'npm test', editor: 'opencode',
+          lastPromptAt: now - 600e3, timestamp: now - 130e3,
+        }, now - 130e3);
+        const orb = orbitalAt(dir);
+        if (mode === 'sync') orb.loadSessions('main'); else await loadAsync(orb, 'main');
+        assert.ok(fs.existsSync(fp), `${mode}: the file -- the session's attention stamp -- was purged mid-tool`);
+        assert.strictEqual(JSON.parse(fs.readFileSync(fp, 'utf8')).lastPromptAt, now - 600e3);
+        assert.ok(!orb.faces.has('ses_oc'), `${mode}: the face itself must still go stale at ORPHAN_TIMEOUT`);
+      } finally { rm(dir); }
+    }
+  });
+
+  test('a no-pid top-level file is kept for NO_PID_FILE_KEEP_MS (30 min), then purged', () => {
+    assert.strictEqual(grid.NO_PID_FILE_KEEP_MS, 30 * 60000);
+    const dir = mkdir();
+    try {
+      const now = Date.now();
+      const kept = now - grid.NO_PID_FILE_KEEP_MS + 60e3;
+      const gone = now - grid.NO_PID_FILE_KEEP_MS - 60e3;
+      const a = put(dir, 'a.json', { session_id: 'a', state: 'idle', turnEnded: true, timestamp: kept }, kept);
+      const b = put(dir, 'b.json', { session_id: 'b', state: 'idle', timestamp: gone }, gone);
+      orbitalAt(dir).loadSessions(null);
+      assert.ok(fs.existsSync(a), 'a window between turns 29 min ago lost its file');
+      assert.strictEqual(fs.existsSync(b), false, 'a no-pid file silent past 30 min was kept forever');
+    } finally { rm(dir); }
+  });
+
+  test('guard: stopped, orphaned child, dead-pid and junk files are purged at STALE_MS as before', () => {
+    const dir = mkdir();
+    try {
+      const t = Date.now() - STALE_MS - 10e3;
+      const files = [
+        put(dir, 'done.json', { session_id: 'done', state: 'idle', stopped: true, timestamp: t }, t),
+        put(dir, 'P-sub-1.json', { session_id: 'P-sub-1', parentSession: 'P', state: 'thinking', timestamp: t }, t),
+        put(dir, 'dead.json', { session_id: 'dead', state: 'coding', pid: 99999999, timestamp: t }, t),
+        put(dir, 'junk.json', 'null', t),
+      ];
+      orbitalAt(dir).loadSessions(null);
+      for (const fp of files) assert.strictEqual(fs.existsSync(fp), false, `${path.basename(fp)} was kept`);
+    } finally { rm(dir); }
+  });
+
+  // -- 2. Only a parent-written synthetic subagent cycles ---------------------
+  // Any child whose id lacked `-agent-` was cycled: an OpenCode task session,
+  // a real writer, showed invented reading/searching/coding over its own tool.
+
+  const staleWrite = (f, over = {}) => {
+    const t = Date.now() - CYCLE_STALE_MS - 1000;
+    f.updateFromFile({ parentSession: 'ses_dad', state: 'testing', detail: 'npm test', timestamp: t, ...over }, t);
+    f.spawning = false;
+    f.firstSeen = Date.now() - (3 * CYCLE_INTERVAL + 500); // the cycle index would be 'coding'
+    f.minDisplayUntil = 0;
+    return f;
+  };
+
+  test('a real child session (an OpenCode task) holds its own state: no fake work is cycled over it', () => {
+    const f = staleWrite(new MiniFace('ses_kid'), { editor: 'opencode' });
+    f.tick(16);
+    assert.deepStrictEqual([f.state, f.detail], ['testing', 'npm test']);
+  });
+
+  test('a parent-written synthetic subagent still cycles; a write without the marker is not synthetic', () => {
+    const f = staleWrite(new MiniFace('ses_dad-sub-1'), { state: 'thinking', detail: '', synthetic: true });
+    assert.strictEqual(f.synthetic, true);
+    f.tick(16);
+    assert.strictEqual(f.state, 'coding', 'a synthetic child stopped cycling');
+    const t = Date.now() - CYCLE_STALE_MS - 1000;
+    f.minDisplayUntil = 0;
+    f.updateFromFile({ parentSession: 'ses_dad', state: 'thinking', timestamp: Date.now() }, t);
+    assert.strictEqual(f.synthetic, false);
+    f.minDisplayUntil = 0;
+    f.tick(16);
+    assert.strictEqual(f.state, 'thinking');
+  });
+
+  // -- 3. One unreadable read of the parent ------------------------------------
+  // An unreadable record has no mtime, so the parent read as not fresh for that
+  // pass: silent children were dropped and respawned, or unlinked after two.
+
+  const unreadableParentScene = () => {
+    const now = Date.now();
+    const orb = new OrbitalSystem();
+    orb._sessionsDir = '/nonexistent-r6';
+    const unlinked = [];
+    const parent = () => ({ file: 'P.json', data: { session_id: 'P', state: 'subagent', timestamp: now - 1000 }, mtimeMs: now - 1000 });
+    const child = (age) => ({
+      file: 'P-agent-a1.json', mtimeMs: now - age,
+      data: { session_id: 'P-agent-a1', parentSession: 'P', state: 'thinking', timestamp: now - age },
+    });
+    const pass = (recs) => orb._applySessionResults('P', recs, { unlink: (fp) => unlinked.push(fp) });
+    return { orb, unlinked, parent, child, pass, unreadable: { file: 'P.json', error: true } };
+  };
+
+  test('a live child survives one unreadable read of its parent: no drop, no respawn', () => {
+    const { orb, parent, child, pass, unreadable } = unreadableParentScene();
+    pass([parent(), child(100e3)]);
+    orb.setMainSession('P');
+    const f = orb.faces.get('P-agent-a1');
+    f.spawning = false;
+    pass([unreadable, child(100e3)]);
+    assert.strictEqual(orb.faces.get('P-agent-a1'), f, 'the child was dropped while its parent could not be read');
+    assert.strictEqual(orb.liveChildCount(), 1);
+    pass([parent(), child(100e3)]);
+    assert.strictEqual(orb.faces.get('P-agent-a1'), f);
+    assert.strictEqual(f.spawning, false, 'the child respawned');
+  });
+
+  test('two unreadable passes in a row do not unlink a silent live child', () => {
+    const { orb, unlinked, parent, child, pass, unreadable } = unreadableParentScene();
+    pass([parent(), child(130e3)]);
+    pass([unreadable, child(130e3)]);
+    pass([unreadable, child(130e3)]);
+    assert.deepStrictEqual(unlinked, []);
+    assert.ok(orb.faces.has('P-agent-a1'));
+  });
+
+  test('guard: a remembered parent mtime still ages: a parent last seen past STALE_MS vouches for nothing', () => {
+    const { orb, unlinked, pass, unreadable } = unreadableParentScene();
+    const now = Date.now();
+    const old = now - STALE_MS - 30e3;
+    pass([{ file: 'P.json', data: { session_id: 'P', state: 'subagent', timestamp: old }, mtimeMs: old }]);
+    const t = now - 130e3;
+    pass([unreadable, { file: 'P-agent-a1.json', mtimeMs: t, data: { session_id: 'P-agent-a1', parentSession: 'P', state: 'thinking', timestamp: t } }]);
+    assert.deepStrictEqual(unlinked, [path.join('/nonexistent-r6', 'P-agent-a1.json')],
+      'a dead parent\'s remembered mtime kept its ghost child');
+    assert.ok(!orb.faces.has('P-agent-a1'));
+  });
+
+  // -- 4. The `+N more` overflow text -------------------------------------------
+  // It sat on a fixed row and was drawn over whichever ring face passed it.
+
+  test('`+N more` never overwrites a ring face and never lands on the last two rows', () => {
+    const { ClaudeFace } = require('../lib/face');
+    const overlap = (a, b) => a.col < b.col + b.w && b.col < a.col + a.w && a.row < b.row + b.h && b.row < a.row + a.h;
+    const oc = process.stdout.columns, or = process.stdout.rows;
+    try {
+      for (const [cols, rows] of [[116, 49], [124, 49], [136, 49], [160, 58]]) {
+        process.stdout.columns = cols; process.stdout.rows = rows;
+        const face = new ClaudeFace();
+        face.showStats = true; face.accessoriesEnabled = true;
+        const orb = new OrbitalSystem();
+        orb.setMainSession('main');
+        for (let i = 0; i < 12; i++) {
+          const f = new MiniFace('s' + i);
+          f.updateFromFile({ state: 'coding' });
+          f.firstSeen = i; f.spawning = false;
+          orb.faces.set('s' + i, f);
+        }
+        face.update(66); face.render();
+        let drawn = 0, frames = 0;
+        for (let fr = 0; fr < 900; fr++) {
+          orb.update(66);
+          if (fr % 15) continue;
+          frames++;
+          const out = orb.render(cols, rows, face.lastPos, null);
+          const boxes = [];
+          const re = /\x1b\[(\d+);(\d+)H(?:\x1b\[[^m]*m)*╭/g;
+          let m;
+          while ((m = re.exec(out))) boxes.push({ row: +m[1], col: +m[2], w: MINI_W, h: MINI_H });
+          const t = /\x1b\[(\d+);(\d+)H(?:\x1b\[[^m]*m)*(\+\d+ more)/.exec(out);
+          if (!t) continue;
+          drawn++;
+          const text = { row: +t[1], col: +t[2], w: t[3].length, h: 1 };
+          assert.ok(text.row <= rows - 2, `${cols}x${rows} f${fr}: on row ${text.row}`);
+          for (const b of boxes) {
+            assert.ok(!overlap(text, b), `${cols}x${rows} f${fr}: '${t[3]}' at ${text.row},${text.col} over the face at ${b.row},${b.col}`);
+          }
+        }
+        assert.ok(drawn >= frames / 2, `${cols}x${rows}: the indicator showed in only ${drawn} of ${frames} frames`);
+      }
+    } finally { process.stdout.columns = oc; process.stdout.rows = or; }
+  });
+
+  // -- 5. A same-state work write and the queue ---------------------------------
+
+  test('a same-state work write drops any queued state but a wait, as the main face does', () => {
+    for (const queued of ['searching', 'thinking', 'satisfied', 'waiting']) {
+      const f = new MiniFace('x-agent-1');
+      const t = Date.now();
+      f.updateFromFile({ state: 'reading', detail: 'a.js', timestamp: t });
+      f.updateFromFile({ state: queued, detail: 'queued', timestamp: t + 1 });
+      assert.strictEqual(f.pendingState, queued, `sanity: ${queued} is queued behind reading`);
+      f.updateFromFile({ state: 'reading', detail: 'b.js', timestamp: t + 2 });
+      const keep = queued === 'waiting';
+      assert.strictEqual(f.pendingState, keep ? 'waiting' : null, `queued ${queued}`);
+      f.minDisplayUntil = 0;
+      f.tick(16);
+      assert.deepStrictEqual([f.state, f.detail], keep ? ['waiting', 'queued'] : ['reading', 'b.js'],
+        `queued ${queued} flushed over the tool that is running`);
+    }
+  });
+
+  // -- 6. A folder named like an Object.prototype member ------------------------
+
+  test('a folder named constructor, toString, valueOf or __proto__ still labels its face', () => {
+    for (const name of ['constructor', 'toString', 'valueOf', '__proto__', 'hasOwnProperty']) {
+      const orb = new OrbitalSystem();
+      orb._sessionsDir = '/nonexistent-r6';
+      const now = Date.now();
+      orb._applySessionResults('main', [
+        { file: 'a.json', data: { session_id: 'a', state: 'coding', cwd: '/home/u/src/' + name, modelName: 'claude', timestamp: now }, mtimeMs: now },
+        { file: 'b.json', data: { session_id: 'b', state: 'coding', cwd: '/home/u/src/api', modelName: 'claude', timestamp: now }, mtimeMs: now },
+      ], { unlink() {} });
+      assert.strictEqual(orb.faces.get('a').label, name.slice(0, 8), name);
+      assert.strictEqual(orb.faces.get('b').label, 'api', name);
+    }
+  });
+
+  // -- 7. Labels after the silent first pick -----------------------------------
+
+  test('ring labels follow the main session as soon as it changes, not a load later', () => {
+    const orb = new OrbitalSystem();
+    orb._sessionsDir = '/nonexistent-r6';
+    const now = Date.now();
+    orb._applySessionResults(null, [
+      { file: 'M.json', data: { session_id: 'M', state: 'coding', cwd: '/work/a/api', modelName: 'claude', timestamp: now }, mtimeMs: now },
+      { file: 'O.json', data: { session_id: 'O', state: 'coding', cwd: '/work/b/api', modelName: 'claude', timestamp: now }, mtimeMs: now },
+    ], { unlink() {} });
+    assert.strictEqual(orb.faces.get('O').label, 'claude', 'sanity: two faces share a folder name at boot');
+    orb.setMainSession('M');
+    assert.strictEqual(orb.faces.get('O').label, 'api', 'the label still counted the main among the ring');
+  });
+
+  // -- 8. PID cache entries stamped before the wall clock stepped back ----------
+
+  test('a PID verdict dated in the future re-resolves now, not when the clock catches up', () => {
+    const pid = 616161;
+    let calls = 0;
+    _pidStartCache.delete(pid);
+    _setPidResolver((pids, done) => { calls++; done(new Map(pids.map(p => [p, 12345]))); });
+    try {
+      _pidStartCache.set(pid, { value: 12345, resolvedAt: Date.now() + 3600e3 });
+      requestPidStartTime(pid, alive);
+      assert.strictEqual(calls, 1, 'a verdict from before a 1h step read as fresh for the whole hour');
+      assert.ok(_pidStartCache.get(pid).resolvedAt <= Date.now());
+      requestPidStartTime(pid, alive);
+      assert.strictEqual(calls, 1, 'the refreshed verdict is fresh again');
+    } finally {
+      _setPidResolver(null);
+      _pidStartCache.delete(pid);
+    }
+  });
+
+  test('a pending start time dated in the future protects only within the 1h cap', () => {
+    const pid = 626262;
+    try {
+      _pidStartCache.set(pid, { value: 'pending', resolvedAt: Date.now() + 3600e3 });
+      assert.strictEqual(isOwnedByLiveProcess(pid, Date.now() - 2 * 3600e3, alive), false,
+        'a pending entry from before the step protected an ancient session for the whole step');
+      assert.strictEqual(isOwnedByLiveProcess(pid, Date.now() - 60e3, alive), true, 'a recent write keeps the cap');
+    } finally { _pidStartCache.delete(pid); }
+  });
+
+  test('the sweep evicts a resolved entry dated in the future', () => {
+    const pid = 636363;
+    try {
+      _pidStartCache.set(pid, { value: 12345, resolvedAt: Date.now() + 3600e3 });
+      grid._sweepPidCache();
+      assert.strictEqual(_pidStartCache.has(pid), false);
+    } finally { _pidStartCache.delete(pid); }
+  });
+
+  // -- Grandchildren in the session list ------------------------------------------
+  // An OpenCode task can start a task of its own: its parent is a child.
+
+  test('a grandchild is listed under its parent, not as a depth-0 orphan', () => {
+    const mk = (id, over) => Object.assign(new MiniFace(id), over);
+    const main = { sessionId: 'M', isMain: true, label: 'main' };
+    const out = orderSessionList(main, [
+      mk('ses_grand', { parentSession: 'ses_kid', firstSeen: 3 }),
+      mk('A', { lastPromptAt: 5, firstSeen: 1 }),
+      mk('lost-kid', { parentSession: 'lost', firstSeen: 5 }),
+      mk('ses_kid', { parentSession: 'M', firstSeen: 2 }),
+      mk('lost', { parentSession: 'ghost', firstSeen: 4 }),
+    ]);
+    assert.deepStrictEqual(out.map(e => [e.face.sessionId, e.depth]),
+      [['M', 0], ['ses_kid', 1], ['ses_grand', 2], ['A', 0], ['lost', 0], ['lost-kid', 1]]);
+  });
+
+  test('guard: a parent loop in hostile files lists each session once', () => {
+    const mk = (id, over) => Object.assign(new MiniFace(id), over);
+    const out = orderSessionList(null, [mk('x', { parentSession: 'y' }), mk('y', { parentSession: 'x' })]);
+    assert.deepStrictEqual(out.map(e => e.face.sessionId).sort(), ['x', 'y']);
   });
 });
 

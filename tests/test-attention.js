@@ -560,15 +560,18 @@ describe('grid -- the main session is loaded but kept off the ring', () => {
       const dir = t.sessionsDir;
       fs.mkdirSync(dir, { recursive: true });
       const now = Date.now();
-      const old = new Date(now - 130000);
+      // Past every window: a pid-less top-level file is kept for
+      // NO_PID_FILE_KEEP_MS (30 min), so only the main-file rule keeps M.
+      const age = require('../lib/grid').NO_PID_FILE_KEEP_MS + 10000;
+      const old = new Date(now - age);
       const seed = (name, obj) => {
         const fp = path.join(dir, name);
         writeJsonAtomic(fp, obj);
         fs.utimesSync(fp, old, old);
         return fp;
       };
-      const mainFp = seed('M.json', { session_id: 'M', state: 'coding', timestamp: now - 130000, lastPromptAt: now - 130000 });
-      const otherFp = seed('B.json', { session_id: 'B', state: 'coding', timestamp: now - 130000 });
+      const mainFp = seed('M.json', { session_id: 'M', state: 'coding', timestamp: now - age, lastPromptAt: now - age });
+      const otherFp = seed('B.json', { session_id: 'B', state: 'coding', timestamp: now - age });
       const orb = new OrbitalSystem();
       orb._sessionsDir = dir;
       orb.loadSessions('M');   // no faces yet: nothing else protects either file

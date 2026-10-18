@@ -212,7 +212,7 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 
 **PID liveness is identity-checked.** `isOwnedByLiveProcess(pid, lastWriteMs)` (grid.js) lets a PID protect a session only if the process's **start time predates the session's last write** (+`SLACK_MS`). A recycled PID always fails this.
 
-- **The start-time cache.** Start times resolve asynchronously: batched PowerShell on Windows, `/proc` on Linux, `ps` on macOS, one exec at a time. Entries last `PID_CACHE_TTL_MS` (60s). An expired entry keeps its value under a `refreshing` marker while it re-resolves.
+- **The start-time cache.** Start times resolve asynchronously: batched PowerShell on Windows, `/proc` on Linux, `ps` on macOS, one exec at a time. Entries last `PID_CACHE_TTL_MS` (60s). An entry whose `resolvedAt` lies in the future (a clock stepped back) has no age (`_entryAge`): it counts as expired, past its pending window, and sweepable. An expired entry keeps its value under a `refreshing` marker while it re-resolves.
 - **Cache values** are an epoch, `'pending'`, `'dead'`, `'unknown-alive'` or `'unknown-nodata'`.
   - `'pending'` protects for `PID_PENDING_PROTECT_MS` (30s), then falls back to the cap.
   - `'dead'` means the resolver could not find the pid. It is not owned until the TTL, then refreshed once. (Deleting it instead read as pending forever.)
@@ -230,11 +230,12 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 - **Sanitising.** `readState` also cleans counters (finite or 0), `frequentFiles` (clean keys, no prototype, ≤200), `milestone` (`cleanMilestone`), `diffInfo` (non-negative ints or null), `pid` (int > 0 or 0) and `waitConfirmed` (bool or null).
 - **Guards.** The boot `loadSessions` and the per-frame `orbital.update` are guarded.
 - **Paths.** On win32, `_truncatePath`'s `~` match is case-insensitive.
+- **Labels.** `_assignLabels` counts folder names in a prototype-less map, so a folder named `constructor` or `__proto__` still labels its face.
 
 **The orbital loader.** `loadSessions` (sync, at boot) and `loadSessionsAsync` (every `SESSION_POLL_MS`) build the same per-file records. `_applySessionResults` makes every purge and face decision.
 
 - **Records.** Each file is read once, then stat'ed after the read (`sessionRecord`/`readSessionRecordSync`), giving a `data`, `empty` or `error` record. An unreadable file has no mtime and is never purged that pass.
-- **Parent freshness** is the parent file's mtime (≤ `STALE_MS` old).
+- **Parent freshness** is the parent file's mtime (≤ `STALE_MS` old). A parent unreadable this pass keeps the mtime it was last judged at (`_lastMtimes`); the unreadable record itself is still never purged.
 - **Junk** is a file that is empty, unparseable or not an object. Junk older than `STALE_MS` is purged, unless it is the main's file or a live face vouches for it (`_vouchedFor`). Fresh junk is a write in progress and keeps the existing face.
 - **Ordering.** An async pass that started before a sync load is discarded (`_syncLoads`). A future mtime is dated from first sight (`_judgedMtime`).
 - **`MiniFace.updateFromFile`:**
@@ -259,6 +260,7 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
   - On win32, with no `pid`, "live" is purely the 90s `ORPHAN_TIMEOUT` write-silence bound. A session on a permission prompt longer than that hands the center to a working window, even though its `waiting` hold lasts 30 minutes. One clock asks "is it alive?", the other "how long do we show the wait?", and only the first decides the center.
 - **`isStale()`'s 10s completion cut** (`STOPPED_LINGER_MS`) applies only to a **child whose parent is no longer fresh**. Faces are built and judged in one loader pass before any `tick()`, so a wider rule would kill live windows and children at boot over a stale reward write.
 - **The main session's file is never unlinked** by either stale purge. On win32 its `MiniFace` goes stale 30s before the purge.
+- **A top-level file naming no `pid`** (win32) is kept `NO_PID_FILE_KEEP_MS` (30 min, the renderer's `WAIT_HOLD_STALE_MS`) after its last write instead of `STALE_MS`, so a long tool cannot cost a window its `lastPromptAt`/`firstSeenAt` (an adapter finding no file stamped a fresh `lastPromptAt` and took the center). Its face still goes stale at `ORPHAN_TIMEOUT`. A positive-integer pid is judged by liveness as before.
 - **A live pin wins**, even a promoted child. The pin is released (`pinnedId: null`) once its session is stopped, stale or gone.
 - **Otherwise attention wins:** the highest `lastPromptAt` (`attentionAt`), meaning when the user last addressed the session.
 - **Ties keep the current main.** On the first pick, the newest write (`lastUpdate`) breaks a tie.
@@ -326,7 +328,7 @@ Every state, session, stats and prefs write goes through `writeJsonAtomic` (temp
 **Family heartbeat.** Neither a subagent mid-turn nor a parent waiting on it emits hooks, so mtime alone cannot tell a live family from a dead one (and win32 has no `pid`).
 
 - **Child to parent.** Every agent event stamps the **parent's** file (`_touchSessionFile`) without rewriting it. A child earns the long `CHILD_ORPHAN_TIMEOUT` (15 min) only while its parent's file is fresh, so a crashed parent goes stale normally and takes its orbitals with it.
-- **Parent to child is deliberately not symmetric.** `_touchActiveSubagents` touches only *legacy synthetic* entries, which have no writer of their own; the parent writes their state via `_writeSubagentToolState`. An agent-owned entry must never live on parent activity alone, or a missed `SubagentStop` leaves a ghost.
+- **Parent to child is deliberately not symmetric.** `_touchActiveSubagents` touches only *legacy synthetic* entries, which have no writer of their own; the parent writes their state via `_writeSubagentToolState`. Every such parent-written file carries `synthetic: true` (`buildSubagentSessionState` and the no-`agent_id` `SubagentStart` write), and only a face whose last write carried it may cycle fake work (`MiniFace._cyclesActivity`): an OpenCode task session or an engmux run is a real writer. An agent-owned entry must never live on parent activity alone, or a missed `SubagentStop` leaves a ghost.
 
 **Conducting hold.** Agent events do not write the main's file content (the heartbeat moves only its mtime).
 
@@ -790,7 +792,7 @@ A per-face label (≤ 8 chars) follows `teammateName` > `taskDescription` > cwd 
 
 **Loading.** `OrbitalSystem` loads **every** session file into `faces`, the main included.
 
-- `setMainSession(id)` marks the main, and `getSortedFaces()`/`_assignLabels()` filter it off the ring. So the list, `liveChildCount()` and the policy all read it as a normal `MiniFace`.
+- `setMainSession(id)` marks the main and relabels the ring at once; `getSortedFaces()`/`_assignLabels()` filter it off the ring. So the list, `liveChildCount()` and the policy all read it as a normal `MiniFace`.
 - `loadSessions(null)` (at boot) excludes nothing.
 - A `MiniFace` carries `lastPromptAt`, `toolCalls` and `filesEdited`.
 
@@ -799,7 +801,8 @@ A per-face label (≤ 8 chars) follows `teammateName` > `taskDescription` > cwd 
 - **`orderSessionList(mainInfo, faces)`** returns `[{ face, depth }]` in **tree order**:
   - the main row (a synthesized `mainInfo`), with its children by `firstSeen`;
   - the other top-level sessions by attention (`lastPromptAt` desc, `firstSeen` tiebreak), each with its children;
-  - then orphans.
+  - each child with its own children one level deeper (an OpenCode task's task, depth 2+);
+  - then orphans (parent not listed), each with its children. A parent loop lists each session once.
 - **`listNavigableIds(entries)`** returns what `j`/`k`/`Enter` may land on: every row that is not `stopped`, plus the main row always (between turns its `stopped` is the folded `turnEnded`). A stopped session still draws for ~10s, but pinning it would be undone on the same tick.
 - **`renderSessionList(cols, rows, entriesOrFaces, paletteThemes, mainInfo, selected)`** takes `selected` as a **session id**. A number is still accepted for legacy callers, as is a face array.
 
@@ -856,6 +859,7 @@ Singletons get no tethers or labels.
   - A face joining a ring already on screen starts at its predecessor's current offset (`_startJoiners`/`joinFrom`) and eases forward at full radius, without a radial spawn. It is drawn beneath, and kept out of `_resolveOverlaps` until the ease ends.
   - A face off the ring forgets its offset, so a demoted main rejoins the same way.
   - A first-drawn ring snaps into place.
+- **The `+N more` text** (`_overflowRow`) takes its planned row (`mainPos.row + mainPos.h + 7`, ≤ `rows - 2`) only when no ring box covers it, else the nearest free row below the keep-out, else above it, else it is skipped that frame.
 - **Space needed.** The ring needs about 80×60 or 114×50 with accessories (78×60 or 104×50 without). Smaller windows get the stable side panel.
 - **Tests.** `tests/test-grid.js › layout invariants` sweeps window sizes and asserts:
   - no overlap with the keep-out, between faces, or with the hint row;
@@ -1128,6 +1132,7 @@ To develop: `npm run demo` in one terminal and `npm start` in another (orbitals:
 | `STALE_MS` | 120000ms | grid.js (session file purge) |
 | `STOPPED_LINGER_MS` | 10000ms | grid.js |
 | `ORPHAN_TIMEOUT` / `CHILD_ORPHAN_TIMEOUT` | 90000ms / 15 min | grid.js |
+| `NO_PID_FILE_KEEP_MS` | 30 min | grid.js (a pid-less top-level file's purge) |
 | `PID_PENDING_PROTECT_MS` / `PID_PROTECT_CAP_MS` | 30000ms / 1h | grid.js |
 | `PID_CACHE_TTL_MS` / `SLACK_MS` | 60000 / 1000ms | grid.js |
 | `MAX_ORBITALS` / `ORBIT_SPACING` | 8 / 1.2 | grid.js |
@@ -1137,7 +1142,7 @@ To develop: `npm run demo` in one terminal and `npm start` in another (orbitals:
 | `rotationSpeed` (instance field) | 0.007 rad/frame | grid.js (~1 revolution per 60s) |
 | `INTER_GROUP_GAP` / `INTRA_GROUP_GAP` | 0.15 / 0.35 rad | grid.js |
 | `TETHER_BRIGHTNESS` / `GROUP_LABEL_BRIGHTNESS` | 0.15 / 0.45 | grid.js |
-| `CYCLE_WORK_STATES` / `CYCLE_INTERVAL` / `CYCLE_STALE_MS` | 5 states / 2500 / 3000ms | grid.js (synthetic subagents only, never a `-agent-` orbital or `CYCLE_PROTECTED_STATES`) |
+| `CYCLE_WORK_STATES` / `CYCLE_INTERVAL` / `CYCLE_STALE_MS` | 5 states / 2500 / 3000ms | grid.js (only a face whose last write carried `synthetic: true`, never a `-agent-` orbital or `CYCLE_PROTECTED_STATES`) |
 | `EXIT_GRACE_MS` | 3000ms | codex-wrapper.js |
 | `MAX_FIELD` / `MAX_BATCH_BYTES` / `CHAIN_WAIT_MS` | 64 KB / 900 KB / 3000ms | opencode-plugin.mjs |
 | `DOCTOR_QUIET_MS` | 1h | setup.js |
@@ -1331,7 +1336,6 @@ The demos write a `demo-main` **session** file stamped with `lastPromptAt`, beca
 - **`pickMainSession` ranks by raw `lastPromptAt`.** After the clock steps back, an older prompt keeps the center until the clock catches up. Low priority.
 - **`daily.cumulativeMs` sums per-session time**, so concurrent windows add up.
 - **A cross-terminal flicker check of the per-frame full clear** is still pending, by eye.
-- **Unconfirmed: the orbital `+N more` text** (`mainPos.row + mainPos.h + 7`, capped at `rows - 2`) may overdraw the lowest ring face.
 - **Four `StopFailure` branches are unasserted:** `max_output_tokens`, `authentication_failed`, `billing_error` and the `'API error'` default.
 - **A state file without a `timestamp` is never applied.** Every writer stamps one.
 - **`docs/` is gitignored.** The attention-main spec and plan in `docs/superpowers/` won't survive a fresh clone.
