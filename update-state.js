@@ -23,8 +23,17 @@ const {
   STATE_FILE, SESSIONS_DIR, STATS_FILE, PID_FILE, QUIT_FLAG_FILE, SPAWN_LOCK_FILE, STATS_LOCK_FILE,
   safeFilename, getGitBranch, getIsWorktree, loadPrefs,
   writeJsonAtomic, acquireSpawnLock, acquireFileLock, spawnRendererWindow, isRendererAlive,
-  COMPLETION_STATES, PERMISSION_CONFIRM_MS, PERMISSION_TOOL_STATES,
 } = require('./lib/shared');
+// The permission-wait lifecycle: one module for the hook and every reader.
+const {
+  toolCallKey, notifyEnabled, askFields, deniedAnswers,
+  agentWaitVerdict, notificationWait, releaseStandIn,
+} = require('./lib/wait');
+// What a write keeps from the session file before it (the tombstones, the
+// open wait, the sticky fields), for both write paths.
+const {
+  TURN_CLOSING_EVENTS, STICKY_FIELDS, nextSessionFile, stopsGlobal,
+} = require('./lib/carry');
 const {
   toolToState, normalizeToolResponse, classifyToolResult, classifyTruncatedInput, updateStreak, defaultStats, normalizeStats,
   EDIT_TOOLS, SUBAGENT_TOOLS, ASK_TOOLS, toText,
@@ -57,85 +66,9 @@ const AGENT_EXCLUDED_EVENTS = new Set([
   'InstructionsLoaded', 'StopFailure', 'PostModelSwitch',
 ]);
 
-// Events that are live activity: they never inherit a finished turn, so a
-// session file's `turnEnded` is dropped by them. Every OTHER event that lands
-// after a Stop (a late PostToolUse, a background agent's SubagentStop, a
-// TaskCompleted, a PostCompact...) is an echo of the turn that already ended
-// and carries `turnEnded` forward -- otherwise it reopened the turn and the
-// renderer sat on an active face for the 45s thinking timeout. Stop,
-// StopFailure and SessionEnd decide their own flags.
-const TURN_OPENING_EVENTS = new Set([
-  'PreToolUse', 'UserPromptSubmit', 'SessionStart', 'SubagentStart',
-  'PreCompact', 'Setup', 'PostModelSwitch',
-]);
-// Interrupt is Codex's: it runs no Stop hook when the user presses Esc (and
-// none at all for a failed turn), only Interrupt. Without it the face held
-// "running command · still running" for the whole 10-minute long-tool hold.
-const TURN_CLOSING_EVENTS = new Set(['Stop', 'StopFailure', 'SessionEnd', 'Interrupt']);
-// An agent's StopFailure is ITS turn failing. AGENT_EXCLUDED_EVENTS shows it
-// on the parent's face, but it ends nothing there (see its handler), so to
-// the parent's files it is an echo like any other. Taken as turn-closing, it
-// dropped the parent's `turnEnded` and the global `stopped` after a Stop, and
-// the finished turn sat on the 45s thinking timeout.
-function closesTurn(event, agentId) {
-  return TURN_CLOSING_EVENTS.has(event) && !(agentId && event === 'StopFailure');
-}
-
-// Session files that may inherit a finished turn from their predecessor.
-// `waiting` is the exception: the renderer folds `turnEnded` into `stopped`
-// and then force-rescues any non-reward face to "wrapping up", so a wait
-// written with `turnEnded` would never be seen. It carries `turnOver`
-// instead -- the same fact, invisible to the renderer -- so the NEXT echo
-// (a background SubagentStop after an idle_prompt) still knows the turn is over.
-function carriesTurnEnd(event, agentId) {
-  return !TURN_OPENING_EVENTS.has(event) && !closesTurn(event, agentId);
-}
-
-// Turn-opening events that also happen BETWEEN turns: a /compact, a /model, a
-// config reload, a subagent's own auto-compaction (Claude Code sends that one
-// with the parent's session_id and no agent_id). After a finished turn they
-// sit beside it rather than start a new one, so they keep its end (as
-// `turnOver`, below). Dropping it left the renderer on the 45s thinking
-// timeout with nothing left to close the turn.
-const AMBIENT_EVENTS = new Set(['PreCompact', 'PostModelSwitch', 'SessionStart', 'Setup']);
-
-// Every event that lands beside a finished turn and keeps its end: the echoes,
-// and the ambient events but SessionStart (a resume is the session starting
-// again). They re-stamp the global `stopped`, and they keep a session file's
-// own `stopped` -- the session ENDED: a background agent's SubagentStop after
-// SessionEnd rewrote the ended window live, a top-level candidate again.
-function echoesTurnEnd(event, agentId) {
-  return carriesTurnEnd(event, agentId) || (AMBIENT_EVENTS.has(event) && event !== 'SessionStart');
-}
-
-// The states a finished turn may be carried with as `turnEnded`. The renderer
-// folds `turnEnded` into `stopped`, force-rescues every face outside its
-// RESCUE_EXCLUDE to "wrapping up", and shows a new idle + stopped write as
-// responding: a ConfigChange's `reading` after a Stop replayed the whole
-// responding -> done! celebration. Everything else carries the same fact as
-// `turnOver`, which the renderer reads as "not active" (the short idle
-// timeout) but never rescues -- `waiting` was the first such case.
-const TURN_END_SAFE_STATES = new Set([...COMPLETION_STATES, 'error']);
-
-// Which tool call a permission prompt is waiting on. PermissionRequest
-// carries no tool_use_id (checked against the 2.1.281 schema), only the
-// tool's name and input -- and so does the PostToolUse that answers it when
-// the user allows. A short digest keeps the session file small.
-function toolCallKey(name, input) {
-  let text = '';
-  try { text = JSON.stringify(input) || ''; } catch {}
-  let h = 5381;
-  for (let i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
-  return `${toText(name)}:${h.toString(36)}:${text.length}`;
-}
-
-// What a write inherits from a session file that records a finished turn:
-// null, 'turnEnded' or 'turnOver'.
-function inheritedTurnEnd(event, state, agentId) {
-  if (AMBIENT_EVENTS.has(event)) return 'turnOver';
-  if (!carriesTurnEnd(event, agentId)) return null;
-  return TURN_END_SAFE_STATES.has(state) ? 'turnEnded' : 'turnOver';
-}
+// The turn-end contract -- which events open, close and echo a turn, and
+// what a write carries on from the session file before it -- is
+// lib/carry.js's, shared by the main path and the >1 MB fallback.
 
 // SessionStart's `source`, checked against the 2.1.300 schema: startup |
 // resume | clear | compact | fork. Each comparison below names the sources it
@@ -241,13 +174,9 @@ function asyncWriteIsStale(event, prev, toolUseId, callKey) {
 // confirms it: a wait still unconfirmed well past 6 s was answered (allowed),
 // and the tool is running -- its PostToolUse may be minutes away. The
 // renderer reads these fields; they live exactly as long as `waitingOn`.
-// `waitAskedAt` is the request's own EVENT_AT, for the hook alone: syncAt
-// cannot say how long a wait has been open, since a background agent's
-// SubagentStart or InstructionsLoaded lands on the same file in between.
-const WAIT_FIELDS = ['waitingOn', 'waitKind', 'waitConfirmed', 'permState', 'permDetail', 'waitAskedAt'];
+// The lifecycle and every rule about it are in lib/wait.js.
 function permissionNotifyEnabled() {
-  const v = process.env.CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS;
-  return !(typeof v === 'string' && /^\s*(1|true|yes|on)\s*$/i.test(v));
+  return notifyEnabled(process.env.CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS);
 }
 
 // Notification types that ask for nothing (2.1.300's set). They used to fall
@@ -259,16 +188,6 @@ const INFO_NOTIFICATIONS = new Set([
   'computer_use_exit', 'push_notification', 'plugin_notification',
 ]);
 
-// Sticky session-file fields: set once, preserved across every later write.
-// `editor` is deliberately absent: every write stamps it fresh (EDITOR is
-// never empty), so a copy-if-missing loop could never fire for it. The owner's
-// provenance is kept by the global owner guard instead.
-// `firstSeenAt` is when the file was first written. The legacy foreign-session
-// classifier used the file's birthtime for that, but writeJsonAtomic renames
-// a temp file over the old one, which REPLACES it -- birthtime is the last
-// write (NTFS and POSIX alike), so an unregistered parallel window was
-// classified parallel on its first event and the owner's subagent on its next.
-const STICKY_FIELDS = ['taskDescription', 'parentSession', 'agentType', 'isTeammate', 'teamName', 'teammateName', 'lastPromptAt', 'model', 'firstSeenAt'];
 
 // firstSeenAt itself comes from state-machine.js's firstSeenFor, which the
 // adapters share.
@@ -359,10 +278,7 @@ function _healLeadFile(leadId) {
 // session's id alone (2.1.300 builds it without the tool's context). Confirm
 // the agents' unconfirmed waits that are old enough to be the one this
 // notification is about -- otherwise the renderer would resolve them while
-// the dialog is still open. One opened under ~5 s ago cannot be (the timer is
-// 6 s); if it was answered meanwhile, being confirmed early only means it
-// waits for its PostToolUse, as every wait did before.
-const PERMISSION_CONFIRM_MIN_AGE_MS = 5000;
+// the dialog is still open (agentWaitVerdict, lib/wait.js).
 // Returns the agent session-file names (no .json) whose prompt is open and
 // confirmed once this returns -- just now, or by an earlier notification:
 // the parent stands in for all of them (an agent's SubagentStart can have
@@ -376,16 +292,10 @@ function _confirmAgentWaits(sessionId) {
       const fp = path.join(SESSIONS_DIR, name);
       let s = null;
       try { s = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch {}
-      if (!s || typeof s !== 'object' || s.stopped || s.state !== 'waiting') continue;
-      if (s.waitKind !== 'permission') continue;
-      if (s.waitConfirmed === true) { confirmed.push(name.slice(0, -'.json'.length)); continue; }
-      if (s.waitConfirmed !== false) continue;
-      // The request's own time: syncAt (an async write since, a parallel
-      // tool of the agent's, moves eventAt but carries syncAt).
-      const askedAt = typeof s.syncAt === 'number' ? s.syncAt : s.eventAt;
-      if (typeof askedAt === 'number' && EVENT_AT - askedAt < PERMISSION_CONFIRM_MIN_AGE_MS) continue;
+      const verdict = agentWaitVerdict(s, EVENT_AT);
+      if (!verdict) continue;
       // A fresh timestamp: the renderer skips a write whose timestamp it has seen.
-      writeJsonAtomic(fp, { ...s, waitConfirmed: true, timestamp: Date.now() }, 0o600);
+      if (verdict === 'confirm') writeJsonAtomic(fp, { ...s, waitConfirmed: true, timestamp: Date.now() }, 0o600);
       confirmed.push(name.slice(0, -'.json'.length));
     }
   } catch {}
@@ -400,33 +310,18 @@ function _confirmAgentWaits(sessionId) {
 // the agents it stands for (`waitForAgents`) and what it showed before
 // (`waitPrev`); when the last of them is answered, the parent goes back.
 // The global file gets the same treatment when this session owns it (tmux).
+// (releaseStandIn, lib/wait.js: still asking on another agent's behalf, it
+// keeps waiting minus this one -- or the next answer still finds it and the
+// parent never goes back.)
 function _releaseParentWait(parentId, agentFile) {
-  const restore = (s) => {
-    const rest = s.waitForAgents.filter(id => id !== agentFile);
-    // Still asking on another agent's behalf: keep waiting, minus this one --
-    // or the next answer still finds it and the parent never goes back.
-    // (Same timestamp: nothing the renderer needs to redraw.)
-    if (rest.length) return { ...s, waitForAgents: rest };
-    const next = { ...s, timestamp: Date.now(), answered: true };
-    for (const field of [...WAIT_FIELDS, 'waitForAgents', 'waitPrev']) delete next[field];
-    const prev = s.waitPrev && typeof s.waitPrev.state === 'string' ? s.waitPrev : null;
-    next.state = prev ? prev.state : 'subagent';
-    next.detail = prev && typeof prev.detail === 'string' ? prev.detail : 'conducting';
-    return next;
-  };
-  const asksFor = (s) => s && typeof s === 'object' && s.state === 'waiting'
-    && Array.isArray(s.waitForAgents) && s.waitForAgents.includes(agentFile);
   try {
-    const fp = path.join(SESSIONS_DIR, safeFilename(parentId) + '.json');
-    const s = _readSessionFile(parentId);
-    if (asksFor(s)) { const next = restore(s); if (next) writeJsonAtomic(fp, next, 0o600); }
+    const next = releaseStandIn(_readSessionFile(parentId), agentFile, Date.now());
+    if (next) writeJsonAtomic(path.join(SESSIONS_DIR, safeFilename(parentId) + '.json'), next, 0o600);
   } catch {}
   try {
     const g = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    if (asksFor(g) && g.sessionId === parentId) {
-      const next = restore(g);
-      if (next) writeJsonAtomic(STATE_FILE, next, 0o600);
-    }
+    const next = g && g.sessionId === parentId ? releaseStandIn(g, agentFile, Date.now()) : null;
+    if (next) writeJsonAtomic(STATE_FILE, next, 0o600);
   } catch {}
 }
 
@@ -894,10 +789,8 @@ function _writeFallback(ids, override) {
     sessionExtra.parentSession = originalFallbackId;
     if (agentType) { sessionExtra.agentType = agentType; sessionExtra.modelName = agentType; }
   }
-  // Keep the session file's sticky fields -- above all lastPromptAt, whose
-  // loss drops the window to attention 0 and moves the center away -- and
-  // honour the same turn-boundary carry as the main path. A fresh
-  // SessionStart reads nothing (its predecessor was just unlinked).
+  // The file this write carries on from (see nextSessionFile below). A fresh
+  // SessionStart reads nothing: its predecessor was just unlinked.
   let prevSession = null;
   if (hookEvent !== 'SessionStart') prevSession = _readSessionFile(sessionFileId);
   // The async ordering rules hold here too (see asyncWriteIsStale). There is
@@ -905,63 +798,27 @@ function _writeFallback(ids, override) {
   // names the tool_use_id.
   const toolUseId = (ids && ids.toolUseId) || '';
   if (asyncWriteIsStale(hookEvent, prevSession, toolUseId, '')) return;
-  // An ended session stays ended through every echo (see echoesTurnEnd).
-  const ended = hookEvent === 'SessionEnd'
-    || (!!prevSession && !!prevSession.stopped && echoesTurnEnd(hookEvent, agentId));
-  if (prevSession) {
-    for (const field of STICKY_FIELDS) {
-      if (prevSession[field] && !sessionExtra[field]) sessionExtra[field] = prevSession[field];
-    }
-    if (!ended && (prevSession.turnEnded || prevSession.turnOver)) {
-      const inherit = inheritedTurnEnd(hookEvent, fallbackState, agentId);
-      if (inherit) sessionExtra[inherit] = true;
-    }
-    // A permission prompt, as on the main path: the waited call's own tool
-    // end answers it (matched by the call key from the raw payload), and
-    // every other write that is no answer keeps it. Carrying only the sticky
-    // fields, a parallel tool's huge result wiped an open prompt, and an
-    // allowed call's huge result left one open until the next turn.
-    if (prevSession.waitingOn) {
-      const toolEnd = hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure';
-      if (toolEnd && ids && ids.callKey && prevSession.waitingOn === ids.callKey) {
-        sessionExtra.answered = true;
-      } else if (!sessionExtra.answered && !closesTurn(hookEvent, agentId) && hookEvent !== 'PermissionRequest') {
-        for (const field of WAIT_FIELDS) {
-          if (prevSession[field] !== undefined) sessionExtra[field] = prevSession[field];
-        }
-      }
-    }
-  }
-  sessionExtra.firstSeenAt = firstSeenFor(prevSession, Date.now());
-  Object.assign(sessionExtra, orderingFields(prevSession, hookEvent,
+  // The same carry as the main path, through the same function: the
+  // tombstones (an ended session stays ended through every echo), an open
+  // permission prompt -- answered by the waited call's own huge result,
+  // matched by the call key from the raw payload, and kept through any other
+  // -- and the sticky fields, above all lastPromptAt, whose loss dropped the
+  // window to attention 0 and moved the center away. Each path once kept its
+  // own copy of these rules, and they drifted apart.
+  const next = nextSessionFile(prevSession, {
+    event: hookEvent, agentId, isAgent, state: fallbackState, detail: fallbackDetail,
+    fields: sessionExtra, callKey: (ids && ids.callKey) || '',
+  });
+  next.fields.firstSeenAt = firstSeenFor(prevSession, Date.now());
+  Object.assign(next.fields, orderingFields(prevSession, hookEvent,
     (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure') ? shortToolId(toolUseId) : ''));
-  // The global `stopped` re-stamp, as on the main path: from the global
-  // file's own flag, or from the session file's record of the finished turn
-  // (a between-turns wait clears the first).
-  const turnWasOver = !isAgent && !!prevSession
-    && !!(prevSession.stopped || prevSession.turnEnded || prevSession.turnOver);
-  const globalExtra = (!fallbackExtra.stopped && (globalWasOurStop || turnWasOver)
-    && echoesTurnEnd(hookEvent, agentId) && fallbackState !== 'waiting')
-    ? { ...fallbackExtra, stopped: true } : fallbackExtra;
+  const globalExtra = stopsGlobal(prevSession, {
+    event: hookEvent, agentId, isAgent, state: fallbackState, globalOwnStop: globalWasOurStop,
+  }) ? { ...fallbackExtra, stopped: true } : fallbackExtra;
   if (shouldWriteGlobal) writeState(fallbackState, fallbackDetail, globalExtra);
-
-  if (hookEvent === 'Stop' && !isAgent) {
-    const idleFallbackExtra = { ...sessionExtra, turnEnded: true };
-    delete idleFallbackExtra.stopped;
-    delete idleFallbackExtra.turnOver;
-    writeSessionState(sessionFileId, 'idle', 'between turns', false, idleFallbackExtra);
-  } else {
-    if ((hookEvent === 'StopFailure' || hookEvent === 'Interrupt') && !agentId) {
-      sessionExtra.turnEnded = true;
-      delete sessionExtra.turnOver;
-    }
-    // On a session file `stopped` is reserved for SessionEnd -- and kept
-    // after it (see `ended`).
-    if (!ended) delete sessionExtra.stopped;
-    writeSessionState(sessionFileId, fallbackState, fallbackDetail, ended, sessionExtra);
-  }
+  writeSessionState(sessionFileId, next.state, next.detail, next.stopped, next.fields);
   // An agent's prompt was answered: a parent standing in for it goes back.
-  if (isAgent && sessionExtra.answered) _releaseParentWait(originalFallbackId, safeFilename(sessionFileId));
+  if (isAgent && next.fields.answered) _releaseParentWait(originalFallbackId, safeFilename(sessionFileId));
   // Family heartbeat, as on the main path.
   if (isAgent) _touchSessionFile(originalFallbackId);
 }
@@ -1448,55 +1305,17 @@ process.stdin.on('end', () => {
         // The dialog is still open 6 s on: the wait is confirmed. Keep the
         // PermissionRequest's own details (which tool, the tool's work face)
         // rather than the generic "allow?" -- they name what is being asked.
-        const prev = prevSessionFile;
-        // The agents' prompts this notification may be about (it carries the
-        // session id alone). Agents asking seconds apart get a notification
-        // each -- add to the list the parent already holds, never replace it
-        // (a later notification that confirms nothing new would otherwise
-        // forget the first agent).
+        // It carries the session id alone, so it may be about the agents'
+        // prompts too: the parent then stands in for them (notificationWait,
+        // lib/wait.js, which also knows the session's own prompt allowed long
+        // ago when an agent is the one asking). An agent's own notification
+        // stands in for nobody.
         const agents = agentId ? [] : _confirmAgentWaits(sessionId);
-        const standingIn = !agentId && prev && prev.state === 'waiting' && Array.isArray(prev.waitForAgents)
-          ? prev.waitForAgents.filter(a => typeof a === 'string') : [];
-        const all = [...new Set([...standingIn, ...agents])].slice(0, 8);
-        let asking = prev && prev.waitingOn && prev.waitKind === 'permission';
-        // The session's OWN prompt, still unconfirmed PERMISSION_CONFIRM_MS
-        // after it was asked, was answered -- allowed, its tool is running (the
-        // renderer already shows it so) -- and an agent's notification is not
-        // about it. Re-confirming it put the parent back on "allow Bash?" over
-        // its own running call, and, "asking", it never stood in for the
-        // agent: answering the agent released nothing until the parent's tool
-        // ended. Only while an agent is asking: a notification nobody else
-        // claims is still the session's own, however late its hook started.
-        if (asking && all.length && prev.waitConfirmed === false && typeof prev.waitAskedAt === 'number'
-            && EVENT_AT - prev.waitAskedAt >= PERMISSION_CONFIRM_MS) {
-          asking = false;
-          ownWaitAnswered = true;
-        }
-        if (asking) {
-          waitingOn = prev.waitingOn;
-          if (prev.state === 'waiting' && typeof prev.detail === 'string' && prev.detail) detail = prev.detail;
-        }
-        waitFields = {
-          waitKind: 'permission', waitConfirmed: true,
-          ...(asking && typeof prev.permState === 'string' ? { permState: prev.permState } : {}),
-          ...(asking && typeof prev.permDetail === 'string' ? { permDetail: prev.permDetail } : {}),
-        };
-        // Not the session's own question: it stands in for its agents' (see
-        // _releaseParentWait), and remembers what to go back to.
-        if (!asking && all.length) {
-          waitFields.waitForAgents = all;
-          if (standingIn.length && prev.waitPrev && typeof prev.waitPrev.state === 'string') {
-            waitFields.waitPrev = prev.waitPrev;
-          } else if (ownWaitAnswered && prev.state === 'waiting') {
-            // Still the allowed prompt's own write: what the face shows now
-            // is that tool, running -- and what it goes back to.
-            if (PERMISSION_TOOL_STATES.has(prev.permState)) {
-              waitFields.waitPrev = { state: prev.permState, detail: typeof prev.permDetail === 'string' ? prev.permDetail : '' };
-            }
-          } else if (prev && typeof prev.state === 'string' && prev.state !== 'waiting') {
-            waitFields.waitPrev = { state: prev.state, detail: typeof prev.detail === 'string' ? prev.detail : '' };
-          }
-        }
+        const asked = notificationWait(prevSessionFile, agents, EVENT_AT, { standIn: !agentId });
+        if (asked.waitingOn) waitingOn = asked.waitingOn;
+        if (asked.detail) detail = asked.detail;
+        waitFields = asked.fields;
+        ownWaitAnswered = asked.dropOwn;
       }
     }
     else if (hookEvent === 'UserPromptSubmit') {
@@ -1694,14 +1513,10 @@ process.stdin.on('end', () => {
       // must never look unconfirmed -- the renderer would resolve it while
       // the prompt is still open. Same when the user turned the
       // notification off.
-      if (EDITOR === 'claude' && permissionNotifyEnabled()) {
-        const work = toolToState(toolName, toolInput);
-        waitFields = {
-          waitKind: 'permission', waitConfirmed: false,
-          permState: work.state, permDetail: work.detail,
-          waitAskedAt: EVENT_AT,
-        };
-      }
+      waitFields = askFields({
+        editor: EDITOR, notify: permissionNotifyEnabled(),
+        work: toolToState(toolName, toolInput), askedAt: EVENT_AT,
+      });
     }
     else if (hookEvent === 'PermissionDenied') {
       // 2.1.300 fires it when the auto-mode classifier refuses a tool call --
@@ -1715,8 +1530,7 @@ process.stdin.on('end', () => {
       detail = `${label.slice(0, 24)} denied`;
       // It answers the wait on this call, or nothing at all if none is
       // pending; a wait on some OTHER call is still open and stays.
-      const pending = prevSessionFile && prevSessionFile.waitingOn;
-      if (!pending || pending === callKey) permissionAnswered = true;
+      if (deniedAnswers(prevSessionFile, callKey)) permissionAnswered = true;
     }
     else if (hookEvent === 'Setup') {
       state = 'starting';
@@ -1939,12 +1753,12 @@ process.stdin.on('end', () => {
       // clears it (an idle_prompt lands ~60 s after every Stop), and the next
       // echo wrote the global file live -- no other window could take it for
       // two minutes. The session file still knows, so it counts too.
-      const turnWasOver = (existing.stopped && existing.sessionId === sessionId)
-        || (!isAgentEvent && !!prevSessionFile
-          && !!(prevSessionFile.stopped || prevSessionFile.turnEnded || prevSessionFile.turnOver));
-      if (!isAgentEvent && turnWasOver && !stopped && echoesTurnEnd(hookEvent, agentId) && state !== 'waiting') {
-        globalStopped = true;
-      }
+      // (stopsGlobal, lib/carry.js: an echo re-stamps it while the turn is
+      // over -- by the global file's own flag, or the session file's record.)
+      globalStopped = stopsGlobal(prevSessionFile, {
+        event: hookEvent, agentId, isAgent: isAgentEvent, state,
+        globalOwnStop: !!existing.stopped && existing.sessionId === sessionId,
+      });
       // Preserve model name — subagents sharing session ID must not overwrite the owner's name.
       // See also: base-adapter.js guardedWriteState (adapters) and face.js setStats (env var).
       if (!isAgentEvent && existing.sessionId === sessionId && existing.modelName &&
@@ -2003,14 +1817,11 @@ process.stdin.on('end', () => {
     // too (the unlink above is skipped for `source === 'compact'`, which is
     // the same live session restarting), so a fresh session is a candidate for
     // the center before its first tool call.
+    // What the session file ends up holding (see below); the write's own
+    // fields when nothing is written.
+    let written = extra;
     if (!staleWrite) {
       let existingSession = null;
-      // Preserve stopped flag and sticky fields from existing session file
-      // (set once at SubagentStart/TeammateIdle, must survive subsequent hook updates)
-      // `model` is live here (unlike the dead 'editor' entry): extra.model is
-      // set only when acquisition actually produced something, so the
-      // `!extra[field]` guard both carries it forward and lets a real
-      // PostModelSwitch override it. (STICKY_FIELDS is defined at the top.)
       // A fresh session starts with fresh fields, so it reads nothing: the
       // unlink above normally leaves no file, but a failed unlink (a locked
       // file on Windows) would otherwise resurrect a dead session's agentType
@@ -2020,86 +1831,37 @@ process.stdin.on('end', () => {
         try {
           existingSession = JSON.parse(fs.readFileSync(
             path.join(SESSIONS_DIR, safeFilename(writeSessionId) + '.json'), 'utf8'));
-          // An ended session stays ended through every echo, not just a late
-          // tool end (see echoesTurnEnd): only something that starts it again
-          // (a turn-opening event, SessionStart's unlink) makes it live.
-          if (!stopped && existingSession.stopped && echoesTurnEnd(hookEvent, agentId)) {
-            stopped = true;
-            extra.stopped = true;
-          }
-          // Same rule for the turn boundary: an echo of a finished turn (a late
-          // PostToolUse, a background agent's SubagentStop -- see
-          // carriesTurnEnd) must not erase a Stop; a turn-opening event
-          // (PreToolUse/UserPromptSubmit...) drops it. A finished turn reads as
-          // `stopped || turnEnded` on a session file and the renderer folds
-          // both -- but only SessionEnd sets `stopped` here, so the global
-          // owner and a parallel window take the same path: `turnEnded`
-          // carried forward. A face the renderer would rescue carries it as
-          // `turnOver` instead (see inheritedTurnEnd), and the next echo with
-          // a reward or an error turns that back into turnEnded.
-          if (!stopped && (existingSession.turnEnded || existingSession.turnOver)) {
-            const inherit = inheritedTurnEnd(hookEvent, state, agentId);
-            if (inherit) extra[inherit] = true;
-          }
-          // A permission prompt is answered by allowing it, too: then the only
-          // word is the asking tool's own PostToolUse. Until that (or the
-          // user's next prompt), the question stays on the file -- with its
-          // confirmation fields, which live exactly as long as it does.
-          // (A notification that found it long answered drops it here.)
-          if (existingSession.waitingOn && !extra.waitingOn) {
-            const post = hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure';
-            if (post && existingSession.waitingOn === callKey) {
-              extra.answered = true;
-            } else if (!extra.answered && !closesTurn(hookEvent, agentId) && !ownWaitAnswered) {
-              for (const field of WAIT_FIELDS) {
-                if (existingSession[field] !== undefined && extra[field] === undefined) {
-                  extra[field] = existingSession[field];
-                }
-              }
-            }
-          }
-          // The piggybacked work state is only worth injecting if the renderer
-          // never saw the PreToolUse write. Name that write by its timestamp
-          // (when the file still holds it) so the renderer can tell.
-          if (extra.workState && existingSession.state === extra.workState
-              && typeof existingSession.timestamp === 'number') {
-            extra.workSince = existingSession.timestamp;
-          }
-          for (const field of STICKY_FIELDS) {
-            if (existingSession[field] && !extra[field]) {
-              extra[field] = existingSession[field];
-            }
-          }
-          // Heal sessions falsely stamped as subagents (#134): the stats owner
-          // and classified parallel windows are top-level by definition — drop a
-          // stale parentSession/taskDescription stamp instead of preserving it.
-          // (Teammates keep theirs; their fields are legitimately set. An agent
-          // event writes the agent's file under the parent's session_id, so it
-          // is exempt too -- its parentSession stamp is the correct one.)
-          if (!isAgentEvent && (isParallelSession || stats.session.id === sessionId) && !extra.isTeammate) {
-            delete extra.parentSession;
-            delete extra.taskDescription;
-          }
         } catch {}
+      }
+      // What this write keeps from the file before it -- the session's and
+      // the turn's tombstones, an open permission prompt (or its answer),
+      // the sticky fields -- and what it ends itself: lib/carry.js, the one
+      // copy of these rules the >1 MB fallback writes through too.
+      const next = nextSessionFile(existingSession, {
+        event: hookEvent, agentId, isAgent: isAgentEvent, state, detail,
+        fields: extra, callKey, dropOwnWait: ownWaitAnswered,
+      });
+      written = next.fields;
+      // Heal sessions falsely stamped as subagents (#134): the stats owner
+      // and classified parallel windows are top-level by definition — drop a
+      // stale parentSession/taskDescription stamp instead of preserving it.
+      // (Teammates keep theirs; their fields are legitimately set. An agent
+      // event writes the agent's file under the parent's session_id, so it
+      // is exempt too -- its parentSession stamp is the correct one.)
+      if (existingSession && !isAgentEvent && (isParallelSession || stats.session.id === sessionId)
+          && !written.isTeammate) {
+        delete written.parentSession;
+        delete written.taskDescription;
       }
       // Session-file only, after the global write: the ordering fields
       // (asyncWriteIsStale reads them back) and when the file was born.
-      extra.firstSeenAt = firstSeenFor(existingSession, Date.now());
-      Object.assign(extra, orderingFields(existingSession, hookEvent,
+      written.firstSeenAt = firstSeenFor(existingSession, Date.now());
+      Object.assign(written, orderingFields(existingSession, hookEvent,
         (hookEvent === 'PostToolUse' || hookEvent === 'PostToolUseFailure') ? shortToolId(toolUseId) : ''));
-      if (hookEvent === 'Stop' && !isAgentEvent) {
-        // Stop = end of turn, not end of session. Keep orbital visible as idle.
-        // Global state file already has stopped=true for ownership release.
-        const idleExtra = { ...extra, turnEnded: true };
-        delete idleExtra.stopped;
-        writeSessionState(sessionId, 'idle', 'between turns', false, idleExtra);
-      } else {
-        if (failureEndsTurn) { extra.turnEnded = true; delete extra.turnOver; }
-        writeSessionState(writeSessionId, state, detail, stopped, extra);
-      }
+      writeSessionState(writeSessionId, next.state, next.detail, next.stopped, written);
     }
     // An agent's prompt was answered: a parent standing in for it goes back.
-    if (isAgentEvent && extra.answered) _releaseParentWait(sessionId, safeFilename(writeSessionId));
+    if (isAgentEvent && written.answered) _releaseParentWait(sessionId, safeFilename(writeSessionId));
     // Family heartbeat: an agent working proves its parent is alive, and the
     // parent itself writes nothing while it waits. See _touchSessionFile.
     // (A stale event is still the agent working.)

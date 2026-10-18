@@ -106,39 +106,14 @@ function needsRescue(face, lastStopped, editorDead, liveChildren = 0) {
 // allowed -- and its tool (`permState` / `permDetail`) is running.
 // Only for that contract: a confirmed wait, a wait without the fields (an
 // older hook), and every other editor (Codex has no Notification hook at all)
-// keep waiting exactly as before.
-// PERMISSION_CONFIRM_MS: 8s, the 6s timer plus slack. PERMISSION_TOOL_STATES:
-// what an answered prompt may turn into, the asking tool's own face -- one
-// set with the orbitals (grid.js), in shared.js.
-const { PERMISSION_CONFIRM_MS, PERMISSION_TOOL_STATES } = require('./lib/shared');
-
-// Pure: a Claude Code permission wait its 6s Notification has not confirmed.
-// `waitConfirmed` must be an explicit false -- anything else is a wait this
-// contract does not describe, and it keeps today's behaviour.
-function isUnconfirmedPermission(write) {
-  return !!write && write.state === 'waiting' && write.waitKind === 'permission'
-    && write.waitConfirmed === false && write.editor === 'claude'
-    && PERMISSION_TOOL_STATES.has(write.permState);
-}
-
-// Pure: has that wait gone unconfirmed long enough to have been answered?
-// Measured from the write's own timestamp, so a renderer that only sees the
-// wait late (a boot, a swap) does not make the user wait again.
-function permissionAnswered(write, now) {
-  if (!isUnconfirmedPermission(write)) return false;
-  const ts = write.timestamp || 0;
-  return ts > 0 && now - ts >= PERMISSION_CONFIRM_MS;
-}
-
-// Pure: a later write that still carries such a wait. update-state.js keeps
-// the wait fields on every write until the prompt is answered, so a parallel
-// tool's write (or a SubagentStop) can land on top of the wait with them set:
-// the prompt is still unconfirmed, whatever that write's own state says.
-function carriesUnconfirmedPermission(write) {
-  return !!write && !!write.waitingOn && write.waitKind === 'permission'
-    && write.waitConfirmed === false && write.editor === 'claude'
-    && PERMISSION_TOOL_STATES.has(write.permState);
-}
+// keep waiting exactly as before. The lifecycle and its predicates -- the
+// asking write (isUnconfirmedPermission), a later write that carries it on
+// (carriesUnconfirmedPermission), one allowed by now (permissionAnswered) --
+// are lib/wait.js's, shared with the hook, the orbitals and tmux mode.
+const {
+  PERMISSION_CONFIRM_MS,
+  isUnconfirmedPermission, carriesUnconfirmedPermission, permissionAnswered, waitPhase,
+} = require('./lib/wait');
 
 // -- Timeout cascade -------------------------------------------------
 // Pure: decide the timeout-driven transition for the main face.
@@ -395,7 +370,7 @@ function tmuxDisplayState(data, now) {
   let state = (data && data.state) || 'idle';
   const ts = (data && data.timestamp) || 0;
   const age = ts ? now - ts : 0;
-  if (state === 'waiting' && permissionAnswered(data, now)) state = data.permState;
+  if (state === 'waiting' && waitPhase(data, now) === 'allowed') state = data.permState;
   else if (state === 'waiting') return age > WAIT_HOLD_STALE_MS ? 'idle' : 'waiting';
   if (data && data.stopped) return age > IDLE_TIMEOUT ? 'idle' : state;
   const limit = (ACTIVE_WORK_STATES.has(state) && state !== 'responding') ? LONG_TOOL_HOLD_MS : THINKING_TIMEOUT;
@@ -1057,7 +1032,7 @@ function runUnifiedMode(opts = {}) {
         // is handed over re-expressed on today's wall clock (see startupGate).
         const ts = stateData.timestamp || 0;
         const uptime = mono - rendererStartMono;
-        const asksUser = stateData.state === 'waiting' && !permissionAnswered(stateData, now);
+        const asksUser = stateData.state === 'waiting' && waitPhase(stateData, now) !== 'allowed';
         const gate = startupGate(ts, !!stateData.stopped, now, now - uptime, uptime, asksUser);
         if (gate === 'skip') return;
         if (gate === 'record') {

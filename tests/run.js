@@ -46,6 +46,7 @@ const TEST_MODULES = [
   './test-subagents.js',
   './test-attention.js',
   './test-release.js',
+  './test-lifecycle.js',
 ];
 
 // The subprocess-heavy files, slowest first (serial times on win32, Oct

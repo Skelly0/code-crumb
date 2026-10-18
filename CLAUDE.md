@@ -69,6 +69,8 @@ lib/
   transition.js    SwapTransition: dissolve/swap/materialize animation state machine
   accessories.js   Accessory definitions (hats, glasses, ears, etc.) and rendering helpers
   state-machine.js Pure logic: tool→state mapping, result classification, diff counting, streaks, stats helpers
+  wait.js          Pure: the permission-wait lifecycle (asked → confirmed | allowed → answered), for the hook and every reader
+  carry.js         Pure: the turn-end contract and nextSessionFile/stopsGlobal, the one carry both update-state.js write paths use
   shared.js        Paths, face state sets, PERMISSION_CONFIRM_MS/PERMISSION_TOOL_STATES, prefs, writeJsonAtomic, spawn/stats locks, shell quoting,
                    buildRendererCommands/spawnRendererWindow, isRendererAlive, display width (charWidth/strWidth/sliceToWidth/sliceFromEndToWidth)
 adapters/
@@ -142,6 +144,13 @@ Per-session state for **every** session: subagents, parallel windows, and the ma
 #### The turn-end contract
 
 A non-agent `Stop` writes `idle` / `between turns` with `turnEnded: true` and **no** `stopped`: the session is between turns, not over.
+
+**These rules live in carry.js**, and both of update-state.js's write paths, the main one and the >1 MB fallback, go through it. They used to keep a copy each, and every review round found the copies drifted apart.
+
+- **`nextSessionFile(prev, w)`** (pure) turns the file before a write into the file after it: `{ state, detail, stopped, fields }`. It applies the session's tombstone, the turn's end, the open wait (`carryWait`, wait.js), `workSince` and the sticky fields, plus what the write itself ends (`writeEnds`: `session`, `turn` or `failed`).
+- **`stopsGlobal(prev, w)`** decides the global file's `stopped`.
+- **Both are tombstones.** `stopped` (the session ended) and `turnEnded`/`turnOver` (the turn ended) each survive every write that only echoes them, and only a new start clears them.
+- **Tests.** test-lifecycle tables both functions, and drives the real hook down both paths with the same events to check they keep the same facts.
 
 - **Carrying the turn end.** Every event outside `TURN_OPENING_EVENTS` (PreToolUse, UserPromptSubmit, SessionStart, SubagentStart, PreCompact, Setup, PostModelSwitch) carries the turn end forward, along with the global file's `stopped` (`carriesTurnEnd`).
 - **Which flag is carried** (`inheritedTurnEnd`):
@@ -493,7 +502,7 @@ Editors without a model are unchanged.
 
 **`face.forceState(state, detail, minMs)`** applies a state at once, skipping the buffer, dropping the queue, and recording the change for caffeine. Rescue paths (a missed Stop, a dead editor) use it, except on `RESCUE_EXCLUDE` states. Those include `error`, which decays by itself so a late `PostToolUseFailure` after Stop still shows.
 
-**Shared sets.** `ACTIVE_WORK_STATES`, `COMPLETION_STATES` and `INTERRUPTIBLE_STATES` are defined once in shared.js, and imported by face.js, grid.js and renderer.js. So is `PERMISSION_TOOL_STATES` (see Permission waits), for grid.js and renderer.js.
+**Shared sets.** `ACTIVE_WORK_STATES`, `COMPLETION_STATES` and `INTERRUPTIBLE_STATES` are defined once in shared.js, and imported by face.js, grid.js and renderer.js. So are `PERMISSION_CONFIRM_MS` and `PERMISSION_TOOL_STATES` (see Permission waits), which grid.js and renderer.js import through wait.js.
 
 #### The Timeout Cascade (`idleCascade`)
 
@@ -566,6 +575,11 @@ Editors without a model are unchanged.
 - **Transcript.** Async hook output never reaches the transcript.
 
 #### Permission waits
+
+**The lifecycle is wait.js's**: one pure module, with its state diagram at the top, holds every rule below.
+
+- **The hook writes through it:** `askFields` (PermissionRequest), `notificationWait`/`agentWaitVerdict` (the notification), `carryWait`/`deniedAnswers` (every later write), `releaseStandIn` (a parent's stand-in) and `toolCallKey`.
+- **The readers ask it the same questions:** the renderer, the orbitals and tmux use `isUnconfirmedPermission`, `carriesUnconfirmedPermission`, `permissionAnswered`, `isUnconfirmedAsk` and `waitPhase` (`none`/`open`/`asked`/`confirmed`/`allowed`). Each used to keep its own copy.
 
 **The 6 s notification.** Claude Code fires `Notification(permission_prompt)` 6 s after a permission dialog opens, and cancels it if the dialog is answered first (2.1.300). `CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS` turns it off.
 
